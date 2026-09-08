@@ -39,6 +39,7 @@
 | [kernel-bootstrap-m6.md](done/kernel-bootstrap-m6.md) | M6: IPC endpoint+Call/Reply+도네이션, 커널 스레드 2개 사이 왕복 + badge 전파 QEMU 확인 |
 | [kernel-bootstrap-m7.md](done/kernel-bootstrap-m7.md) | M7: IPC 페이지(copy)·핸들 전달 + notification, 위임된 핸들로 직접 sys_wait까지 QEMU 확인 |
 | [kernel-bootstrap-m8.md](done/kernel-bootstrap-m8.md) | M8(최종): initrd→ELF 로드→유저모드 진입(SYSCALL/SYSRET)→initrun의 IPC Call에 커널 응답까지 QEMU 확인 — kernel-bootstrap.md 전체 완료 |
+| [smp-fpu-bringup-m9.md](done/smp-fpu-bringup-m9.md) | M9: eager FXSAVE/FXRSTOR로 FPU/SIMD 컨텍스트 스위칭 QEMU 확인(양성+음성 대조 모두), 그 과정에서 발견한 슬랩 청크 16바이트 정렬 누락 버그(ADR-134) 진단·수정 |
 
 ## design — 설계/상세
 

@@ -18,8 +18,12 @@
 // (ADR-002 HAL 경계 — 이 파일은 x86_64 어셈블리를 전혀 모른다).
 // new_pml4_phys(M8 추가): 0이면 CR3 유지, 0이 아니면 그 물리주소로
 // 전환한다(context_switch.S 상단 주석).
+// old_fxsave_area/new_fxsave_area(M9, ADR-127): FXSAVE/FXRSTOR 대상
+// object::thread::fxsave_area 주소. old가 nullptr이면 저장을
+// 건너뛴다(context_switch.S 상단 주석 참고).
 extern "C" void arch_context_switch(uint64_t* old_rsp_out, uint64_t new_rsp,
-                                     uint64_t new_pml4_phys);
+                                     uint64_t new_pml4_phys, void* old_fxsave_area,
+                                     void* new_fxsave_area);
 
 // M8 — 새로 만든 유저 스레드가 "처음" 스케줄될 때 진입하는 자리
 // (create_kernel_thread의 entry 자리를 유저 스레드는 이걸로 대신한다).
@@ -89,6 +93,21 @@ void init() {
     }
 }
 
+// M9(ADR-127 §결정3) — object::thread::fxsave_area는 이미 0으로
+// value-initialize돼 있다(kernel_objects.hpp의 `= {}`) — 여기서는
+// FCW/MXCSR만 프로세서 리셋 기본값으로 patch한다. 이 값이 아니면
+// 새 스레드가 처음 FXRSTOR될 때 예외를 마스킹하지 않은 채(FCW 전부
+// 0) x87 연산 중 스퓨리어스 예외를 낼 수 있다(Intel SDM Vol.1 §13.6).
+constexpr uint16_t k_fpu_default_fcw = 0x037F;
+constexpr uint32_t k_fpu_default_mxcsr = 0x1F80;
+
+void init_fxsave_area(object::thread* t) {
+    auto* fcw = reinterpret_cast<uint16_t*>(&t->fxsave_area[0]);
+    auto* mxcsr = reinterpret_cast<uint32_t*>(&t->fxsave_area[24]);
+    *fcw = k_fpu_default_fcw;
+    *mxcsr = k_fpu_default_mxcsr;
+}
+
 object::thread* create_kernel_thread(void (*entry)(), object::priority_band band,
                                       uint32_t preferred_node) {
     void* mem = mm::slab_alloc(sizeof(object::thread));
@@ -98,6 +117,7 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     auto* t = new (mem) object::thread();
     t->sched.band = band;
     t->sched.preferred_node = preferred_node;
+    init_fxsave_area(t);
 
     constexpr uint32_t k_stack_order = 2;  // 16KiB (scheduler.hpp 상단 주석)
     auto stack_page = mm::alloc_pages(k_stack_order, preferred_node);
@@ -137,6 +157,7 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     auto* t = new (mem) object::thread();
     t->sched.band = object::priority_band::user;
     t->sched.preferred_node = 0;
+    init_fxsave_area(t);
     t->owner_space = space;
     t->handles = handles;
     t->user_entry_rip = entry_rip;
@@ -199,7 +220,8 @@ void start() {
     }
 
     g_current = next;
-    arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
+    arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next),
+                         nullptr, next->fxsave_area);
     __builtin_unreachable();
 }
 
@@ -219,7 +241,8 @@ void yield() {
 
     enqueue(*prev);
     g_current = next;
-    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
+    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next),
+                         prev->fxsave_area, next->fxsave_area);
     // arch_context_switch에서 돌아왔다는 것은 prev가 다시 스케줄되어
     // 이 지점부터 재개됐다는 뜻이다.
 }
@@ -242,7 +265,8 @@ void block() {
     // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
     // sched::enqueue()할 책임을 진다.
     g_current = next;
-    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
+    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next),
+                         prev->fxsave_area, next->fxsave_area);
 }
 
 [[noreturn]] void exit() {
@@ -267,7 +291,8 @@ void block() {
     // block()과 달리 그 무엇도 나중에 prev를 깨우지 않는다(어떤 대기열
     // 에도 prev를 넣어 두지 않았다) — 이 스레드는 여기서 영구히 끝난다.
     uint64_t discard_rsp;
-    arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next));
+    arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next), nullptr,
+                         next->fxsave_area);
     __builtin_unreachable();
 }
 

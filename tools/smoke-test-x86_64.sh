@@ -25,6 +25,9 @@
 #     저지대 공유 매핑 포함)·핸들 테이블을 가진 유저 스레드로 SYSCALL/
 #     SYSRET 기반 IRETQ 진입시켜, initrun이 SYSCALL로 보낸 IPC Call에
 #     커널이 응답한다.
+#   M9 (smp-fpu-bringup.md, ADR-127): 서로 다른 두 커널 스레드가 xmm0에
+#     넣어 둔 값이 yield()를 여러 차례 거쳐도 서로 오염되지 않음을
+#     확인한다(eager FXSAVE/FXRSTOR).
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -70,6 +73,14 @@ declare -a EXPECTED=(
   "[initrun] load_elf ok=1"
   "[initrun] setup_initrun_process ok=1"
   "[initrun] kernel received boot call ok=1 label=0xb007 (expect 0xb007) - 부팅 성공"
+  "[fpu] thread A iteration 0 xmm0 preserved=1"
+  "[fpu] thread A iteration 1 xmm0 preserved=1"
+  "[fpu] thread A iteration 2 xmm0 preserved=1"
+  "[fpu] thread A done all_preserved=1"
+  "[fpu] thread B iteration 0 xmm0 preserved=1"
+  "[fpu] thread B iteration 1 xmm0 preserved=1"
+  "[fpu] thread B iteration 2 xmm0 preserved=1"
+  "[fpu] thread B done all_preserved=1"
 )
 
 LOG_FILE="$(mktemp)"

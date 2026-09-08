@@ -81,6 +81,12 @@ struct thread {
     uint64_t user_entry_rip = 0;      // 최초 유저모드 진입 시 RIP(ELF e_entry).
     uint64_t user_rsp = 0;            // 최초 유저모드 진입 시 RSP(유저 스택 top).
     uint64_t user_arg0 = 0;           // 최초 진입 시 RDI(boot.md §6 — "첫 인자" 관례. boot_info 등).
+
+    // M9(ADR-127) — FXSAVE/FXRSTOR 대상 영역. FXSAVE는 16바이트 정렬을
+    // 요구한다(정렬 안 된 주소로 실행하면 #GP). create_kernel_thread/
+    // create_user_thread(scheduler.cpp)가 0으로 채운 뒤 FCW/MXCSR
+    // 기본값을 patch한다 — 그 전까지는 내용이 정해지지 않은 상태다.
+    alignas(16) uint8_t fxsave_area[512] = {};
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/

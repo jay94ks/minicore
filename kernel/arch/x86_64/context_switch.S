@@ -1,6 +1,7 @@
 /*
  * arch_context_switch(uint64_t* old_rsp_out, uint64_t new_rsp,
- *                      uint64_t new_pml4_phys) —
+ *                      uint64_t new_pml4_phys,
+ *                      void* old_fxsave_area, void* new_fxsave_area) —
  * docs/spec/scheduler.md, kernel/core/sched/scheduler.cpp가 부르는
  * 커널 전용 훅(ADR-002 HAL 경계 패턴 — arch_irq_save/restore와 동일).
  *
@@ -20,6 +21,16 @@
  * 아니면 그 물리주소를 CR3에 적재한다 — 유저 스레드(object::thread::
  * owner_space != nullptr)로 전환할 때 sched.cpp가 owner_space->
  * page_table_root를 그대로 넘긴다.
+ *
+ * old_fxsave_area/new_fxsave_area(M9, ADR-127 — 4·5번째 인자 rcx/r8):
+ * FXSAVE/FXRSTOR 대상인 object::thread::fxsave_area(512바이트, 16바이트
+ * 정렬)의 주소. eager 정책 — 스위치마다 무조건 저장/복원한다(lazy
+ * CR0.TS/#NM 트랩 전환은 ADR-133, M11b 이후). old_fxsave_area가
+ * nullptr이면 저장을 건너뛴다 — sched::start()(부팅 후 첫 스위치,
+ * "이전 스레드"라는 게 아직 없다)와 sched::exit()(빠져나가는 스레드는
+ * 다시 스케줄되지 않으므로 그 FPU 상태를 저장할 이유가 없다)가 이
+ * 경우다. new_fxsave_area는 항상 유효해야 한다(모든 실제 스레드가
+ * fxsave_area를 갖고 있으므로).
  */
 .section .text
 .global arch_context_switch
@@ -33,12 +44,19 @@ arch_context_switch:
     push %r15
 
     mov %rsp, (%rdi)   /* *old_rsp_out = 현재 rsp */
+
+    test %rcx, %rcx    /* old_fxsave_area == nullptr? */
+    jz 1f
+    fxsave (%rcx)
+1:
+    fxrstor (%r8)
+
     mov %rsi, %rsp     /* rsp = new_rsp */
 
     test %rdx, %rdx
-    jz 1f
+    jz 2f
     mov %rdx, %cr3
-1:
+2:
 
     pop %r15
     pop %r14

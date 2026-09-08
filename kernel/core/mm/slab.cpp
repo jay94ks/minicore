@@ -25,7 +25,17 @@ namespace mm {
 
 namespace {
 
-struct slab_header {
+// alignas(16)(M9): sizeof(slab_header) 자체가 16의 배수여야 그 뒤에
+// 오는 첫 청크(area = header + sizeof(slab_header))가 16바이트 정렬을
+// 유지한다 — 페이지 자체는 항상 4096(=16의 배수) 정렬이므로, 그 뒤에
+// 얹는 오프셋도 16의 배수면 각 크기 클래스(전부 16의 배수, slab.hpp
+// k_slab_size_classes)의 모든 청크가 자연히 16바이트 정렬된다. 이
+// alignas가 없으면 세 멤버(8+8+4=20바이트, 8바이트 정렬 요구라 24로
+// 패딩)가 24바이트가 되어 16의 배수가 아니게 되고, 모든 청크가
+// 8바이트만큼 어긋난다 — object::thread::fxsave_area(ADR-127, FXSAVE/
+// FXRSTOR 요구)가 이 문제를 QEMU에서 실제 #GP로 처음 드러냈다(M1~M8은
+// 16바이트 정렬을 요구하는 어떤 것도 slab에 넣은 적이 없었다).
+struct alignas(16) slab_header {
     slab_header* next_slab = nullptr;
     void* free_chunk_list = nullptr;
     uint32_t free_count = 0;

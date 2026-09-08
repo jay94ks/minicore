@@ -14,6 +14,8 @@
 # M8: elf_loader.cpp(ELF64 PT_LOAD 로더), syscall_entry.S+syscall.cpp
 # (SYSCALL/SYSRET), usermode.S+user_thread.cpp(IRETQ로 최초 유저모드
 # 진입) — initrd_blob.S(아래 configure_file)는 개발용 initrd 임베딩.
+# M9(smp-fpu-bringup.md, ADR-127): fpu.cpp가 CR0/CR4 FPU 활성화 시퀀스를
+# 제공하고, context_switch.S가 매 스위치마다 무조건 FXSAVE/FXRSTOR한다.
 
 # init/initrun/CMakeLists.txt가 만든 initrd.img 경로를 읽어 .incbin
 # 소스를 생성한다 — 최상위 CMakeLists.txt가 init/initrun을 kernel보다
@@ -28,6 +30,7 @@ add_executable(minicore_kernel_x86_64
     boot_info_x86_64.cpp
     context_switch.S
     elf_loader.cpp
+    fpu.cpp
     idle.S
     irq.cpp
     kernel_main.cpp

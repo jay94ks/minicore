@@ -10,9 +10,14 @@
 // notification 왕복 확인. M8: initrd에서 initrun ELF를 로드해 유저모드로
 // 진입시키고, initrun이 SYSCALL로 보낸 IPC Call에 커널이 응답 — 이
 // 계획의 최종 완료 기준(kernel-bootstrap.md M8).
+//
+// docs/plan/smp-fpu-bringup.md M9(ADR-127): FPU/SIMD 컨텍스트 스위칭 —
+// 서로 다른 두 스레드가 각자 xmm 레지스터에 넣어 둔 값이 yield()를
+// 여러 번 거쳐도 섞이지 않음을 확인.
 #include "boot_info.hpp"
 #include "boot_info_x86_64.hpp"
 #include "elf_loader.hpp"
+#include "fpu.hpp"
 #include "klog.hpp"
 #include "page_table.hpp"
 #include "syscall.hpp"
@@ -271,6 +276,48 @@ void thread_b_entry() {
         sched::yield();
     }
     klog::printf("[sched] thread B done\n");
+    sched::exit();
+}
+
+// M9(smp-fpu-bringup.md, ADR-127) — 서로 다른 두 스레드가 xmm0에 넣어 둔
+// 값이 yield()를 여러 차례 거쳐도 서로 오염되지 않음을 확인한다(다른
+// 스레드가 그사이 자기 xmm0 값을 쓰기 때문에, FXSAVE/FXRSTOR 없이는
+// 반드시 깨진다). 커널 전체는 -mno-sse로 컴파일되므로(CMakeLists.txt
+// 상단 주석 — CR4.OSFXSR을 아직 설정하지 않았던 시절의 안전장치, M9
+// 이후에도 커널 전역에 SSE 코드생성을 허용할지는 별개 결정이라 그대로
+// 둔다) 이 두 함수만 target 속성으로 개별적으로 SSE 코드생성을
+// 허용한다.
+__attribute__((target("sse2"))) void thread_fpu_a_entry() {
+    constexpr uint64_t k_pattern = 0xAAAAAAAAAAAAAAAAull;
+    asm volatile("movq %0, %%xmm0" : : "r"(k_pattern) : "xmm0");
+
+    bool all_preserved = true;
+    for (int i = 0; i < k_sched_demo_iterations; ++i) {
+        sched::yield();
+        uint64_t readback;
+        asm volatile("movq %%xmm0, %0" : "=r"(readback));
+        bool ok = (readback == k_pattern);
+        all_preserved = all_preserved && ok;
+        klog::printf("[fpu] thread A iteration %d xmm0 preserved=%u\n", i, ok);
+    }
+    klog::printf("[fpu] thread A done all_preserved=%u\n", all_preserved);
+    sched::exit();
+}
+
+__attribute__((target("sse2"))) void thread_fpu_b_entry() {
+    constexpr uint64_t k_pattern = 0x5555555555555555ull;
+    asm volatile("movq %0, %%xmm0" : : "r"(k_pattern) : "xmm0");
+
+    bool all_preserved = true;
+    for (int i = 0; i < k_sched_demo_iterations; ++i) {
+        sched::yield();
+        uint64_t readback;
+        asm volatile("movq %%xmm0, %0" : "=r"(readback));
+        bool ok = (readback == k_pattern);
+        all_preserved = all_preserved && ok;
+        klog::printf("[fpu] thread B iteration %d xmm0 preserved=%u\n", i, ok);
+    }
+    klog::printf("[fpu] thread B done all_preserved=%u\n", all_preserved);
     sched::exit();
 }
 
@@ -642,6 +689,12 @@ object::thread* setup_initrun_process() {
         sched::create_kernel_thread(&thread_b_entry, object::priority_band::kernel, 0);
     klog::printf("[sched] create_kernel_thread a=%u b=%u\n", a != nullptr, b != nullptr);
 
+    object::thread* fpu_a =
+        sched::create_kernel_thread(&thread_fpu_a_entry, object::priority_band::kernel, 0);
+    object::thread* fpu_b =
+        sched::create_kernel_thread(&thread_fpu_b_entry, object::priority_band::kernel, 0);
+    klog::printf("[fpu] create_kernel_thread a=%u b=%u\n", fpu_a != nullptr, fpu_b != nullptr);
+
     bool ipc_ready = demo_ipc_setup();
     klog::printf("[ipc] setup ok=%u\n", ipc_ready);
 
@@ -683,6 +736,12 @@ object::thread* setup_initrun_process() {
     if (b != nullptr) {
         sched::enqueue(*b);
     }
+    if (fpu_a != nullptr) {
+        sched::enqueue(*fpu_a);
+    }
+    if (fpu_b != nullptr) {
+        sched::enqueue(*fpu_b);
+    }
     if (c != nullptr) {
         sched::enqueue(*c);
     }
@@ -716,6 +775,11 @@ object::thread* setup_initrun_process() {
 extern "C" [[noreturn]] void kernel_main() {
     klog::init();
     klog::printf("hello from kernel\n");
+
+    // M9(ADR-127) — 첫 arch_context_switch(=첫 FXSAVE/FXRSTOR, demo_sched()
+    // 안에서 발생)보다 반드시 먼저 호출해야 한다. CR4.OSFXSR 없이
+    // FXSAVE/FXRSTOR를 실행하면 #UD.
+    arch_x86_64::init_fpu();
 
     demo_mm();
     demo_object_model();
