@@ -36,9 +36,15 @@ minicore/
 │
 ├── init/
 │   └── initrun/                # 커널이 직접 기동하는 최초 유저 프로세스 (ADR-017)
-│                                 # 부팅 후 procsrv 등 코어 서버들을 기동 매니페스트에 따라 실행
+│                                 # boot_info.boot_device_descriptor(initrd의 disk.cfg에서
+│                                 # 옴)로 부트 디바이스를 직접 마운트하는 임베디드 최소
+│                                 # virtio-blk 클라이언트+FAT32 리더를 갖고, 그 위에서
+│                                 # procsrv 등 서비스 바이너리를 찾아 순서대로 기동한다
+│                                 # (ADR-131 — devmgr/M15/M16의 "진짜" 드라이버와는 별개 코드)
 │
 ├── servers/                     # 시스템 서비스 (직접 구현, ADR-006/007/008)
+│   │                             # 전부 libk(C++ 유틸)+libmc(C API 바인딩)만 링크한다 —
+│   │                             # libc가 필요 없다 (ADR-132)
 │   ├── procsrv/                  # 프로세스 서버: fork/exec/signal/wait/pid, fd 진실 공급원 (ADR-016)
 │   ├── vfs/                       # 경로 탐색·마운트·핸들 위임 (ADR-018)
 │   ├── fs/
@@ -48,9 +54,16 @@ minicore/
 │   ├── cfgsrv/                    # 설정 리포지터리(레지스트리) 서버 (ADR-060, VFS와 완전 분리)
 │   └── drivers/                   # 유저 드라이버 (블록·네트워크·USB·GPU 등, ADR-007)
 │
+├── libmc/                        # minicore 네이티브 유저랜드 API, 순수 C+어셈블러 (ADR-132)
+│   ├── include/mc/                # syscall 1:1 래퍼 + 서버별 프로토콜 클라이언트 헤더(정본)
+│   └── src/
+│       ├── <arch>/                 # syscall 트램폴린 asm + _start(진입점, ADR-131 인자 관례 파싱)
+│       └── ipc/                    # 서버별 프로토콜 클라이언트 구현 (servers/ 구조·이름과 대응)
+│
 ├── libc/                        # POSIX 계층 (ADR-005/008)
 │   ├── CMakeLists.txt            # third_party/<libc>에 대한 빌드 글루
-│   └── sysdeps/minicore/          # 커널 syscall·서버 IPC를 libc에 연결하는 직접 구현 계층
+│   └── sysdeps/minicore/          # libc 내부 훅을 libmc의 mc_* 호출로 연결하는 얇은 어댑터
+│                                   # (ADR-132 — 프로토콜 자체는 여기서 구현하지 않는다)
 │
 ├── userland/                     # 포팅된 셸·coreutils 등 (ADR-005)
 │   └── <각 도구>/CMakeLists.txt   # third_party/<도구> 소스에 대한 빌드 글루
@@ -64,8 +77,12 @@ minicore/
 │
 ├── tools/                        # 개발 도구
 │   ├── apply-patches.*            # submodule 체크아웃 위에 patches/ 적용
-│   ├── mkinitrd.*                 # initrun + 코어 서버를 initrd로 패키징
-│   └── run-qemu.*                 # 아키텍처별 QEMU 실행 스크립트
+│   ├── mkinitrd.*                 # initrun 자신 + disk.cfg(부트 디바이스 서술자,
+│   │                                # ADR-131)를 커널 임베딩용 initrd로 패키징
+│   ├── mkbootdisk.*(가칭)          # procsrv 등 서비스 바이너리를 담는 FAT32 부트
+│   │                                # 디스크 이미지 생성 (ADR-131, mkinitrd와 별개 산출물)
+│   └── run-qemu.*                 # 아키텍처별 QEMU 실행 스크립트 (ADR-131 이후 부트
+│                                    # 디스크를 virtio-blk로 붙이는 옵션 포함)
 │
 └── docs/                          # 이 문서 체계 (spec/plan/done/design/remind)
 ```

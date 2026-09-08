@@ -205,3 +205,96 @@
     대체 구현은 근거가 명확할 때만 선택한다. 지금 시점에는 구체적으로
     어떤 컴포넌트를 대체할지 정하지 않는다 — 실제 포팅 착수 시점에
     컴포넌트별로 판단한다.
+
+## ADR-132. libmc: minicore 네이티브 유저랜드 API를 순수 C+어셈블러로 제공하는 기반 라이브러리, libc는 그 위의 클라이언트 (ADR-005/008 보강)
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: 커널 syscall과 시스템 서버 IPC 프로토콜에 대한 **1:1(또는
+  최소한으로 확장된) C 바인딩**을 제공하는 새 라이브러리
+  **`libmc`**(**LIB**rary for **M**iniCore userland APIs)를 만든다.
+  순수 **C(freestanding에 가까운 부분집합)와 어셈블러로만** 작성하고
+  C++을 전혀 쓰지 않는다.
+  1. **유저랜드 계층 구조를 명시적으로 3단으로 정리한다**:
+     - **0단(커널)**: syscall ABI(ADR-122).
+     - **1단(`libmc`)**: 이 ADR. 모든 syscall의 얇은 1:1 C 래퍼
+       (`mc_ipc_call`/`mc_ipc_recv`/`mc_ipc_reply`/`mc_ipc_notify`/
+       `mc_ipc_wait`/`mc_handle_close`, ADR-131의
+       `mc_process_spawn`(원본 ELF 바이트를 받아 프로세스를 만드는
+       래퍼) 등)와, 각 시스템 서버
+       프로토콜(procsrv의 fork/exec/계정/로그인, VFS의 open/stat,
+       FS 서버 공통 프로토콜의 read/write/close/lock/공유모드, devmgr
+       등록, cfgsrv get/set)에 대한 **표준 클라이언트 구현**을 담는다
+       — 메시지 조립·다중 Call 분할(procsrv.md §4.1의 "handle_count
+       초과 시 여러 번 나눠 호출" 같은 반복 패턴) 등 프로토콜
+       그 자체의 "약속을 지키는 코드"를 여기 한 곳에만 둔다.
+     - **2단**: 여기서 갈라진다 — (2a) **minicore 네이티브 서버/앱**
+       (procsrv/vfs/devmgr/cfgsrv/drivers/initrun, ADR-006/007이
+       직접구현으로 정한 것들)은 `libk`(C++ freestanding 유틸)와
+       `libmc`(C 바인딩, `extern "C"`로 링크)만 링크하고 **libc가
+       전혀 필요 없다**. (2b) **포팅된 libc**(ADR-005/008)는
+       `libmc`를 링크하고, `libc/sysdeps/minicore/`는 이제 "커널
+       syscall·서버 IPC를 직접 구현"하지 않고 **libc 내부 훅을
+       `libmc`의 `mc_*` 호출로 옮기기만 하는 얇은 어댑터**가 된다.
+     - **3단**: 포팅된 유저랜드 앱/셸(ADR-005)은 2b의 libc만 쓴다 —
+       `libmc`를 직접 보지 않는다.
+  2. **프로토콜 와이어 포맷(구조체/오퍼레이션 레이블)의 단일 출처는
+     `libmc`의 C 헤더**로 삼는다 — 서버 쪽 C++ 구현(예: procsrv
+     자신)도 이 헤더를 `extern "C"`로 포함해 클라이언트/서버가 같은
+     레이아웃에 합의함을 컴파일 타임에 보장한다(POD 구조체는 C/C++
+     양쪽에서 레이아웃이 같다). `docs/spec/*.md`의 프로토콜 의사코드는
+     여전히 사람이 읽는 명세로 유지하되, 실제 정의는 `libmc` 헤더가
+     정본이다.
+  3. **네이티브 프로세스 진입점**: `libmc`가 최소한의 `_start`(어셈블러)를
+     제공한다 — ADR-131이 정한 진입 레지스터 관례(RDI=boot_info,
+     RSI=argv blob)를 파싱해 통상적인
+     `int main(int argc, char** argv, const struct mc_boot_info* bi)`
+     형태로 넘겨준다. `sys_process_spawn`/향후 일반 exec() 어느
+     경로로 만들어진 프로세스든 이 하나의 진입 관례를 공유한다.
+  4. **저장소 배치**: 새 최상위 디렉터리 `libmc/`
+     (`libmc/include/mc/`, `libmc/src/<arch>/`(syscall 트램폴린 asm),
+     `libmc/src/ipc/`(서버별 프로토콜 클라이언트, `servers/` 하위
+     구조와 이름을 맞춘다)) — `libk/`·`libc/`와 나란한 위치.
+     [repo-layout.md](repo-layout.md)를 이 ADR과 함께 갱신한다.
+- **근거**: 사용자가 "libc 포팅과 별개로, 자체 메커니즘과 1:1로
+  대응/확장되는 순수 C+어셈블러 유저랜드 라이브러리가 있으면 libc
+  포팅이 단순해질 것"이라고 제안했다 — 확인해보니 이 필요는
+  ADR-008이 이미 "libc는 서버들과 통신하는 클라이언트가 된다"고
+  선언해 둔 자리에 정확히 들어맞는다: ADR-008은 **누가** 클라이언트
+  역할을 하는지는 말했지만 **그 클라이언트 구현을 어디 둘지**는
+  정하지 않았다 — 지금까지는 암묵적으로 "libc 포팅 글루 코드 안에"
+  였는데, 이러면 libc 구현체(musl/newlib 등, ADR-005)를 바꾸거나
+  여러 개를 동시에 지원하려 할 때마다, 또는 (2a)의 네이티브 서버가
+  같은 프로토콜을 다시 구현해야 할 때마다 **프로토콜 로직 자체가
+  중복·분기**된다. `libmc`를 libc와 완전히 독립된 순수 C 라이브러리로
+  분리하면: (a) 어떤 libc를 포팅하든 동일한 `libmc`를 그대로 재사용
+  하고 `sysdeps/minicore`만 얇게 다시 쓰면 되며, (b) 애초에 POSIX와
+  전혀 무관한 minicore 네이티브 서버들(procsrv 자신부터가 그렇다)도
+  자기가 만드는 프로토콜의 클라이언트 절반(다른 서버를 호출하는
+  쪽)을 위해 `libmc`를 그대로 쓸 수 있어 서버 코드에서도 중복이
+  없어진다. **순수 C(+asm)로 못박은 이유**는 이식 대상 libc 구현체
+  대부분이 C로 작성되어 C++ 런타임(예외 처리 없음이어도
+  네임맹글링·정적 초기화 관례 등)에 대한 의존을 요구하지 않는 것이
+  안전하기 때문이다 — `libk`(ADR-066+)는 이미 C++ 전용으로 확정돼
+  있으므로, `libmc`를 `libk` 위에 쌓지 않고 **완전히 별개의 낮은
+  계층**으로 둬야 이 제약이 지켜진다.
+- **영향**:
+  - `docs/plan/system-servers-bringup.md`(M12~M20)에 `libmc`가
+    각 마일스톤에 걸쳐 점진적으로 채워지는 교차 트랙으로
+    반영돼야 한다(이 문서와 함께 갱신) — M12에서 syscall 래퍼
+    +procsrv 클라이언트, M13에서 VFS/FS 프로토콜 클라이언트,
+    M14에서 devmgr 등록 클라이언트, M17에서 콘솔/로그인 클라이언트,
+    M18에서 신뢰 위임 관련 호출, M19에서 cfgsrv 클라이언트, M20에서
+    비로소 `libc/sysdeps/minicore`가 이를 소비.
+  - `servers/*`(procsrv 등)의 CMake 링크 대상이 `libk`+`libmc`로
+    바뀐다 — repo-layout.md의 servers/ 서브프로젝트 설명을 이
+    ADR과 함께 갱신한다.
+  - `libc/sysdeps/minicore/`의 역할 설명("커널 syscall·서버 IPC를
+    libc에 연결하는 직접 구현 계층")이 낡았다 — "libmc 호출로
+    연결하는 얇은 어댑터"로 repo-layout.md를 갱신한다.
+  - `libmc` 자체의 빌드 방식(정적 라이브러리 하나로 전체 아키텍처를
+    감당할지, 프로토콜별로 더 잘게 나눌지)과 각 syscall/프로토콜
+    함수의 정확한 시그니처는 이 ADR의 범위 밖 — M12 착수 시점에
+    `docs/spec/`(가칭 `libmc-abi.md`)로 구체화한다(ADR-043이 이미
+    확립한 "세부는 착수 시점에" 관례).
+  - aarch64 syscall 트램폴린 asm은 aarch64 이식 계획(별도, ADR-009)
+    시점에 추가한다 — 지금은 x86_64만 작성한다.

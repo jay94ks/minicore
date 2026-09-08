@@ -1,9 +1,10 @@
 # 실행 계획: 시스템 서버 로드맵 (M12~M20) — procsrv부터 로그인 후 셸까지
 
-**관련 결정**: [kernel-ipc-objects.md](../design/kernel-ipc-objects.md),
+**관련 결정**: [foundations.md](../design/foundations.md)(ADR-005·008·
+**132**), [kernel-ipc-objects.md](../design/kernel-ipc-objects.md),
 [filesystem.md](../design/filesystem.md)(ADR-018·044~050·058~059·065·
 080·099~103·**128**), [boot-and-drivers.md](../design/boot-and-drivers.md)
-(ADR-038~043·056·057·**129·130**), [security-model.md](../design/security-model.md),
+(ADR-038~043·056·057·**129·130·131**), [security-model.md](../design/security-model.md),
 [registry-decisions.md](../design/registry-decisions.md)(ADR-060~064)
 
 **선행 완료 전제**: [kernel-bootstrap.md](kernel-bootstrap.md)(M1~M8)과
@@ -23,12 +24,27 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 `docs/spec/`에 각 마일스톤 착수 시점에 개별 작성한다(ADR-043이 이미
 이 방식을 명시한 선례).
 
-이 계획을 세우면서 예외가 넷 생겼다 — 전부 이번에 새 ADR로 미리
+이 계획을 세우면서 예외가 여섯 생겼다 — 전부 이번에 새 ADR로 미리
 해소해뒀다:
 
-- **OPEN-29**(initrun 기동 매니페스트 형식) — 아직 미결정, M12 착수
-  전에 새 ADR로 해소해야 한다(이 계획 자체는 아직 그 ADR을 쓰지
-  않았다 — M12 §선행 결정 필요 참고).
+- **ADR-132**(foundations.md) — libc 포팅과 별개로, minicore 자체
+  syscall/서버 프로토콜에 1:1(또는 최소 확장) 대응하는 순수 C+어셈블러
+  라이브러리 **`libmc`**를 새로 둔다. libc는 `libmc` 위의 클라이언트가
+  되고(ADR-008이 이미 예고한 "libc는 클라이언트" 원칙의 구체화),
+  minicore 네이티브 서버(procsrv 등)도 libc 없이 `libk`+`libmc`만
+  링크한다 — 프로토콜 클라이언트 구현이 libc 포팅 글루/각 서버에
+  중복되지 않고 한 곳에만 있다. 아래 **libmc 교차 트랙** 참고.
+
+- **ADR-131**(boot-and-drivers.md, OPEN-29·OPEN-50 해소) — initrun은
+  고정 이름 하나를 spawn하는 게 아니라, **커널이 initrd의 `disk.cfg`
+  엔트리(OS 설치 시점 구성값, 지금은 mkinitrd.py가 대신 채움)로
+  전달한 부트 디바이스 서술자를 boot_info로 받아, 그 장치를 자신에게
+  내장된 최소 virtio-blk 클라이언트+FAT32 리더로 직접 마운트**하고,
+  `/sys/srv/lib/NNN-이름.ini`(파일명순=실행순, `exec`/`args`+레지스트리
+  대체용 폴백 설정) 파일들로 procsrv를 포함한 서비스 바이너리들을
+  찾아 순서대로 `sys_process_spawn`(원본 ELF 바이트를 직접 넘기는
+  형태로 일반화)한다. devmgr/virtio-blk 서버/FAT32 FS 서버(M14~M16)의
+  "진짜" 구현과는 의도적으로 별개인 부트스트랩 전용 코드다.
 - **ADR-128**(filesystem.md) — M16에 ext4를 추가하려면 FS마다 다른
   "파일 신원"을 가리키는 공통 개념이 있어야 하는데(공유 모드 충돌
   판별 등, ADR-101이 암묵적으로 요구해왔다) 지금까지 정의된 적이
@@ -41,21 +57,66 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
   아님, 고정 레거시 프로브)를 담을 자리가 없었다 — 입력 장치
   클래스를 새로 정의했다.
 
-## M12. procsrv 골격 — 프로세스 테이블·fork/exec·계정 모델·fd 진실 공급원
+## libmc 교차 트랙 (M12~M20 전 구간)
 
-- **선행 결정 필요**: **OPEN-29**(initrun 기동 매니페스트 형식) — initrun이
-  procsrv를 어떤 인자로, 어떤 순서로 실행할지 정하는 새 ADR을 착수 전에
-  작성한다([boot-and-drivers.md](../design/boot-and-drivers.md) 대상).
-- **구현**: [procsrv.md](../spec/procsrv.md) §프로세스 테이블·fork/exec
-  시퀀스(ADR-016 COW 활용)·fd 진실 공급원 프로토콜, 계정
-  모델([security-model.md](../design/security-model.md) ADR-079 —
-  uid/gid 발급, ROOT/Supervisor 식별) 저장소까지. 로그인/session_program
-  프로토콜 자체(§procsrv.md)는 이 마일스톤에서 **프로토콜 골격만** 만들고
-  실제 콘솔 연동은 M17로 미룬다(procsrv.md 자신이 이미 이렇게 scope함).
-- **목표(QEMU 검증)**: initrun이 새 ADR의 매니페스트로 procsrv를 실행하고,
-  procsrv가 **자기 자신을 fork/exec**해 실제 두 번째 완전한 유저
-  프로세스를 만들어내는 것을 로그로 확인한다 — M4~M8까지는 커널이
-  직접 만든 스레드/프로세스뿐이었다.
+[ADR-132](../design/foundations.md)로 확정한 `libmc`는 한 마일스톤의
+산출물이 아니라 **이 계획 전체에 걸쳐 그때그때 필요한 클라이언트가
+쌓이는 교차 트랙**이다 — 새 서버 프로토콜이 생기는 마일스톤마다
+그 서버를 부르는 `mc_*` 클라이언트 함수도 같은 마일스톤에서 함께
+작성한다(서버 구현과 그 서버의 표준 클라이언트를 분리해서 나중에
+몰아 만들지 않는다 — 프로토콜을 막 확정한 시점에 클라이언트도 같이
+써야 서버·클라이언트가 실제로 들어맞는지 바로 검증된다):
+
+| 마일스톤 | libmc에 추가되는 것 |
+|---|---|
+| M12 | syscall 1:1 래퍼 전체(`mc_ipc_*`, `mc_handle_close`, ADR-131의 `mc_process_spawn`) + `_start` 진입점(§ADR-132 결정3) + procsrv 클라이언트(`mc_fork`/`mc_exec`/fd 프로토콜). initrun 자신의 임베디드 virtio-blk/FAT32 리더는 부트스트랩 전용이라 `libmc` 범위 밖(ADR-131 §근거) |
+| M13 | VFS 클라이언트(`mc_open`/`mc_stat`) + FS 서버 공통 프로토콜 클라이언트(`mc_read`/`mc_write`/`mc_close`, ADR-101 공유모드/잠금 포함) |
+| M14 | devmgr 등록 클라이언트(드라이버가 자신을 등록하는 쪽, ADR-041) |
+| M17 | 콘솔/로그인 클라이언트(`mc_login` 등, procsrv §8 프로토콜) |
+| M18 | 신뢰 위임·su/sudo·jail 관련 호출 클라이언트 |
+| M19 | cfgsrv 클라이언트(`mc_cfg_get`/`mc_cfg_set`) |
+| M20 | `libc/sysdeps/minicore`가 여기까지 쌓인 `libmc`를 처음으로 실제 소비 — 이 시점 이전에는 `libmc`만 있고 포팅된 libc는 아직 없다 |
+
+각 마일스톤의 §구현에 "그 서버의 libmc 클라이언트도 함께 작성"이
+암묵적으로 포함된다고 보고, 아래 마일스톤 절에서 매번 반복해 적지
+않는다 — 이 표가 그 대응표다. `libmc` 자체의 세부 ABI는 M12 착수
+시점에 `docs/spec/`로 별도 작성한다(ADR-132 §영향).
+
+## M12. 부트 디바이스 마운트 + procsrv 골격 — 프로세스 테이블·fork/exec·계정 모델·fd 진실 공급원
+
+- **선행 결정**: **ADR-131**(boot-and-drivers.md, OPEN-29·OPEN-50
+  해소 완료) — initrun이 부트 디바이스를 직접 마운트해
+  `/sys/srv/lib/NNN-이름.ini`(발견 순서=파일명순, `exec`/`args`+
+  레지스트리 대체용 폴백 설정) 파일들로 서비스를 찾아 기동하는
+  전체 절차가 이미 확정돼 있다. 이 마일스톤은 그대로 구현만 하면
+  된다.
+- **구현**: 두 갈래다.
+  1. **initrun의 부트스트랩 절차**(ADR-131) — `boot_info.
+     boot_device_descriptor` 파싱, 임베디드 최소 virtio-blk
+     클라이언트(블로킹, 읽기 전용), 임베디드 최소 FAT32 읽기전용
+     파서 + INI 파서, `/sys/srv/lib/*.ini`를 파일명순으로 나열해
+     각각의 `exec=`/`args=`로 `sys_process_spawn(elf_data, elf_size,
+     argv, grant_trusted)`(신설 커널 syscall)를 호출하고, 나머지
+     key=value는 원본 그대로 새 프로세스에게
+     `boot_info.config_blob_addr/size`로 매핑해 전달한다.
+     `tools/mkinitrd.py`가 `disk.cfg` 엔트리를 채우도록 확장하고,
+     새 `tools/mkbootdisk.py`로 `/sys/srv/bin/procsrv` +
+     `/sys/srv/lib/000-procsrv.ini`를 담은 FAT32 부트 디스크
+     이미지를 만들어 `tools/run-qemu.sh`가 virtio-blk로 붙이도록
+     확장한다.
+  2. **procsrv 자체**([procsrv.md](../spec/procsrv.md)) — 프로세스
+     테이블·fork/exec 시퀀스(ADR-016 COW 활용)·fd 진실 공급원
+     프로토콜, 계정 모델([security-model.md](../design/security-model.md)
+     ADR-079 — uid/gid 발급, ROOT/Supervisor 식별) 저장소까지.
+     로그인/session_program 프로토콜 자체(§procsrv.md)는 이
+     마일스톤에서 **프로토콜 골격만** 만들고 실제 콘솔 연동은 M17로
+     미룬다(procsrv.md 자신이 이미 이렇게 scope함).
+- **목표(QEMU 검증)**: initrun이 `boot_info`로 받은 서술자로 부트
+  디스크(virtio-blk 위 FAT32)를 마운트하고, 그 안에서 procsrv를
+  찾아 `sys_process_spawn`으로 띄우는 것과, procsrv가 **자기 자신을
+  fork/exec**해 실제 두 번째 완전한 유저 프로세스를 만들어내는 것을
+  로그로 확인한다 — M4~M8까지는 커널이 직접 만든 스레드/프로세스뿐,
+  실제 디스크 I/O를 거친 프로세스 생성은 이번이 처음이다.
 
 ## M13. VFS + memfs — fd 라우팅 실동작 + 최초 파일시스템
 

@@ -1,6 +1,6 @@
 # VFS 디렉토리 구성 스펙
 
-**관련 결정**: ADR-005, ADR-008, ADR-018, ADR-022, ADR-044~050, ADR-056, ADR-058, ADR-059, ADR-065
+**관련 결정**: ADR-005, ADR-008, ADR-018, ADR-022, ADR-044~050, ADR-056, ADR-058, ADR-059, ADR-065, ADR-131
 **관련 설계**: [repo-layout.md](../design/repo-layout.md) (`servers/vfs`, `servers/fs`, `servers/devmgr`, `servers/procsrv`)
 
 이 문서는 minicore가 부팅한 뒤 유저에게 보이는 **런타임 파일시스템
@@ -23,6 +23,9 @@
 │   │   └── ...                 # 서비스가 늘어날 때마다 하위 마운트 추가
 │   ├── etc/                  # 전역 시스템 설정 (영속, 일반 FS)
 │   ├── bin/                  # 전역 시스템 바이너리 (영속, 일반 FS)
+│   ├── srv/                  # 코어 서버 실행파일·시동 정보 (ADR-131)
+│   │   ├── bin/                # 서버 실행파일
+│   │   └── lib/                # NNN-이름.ini 시동 파일(발견 순서=파일명순)
 │   ├── mnt/                  # 시스템 수준 외부 매체 마운트 루트
 │   ├── dev/                  # devmgr가 FS 서버 겸임 (ADR-048)
 │   └── tmp/                  # memfs 마운트, 휘발성 (ADR-048)
@@ -50,6 +53,7 @@
 | `/sys/proc` | synthetic | procsrv (FS 서버 겸임, ADR-047) | 프로세스 상태 열람 |
 | `/sys/live/*` | synthetic, 하위 경로별로 상이 | 주제별 서버 (ADR-047) | 매핑표는 ADR-058(§5) |
 | `/sys/etc`, `/sys/bin` | 일반 영속 FS | fs | 시스템 전역, 사용자 쓰기 불가(권한은 별도 결정) |
+| `/sys/srv/bin`, `/sys/srv/lib` | 일반 영속 FS(부팅 극초기엔 FAT32, ADR-131) | fs | 코어 서버 실행파일(`bin`) + `NNN-이름.ini` 시동 파일(`lib`) — initrun이 이 경로 관례로 부팅 극초기 서비스를 찾는다(ADR-131 §결정4) |
 | `/sys/mnt/*` | 마운트 시점에 결정 | 매체별 FS 서버 | USB=FAT/exFAT, CDROM=ISO9660 등, 로드맵은 실제 필요 시점에 정의 |
 | `/sys/dev` | synthetic | devmgr (FS 서버 겸임, ADR-048) | PCIe 등에서 열거된 장치 노드 |
 | `/sys/tmp` | memfs | fs(memfs) | 새 구현 불필요 — 기존 memfs 재마운트 |
