@@ -44,6 +44,7 @@ add_executable(minicore_kernel_x86_64
     kernel_main.cpp
     klog_uart.cpp
     lapic.cpp
+    page_fault.cpp
     page_table.cpp
     smp.cpp
     syscall.cpp

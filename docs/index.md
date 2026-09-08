@@ -43,6 +43,7 @@
 | [smp-fpu-bringup-m10.md](done/smp-fpu-bringup-m10.md) | M10: IDT 기초(catch-all 예외 진단)+ACPI MADT 파싱(EBDA/BIOS ROM RSDP 스캔)+LAPIC 구동+AP 기동(INIT-SIPI-SIPI)+IPI 기반 TLB shootdown, `-smp N` QEMU로 AP 전원 온라인·shootdown 왕복 확인, 그 과정에서 발견한 SIPI 프로토콜·코어별 IDTR 버그(ADR-135) 진단·수정 |
 | [smp-fpu-bringup-m11.md](done/smp-fpu-bringup-m11.md) | M11: ACPI SRAT/SLIT 파싱+다중 NUMA 노드 물리 메모리 풀 분리+거리 기반 할당 폴백(ADR-054)+워크 스틸링(ADR-053, 범위 정정 ADR-137)+실제 락 순서 표(ADR-136), `-numa` QEMU로 검증 |
 | [smp-fpu-bringup-m11b.md](done/smp-fpu-bringup-m11b.md) | M11b(smp-fpu-bringup.md 전체 완료): CPUID 기반 XSAVE/AVX 검사+CR0.TS/`#NM` lazy 전환(ADR-133), 그 과정에서 발견한 slab 64바이트 정렬 미보장(ADR-138)·`sched::yield()` enqueue 순서 버그(ADR-139) 진단·수정, `-cpu` 유/무 두 QEMU 구성으로 검증 |
+| [system-servers-bringup-m12-kernel-cow.md](done/system-servers-bringup-m12-kernel-cow.md) | M12 **일부**(M12 자체는 미완료): ADR-016이 미뤄 둔 커널 COW 프리미티브 4가지(프레임 참조 카운트, PTE cow 소프트웨어 비트+`clone_address_space_cow`, `#PF` 쓰기 폴트 분기, syscall 커널 스택 스레드별 분리, ADR-140/141) 구현+QEMU 검증. virtio-blk/cpio/procsrv 등 M12의 나머지는 OPEN-53~57로 승인 대기 |
 
 ## design — 설계/상세
 

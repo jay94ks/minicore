@@ -27,6 +27,7 @@
 #include "idt.hpp"
 #include "klog.hpp"
 #include "lapic.hpp"
+#include "page_fault.hpp"
 #include "page_table.hpp"
 #include "smp.hpp"
 #include "syscall.hpp"
@@ -195,6 +196,112 @@ void demo_mm(const acpi_topology& acpi) {
         mm::slab_free(slab_b, 32);
     }
     klog::printf("[mm:slab] freed both chunks\n");
+}
+
+// M12(system-servers-bringup.md §M12, ADR-016) — fork() COW의 첫 번째
+// 커널 기반요소인 프레임 참조 카운트를 실제 QEMU에서 검증한다. 한
+// 프레임을 "2명이 공유"하는 상황을 흉내내(add_ref 두 번) 세 번
+// release해 보면: 처음 두 번은 아직 다른 소유자가 있어(false) 실제
+// 반환하면 안 되고, 마지막(진짜 유일한 소유자로 남는 순간)만 true라
+// free_pages를 불러야 한다는 계약을 확인한다.
+void demo_frame_refcount() {
+    auto page = mm::alloc_pages(0, 0);
+    if (!page.is_ok()) {
+        klog::printf("[mm:refcount] alloc failed\n");
+        return;
+    }
+    uint64_t addr = page.value();
+
+    uint32_t initial = mm::frame_ref_count(addr);
+    mm::frame_add_ref(addr);
+    mm::frame_add_ref(addr);
+    uint32_t after_addref = mm::frame_ref_count(addr);
+
+    bool release1 = mm::frame_release(addr);
+    bool release2 = mm::frame_release(addr);
+    bool release3 = mm::frame_release(addr);
+
+    klog::printf(
+        "[mm:refcount] initial=%u after_addref=%u release1=%u release2=%u release3=%u "
+        "(expect 0,2,0,0,1)\n",
+        initial, after_addref, release1, release2, release3);
+
+    if (release3) {
+        mm::free_pages(addr, 0);
+    }
+    klog::printf("[mm:refcount] demo done\n");
+}
+
+// M12(system-servers-bringup.md §M12, ADR-016) — fork() COW의 나머지 두
+// 커널 기반요소(clone_address_space_cow, page_fault.cpp의 쓰기 폴트
+// 판단)를 실제 유저 스레드/CR3 전환 없이 직접 검증한다. 아직 실제
+// fork() 시스템 콜이 없으므로(그건 이 계획의 다음 단계), "부모"
+// 주소공간을 손으로 하나 만들고 클론한 뒤, 두 방향(자식이 먼저 쓰기 vs
+// 그 뒤 부모가 쓰기)으로 진짜 프로덕션 함수(try_handle_cow_write_fault_for)
+// 를 호출해 "복사가 필요한 경우"와 "그냥 권한만 다시 켜면 되는 경우"
+// 둘 다를 실제로 실행해 본다.
+void demo_cow_clone() {
+    auto parent = arch_x86_64::create_address_space_root();
+    if (!parent.is_ok()) {
+        klog::printf("[cow] create parent failed\n");
+        return;
+    }
+    uint64_t parent_pml4 = parent.value();
+
+    auto page = mm::alloc_pages(0, 0);
+    if (!page.is_ok()) {
+        klog::printf("[cow] alloc page failed\n");
+        return;
+    }
+    uint64_t phys = page.value();
+
+    // pml4 index 1(가상주소 1<<39) — index 0(저지대 GDT)·256 이상
+    // (커널/physmap)과 겹치지 않는, create_address_space_root가 빈
+    // 채로 남겨 둔 유저 영역.
+    constexpr uint64_t k_test_virt = 1ull << 39;
+    arch_x86_64::map_page(parent_pml4, k_test_virt, phys,
+                          arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
+
+    auto child = arch_x86_64::clone_address_space_cow(parent_pml4);
+    if (!child.is_ok()) {
+        klog::printf("[cow] clone failed\n");
+        return;
+    }
+    uint64_t child_pml4 = child.value();
+
+    auto q_parent = arch_x86_64::query_page(parent_pml4, k_test_virt);
+    auto q_child = arch_x86_64::query_page(child_pml4, k_test_virt);
+    klog::printf(
+        "[cow] after clone: parent_write=%u parent_cow=%u child_write=%u child_cow=%u "
+        "same_phys=%u refcount=%u (expect 0,1,0,1,1,1)\n",
+        arch_x86_64::has_perm(q_parent.perm, arch_x86_64::page_perm::write),
+        arch_x86_64::has_perm(q_parent.perm, arch_x86_64::page_perm::cow),
+        arch_x86_64::has_perm(q_child.perm, arch_x86_64::page_perm::write),
+        arch_x86_64::has_perm(q_child.perm, arch_x86_64::page_perm::cow),
+        static_cast<unsigned>(q_child.phys == phys), mm::frame_ref_count(phys));
+
+    // 자식이 먼저 쓴다 — 부모가 아직 남아 있으니(refcount>0) 새
+    // 프레임으로 복사돼야 한다.
+    constexpr uint64_t k_pf_present = 1, k_pf_write = 2;
+    bool handled_child =
+        arch_x86_64::try_handle_cow_write_fault_for(child_pml4, k_test_virt, k_pf_present | k_pf_write);
+    auto q_child_after = arch_x86_64::query_page(child_pml4, k_test_virt);
+    klog::printf(
+        "[cow] child write fault: handled=%u child_write_after=%u child_phys_changed=%u "
+        "refcount_after=%u (expect 1,1,1,0)\n",
+        handled_child, arch_x86_64::has_perm(q_child_after.perm, arch_x86_64::page_perm::write),
+        static_cast<unsigned>(q_child_after.phys != phys), mm::frame_ref_count(phys));
+
+    // 이제 부모가 쓴다 — 자식이 이미 떨어져 나갔으니(refcount==0) 복사
+    // 없이 그냥 쓰기 권한만 다시 켜지는 fast-path를 타야 한다.
+    bool handled_parent = arch_x86_64::try_handle_cow_write_fault_for(
+        parent_pml4, k_test_virt, k_pf_present | k_pf_write);
+    auto q_parent_after = arch_x86_64::query_page(parent_pml4, k_test_virt);
+    klog::printf(
+        "[cow] parent write fault: handled=%u parent_write_after=%u parent_phys_same=%u "
+        "(expect 1,1,1)\n",
+        handled_parent, arch_x86_64::has_perm(q_parent_after.perm, arch_x86_64::page_perm::write),
+        static_cast<unsigned>(q_parent_after.phys == phys));
 }
 
 // handle_table(64 엔트리, 엔트리마다 intrusive_list 센티널 포함)은
@@ -940,6 +1047,8 @@ extern "C" [[noreturn]] void kernel_main() {
     arch_x86_64::set_cpu_node_map(acpi.madt, acpi.srat);
 
     demo_mm(acpi);
+    demo_frame_refcount();
+    demo_cow_clone();
 
     // M10(ADR-055) — mm::init()이 끝난 뒤에야 AP 커널 스택을 확보할 수
     // 있다(bring_up_aps가 mm::alloc_pages를 쓴다).

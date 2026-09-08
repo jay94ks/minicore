@@ -15,6 +15,11 @@
 | OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
 | OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스" — procsrv 등 코어 서버가 아닌 **별도의 유저랜드 서비스 관리자 데몬**(정체성 확정, Linux systemd에 대응)의 실제 이름·책임 범위와, 프로세스 트리의 새 루트가 되는 구체적 절차 — **별도 design 문서 대상**(OPEN-52와 같은 성격) | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
+| OPEN-53 | `sys_process_spawn(elf_data, elf_size, argv, grant_trusted)`(system-servers-bringup.md §M12가 이름만 정해 둔 신설 syscall)의 정확한 시그니처·에러 코드·syscall 번호, 그리고 실제 `fork()`가 쓸 별도 syscall(주소공간 COW 복제+스레드 복제)의 시그니처 — ADR-140/141(kernel-memory.md)이 커널 프리미티브(clone_address_space_cow, 프레임 참조 카운트, per-thread syscall 스택)까지는 준비해 뒀지만 이걸 유저에게 노출하는 syscall ABI 자체는 아직 미정 | ADR-016, ADR-131, ADR-140, ADR-141 | [kernel-memory.md](kernel-memory.md), [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 | (미정) | [procsrv.md](../spec/procsrv.md) |
+| OPEN-55 | OPEN-52(서비스 준비완료 신호 프로토콜)가 아직 별도 설계로 미착수인 상태에서, M12가 지금 당장 써야 할 **임시 방편**(정해진 타임아웃 vs 단순 notification 1회 등, 계획 §M12 §구현1이 이미 이렇게 임시로 진행하라고 명시)의 구체적 선택 | ADR-131 | [system-servers-bringup.md](../plan/system-servers-bringup.md) |
+| OPEN-56 | procsrv.md §5(계정 생성)/§7(로그인)/§8(su/sudo)를 M12에서 완전히 스킵하고 "프로토콜 골격만"(계획 §M12 §구현2가 이미 이렇게 scope했다) 남기는 정확한 경계 — 골격만 만든다는 게 정확히 어디까지인지(예: 코드상 handler 자리는 만들되 항상 실패 반환? 아예 라우팅도 안 함?) | (미정) | [procsrv.md](../spec/procsrv.md) |
+| OPEN-57 | virtio-blk 클라이언트·cpio(newc) 파서·INI 파서·`tools/mkbootdisk.py`의 구현 순서와 각각의 최소 범위(예: virtio-blk 큐 협상을 얼마나 단순화할지) — system-servers-bringup.md §M12가 뭘 만들지는 정했지만 어느 순서로 쌓을지는 구현자 재량으로 남겨 뒀다 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 
 ## 해결된 항목 (이력)
 

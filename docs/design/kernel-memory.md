@@ -606,3 +606,151 @@
   - `handle_table`의 무동기화 상태는 이 ADR이 해결하지 않는다 —
     procsrv 등 M12 이후 계획에서 실제로 여러 프로세스가 동시에
     핸들 테이블에 접근하게 되는 시점에 별도 결정이 필요하다.
+
+## ADR-140. ADR-016 COW의 실제 커널 구현: 프레임 참조 카운트 테이블 + PTE 소프트웨어 비트 + 쓰기 폴트 분기
+
+- **상태**: 확정 (2026-09-09~10)
+- **결정**: ADR-016이 요구한 세 가지("페이지 프레임 참조 카운트가
+  ADR-012 할당자에 통합", "커널이 직접 COW 복제/쓰기 폴트 분리를
+  수행")를 다음과 같이 실제로 구현한다.
+  1. **프레임 참조 카운트**: [page_allocator.hpp](../../kernel/core/mm/page_allocator.hpp)/
+     [.cpp](../../kernel/core/mm/page_allocator.cpp)에 order-0(4KiB) 전용
+     테이블을 추가한다. `mm::init()`이 usable 영역의 최대 물리주소를
+     보고 필요한 크기를 order-N(최대 4MiB=4GiB 물리메모리 상당,
+     넘으면 `LIBK_PANIC`)로 계산해 `alloc_pages()`로 한 번 확보한다.
+     값의 의미는 "0=단독 소유, N=나 말고 N명 더"다(절대 소유자 수가
+     아니라 **추가** 소유자 수) — `frame_add_ref`/`frame_release`/
+     `frame_ref_count` 세 함수만 노출한다. `frame_release`는 "내가
+     마지막 소유자였는가"를 `bool`로 직접 반환해(감소 후 값을 호출자가
+     다시 해석하게 하지 않는다) 호출부 실수를 원천 차단한다 —
+     `free_pages(order=0)`도 이 API로 갈아타 공유 중인 프레임은
+     실제로 반환하지 않고 카운트만 줄인다.
+  2. **PTE 소프트웨어 비트**: [page_table.hpp](../../kernel/arch/x86_64/page_table.hpp)의
+     `page_perm`에 `cow`(비트 3, 실제 PTE에는 하드웨어가 무시하는
+     bit 9로 인코딩)를 추가해 기존 `map_page`/`protect_page`/
+     `query_page` 경로를 그대로 통과하게 만들었다 — 새 API를 따로
+     만들지 않고 "권한 비트 하나 더" 취급만으로 충분했다. 이 비트가
+     있고 write가 없는 페이지는 "권한이 없어서가 아니라 COW라 복사가
+     필요할 뿐"이라는 뜻이다.
+  3. **`clone_address_space_cow(src_pml4_phys)`**([page_table.cpp](../../kernel/arch/x86_64/page_table.cpp)):
+     `create_address_space_root()`로 새 루트를 만든 뒤, 유저 영역(pml4
+     index 1~255 — index 0의 저지대 GDT 항등 매핑과 256 이상의
+     커널/physmap은 원본과 그대로 공유, `create_address_space_root`와
+     동일 정책)만 4단계 전부(PDPT→PD→PT)를 직접 순회해 present인
+     리프 페이지마다: 부모 PTE를 write 없이 값 다시 씀(재하강),
+     자식에 같은 물리 페이지를 같은 권한(write 제외)+cow로 `map_page`,
+     `mm::frame_add_ref` 1회. 이 프로젝트에 거대 페이지(2MiB/1GiB) 리프가
+     전혀 없다는 사실(`walk_to_pt`가 항상 PT까지 내려간다) 덕분에
+     4KiB 단위 순회만으로 충분하다.
+  4. **쓰기 폴트 분기**: 새 파일 [page_fault.hpp](../../kernel/arch/x86_64/page_fault.hpp)/
+     [.cpp](../../kernel/arch/x86_64/page_fault.cpp), IDT 벡터 14(`#PF`,
+     idt.cpp가 이제 라우팅)로 진입한다. 진짜 로직은
+     `try_handle_cow_write_fault_for(pml4_phys, fault_addr, error_code)`
+     하나뿐이고, `try_handle_cow_write_fault(fault_addr, error_code)`는
+     `sched::current()->owner_space`에서 pml4_phys를 뽑아 넘겨주는
+     겉껍질이다(idt.cpp가 이걸 부른다) — 이렇게 나눈 이유는 실제
+     fork() 시스템 콜이 아직 없는 이 마일스톤에서도(다음 단계) 진짜
+     프로덕션 함수를 손으로 만든 부모/자식 주소공간에 직접 걸어
+     QEMU에서 검증할 수 있게 하기 위해서였다(아래 검증 결과 참고).
+     COW 표시 있는 present+비write 페이지에 대한 쓰기 폴트에서:
+     `mm::frame_release(phys)`가 true(마지막 소유자)면 `protect_page`로
+     쓰기 권한만 다시 켜고 끝(복사 없음, "fast-path") — false(아직
+     다른 소유자)면 새 프레임에 memcpy 후 그쪽으로 `unmap_page`+
+     `map_page` 재배선한다. COW 대상이 아니면(표시 없음, 이미 쓰기
+     가능, not-present 등) false를 반환해 idt.cpp가 M10의 catch-all
+     진단(`diagnose_and_halt`)으로 떨어뜨린다 — 유저에게 SIGSEGV류를
+     전달하는 절차는 아직 없다(이 계획 범위 밖, 별도 OPEN 필요).
+- **근거**: ADR-016이 "쓰기 폴트 시 페이지 프레임 분리"와 "참조
+  카운트 관리"를 명시했지만 실제 자료구조·알고리즘·PTE 인코딩까지는
+  정하지 않았다(당시엔 IDT/페이지폴트 핸들러 자체가 없었다,
+  page_table.hpp M4 시절 주석 참고) — M12에서 실제로 필요해진
+  지금, 기존 `page_perm`/`map_page`/`protect_page`/`query_page` API를
+  최대한 그대로 재사용하는 쪽으로 설계해(새 API를 늘리지 않고) 코드
+  표면을 작게 유지했다.
+- **검증 결과(QEMU 실측, kernel_main.cpp::demo_frame_refcount/
+  demo_cow_clone, tools/smoke-test-x86_64.sh)**:
+  - `frame_add_ref` 2회 후 `frame_release` 3회 호출 시 앞의 2번은
+    false(아직 소유자 있음), 마지막만 true — 설계한 계약대로 동작함을
+    확인.
+  - 부모 주소공간에 페이지 하나를 매핑하고 `clone_address_space_cow`
+    호출 후, 부모/자식 모두 `write=0, cow=1`, 같은 물리주소,
+    `frame_ref_count==1`(추가 소유자 1명)임을 확인.
+  - `try_handle_cow_write_fault_for`를 자식 쪽에 먼저 걸면(부모가
+    아직 있음) 새 프레임으로 복사되고(`refcount`가 다시 0으로),
+    그 뒤 부모 쪽에 걸면(이제 유일한 소유자) 복사 없이 그대로 쓰기
+    권한만 켜지는 fast-path를 탐을 로그로 직접 확인(둘 다 원래
+    물리 페이지가 유지되는지/바뀌는지까지 검증).
+  - **버그 발견·수정**: `page_fault.cpp` 최초 작성 시 `fault_addr &
+    ~(mm::k_page_size - 1)`로 페이지 정렬을 계산했는데,
+    `mm::k_page_size`가 `uint32_t`라 `~(k_page_size-1)`이 32비트
+    마스크(`0xFFFFF000`)로 계산돼 `fault_addr`의 상위 32비트가 전부
+    잘려 나갔다 — pml4 index 1(`1<<39`, 4GiB보다 훨씬 높은 주소)로
+    데모를 처음 돌렸을 때 두 번의 `try_handle_cow_write_fault_for`
+    호출이 모두 조용히 `false`를 반환하는 것으로 드러났다(하위
+    4GiB 안의 주소만 다뤘다면 우연히 안 드러났을 것이다). `mm::
+    k_page_size`를 `static_cast<uint64_t>`로 먼저 올려 수정.
+  - **확인하지 못함**: 실제 `fork()` 시스템 콜을 통한 종단 간 흐름
+    (유저 프로세스가 실제로 fork되어 CR3가 전환된 상태에서 하드웨어
+    `#PF`가 발생하는 경로) — 이 ADR은 커널 프리미티브만 다룬다,
+    시스템 콜 wiring은 이어지는 작업이다.
+- **영향**:
+  - `kernel/arch/x86_64/CMakeLists.txt`에 `page_fault.cpp` 추가.
+  - `docs/spec/memory.md`/`docs/spec/objects.md`가 COW를 언급하는
+    부분이 있다면 이 구현이 "쓰기 폴트 핸들러(IDT, M4 범위 밖)와
+    프레임별 참조 카운트 저장소(mm이 아직 갖고 있지 않음)"라고 적어
+    둔 전제(둘 다 미구현)를 갱신해야 한다 — page_table.hpp 상단
+    주석은 이미 이 ADR 번호를 반영해 갱신했다.
+  - `object::thread::owner_space`가 있는 실제 유저 스레드가 여러 개
+    동시에 존재하고 서로 다른 코어에서 동시에 `#PF`를 낼 수 있게
+    되는 시점(M12 이후, procsrv의 진짜 다중 프로세스)에는 프레임
+    참조 카운트 테이블 자체에 락이 전혀 없다는 사실(현재는 BSP
+    단일 코어 협조적 스케줄러라 안전, ADR-136의 handle_table과
+    똑같은 처지)을 반드시 재검토해야 한다.
+
+## ADR-141. syscall 진입 커널 스택을 스레드별로 분리(M8의 전역 스크래치 2개 제거)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: M8이 `syscall_entry.S`에 둔 전역 스크래치 두 개
+  (`g_syscall_kernel_rsp`, `g_syscall_saved_user_rsp`)를 스레드별로
+  분리한다.
+  1. `object::thread`에 `syscall_kernel_rsp` 필드를 추가한다 —
+     `create_user_thread()`가 그 스레드의 커널 스택을 할당하면서
+     top 주소를 그대로 계산해 채워 둔다(고정값, 이후 안 바뀜).
+  2. `kernel/core/sched/scheduler.cpp`에 `sync_syscall_kernel_rsp()`를
+     추가해 `start()`/`yield()`/`block()`/`exit()`가 매번 다음
+     스레드로 전환하기 직전에(`next_pml4_phys()`와 같은 자리) 전역
+     `g_syscall_kernel_rsp`를 그 스레드의 값으로 맞춘다 — 커널
+     스레드(`owner_space==nullptr`)는 건드리지 않는다.
+  3. `g_syscall_saved_user_rsp`는 완전히 없앤다. `syscall_entry.S`가
+     유저 RSP를 전역이 아니라 **그 스레드 자신의(1번 덕분에 이제
+     스레드별로 분리된) 커널 스택 위에 직접 push**한다 — RCX/R11을
+     push하는 것과 정확히 같은 방식.
+- **근거**: M8 시절에는 유저 스레드가 정확히 하나(`initrun`)뿐이고
+  그 스레드의 유일한 syscall(`sys_call`)도 서버가 이미 `sys_recv`로
+  기다리고 있어 블로킹 없이 즉시 응답이 오는 데모 시나리오였다 —
+  전역 스크래치 두 개로도 충돌이 날 여지가 없었다. 하지만
+  ADR-140(COW)에 이어 실제 `fork()`가 생기면 유저 스레드가 2개
+  이상 동시에 존재하고, 그중 하나가 `sys_call`/`sys_recv`로
+  **블로킹된 채**(`sched::block()`을 거쳐 커널 콜스택 깊은 곳에
+  멈춰 있는 상태) 다른 스레드가 또 syscall을 걸 수 있다 — 그 순간
+  전역 스크래치 두 개는 "블록된 스레드가 나중에 재개될 때 읽을
+  값"을 그새 다른 스레드가 덮어써 버린다(진짜 데이터 손상, 재현
+  조건이 fork() 이전에는 아예 만들어지지 않아 M8~M11까지 드러날
+  기회가 없었다). fork()를 실제로 구현하기 **직전**에 이 잠재
+  버그를 먼저 없애 두는 편이, fork() 자체를 만들면서 동시에 이
+  문제까지 진단하는 것보다 안전하다고 판단했다.
+- **영향**:
+  - `syscall_entry.S`의 `.bss` 심벌이 `g_syscall_kernel_rsp` 하나로
+    줄었다 — `g_syscall_saved_user_rsp`를 참조하던 코드는 없었으므로
+    (M8 이후 이 파일 안에서만 쓰였다) 다른 파일에 영향 없음.
+  - `user_thread.cpp::arch_user_thread_trampoline()`이 더 단순해졌다
+    (전역을 더 이상 직접 쓰지 않는다) — `sched::current()`로 자기
+    자신을 찾아 `enter_usermode`만 호출한다.
+  - **확인함**(QEMU, `tools/smoke-test-x86_64.sh` 전체 46개 +
+    smp/numa/avx 스위트): 기존 M8 단일 유저 스레드 IPC Call 경로가
+    이 변경 후에도 그대로 성공한다(실제 SYSCALL/SYSRET 왕복).
+  - **확인하지 못함**: 정확히 이 ADR이 고치려 한 시나리오(유저
+    스레드 2개, 한쪽이 블록된 채 다른 쪽이 syscall) 자체 — 아직
+    fork()가 없어 유저 스레드가 2개 동시에 존재할 방법이 없다.
+    fork()가 실제로 구현되면 그 시점에 반드시 실제로 재현·검증해야
+    한다.

@@ -18,6 +18,8 @@ namespace {
 constexpr uint64_t k_pte_present = 1ull << 0;
 constexpr uint64_t k_pte_writable = 1ull << 1;
 constexpr uint64_t k_pte_user = 1ull << 2;
+// M12(ADR-016) — 소프트웨어 전용(하드웨어가 무시하는 bit 9). page_perm::cow 참고.
+constexpr uint64_t k_pte_cow = 1ull << 9;
 constexpr uint64_t k_pte_no_execute = 1ull << 63;
 constexpr uint64_t k_pte_addr_mask = 0x000FFFFFFFFFF000ull;
 
@@ -62,6 +64,9 @@ uint64_t leaf_flags(page_perm perm) {
     }
     if (!has_perm(perm, page_perm::exec)) {
         flags |= k_pte_no_execute;
+    }
+    if (has_perm(perm, page_perm::cow)) {
+        flags |= k_pte_cow;
     }
     return flags;
 }
@@ -214,7 +219,75 @@ page_query_result query_page(uint64_t pml4_phys, uint64_t virt) {
     if (!(entry & k_pte_no_execute)) {
         perm = perm | page_perm::exec;
     }
+    if (entry & k_pte_cow) {
+        perm = perm | page_perm::cow;
+    }
     return page_query_result{true, entry & k_pte_addr_mask, perm};
+}
+
+result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
+    auto new_root = create_address_space_root();
+    if (!new_root.is_ok()) {
+        return new_root;
+    }
+    uint64_t dst_pml4_phys = new_root.value();
+
+    // 유저 영역만(index 1~255) — index 0(저지대 GDT)과 256 이상(커널/
+    // physmap)은 create_address_space_root가 이미 원본과 동일하게
+    // 채워 뒀다(모든 주소공간이 공유). index<256이라 virt의 bit 47은
+    // 항상 0 — 별도 부호 확장이 필요 없다.
+    uint64_t* src_pml4 = table_virt(src_pml4_phys);
+    for (uint32_t i4 = 1; i4 < 256; ++i4) {
+        if (!(src_pml4[i4] & k_pte_present)) {
+            continue;
+        }
+        uint64_t* src_pdpt = table_virt(src_pml4[i4] & k_pte_addr_mask);
+        for (uint32_t i3 = 0; i3 < 512; ++i3) {
+            if (!(src_pdpt[i3] & k_pte_present)) {
+                continue;
+            }
+            uint64_t* src_pd = table_virt(src_pdpt[i3] & k_pte_addr_mask);
+            for (uint32_t i2 = 0; i2 < 512; ++i2) {
+                if (!(src_pd[i2] & k_pte_present)) {
+                    continue;
+                }
+                uint64_t* src_pt = table_virt(src_pd[i2] & k_pte_addr_mask);
+                for (uint32_t i1 = 0; i1 < 512; ++i1) {
+                    uint64_t entry = src_pt[i1];
+                    if (!(entry & k_pte_present)) {
+                        continue;
+                    }
+                    uint64_t phys = entry & k_pte_addr_mask;
+                    uint64_t virt = (static_cast<uint64_t>(i4) << 39) |
+                                    (static_cast<uint64_t>(i3) << 30) |
+                                    (static_cast<uint64_t>(i2) << 21) |
+                                    (static_cast<uint64_t>(i1) << 12);
+
+                    page_perm cow_perm = page_perm::cow;
+                    if (entry & k_pte_user) {
+                        cow_perm = cow_perm | page_perm::user;
+                    }
+                    if (!(entry & k_pte_no_execute)) {
+                        cow_perm = cow_perm | page_perm::exec;
+                    }
+                    // write는 일부러 빼 둔다 — COW의 핵심(page_fault.cpp가
+                    // 쓰기 폴트에서 실제 분기를 담당).
+
+                    src_pt[i1] = phys | leaf_flags(cow_perm);  // 부모도 다시 내려감.
+                    broadcast_tlb_shootdown(virt);
+
+                    auto map_ok = map_page(dst_pml4_phys, virt, phys, cow_perm);
+                    if (!map_ok.is_ok()) {
+                        return result<uint64_t, map_error>::err(map_ok.error());
+                    }
+
+                    mm::frame_add_ref(phys);
+                }
+            }
+        }
+    }
+
+    return result<uint64_t, map_error>::ok(dst_pml4_phys);
 }
 
 }  // namespace arch_x86_64

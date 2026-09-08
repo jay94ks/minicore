@@ -112,4 +112,33 @@ pool_stats stats(uint32_t node);
 // 같아야 한다(다르면 무시하고 기존 순서를 유지).
 void set_node_distance(uint32_t node_count, const uint8_t* distance);
 
+// M12(system-servers-bringup.md §M12, ADR-016) — fork()의 COW(Copy-on-
+// Write) 지원. order-0(4KiB) 프레임 단위로만 추적한다 — COW는 항상
+// 페이지 단위 매핑을 다루므로 더 큰 order를 추적할 필요가 없다(order>0
+// 블록은 절대 이 API를 거치지 않는다, arch_x86_64::clone_address_space_cow
+// 참고).
+//
+// 값의 의미: 0 = "공유되지 않음"(정상적으로 alloc_pages가 막 내준 새
+// 프레임의 기본 상태 — 실소유자가 정확히 하나뿐). 1 이상 = "나 말고
+// 이만큼 더 있다"(실소유자 수는 이 값+1) — COW 클론이 프레임을 다른
+// 주소공간과 공유하게 만들 때마다 1씩 늘어난다.
+//
+// mm::init() 시점에 보이는 최대 물리주소를 기준으로 크기를 정해
+// order-10(4MiB) 블록 하나에 담는다 — 이 상한(4GiB 물리 메모리까지
+// 추적 가능, uint32_t 엔트리 기준)을 넘는 시스템은 이 프로젝트의
+// QEMU 개발 규모(수백 MiB~수 GiB)를 크게 벗어나므로 LIBK_PANIC한다.
+void frame_add_ref(uint64_t physical_address);
+
+// 이 프레임을 하나의 소유자가 놓는다. 반환값이 true면 "나 말고는
+// 아무도 없었다" — 호출자가 실제로 free_pages(phys, 0)까지 마쳐야
+// 한다는 뜻이다. false면 이미 다른 소유자가 있어(공유 카운트를 이
+// 함수가 이미 1 줄여 뒀다) 호출자는 free_pages를 부르면 **안 된다**
+// (그 소유자를 대신 반환해 버리는 이중 반환 버그가 된다) — 매핑만
+// 제거하는 걸로 끝난다. COW 쓰기 폴트 핸들러도 이 반환값으로 "내가
+// 마지막 소유자면 복사 없이 그냥 쓰기 권한만 다시 켠다"를 판단한다.
+bool frame_release(uint64_t physical_address);
+
+// 현재 "나 말고 이만큼 더 있다" 값을 그냥 조회한다(변경 없음).
+uint32_t frame_ref_count(uint64_t physical_address);
+
 }  // namespace mm

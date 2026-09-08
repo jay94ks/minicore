@@ -39,6 +39,12 @@ inline constexpr uint8_t k_vector_spurious = 0xFF;
 // 쓴다. M10은 이 슬롯을 마련만 해 두고 catch-all로 라우팅했었다.
 inline constexpr uint8_t k_vector_nm = 7;
 
+// #PF(Page Fault) — M12(system-servers-bringup.md §M12, ADR-016)의
+// COW 쓰기 폴트 처리(page_fault.cpp::try_handle_cow_write_fault)가
+// 실제로 쓴다. 그 함수가 false를 반환하면(COW 대상이 아닌 진짜 폴트)
+// M10의 catch-all(diagnose_and_halt)로 그대로 떨어진다.
+inline constexpr uint8_t k_vector_page_fault = 14;
+
 // IDT를 구성하고 lidt로 적재한다. kernel_main 극초기, 첫 IPI/예외보다
 // 반드시 먼저 호출해야 한다. LAPIC/AP는 아직 필요 없다 — 순수 CPU
 // 상태(IDT)만 다룬다.

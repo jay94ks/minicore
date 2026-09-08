@@ -2,6 +2,7 @@
 #include "idt.hpp"
 
 #include "gdt_selectors.hpp"
+#include "page_fault.hpp"
 
 #include <cstdint>
 
@@ -140,6 +141,19 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
         // M11b(ADR-133) — M10이 마련해 둔 자리를 이제 실제로 채운다.
         arch_x86_64_handle_nm_trap();
         return;
+    }
+    if (frame->vector == arch_x86_64::k_vector_page_fault) {
+        // M12(ADR-016) — CR2(폴트 가상주소)는 #PF 진입 시점 값을 그대로
+        // 읽어야 한다(뒤이은 다른 코드가 CR2를 건드리기 전에 이 함수가
+        // 즉시 호출되므로 안전하다). COW로 처리됐으면(true) 그대로
+        // 리턴 — iretq가 같은 명령을 재실행한다.
+        uint64_t cr2;
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        if (arch_x86_64::try_handle_cow_write_fault(cr2, frame->error_code)) {
+            return;
+        }
+        // COW 대상이 아니었다 — 진짜 폴트. M10의 catch-all로 떨어진다.
+        arch_x86_64::diagnose_and_halt(*frame);
     }
 
     // 나머지 전부(0~31의 다른 예외 + 아직 안 쓰는 벡터) — catch-all.

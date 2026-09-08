@@ -14,6 +14,20 @@ per_cpu_cache g_cpu_caches[k_max_cpus];
 uint32_t g_node_count = 0;
 bool g_initialized = false;
 
+// M12(ADR-016) — order-0 프레임 참조 카운트 테이블. init()이 usable
+// 영역에서 본 최대 물리주소를 기준으로 딱 한 번 할당한다(frame_add_ref
+// 등 참고, page_allocator.hpp).
+uint32_t* g_frame_refcount = nullptr;
+uint64_t g_frame_refcount_entries = 0;
+
+uint32_t frame_index(uint64_t physical_address) {
+    uint64_t idx = physical_address / k_page_size;
+    if (g_frame_refcount == nullptr || idx >= g_frame_refcount_entries) {
+        LIBK_PANIC("mm::frame_*: physical_address out of refcount table range");
+    }
+    return static_cast<uint32_t>(idx);
+}
+
 // M11(ADR-054) — set_node_distance()가 실제로 호출되기 전까지는
 // false로 남아, alloc_pages()의 노드 폴백이 M1~M10과 완전히 동일한
 // 순서(라운드로빈)를 그대로 쓴다(has_distance_table 참고).
@@ -312,6 +326,43 @@ void init(const boot::boot_info& info, const boot::memory_region* regions) {
     }
 
     g_initialized = true;
+
+    // M12(ADR-016) — usable 영역 중 가장 높은 물리주소를 기준으로
+    // 프레임 참조 카운트 테이블을 order-10(최대 4MiB, 4GiB 물리메모리
+    // 상당) 이내로 확보한다. alloc_pages를 여기서 쓰므로 위에서
+    // g_initialized를 이미 true로 만들어 둬야 한다.
+    uint64_t max_phys = 0;
+    for (uint32_t i = 0; i < info.memory_map_count; ++i) {
+        const boot::memory_region& r = regions[i];
+        if (r.type != boot::k_region_usable) {
+            continue;
+        }
+        uint64_t end = r.base + r.length;
+        if (end > max_phys) {
+            max_phys = end;
+        }
+    }
+
+    uint64_t entry_count = align_up(max_phys, k_page_size) / k_page_size;
+    uint64_t bytes_needed = entry_count * sizeof(uint32_t);
+    uint64_t pages_needed = align_up(bytes_needed, k_page_size) / k_page_size;
+    uint32_t order = 0;
+    while ((1ull << order) < pages_needed) {
+        ++order;
+        if (order > k_max_order) {
+            LIBK_PANIC("mm::init: physical memory too large for frame refcount table");
+        }
+    }
+
+    auto table_page = alloc_pages(order, 0);
+    if (!table_page.is_ok()) {
+        LIBK_PANIC("mm::init: no memory for frame refcount table");
+    }
+    g_frame_refcount = static_cast<uint32_t*>(phys_to_virt(table_page.value()));
+    g_frame_refcount_entries = entry_count;
+    for (uint64_t i = 0; i < entry_count; ++i) {
+        g_frame_refcount[i] = 0;
+    }
 }
 
 result<uint64_t, alloc_error> alloc_pages(uint32_t order, uint32_t preferred_node,
@@ -368,6 +419,15 @@ void free_pages(uint64_t physical_address, uint32_t order) {
     }
 
     if (order == 0) {
+        // M12(ADR-016) — COW로 공유 중인 프레임이면(frame_release가
+        // false) 아직 다른 소유자가 있으므로 실제로 반환하지 않는다
+        // (공유 카운트는 frame_release가 이미 내부적으로 줄여 뒀다).
+        // 호출자 쪽(주소공간 매핑 해제)이 이미 매핑 자체는 지운
+        // 뒤이므로 여기서는 그냥 리턴하면 된다.
+        if (g_frame_refcount != nullptr && !frame_release(physical_address)) {
+            return;
+        }
+
         per_cpu_cache& cache = g_cpu_caches[current_cpu_id()];
         auto* frame = static_cast<page_frame*>(phys_to_virt(physical_address));
         frame->physical_address = physical_address;
@@ -404,6 +464,24 @@ void set_node_distance(uint32_t node_count_arg, const uint8_t* distance) {
         }
     }
     g_has_distance_table = true;
+}
+
+void frame_add_ref(uint64_t physical_address) {
+    uint32_t idx = frame_index(physical_address);
+    ++g_frame_refcount[idx];
+}
+
+bool frame_release(uint64_t physical_address) {
+    uint32_t idx = frame_index(physical_address);
+    if (g_frame_refcount[idx] == 0) {
+        return true;
+    }
+    --g_frame_refcount[idx];
+    return false;
+}
+
+uint32_t frame_ref_count(uint64_t physical_address) {
+    return g_frame_refcount[frame_index(physical_address)];
 }
 
 }  // namespace mm

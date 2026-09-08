@@ -69,6 +69,18 @@ uint64_t next_pml4_phys(const object::thread& next) {
     return next.owner_space != nullptr ? next.owner_space->page_table_root : 0;
 }
 
+// M12(ADR-141) — syscall_entry.S가 쓰는 전역 스크래치를, 지금 스위치해
+// 들어가려는 스레드 전용 값으로 맞춰 둔다. 커널 스레드는 애초에 SYSCALL로
+// 들어올 일이 없으니 건드리지 않는다(next_pml4_phys의 "커널 스레드는
+// 0" 패턴과 같은 정신).
+extern "C" uint64_t g_syscall_kernel_rsp;
+
+void sync_syscall_kernel_rsp(const object::thread& next) {
+    if (next.owner_space != nullptr) {
+        g_syscall_kernel_rsp = next.syscall_kernel_rsp;
+    }
+}
+
 // kernel_band이 true면 kernel_band에서만, false면 user_band에서만 꺼낸다
 // — pick_next_with_stealing()이 "커널 밴드는 노드 경계를 넘어서도
 // 유저 밴드보다 항상 우선"(ADR-014)이라는 전역 순서를 만들 때 두
@@ -273,6 +285,14 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
     uint8_t* stack_top = stack_base + (static_cast<uint64_t>(mm::k_page_size) << k_kstack_order);
 
+    // M12(ADR-141) — 이 스레드 전용 syscall 커널 스택 top을 미리
+    // 계산해 둔다(thread::syscall_kernel_rsp 주석 참고). stack_top은
+    // 아직 아무도 쓰지 않은 순수한 값이다 — 아래 손짜기 초기 컨텍스트가
+    // stack_top보다 낮은 주소만 쓰고, arch_context_switch의 최초 ret가
+    // 그 컨텍스트를 전부 소비(pop)하고 나면 arch_user_thread_trampoline
+    // 진입 시점의 RSP가 정확히 stack_top이 된다.
+    t->syscall_kernel_rsp = reinterpret_cast<uint64_t>(stack_top);
+
     // create_kernel_thread와 같은 손짜기 초기 스택 — 복귀 주소만
     // arch_user_thread_trampoline으로 바꿨다.
     uint64_t* sp = reinterpret_cast<uint64_t*>(stack_top);
@@ -309,6 +329,7 @@ void start() {
     }
 
     g_current = next;
+    sync_syscall_kernel_rsp(*next);
     arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
@@ -342,6 +363,7 @@ void yield() {
     }
 
     g_current = next;
+    sync_syscall_kernel_rsp(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
     // arch_context_switch에서 돌아왔다는 것은 prev가 다시 스케줄되어
     // 이 지점부터 재개됐다는 뜻이다.
@@ -360,6 +382,7 @@ void block() {
     // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
     // sched::enqueue()할 책임을 진다.
     g_current = next;
+    sync_syscall_kernel_rsp(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
 }
 
@@ -386,6 +409,7 @@ void block() {
     // block()과 달리 그 무엇도 나중에 prev를 깨우지 않는다(어떤 대기열
     // 에도 prev를 넣어 두지 않았다) — 이 스레드는 여기서 영구히 끝난다.
     uint64_t discard_rsp;
+    sync_syscall_kernel_rsp(*next);
     arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }

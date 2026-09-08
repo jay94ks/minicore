@@ -82,6 +82,20 @@ struct thread {
     uint64_t user_rsp = 0;            // 최초 유저모드 진입 시 RSP(유저 스택 top).
     uint64_t user_arg0 = 0;           // 최초 진입 시 RDI(boot.md §6 — "첫 인자" 관례. boot_info 등).
 
+    // M12(system-servers-bringup.md §M12, ADR-141) — 이 유저 스레드가
+    // SYSCALL로 커널에 들어올 때 전환할 커널 스택의 top(create_user_thread가
+    // 그 스레드의 커널 스택을 만들면서 미리 계산해 채워 둔다, 이후
+    // 바뀌지 않는 고정값). M8은 이 값을 스레드마다 따로 두지 않고
+    // 전역 스크래치 하나(g_syscall_kernel_rsp)로 관리했다 — 유저
+    // 스레드가 정확히 하나뿐이고 그 스레드의 IPC Call도 블로킹 없이
+    // 바로 응답이 오는 시나리오였던 M8 데모에서는 드러나지 않았지만,
+    // 두 유저 스레드 중 하나가 IPC로 블록된 채 다른 하나가 syscall을
+    // 걸면 전역 하나로는 두 스레드의 커널 스택이 서로를 덮어쓴다 —
+    // fork()로 두 번째 유저 스레드가 실제로 생기기 전에 미리 고쳐
+    // 둔다(scheduler.cpp가 이 스레드로 전환할 때마다 전역 g_syscall_kernel_rsp를
+    // 이 값으로 동기화한다).
+    uint64_t syscall_kernel_rsp = 0;
+
     // M9(ADR-127)는 이 자리에 512바이트(FXSAVE 전용) 배열을 직접
     // 내장했다. M11b(ADR-133, XSAVE/AVX)에서 1024바이트+alignas(64)로
     // 바꿔봤다가 실제로 QEMU에서 `#GP`로 깨지는 것을 확인했다 —

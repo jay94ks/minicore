@@ -4,15 +4,13 @@
 // 매핑만 부팅 시점에 한 번 구성했지만, 이 API는 이후 마일스톤(M8
 // initrun 등)이 새 주소공간을 만들 때 쓸 범용 도구다.
 //
-// COW(ADR-016)에 대하여: kernel-bootstrap.md M4는 "COW 복제 프리미티브의
-// 자료구조 골격만 준비"를 요구한다. 실제 COW(쓰기 폴트 처리, 프레임
-// 참조 카운트)는 페이지 폴트 핸들러(IDT, M4 범위 밖)와 프레임별 참조
-// 카운트 저장소(mm이 아직 갖고 있지 않음 — kernel-bootstrap-m3.md 참고)
-// 둘 다 필요해 이번에 구현하지 않는다. 이 파일이 제공하는
-// map_page/protect_page가 그 프리미티브가 실제로 쓰일 자리다 — 예를
-// 들어 자식 주소공간에 같은 물리 페이지를 read-only로 map_page하고
-// 부모 쪽도 protect_page로 read-only로 낮추는 식으로 미래의 COW clone이
-// 구현될 것이다.
+// COW(ADR-016)에 대하여: kernel-bootstrap.md M4 시점에는 "COW 복제
+// 프리미티브의 자료구조 골격만 준비"했다(페이지 폴트 핸들러도 프레임별
+// 참조 카운트 저장소도 없었다). 실제 구현은 system-servers-bringup.md
+// §M12(ADR-140, kernel-memory.md)에서 완료했다 — `page_perm::cow`
+// 소프트웨어 비트(map_page/protect_page/query_page가 그대로 통과시킴),
+// `clone_address_space_cow()`(아래), 그리고 쓰기 폴트 시의 실제 분기는
+// page_fault.cpp가 담당한다.
 #pragma once
 
 #include <cstdint>
@@ -32,6 +30,16 @@ enum class page_perm : uint32_t {
     write = 1u << 0,
     exec = 1u << 1,
     user = 1u << 2,
+
+    // M12(system-servers-bringup.md §M12, ADR-016) — 하드웨어가 무시하는
+    // PTE 소프트웨어 비트(x86_64 4단계 페이징의 bit 9, Intel SDM Vol.3
+    // §4.5의 "ignored" 비트 중 하나)에 그대로 실어 map_page/protect_page/
+    // query_page를 그대로 통과하게 만든 표시. write 없이 이 비트만 있는
+    // 페이지는 "권한이 없어서 못 쓰는 게 아니라 COW라 복사가 필요할
+    // 뿐"이라는 뜻 — page_fault.cpp가 진짜 권한 위반과 구분하는 유일한
+    // 근거다. COW 클론(같은 파일::clone_address_space_cow)이 부모/자식
+    // 양쪽 PTE에 이 비트를 세우고 mm::frame_add_ref를 부른다.
+    cow = 1u << 3,
 };
 
 inline page_perm operator|(page_perm a, page_perm b) {
@@ -61,5 +69,15 @@ struct page_query_result {
     page_perm perm;
 };
 page_query_result query_page(uint64_t pml4_phys, uint64_t virt);
+
+// M12(ADR-016) — src_pml4_phys의 유저 영역(pml4 index 1~255 — index 0의
+// 저지대 GDT 항등 매핑과 256 이상의 커널/physmap은 create_address_space_root와
+// 같은 정책으로 그대로 공유한다)에 present인 모든 리프 페이지를 새
+// 주소공간에 COW로 복제한다: 양쪽 다 write를 떼고 page_perm::cow를
+// 세운 뒤 mm::frame_add_ref(phys)를 한 번 부른다(0→1, "실소유자가
+// 이제 둘"이라는 뜻 — page_allocator.hpp의 값 의미 참고). 실제 쓰기
+// 시점의 진짜 분기(그대로 쓰기 재개 vs 새 프레임에 복사)는
+// page_fault.cpp가 담당한다.
+result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys);
 
 }  // namespace arch_x86_64
