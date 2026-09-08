@@ -131,3 +131,116 @@ CMake·툴체인·저장소 레이아웃·서드파티 소스 관리에 관한 �
     구체적 기능 공백은 없다.
   - fork 저장소의 정확한 이름·호스팅 위치는 실제로 fork를 만드는
     시점에 정한다.
+
+## ADR-113. freestanding C++ 표준 헤더: libc++ 부재를 자체 shim으로 보강 (부분 해결, → OPEN-48)
+
+- **상태**: 확정 (2026-09-08)
+- **결정**: `docs/plan/kernel-bootstrap.md` M1 구현 중, ADR-031에 따라
+  설치한 Clang/LLVM(winget `LLVM.LLVM`)에는 **libc++ 헤더가 전혀
+  포함되어 있지 않다**는 사실을 확인했다 — 컴파일러 자체가 내장 제공하는
+  freestanding C 헤더(`stdint.h`, `stddef.h`, `stdarg.h` 등, 리소스
+  디렉토리 경유)는 정상 동작하지만, `cxx-conventions.md` §1이 허용
+  목록으로 명시한 C++ 래퍼 헤더(`<cstdint>`, `<cstddef>` 등)는 이를
+  제공하는 libc++/libstdc++ 자체가 `x86_64-unknown-none-elf` 같은
+  freestanding 타깃용으로 설치되어 있지 않으면 어디에도 없다. 이
+  타깃용 libc++ 런타임을 소스에서 직접 빌드하는 것은 별도의 큰 작업이므로
+  (LLVM 소스 전체 clone + `runtimes` 빌드, ADR-031의 "저장소 밖에서
+  관리" 원칙과는 별개로 시간이 오래 걸림), M1을 막지 않기 위해 **당장
+  필요한 3개 헤더(`cstdint`, `cstddef`, `cstdarg`)만 자체 shim으로
+  제공**하기로 한다: `toolchain/freestanding-cxx/`에 동명의 헤더 파일을
+  두고, 각각 대응하는 C 헤더(`stdint.h` 등)를 include한 뒤 필요한
+  심벌만 `namespace std`로 끌어올리는 얇은 래퍼로 작성한다.
+  `toolchain/common.cmake`가 이 디렉토리를 `-isystem`으로 전역
+  추가한다 — 모든 아키텍처·컴파일러 조합에 동일하게 적용된다.
+- **근거**: `cstdint`/`cstddef`/`cstdarg`는 실제 libc++/libstdc++
+  구현에서도 대응 C 헤더를 include하고 심벌을 재노출하는 몇 줄짜리
+  래퍼에 불과해, 직접 작성해도 표준이 요구하는 내용과 사실상 동일하다
+  (구현 세부가 아니라 표준이 보장하는 선언 집합 자체를 옮겨 적는
+  수준). 반면 `<type_traits>`, `<concepts>`, `<atomic>` 등은 그 자체가
+  상당한 구현체이므로 같은 방식으로 자체 shim을 만드는 것은 비현실적
+  이다 — 이 문제는 M3(libk, `docs/plan/kernel-bootstrap.md`)가
+  실제로 이 헤더들을 요구하는 시점까지 미룬다.
+- **영향**:
+  - `cxx-conventions.md` §1의 "허용" 목록은 문구상 변경 없음 — 다만
+    실제로 그 헤더들을 컴파일 가능하게 만드는 수단이 (a) 진짜
+    libc++ 또는 (b) 이 ADR의 자체 shim, 둘 중 하나임을 명시해야 한다
+    (spec 갱신 필요).
+  - `<type_traits>`/`<concepts>`/`<bit>`/`<limits>`/`<atomic>`/`<utility>`/`<new>`(placement)에
+    대해서는 아직 아무 해결책도 없다 — M3 착수 전에 반드시 결정해야
+    한다. → **미결정 (OPEN-48)**: 선택지는 (1) 이들도 개별적으로
+    shim 작성, (2) freestanding 타깃용 libc++ 런타임을 실제로 빌드해
+    저장소 밖에 설치(ADR-031과 동일 패턴), (3) 해당 표준 헤더 의존을
+    포기하고 libk 자체 타입으로 대체. M3 계획 수립 시 결정한다.
+  - 저장소 안에 두는 `toolchain/freestanding-cxx/`는 ADR-031이 말하는
+    "저장소 밖에서 관리해야 할 툴체인 산출물"이 아니다 — LLVM/libc++
+    자체를 vendoring하는 것이 아니라, minicore가 직접 작성한 몇 줄짜리
+    소스 파일이므로 일반 저장소 코드와 동일하게 취급한다.
+
+## ADR-115. 나머지 freestanding C++ 헤더: 헤더별 shim 우선, 어려우면 libk 대체 (해결: OPEN-48)
+
+- **상태**: 확정 (2026-09-08)
+- **결정**: ADR-113이 미해결로 남긴 `<type_traits>`/`<concepts>`/`<bit>`/
+  `<limits>`/`<atomic>`/`<utility>`/`<new>`(placement)에 대해, "freestanding
+  타깃용 libc++를 실제로 빌드"하는 선택지(ADR-113이 제시한 옵션 (2))는
+  **채택하지 않는다**. 대신 헤더 하나하나에 대해:
+  1. 컴파일러 내장 기능(`__has_builtin`류 intrinsic, `__atomic_*`,
+     `__is_*` type trait builtin 등)이나 순수 템플릿 메타프로그래밍만으로
+     동작이 재현 가능하면 `toolchain/freestanding-cxx/`에 그 헤더 이름
+     그대로 shim을 작성한다(ADR-113과 같은 패턴).
+  2. 특정 헤더의 표준 동작을 그대로 재현하는 것이 비현실적이거나
+     불필요하게 크면(예: `<atomic>`의 메모리 순서 세분화 전체), 그
+     표준 헤더 자체를 shim하는 대신 **libk가 필요한 부분집합만 자체
+     타입으로 제공**하고(`libk.md`가 이미 `atomic<T>` 자체 래퍼를
+     `ADR-010` 범위로 정해둔 것과 같은 방식), 커널·서버 코드는 표준
+     헤더 대신 그 libk 타입을 쓴다.
+  이 중 어느 쪽을 택할지는 헤더별로 실제 구현 시점(M3, libk 착수)에
+  판단한다 — 이 ADR은 "libc++를 통째로 빌드하지 않는다"는 방향만
+  확정한다.
+- **근거**: 사용자가 대시보드 답변으로 "이들도 개별적으로 shim 작성.
+  혹은 호환되는 자체 라이브러리/타입을 개발"이라고 명시했다 — ADR-113의
+  세 옵션 중 (1)+(3) 조합을 선택하고 (2)(실제 libc++ 빌드)는 배제하는
+  뜻이다. `<type_traits>`/`<concepts>`처럼 순수 컴파일타임 헤더는
+  직접 shim이 표준과 사실상 동일한 결과를 내는 반면, LLVM 전체
+  소스를 clone해 `runtimes`를 빌드하는 것은(ADR-113이 이미 지적한
+  대로) 저장소 밖에서 별도로 관리해야 할 무거운 산출물이 되어 ADR-031의
+  정신("minicore를 만드는 도구"를 가볍게 유지)과 맞지 않는다. libk가
+  이미 `atomic`/`spinlock` 등 커널 전용 타입을 갖기로 한 것(`libk.md`)과도
+  방향이 일치한다.
+- **영향**:
+  - `docs/spec/cxx-conventions.md` §1·§4가 "이 헤더들은 shim 또는
+    libk 대체 중 하나로 제공된다"를 반영하도록 갱신해야 한다(이
+    ADR과 함께 즉시 반영).
+  - M3(libk) 계획 수립 시, `<type_traits>`/`<concepts>`/`<bit>`/`<limits>`/
+    `<utility>`/`<new>`는 shim 우선으로, `<atomic>`은 libk의 `atomic<T>`
+    자체 타입으로 대체하는 쪽을 기본 가정으로 삼는다 — 실제 구현
+    난이도가 다르면 M3 착수 시 개별적으로 재판단할 수 있다.
+  - OPEN-48은 "방향"만 해소한다 — 각 헤더의 실제 shim/대체 작성은
+    아직 하지 않았으므로 M3 계획 문서에서 구체적 작업 항목으로
+    다시 나열해야 한다.
+
+## ADR-116. freestanding 빌드에도 memset/memcpy/memmove/memcmp를 직접 제공해야 함
+
+- **상태**: 확정 (2026-09-08)
+- **결정**: `docs/plan/kernel-bootstrap.md` M2(`boot_info_x86_64.cpp`,
+  구조체 zero-init `boot::boot_info info{};`) 구현 중, `-ffreestanding`으로
+  빌드해도 Clang이 구조체 초기화·큰 복사를 `memset`/`memcpy` 호출로
+  낮출 수 있어(freestanding 여부와 무관한 코드생성 최적화) 링크 시점에
+  `undefined symbol: memset`으로 실패함을 확인했다. `kernel/core/freestanding_mem.cpp`에
+  `memset`/`memcpy`/`memmove`/`memcmp`의 최소 루프 기반 구현을 두고,
+  컴파일러가 그 구현 자체를 다시 memcpy/memset 호출로 "최적화"해
+  무한 재귀를 만들지 않도록 이 파일만 `-fno-builtin`으로 컴파일한다
+  (`kernel/CMakeLists.txt`의 `set_source_files_properties`).
+- **근거**: 이것은 freestanding C/C++ 커널 개발의 잘 알려진 요구사항
+  이다 — C++ 표준은 freestanding 구현이 `<cstring>`을 제공할 의무를
+  지우지 않지만, 컴파일러 코드생성기는 최적화 목적으로 이 심벌들의
+  존재를 가정한 채 호출을 삽입할 수 있다(실제 이번에 M2에서 처음
+  발생을 확인했다 — 정적 데이터라 `.bss`만으로 해결되는 M1 범위에서는
+  드러나지 않았다). 직접 구현 외의 대안(예: compiler-rt만 링크)은
+  이 시점에는 불필요하게 무겁다.
+- **영향**:
+  - 이후 마일스톤에서 구조체 zero-init/큰 배열 복사를 쓸 때마다 같은
+    링크 오류가 재발할 수 있다는 점을 알아둔다 — 이미 해결되어 있으므로
+    새로 조사할 필요는 없다.
+  - `kernel/core/freestanding_mem.cpp`는 임시 위치다 — M3(libk) 착수
+    시 정식 위치(libk 또는 별도 컴파일러 지원 라이브러리)로 옮기는
+    것을 검토한다(파일 자체 주석에도 명시).

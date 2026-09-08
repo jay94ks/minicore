@@ -40,6 +40,22 @@
   이미지 영역) 구성 순서는 [virtual-memory-layout.md](virtual-memory-layout.md)
   §4.1(ADR-078)에서 정의한다.
 
+### 1.4 x86_64 — QEMU 개발용 PVH 직접 부팅 (ADR-114, 부트로더 아님)
+
+- `kernel/arch/x86_64/boot/`에 Xen/PVH ELF Note
+  (`XEN_ELFNOTE_PHYS32_ENTRY=18`, desc=`_start32`의 물리주소)를 함께
+  둔다. QEMU의 내장 `-kernel` 로더는 Multiboot2도 64비트
+  ELF(`EM_X86_64`)도 지원하지 않아(§1.1의 실제 부팅 이미지를 그
+  경로로 못 띄운다) `tools/run-qemu.sh`가 QEMU의 `qboot.rom` 펌웨어로
+  PVH 직접 부팅 경로를 대신 쓴다 — PVH 진입 상태(32비트 보호모드,
+  페이징 꺼짐, 플랫 세그먼트, GDT/IDT/스택은 커널이 직접 구성)가
+  Multiboot2 진입 상태와 사실상 같아 `_start32`를 그대로 재사용한다.
+- **이것은 실제 부팅 경로가 아니다** — §1.1(Multiboot2/GRUB)과
+  §1.2(UEFI)만이 ADR-017이 정한 배포·실기 부팅 프로토콜이다. 이 노트는
+  개발 중 QEMU 반복 검증 속도를 위한 것으로, `boot_info` 파이프라인
+  (§3~4)과 무관하며 PVH의 `hvm_start_info` 포인터(전달 시 EBX)를
+  읽지 않는다.
+
 ## 2. 소스별 → boot_info 변환 규칙
 
 | boot_info 필드 | Multiboot2 출처 | UEFI 출처 | FDT 출처 |

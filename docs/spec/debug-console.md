@@ -38,7 +38,7 @@ namespace klog {
     void init();                            // arch별 UART 초기화
     void putc(char c);                       // 1바이트 즉시 송신 (폴링, 블로킹)
     void write(const char* s, size_t len);   // putc 반복
-    void printf(const char* fmt, ...);       // 최소 포맷터: %d %u %x %p %s %c %% 만 지원
+    void printf(const char* fmt, ...);       // 최소 포맷터: %d %u %x %p %s %c %% + l 수식어(%ld %lu %lx, 64비트) 지원
 }
 ```
 

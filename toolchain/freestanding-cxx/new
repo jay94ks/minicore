@@ -1,0 +1,18 @@
+// freestanding <new> shim (ADR-113/115) — placement new/delete만 제공한다.
+// ADR-010은 동적 할당을 전제하는 일반 operator new(size_t)를 허용하지
+// 않는다 — 커널 코드는 libk::result/optional의 내부 저장소처럼 이미
+// 확보된 버퍼 위에 객체를 구성할 때만 placement new를 쓴다.
+#pragma once
+
+#include <cstddef>
+
+inline void* operator new(size_t count, void* ptr) noexcept {
+    (void)count;
+    return ptr;
+}
+inline void* operator new[](size_t count, void* ptr) noexcept {
+    (void)count;
+    return ptr;
+}
+inline void operator delete(void*, void*) noexcept {}
+inline void operator delete[](void*, void*) noexcept {}

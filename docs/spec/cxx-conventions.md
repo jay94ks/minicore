@@ -16,7 +16,17 @@ convention이다 — 지금은 ADR-003/010/042에서 이미 정해진 규칙을
   -fno-stack-protector`.
 - 허용: freestanding이 보장하는 표준 헤더 — `<cstdint>`, `<cstddef>`,
   `<type_traits>`, `<concepts>`, `<bit>`, `<limits>`, `<atomic>`,
-  `<utility>`, `<new>`(placement만), `<cstdarg>`.
+  `<utility>`, `<new>`(placement만), `<cstdarg>`. 현재 툴체인에는
+  freestanding 타깃용 libc++가 전혀 없어(ADR-113), 이 헤더들은 실제
+  libc++ 대신 다음 두 방식 중 하나로 제공된다(ADR-115) — 어느 쪽이든
+  코드에서는 표준 헤더처럼 `#include`하면 되고 구현 방식을 의식할
+  필요는 없다:
+  - `<cstdint>`/`<cstddef>`/`<cstdarg>`는 `toolchain/freestanding-cxx/`의
+    자체 shim으로 이미 제공된다(ADR-113).
+  - 나머지(`type_traits`/`concepts`/`bit`/`limits`/`atomic`/`utility`/
+    `new`)는 M3(libk) 착수 시점에 헤더별로 shim을 추가하거나, shim이
+    비현실적인 경우(예: `atomic`) 그 표준 헤더 대신 libk 자체 타입
+    (예: `libk::atomic<T>`)으로 대체한다 — 아직 작성되지 않았다.
 - 금지: 예외(`throw`/`try`/`catch`), RTTI(`dynamic_cast`, `typeid`),
   동적 할당을 전제하는 표준 컨테이너(`std::vector`, `std::string`
   등), `<iostream>`류, 전역 정적 객체의 동적 초기화(생성자 순서가

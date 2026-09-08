@@ -18,15 +18,28 @@ set(CMAKE_SYSTEM_PROCESSOR ${MINICORE_TOOLCHAIN_ARCH})
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 # ADR-010: 예외/RTTI 금지, freestanding 헤더만 허용
+#
+# -isystem freestanding-cxx: 이 툴체인에는 freestanding 타깃용 libc++가
+# 없어 <cstdint>/<cstddef>/<cstdarg>가 어디에도 없다 — 자체 shim으로
+# 보강한다(ADR-113, OPEN-48). 컴파일러 내장 헤더보다 먼저 탐색되어야
+# 하므로 -isystem으로 추가한다.
 set(MINICORE_COMMON_COMPILE_OPTIONS
     -ffreestanding
     -fno-exceptions
     -fno-rtti
     -fno-stack-protector
     -fno-pic
+    -isystem ${CMAKE_CURRENT_LIST_DIR}/freestanding-cxx
     -Wall
     -Wextra
 )
 
 add_compile_options(${MINICORE_COMMON_COMPILE_OPTIONS})
 add_link_options(-nostdlib -static)
+
+# cxx-conventions.md §1이 <concepts>를 허용 목록에 넣은 것 자체가
+# C++20 이상을 전제한다 — 명시적으로 고정해 clang 버전에 따라 기본
+# 표준이 달라지는 데 의존하지 않는다.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)

@@ -1,0 +1,10 @@
+// freestanding <cstdarg> shim (ADR-113) — toolchain/freestanding-cxx/cstdint 참고.
+#pragma once
+
+#include <stdarg.h>
+
+namespace std {
+
+using ::va_list;
+
+}  // namespace std

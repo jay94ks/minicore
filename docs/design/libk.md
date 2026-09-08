@@ -489,6 +489,51 @@
     스크립트(예: `tools/dump-kernel.*`)가 필요할 수 있다 — 구체
     도구화는 M1 이후 실제로 추적이 필요해지는 시점에 정한다.
 
+## ADR-118. libk 타입은 전역에서 쓰이려면 constexpr 생성자를 가져야 한다 (ADR-010/ADR-072 보강)
+
+- **상태**: 확정 (2026-09-08)
+- **결정**: `docs/plan/kernel-bootstrap.md` M3 구현 중, `atomic<T>`(ADR-072)의
+  기본 생성자가 constexpr이 아니었던 탓에 이를 멤버로 둔 `spinlock`
+  등을 포함하는 전역 변수(예: 슬랩 힙의 크기 클래스별 상태 배열)가
+  "동적 초기화가 필요하다"고 컴파일러가 판단해, 실행되지 않는
+  `.init_array`(C++ 전역 생성자 호출 목록 — 이 freestanding 빌드에는
+  이를 호출하는 crt0가 없다)에 초기화를 떠넘기는 것을 확인했다. 그
+  결과 0이 아니어야 할 필드(청크 크기 32 등)가 `.bss`의 0으로 남아
+  나눗셈 예외(#DE)로 트리플 폴트가 났다 — QEMU로 실제 재현·확인함.
+  원인은 `atomic<T>`가 `mutable T value_` + 암시적(비constexpr)
+  생성자를 썼기 때문이다. `atomic<T>`의 생성자를 `constexpr`로
+  명시하고 `mutable` 대신 `const_cast`(load 계열 const 메서드에서)로
+  바꿔 해결했다 — 이제 `atomic`/`spinlock`/`ticket_lock`/`mcs_lock`을
+  포함하는 전역은 상수 초기화(컴파일 타임, `.data`/`.bss`에 값이 직접
+  박힘)로 처리되어 crt0 없이도 올바른 초기값을 갖는다.
+  **앞으로 libk에 추가하는 모든 타입은 전역 변수에 담겨도 안전하도록
+  생성자를 constexpr로 만들어야 한다** — 이는 cxx-conventions.md §1의
+  "전역 정적 객체의 동적 초기화 금지"를 문자 그대로 지키기 위한
+  필요조건이다.
+- **근거**: `result`/`optional`도 저장 기법(alignas 버퍼 + placement
+  new)이 비슷해 같은 함정에 빠지기 쉽지만, 이 둘은 지금까지 지역
+  변수·반환값으로만 쓰였고 전역으로 선언된 적이 없어 이번에
+  실제로는 드러나지 않았다 — 잠재적으로 같은 문제가 있을 수 있다는
+  점은 인지해 둔다(전역으로 선언되는 순간 같은 방식으로 검증 필요).
+  `mutable` 자체가 항상 상수 초기화를 막는 것은 아니지만, 이번 사례는
+  `mutable` 제거 + 명시적 `constexpr`로 문제가 사라지는 것을 실제
+  빌드 산출물(`_GLOBAL__sub_I_*` 심벌 소멸을 `nm`으로 확인)로 검증했다.
+- **영향**:
+  - `libk/include/libk/atomic.hpp`가 `mutable` 대신 `const_cast`
+    기반으로 바뀌었다 — API·의미론은 동일하게 유지된다.
+  - 앞으로 libk에 전역으로 쓰일 가능성이 있는 타입을 추가할 때마다
+    (M4~M6의 objects/sched/ipc 자료구조가 유력한 후보), 빌드 후
+    `nm <elf> | grep GLOBAL__sub_I`로 숨은 동적 초기화 요구가
+    생기지 않았는지 확인하는 습관을 들인다 — 이 ADR이 그 확인
+    방법의 근거를 남긴다.
+  - kernel/core/mm(`g_node_pools`, `g_cpu_caches`, 크기 클래스 배열)과
+    kernel/core/klog.cpp(`g_log_lock`)는 이 수정 이전에도 우연히
+    관찰 가능한 오류가 없었다 — 그 필드들의 "의도한 초기값"이
+    마침 전부 0/nullptr이라 `.bss` 제로 초기화와 우연히 일치했기
+    때문이다(스핀락의 "unlocked"가 0인 것 등). `size_class_state.chunk_size`
+    (0이 아닌 16/32/64/...)만 이 우연에서 벗어나 있어 처음으로
+    문제가 드러났다.
+
 ## 아직 정하지 않은 것
 
 - **OPEN-32**: `result<T,E>`/`optional<T>`의 `[[nodiscard]]` 강제 여부 최종

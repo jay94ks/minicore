@@ -1,0 +1,42 @@
+// freestanding <cstdint> shim (ADR-113) — 현재 툴체인에 이 타깃용 libc++가
+// 없어 자체 제공한다. 대응 C 헤더(stdint.h, 클랑 리소스 디렉토리 제공)를
+// include하고 표준이 요구하는 심벌을 std로 재노출하는 것 이상은 하지 않는다.
+#pragma once
+
+#include <stdint.h>
+
+namespace std {
+
+using ::int8_t;
+using ::int16_t;
+using ::int32_t;
+using ::int64_t;
+using ::uint8_t;
+using ::uint16_t;
+using ::uint32_t;
+using ::uint64_t;
+
+using ::int_least8_t;
+using ::int_least16_t;
+using ::int_least32_t;
+using ::int_least64_t;
+using ::uint_least8_t;
+using ::uint_least16_t;
+using ::uint_least32_t;
+using ::uint_least64_t;
+
+using ::int_fast8_t;
+using ::int_fast16_t;
+using ::int_fast32_t;
+using ::int_fast64_t;
+using ::uint_fast8_t;
+using ::uint_fast16_t;
+using ::uint_fast32_t;
+using ::uint_fast64_t;
+
+using ::intptr_t;
+using ::uintptr_t;
+using ::intmax_t;
+using ::uintmax_t;
+
+}  // namespace std

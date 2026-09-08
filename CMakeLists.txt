@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(minicore CXX C)
+project(minicore CXX C ASM)
 
 # ADR-021: monorepo + 서브프로젝트(meta-build).
 # 이 파일은 "어떤 arch에서 무엇을 빌드하는가"만 결정하고,

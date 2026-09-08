@@ -3,7 +3,7 @@
 [← 설계 문서 색인](index.md)
 
 모든 카테고리 파일에 흩어진 미결정 항목을 한 곳에 모은 문서. 새
-미결정 항목은 다음 번호(`OPEN-48`부터)로 여기에 추가하고, 해당
+미결정 항목은 다음 번호(`OPEN-49`부터)로 여기에 추가하고, 해당
 결정을 다루는 카테고리 파일에도 같은 번호로 언급한다. 해결되면
 `~~OPEN-N~~`으로 취소선 처리하고 해결한 ADR 번호를 적는다.
 
@@ -13,15 +13,16 @@
 |---|---|---|---|
 | OPEN-29 | initrun 기동 매니페스트 형식(서버 실행 순서·인자 기술 방법) | ADR-017, ADR-030 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-32 | result/optional의 `[[nodiscard]]` 강제 여부 최종 확정 시점 | ADR-010, ADR-068, ADR-069 | [libk.md](libk.md) |
-| OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성 자체는 ADR-096으로 이미 해결됨 | ADR-093, ADR-096 | [security-model.md](security-model.md) |
-| OPEN-43 | 콘솔 드라이버 상세 프로토콜(문자 버퍼 형식, 프레임버퍼 글리프 렌더링, TTY 전환 키 조합 등) | ADR-097 | [boot-and-drivers.md](boot-and-drivers.md) |
-| OPEN-46 | "최근 스케줄링 빈도" 측정·기록 방식(스왑 압축 대상 선정용) | ADR-108 | [kernel-memory.md](kernel-memory.md) |
-| OPEN-47 | 스왑 압축·해제 루틴의 정확한 구현 위치(커널 내부 vs SWAPFS 서버) | ADR-108 | [kernel-memory.md](kernel-memory.md) |
+| OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
 
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-48~~ | `<type_traits>`/`<concepts>`/`<bit>`/`<limits>`/`<atomic>`/`<utility>`/`<new>` 등 나머지 freestanding C++ 헤더 확보 방법(libc++ 실제 빌드 vs 개별 shim vs libk 대체) | ADR-115 |
+| ~~OPEN-47~~ | 스왑 압축·해제 루틴의 정확한 구현 위치(커널 내부 vs SWAPFS 서버) | ADR-110 |
+| ~~OPEN-46~~ | "최근 스케줄링 빈도" 측정·기록 방식(스왑 압축 대상 선정용) | ADR-109 |
+| ~~OPEN-43~~ | 콘솔 드라이버 상세 프로토콜(문자 버퍼 형식, 프레임버퍼 글리프 렌더링, TTY 전환 키 조합 등) | ADR-111 |
 | ~~OPEN-44~~ | SWAPFS 압박 상황이 물리 메모리 할당자·정책 서버 쿼터에 어떻게 반영되는지 | ADR-104, ADR-105, ADR-106, ADR-107 |
 | ~~OPEN-45~~ | 파일 잠금의 범위(파일 전체만 vs `fcntl`류 바이트 범위 잠금까지) | ADR-102 |
 | ~~OPEN-39~~ | 로그인 프롬프트 프로세스와 실제 콘솔/tty 드라이버의 연결 방식, 다중 콘솔 기동 방식 | ADR-097, ADR-098 |
