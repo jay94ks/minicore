@@ -3,7 +3,7 @@
 [← 설계 문서 색인](index.md)
 
 모든 카테고리 파일에 흩어진 미결정 항목을 한 곳에 모은 문서. 새
-미결정 항목은 다음 번호(`OPEN-49`부터)로 여기에 추가하고, 해당
+미결정 항목은 다음 번호(`OPEN-53`부터)로 여기에 추가하고, 해당
 결정을 다루는 카테고리 파일에도 같은 번호로 언급한다. 해결되면
 `~~OPEN-N~~`으로 취소선 처리하고 해결한 ADR 번호를 적는다.
 
@@ -13,13 +13,14 @@
 |---|---|---|---|
 | OPEN-32 | result/optional의 `[[nodiscard]]` 강제 여부 최종 확정 시점 | ADR-010, ADR-068, ADR-069 | [libk.md](libk.md) |
 | OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
-| OPEN-49 | initrun이 각 서비스의 초기화 완료를 기다린 뒤 다음으로 넘어간다는 방향은 확정(ADR-131 §결정6) — 정확한 준비완료 신호 프로토콜(notification vs IPC Call/Reply 등)만 미정 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스"의 정체성(procsrv 자신인지 별도 컴포넌트인지)과, 그것이 프로세스 트리의 새 루트가 되는 절차 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
 
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-49~~ | initrun이 각 서비스의 초기화 완료를 기다린 뒤 다음으로 넘어간다는 방향은 확정(ADR-131 §결정6) — 정확한 준비완료 신호 프로토콜은 범위가 커서 별도 설계로 분리 | OPEN-52로 이관 |
 | ~~OPEN-50~~ | initrun이 부트 파티션에서 서비스 바이너리를 찾는 정확한 탐색 규칙 | ADR-131 |
 | ~~OPEN-29~~ | initrun 기동 매니페스트 형식(서버 실행 순서·인자 기술 방법) | ADR-131 |
 | ~~OPEN-48~~ | `<type_traits>`/`<concepts>`/`<bit>`/`<limits>`/`<atomic>`/`<utility>`/`<new>` 등 나머지 freestanding C++ 헤더 확보 방법(libc++ 실제 빌드 vs 개별 shim vs libk 대체) | ADR-115 |

@@ -40,10 +40,11 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
   엔트리(OS 설치 시점 구성값, 지금은 mkinitrd.py가 대신 채움, 없거나
   장치가 안 보이면 initrun 자신의 임베디드 PCIe 폴백 스캔)로 전달한
   부트 디바이스 서술자로, 그 장치를 자신에게 내장된 최소 virtio-blk
-  클라이언트+**cpio(newc)** 리더로 직접 마운트**하고,
-  `/sys/srv/lib/NNN-이름.ini`(파일명순=실행순, `exec`/`args`+레지스트리
-  대체용 폴백 설정) 파일들로 procsrv를 포함한 서비스 바이너리들을
-  찾아 **각자의 초기화 완료를 기다리며** 순서대로
+  클라이언트+**cpio(newc)** 리더로 직접 마운트**하고, 아카이브 안
+  `lib/NNN-이름.ini`(VFS 경로가 아니라 아카이브 내부 상대 경로,
+  파일명순=실행순, `exec`/`args`+레지스트리 대체용 폴백 설정) 파일들로
+  `bin/`의 procsrv를 포함한 서비스 바이너리들을 찾아 **각자의 초기화
+  완료를 기다리며** 순서대로
   `sys_process_spawn`(원본 ELF 바이트를 직접 넘기는 형태로 일반화)한다.
   전부 끝나면 **systemd류 초기 프로세스를 마지막으로 실행시키고
   initrun 스스로는 사라진다**(그 정체성과 절차는 OPEN-51로 남음).
@@ -91,28 +92,33 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 ## M12. 부트 디바이스 마운트 + procsrv 골격 — 프로세스 테이블·fork/exec·계정 모델·fd 진실 공급원
 
 - **선행 결정**: **ADR-131**(boot-and-drivers.md, OPEN-29·OPEN-50
-  해소 완료) — initrun이 부트 디바이스를 직접 마운트해
-  `/sys/srv/lib/NNN-이름.ini`(발견 순서=파일명순, `exec`/`args`+
-  레지스트리 대체용 폴백 설정) 파일들로 서비스를 찾아, 각자의
-  초기화 완료를 기다리며 기동하는 전체 절차가 이미 확정돼 있다.
-  이 마일스톤은 그대로 구현만 하면 된다 — 다만 **OPEN-51**(모든
-  서비스 기동 후 마지막에 실행하는 "systemd류 초기 프로세스"의
-  정체성과 절차)은 착수 시점에 먼저 좁혀야 한다.
+  해소 완료) — initrun이 부트 디바이스(cpio 아카이브)를 직접 마운트해
+  아카이브 안 `lib/NNN-이름.ini`(VFS 경로가 아니라 아카이브 내부
+  상대 경로, 발견 순서=파일명순, `exec`/`args`+레지스트리 대체용
+  폴백 설정) 파일들로 `bin/`의 서비스를 찾아, 각자의 초기화 완료를
+  기다리며 기동하는 전체 절차가 이미 확정돼 있다. 이 마일스톤은
+  그대로 구현만 하면 된다 — 다만 **OPEN-51**(모든 서비스 기동 후
+  마지막에 실행하는 "systemd류 초기 프로세스"의 정체성과 절차)은
+  착수 시점에 먼저 좁혀야 한다.
 - **구현**: 두 갈래다.
   1. **initrun의 부트스트랩 절차**(ADR-131) — `boot_info.
      boot_device_descriptor` 파싱(없거나 장치가 안 보이면 임베디드
      PCIe 폴백 스캔), 임베디드 최소 virtio-blk 클라이언트(블로킹,
      읽기 전용), 임베디드 최소 **cpio(newc)** 읽기전용 파서 + INI
-     파서, `/sys/srv/lib/*.ini`를 파일명순으로 나열해 각각의
+     파서, 아카이브 안 `lib/*.ini`를 파일명순으로 나열해 각각의
      `exec=`/`args=`로 `sys_process_spawn(elf_data, elf_size, argv,
      grant_trusted)`(신설 커널 syscall)를 호출하고 그 서비스의
-     초기화 완료 신호를 기다린 뒤 다음으로 넘어간다. 나머지
+     초기화 완료 신호를 기다린 뒤 다음으로 넘어간다(신호 프로토콜
+     자체는 OPEN-52로 분리된 별도 design 대상이라, 이 마일스톤은
+     그 design이 나올 때까지 쓸 최소 임시 방편 — 예를 들어 정해진
+     타임아웃이나 단순 notification 한 번 — 으로 진행하고, 정식
+     프로토콜이 나오면 교체한다). 나머지
      key=value는 원본 그대로 새 프로세스에게
      `boot_info.config_blob_addr/size`로 매핑해 전달한다. 전부 끝나면
      OPEN-51에서 정할 "systemd류 초기 프로세스"를 마지막으로 실행시키고
      initrun 자신은 종료한다. `tools/mkinitrd.py`가 `disk.cfg` 엔트리를
-     채우도록 확장하고, 새 `tools/mkbootdisk.py`로 `/sys/srv/bin/procsrv` +
-     `/sys/srv/lib/000-procsrv.ini`를 담은 **cpio** 부트 디스크
+     채우도록 확장하고, 새 `tools/mkbootdisk.py`로 `bin/procsrv` +
+     `lib/000-procsrv.ini`를 담은 **cpio** 부트 디스크
      이미지를 만들어 `tools/run-qemu.sh`가 virtio-blk로 붙이도록
      확장한다.
   2. **procsrv 자체**([procsrv.md](../spec/procsrv.md)) — 프로세스
