@@ -84,7 +84,11 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
 - 설계 결정 색인: [docs/design/index.md](docs/design/index.md) (ADR-001~, 주제별 파일 안내)
 - 모든 문서 색인: [docs/index.md](docs/index.md)
 - [docs/plan/kernel-bootstrap.md](docs/plan/kernel-bootstrap.md)(M1~M8)은
-  완료됨 — 결과는 [docs/done/](docs/done/) 참고. 다음 실행 대상(M9 이후:
-  AP 기동·IPI·TLB shootdown 등)은 아직 별도 계획 문서가 작성되지 않았다
-  (kernel-bootstrap.md "M9 이후" 절 참고) — 착수 전 `docs/plan/`에 새
-  계획을 먼저 작성한다.
+  완료됨 — 결과는 [docs/done/](docs/done/) 참고. 다음 실행 대상은
+  [docs/plan/smp-fpu-bringup.md](docs/plan/smp-fpu-bringup.md)
+  (M9: FPU/SIMD 컨텍스트 스위칭, M10: AP 기동·IPI·TLB shootdown,
+  M11: 다중 코어/NUMA 검증+락 순서 문서화) — 아직 미착수. 그 이후는
+  [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
+  (M12: procsrv ~ M20: libc 포팅+로그인 후 셸)로 이어진다 — M12 착수
+  전 OPEN-29(initrun 기동 매니페스트 형식)를 새 ADR로 먼저 해소해야
+  한다.
