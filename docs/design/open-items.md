@@ -13,7 +13,8 @@
 |---|---|---|---|
 | OPEN-32 | result/optional의 `[[nodiscard]]` 강제 여부 최종 확정 시점 | ADR-010, ADR-068, ADR-069 | [libk.md](libk.md) |
 | OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
-| OPEN-49 | initrun이 부트 파티션에서 찾은 서비스들을 순서대로 spawn만 하고 초기화 완료를 기다리지 않는 것의 실제 문제 여부 — 필요해지면 서버별 준비완료 알림 프로토콜을 정한다 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-49 | initrun이 각 서비스의 초기화 완료를 기다린 뒤 다음으로 넘어간다는 방향은 확정(ADR-131 §결정6) — 정확한 준비완료 신호 프로토콜(notification vs IPC Call/Reply 등)만 미정 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스"의 정체성(procsrv 자신인지 별도 컴포넌트인지)과, 그것이 프로세스 트리의 새 루트가 되는 절차 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 
 ## 해결된 항목 (이력)
 

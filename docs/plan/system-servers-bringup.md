@@ -8,7 +8,7 @@
 [registry-decisions.md](../design/registry-decisions.md)(ADR-060~064)
 
 **선행 완료 전제**: [kernel-bootstrap.md](kernel-bootstrap.md)(M1~M8)과
-[smp-fpu-bringup.md](smp-fpu-bringup.md)(M9~M11)이 끝나 있어야 한다 —
+[smp-fpu-bringup.md](smp-fpu-bringup.md)(M9~M11b)이 끝나 있어야 한다 —
 이 계획은 initrun이 뜬 이후, "실제로 쓸모 있는 다중 프로세스 시스템"을
 만드는 단계다.
 
@@ -37,14 +37,20 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 
 - **ADR-131**(boot-and-drivers.md, OPEN-29·OPEN-50 해소) — initrun은
   고정 이름 하나를 spawn하는 게 아니라, **커널이 initrd의 `disk.cfg`
-  엔트리(OS 설치 시점 구성값, 지금은 mkinitrd.py가 대신 채움)로
-  전달한 부트 디바이스 서술자를 boot_info로 받아, 그 장치를 자신에게
-  내장된 최소 virtio-blk 클라이언트+FAT32 리더로 직접 마운트**하고,
+  엔트리(OS 설치 시점 구성값, 지금은 mkinitrd.py가 대신 채움, 없거나
+  장치가 안 보이면 initrun 자신의 임베디드 PCIe 폴백 스캔)로 전달한
+  부트 디바이스 서술자로, 그 장치를 자신에게 내장된 최소 virtio-blk
+  클라이언트+**cpio(newc)** 리더로 직접 마운트**하고,
   `/sys/srv/lib/NNN-이름.ini`(파일명순=실행순, `exec`/`args`+레지스트리
   대체용 폴백 설정) 파일들로 procsrv를 포함한 서비스 바이너리들을
-  찾아 순서대로 `sys_process_spawn`(원본 ELF 바이트를 직접 넘기는
-  형태로 일반화)한다. devmgr/virtio-blk 서버/FAT32 FS 서버(M14~M16)의
-  "진짜" 구현과는 의도적으로 별개인 부트스트랩 전용 코드다.
+  찾아 **각자의 초기화 완료를 기다리며** 순서대로
+  `sys_process_spawn`(원본 ELF 바이트를 직접 넘기는 형태로 일반화)한다.
+  전부 끝나면 **systemd류 초기 프로세스를 마지막으로 실행시키고
+  initrun 스스로는 사라진다**(그 정체성과 절차는 OPEN-51로 남음).
+  devmgr/virtio-blk 서버(M14~M15)의 "진짜" 구현과는 의도적으로
+  별개인 부트스트랩 전용 코드이며, cpio 부트 디바이스는 Linux
+  initramfs처럼 일회성이라 M16의 FAT32 FS 서버(`/boot/uefi` ESP용)와도
+  무관하다.
 - **ADR-128**(filesystem.md) — M16에 ext4를 추가하려면 FS마다 다른
   "파일 신원"을 가리키는 공통 개념이 있어야 하는데(공유 모드 충돌
   판별 등, ADR-101이 암묵적으로 요구해왔다) 지금까지 정의된 적이
@@ -69,7 +75,7 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 
 | 마일스톤 | libmc에 추가되는 것 |
 |---|---|
-| M12 | syscall 1:1 래퍼 전체(`mc_ipc_*`, `mc_handle_close`, ADR-131의 `mc_process_spawn`) + `_start` 진입점(§ADR-132 결정3) + procsrv 클라이언트(`mc_fork`/`mc_exec`/fd 프로토콜). initrun 자신의 임베디드 virtio-blk/FAT32 리더는 부트스트랩 전용이라 `libmc` 범위 밖(ADR-131 §근거) |
+| M12 | syscall 1:1 래퍼 전체(`mc_ipc_*`, `mc_handle_close`, ADR-131의 `mc_process_spawn`) + `_start` 진입점(§ADR-132 결정3) + procsrv 클라이언트(`mc_fork`/`mc_exec`/fd 프로토콜). initrun 자신의 임베디드 virtio-blk/cpio 리더+PCIe 폴백 스캔은 부트스트랩 전용이라 `libmc` 범위 밖(ADR-131 §근거) |
 | M13 | VFS 클라이언트(`mc_open`/`mc_stat`) + FS 서버 공통 프로토콜 클라이언트(`mc_read`/`mc_write`/`mc_close`, ADR-101 공유모드/잠금 포함) |
 | M14 | devmgr 등록 클라이언트(드라이버가 자신을 등록하는 쪽, ADR-041) |
 | M17 | 콘솔/로그인 클라이언트(`mc_login` 등, procsrv §8 프로토콜) |
@@ -87,21 +93,26 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 - **선행 결정**: **ADR-131**(boot-and-drivers.md, OPEN-29·OPEN-50
   해소 완료) — initrun이 부트 디바이스를 직접 마운트해
   `/sys/srv/lib/NNN-이름.ini`(발견 순서=파일명순, `exec`/`args`+
-  레지스트리 대체용 폴백 설정) 파일들로 서비스를 찾아 기동하는
-  전체 절차가 이미 확정돼 있다. 이 마일스톤은 그대로 구현만 하면
-  된다.
+  레지스트리 대체용 폴백 설정) 파일들로 서비스를 찾아, 각자의
+  초기화 완료를 기다리며 기동하는 전체 절차가 이미 확정돼 있다.
+  이 마일스톤은 그대로 구현만 하면 된다 — 다만 **OPEN-51**(모든
+  서비스 기동 후 마지막에 실행하는 "systemd류 초기 프로세스"의
+  정체성과 절차)은 착수 시점에 먼저 좁혀야 한다.
 - **구현**: 두 갈래다.
   1. **initrun의 부트스트랩 절차**(ADR-131) — `boot_info.
-     boot_device_descriptor` 파싱, 임베디드 최소 virtio-blk
-     클라이언트(블로킹, 읽기 전용), 임베디드 최소 FAT32 읽기전용
-     파서 + INI 파서, `/sys/srv/lib/*.ini`를 파일명순으로 나열해
-     각각의 `exec=`/`args=`로 `sys_process_spawn(elf_data, elf_size,
-     argv, grant_trusted)`(신설 커널 syscall)를 호출하고, 나머지
+     boot_device_descriptor` 파싱(없거나 장치가 안 보이면 임베디드
+     PCIe 폴백 스캔), 임베디드 최소 virtio-blk 클라이언트(블로킹,
+     읽기 전용), 임베디드 최소 **cpio(newc)** 읽기전용 파서 + INI
+     파서, `/sys/srv/lib/*.ini`를 파일명순으로 나열해 각각의
+     `exec=`/`args=`로 `sys_process_spawn(elf_data, elf_size, argv,
+     grant_trusted)`(신설 커널 syscall)를 호출하고 그 서비스의
+     초기화 완료 신호를 기다린 뒤 다음으로 넘어간다. 나머지
      key=value는 원본 그대로 새 프로세스에게
-     `boot_info.config_blob_addr/size`로 매핑해 전달한다.
-     `tools/mkinitrd.py`가 `disk.cfg` 엔트리를 채우도록 확장하고,
-     새 `tools/mkbootdisk.py`로 `/sys/srv/bin/procsrv` +
-     `/sys/srv/lib/000-procsrv.ini`를 담은 FAT32 부트 디스크
+     `boot_info.config_blob_addr/size`로 매핑해 전달한다. 전부 끝나면
+     OPEN-51에서 정할 "systemd류 초기 프로세스"를 마지막으로 실행시키고
+     initrun 자신은 종료한다. `tools/mkinitrd.py`가 `disk.cfg` 엔트리를
+     채우도록 확장하고, 새 `tools/mkbootdisk.py`로 `/sys/srv/bin/procsrv` +
+     `/sys/srv/lib/000-procsrv.ini`를 담은 **cpio** 부트 디스크
      이미지를 만들어 `tools/run-qemu.sh`가 virtio-blk로 붙이도록
      확장한다.
   2. **procsrv 자체**([procsrv.md](../spec/procsrv.md)) — 프로세스
@@ -112,10 +123,11 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
      마일스톤에서 **프로토콜 골격만** 만들고 실제 콘솔 연동은 M17로
      미룬다(procsrv.md 자신이 이미 이렇게 scope함).
 - **목표(QEMU 검증)**: initrun이 `boot_info`로 받은 서술자로 부트
-  디스크(virtio-blk 위 FAT32)를 마운트하고, 그 안에서 procsrv를
-  찾아 `sys_process_spawn`으로 띄우는 것과, procsrv가 **자기 자신을
-  fork/exec**해 실제 두 번째 완전한 유저 프로세스를 만들어내는 것을
-  로그로 확인한다 — M4~M8까지는 커널이 직접 만든 스레드/프로세스뿐,
+  디스크(virtio-blk 위 cpio)를 마운트하고, 그 안에서 procsrv를
+  찾아 초기화 완료를 기다리며 `sys_process_spawn`으로 띄우는 것과,
+  procsrv가 **자기 자신을 fork/exec**해 실제 두 번째 완전한 유저
+  프로세스를 만들어내는 것을 로그로 확인한다 — M4~M8까지는 커널이
+  직접 만든 스레드/프로세스뿐,
   실제 디스크 I/O를 거친 프로세스 생성은 이번이 처음이다.
 
 ## M13. VFS + memfs — fd 라우팅 실동작 + 최초 파일시스템

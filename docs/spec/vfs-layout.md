@@ -53,7 +53,7 @@
 | `/sys/proc` | synthetic | procsrv (FS 서버 겸임, ADR-047) | 프로세스 상태 열람 |
 | `/sys/live/*` | synthetic, 하위 경로별로 상이 | 주제별 서버 (ADR-047) | 매핑표는 ADR-058(§5) |
 | `/sys/etc`, `/sys/bin` | 일반 영속 FS | fs | 시스템 전역, 사용자 쓰기 불가(권한은 별도 결정) |
-| `/sys/srv/bin`, `/sys/srv/lib` | 일반 영속 FS(부팅 극초기엔 FAT32, ADR-131) | fs | 코어 서버 실행파일(`bin`) + `NNN-이름.ini` 시동 파일(`lib`) — initrun이 이 경로 관례로 부팅 극초기 서비스를 찾는다(ADR-131 §결정4) |
+| `/sys/srv/bin`, `/sys/srv/lib` | 일반 영속 FS(부팅 극초기엔 initrun이 직접 읽는 일회성 cpio 이미지, ADR-131 — Linux initramfs처럼 부트스트랩 후 다시 쓰이지 않는다) | fs | 코어 서버 실행파일(`bin`) + `NNN-이름.ini` 시동 파일(`lib`) — initrun이 이 경로 관례로 부팅 극초기 서비스를 찾는다(ADR-131 §결정5) |
 | `/sys/mnt/*` | 마운트 시점에 결정 | 매체별 FS 서버 | USB=FAT/exFAT, CDROM=ISO9660 등, 로드맵은 실제 필요 시점에 정의 |
 | `/sys/dev` | synthetic | devmgr (FS 서버 겸임, ADR-048) | PCIe 등에서 열거된 장치 노드 |
 | `/sys/tmp` | memfs | fs(memfs) | 새 구현 불필요 — 기존 memfs 재마운트 |

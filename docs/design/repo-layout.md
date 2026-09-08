@@ -37,10 +37,13 @@ minicore/
 ├── init/
 │   └── initrun/                # 커널이 직접 기동하는 최초 유저 프로세스 (ADR-017)
 │                                 # boot_info.boot_device_descriptor(initrd의 disk.cfg에서
-│                                 # 옴)로 부트 디바이스를 직접 마운트하는 임베디드 최소
-│                                 # virtio-blk 클라이언트+FAT32 리더를 갖고, 그 위에서
-│                                 # procsrv 등 서비스 바이너리를 찾아 순서대로 기동한다
-│                                 # (ADR-131 — devmgr/M15/M16의 "진짜" 드라이버와는 별개 코드)
+│                                 # 옴, 없으면 임베디드 PCIe 폴백 스캔)로 부트 디바이스를
+│                                 # 직접 마운트하는 임베디드 최소 virtio-blk 클라이언트+
+│                                 # cpio(newc) 리더를 갖고, 그 위에서 procsrv 등 서비스
+│                                 # 바이너리를 찾아 초기화 완료를 기다리며 순서대로 기동한
+│                                 # 뒤, 마지막으로 systemd류 초기 프로세스를 실행시키고
+│                                 # 스스로 사라진다(ADR-131 — devmgr/M15의 "진짜" virtio-blk
+│                                 # 드라이버와는 별개 코드, FAT32 서버(M16)와도 무관)
 │
 ├── servers/                     # 시스템 서비스 (직접 구현, ADR-006/007/008)
 │   │                             # 전부 libk(C++ 유틸)+libmc(C API 바인딩)만 링크한다 —
@@ -79,8 +82,9 @@ minicore/
 │   ├── apply-patches.*            # submodule 체크아웃 위에 patches/ 적용
 │   ├── mkinitrd.*                 # initrun 자신 + disk.cfg(부트 디바이스 서술자,
 │   │                                # ADR-131)를 커널 임베딩용 initrd로 패키징
-│   ├── mkbootdisk.*(가칭)          # procsrv 등 서비스 바이너리를 담는 FAT32 부트
-│   │                                # 디스크 이미지 생성 (ADR-131, mkinitrd와 별개 산출물)
+│   ├── mkbootdisk.*(가칭)          # procsrv 등 서비스 바이너리 + NNN-이름.ini 시동
+│   │                                # 파일을 담는 cpio(newc) 부트 디스크 이미지 생성
+│   │                                # (ADR-131, mkinitrd와 별개 산출물)
 │   └── run-qemu.*                 # 아키텍처별 QEMU 실행 스크립트 (ADR-131 이후 부트
 │                                    # 디스크를 virtio-blk로 붙이는 옵션 포함)
 │
@@ -113,5 +117,3 @@ minicore/
 
 - 구체적으로 어떤 libc(예: musl/newlib 계열 중 무엇)와 어떤 셸/coreutils를
   submodule로 채택할지는 여기서 정하지 않는다 — 실제 포팅 착수 시점의 별도 결정.
-- `init/initrun`의 기동 매니페스트 형식(어떤 서버를 어떤 순서로 실행하는지 기술하는
-  방법)은 OPEN-29와 함께 후속 설계 대상이다.

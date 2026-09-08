@@ -87,8 +87,8 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   완료됨 — 결과는 [docs/done/](docs/done/) 참고. 다음 실행 대상은
   [docs/plan/smp-fpu-bringup.md](docs/plan/smp-fpu-bringup.md)
   (M9: FPU/SIMD 컨텍스트 스위칭, M10: AP 기동·IPI·TLB shootdown,
-  M11: 다중 코어/NUMA 검증+락 순서 문서화) — 아직 미착수. 그 이후는
+  M11: 다중 코어/NUMA 검증+락 순서 문서화, M11b: FPU lazy 전환+
+  XSAVE/AVX 지원) — 아직 미착수. 그 이후는
   [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
-  (M12: procsrv ~ M20: libc 포팅+로그인 후 셸)로 이어진다 — M12 착수
-  전 OPEN-29(initrun 기동 매니페스트 형식)를 새 ADR로 먼저 해소해야
-  한다.
+  (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸)로
+  이어진다 — OPEN-29·OPEN-50은 ADR-131로 이미 해소돼 있다.
