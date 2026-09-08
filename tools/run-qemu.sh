@@ -33,6 +33,13 @@
 #                         -numa dist(서로 다른 노드는 20)을 구성한다.
 #                         MINICORE_QEMU_SMP 없이는 쓸 수 없다. 기본은
 #                         미설정(=단일 노드, M1~M10과 동일).
+#   MINICORE_QEMU_CPU=... docs/plan/smp-fpu-bringup.md M11b(ADR-133):
+#                         -cpu 값을 그대로 전달한다(예: "qemu64"로
+#                         XSAVE/AVX 없음, "max"로 XSAVE/AVX 있음 —
+#                         fpu.cpp::init_fpu()가 남기는
+#                         "[fpu] xsave_avail=.. avx_avail=.."로 실제
+#                         반영 여부를 확인한다). 기본은 미설정(QEMU
+#                         기본 CPU 모델).
 
 set -euo pipefail
 
@@ -91,6 +98,10 @@ case "$ARCH" in
       done
     elif [[ -n "${MINICORE_QEMU_SMP:-}" ]]; then
       EXTRA_ARGS+=(-smp "${MINICORE_QEMU_SMP}")
+    fi
+
+    if [[ -n "${MINICORE_QEMU_CPU:-}" ]]; then
+      EXTRA_ARGS+=(-cpu "${MINICORE_QEMU_CPU}")
     fi
 
     exec "$QEMU_BIN" \

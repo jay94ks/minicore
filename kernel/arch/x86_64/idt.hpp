@@ -1,11 +1,12 @@
-// x86_64 IDT — 최소 기반 (docs/plan/smp-fpu-bringup.md §M10, ADR-055).
-// 이 계획에서 IDT에 실제로 거는 벡터는 세 종류로 제한한다:
+// x86_64 IDT — 최소 기반 (docs/plan/smp-fpu-bringup.md §M10/M11b,
+// ADR-055/133). 이 계획에서 IDT에 실제로 거는 벡터는 세 종류로
+// 제한한다:
 //   (a) IPI(TLB shootdown 전용, k_vector_ipi_tlb_shootdown)
 //   (b) 부팅 중 원인 불명 정지를 진단하기 위한 catch-all 예외 핸들러
-//       (0~31 전 벡터 + 아직 안 쓰는 나머지 전부, 기본값)
-//   (c) #NM(벡터 7) — 자리만 마련해 둔다(M11b의 lazy FPU 전환,
-//       ADR-133이 실제 핸들러를 건다). 지금은 (b)와 동일하게 catch-all로
-//       처리한다.
+//       (0~31의 나머지 예외 + 아직 안 쓰는 벡터, 기본값)
+//   (c) #NM(벡터 7) — M11b(ADR-133)의 lazy FPU 전환 핸들러
+//       (fpu.cpp::arch_x86_64_handle_nm_trap). M10은 이 자리를 마련만
+//       하고 (b)로 라우팅했었다.
 // 그 외(LAPIC spurious 벡터)는 이 계획이 LAPIC을 켜는 부산물로 필요해
 // 최소한으로 함께 걷다.
 #pragma once
@@ -34,8 +35,8 @@ inline constexpr uint8_t k_vector_ipi_tlb_shootdown = 0xFC;
 // 남기고 즉시 리턴한다.
 inline constexpr uint8_t k_vector_spurious = 0xFF;
 
-// #NM(Device Not Available) — M11b(ADR-133, lazy FPU)가 실제로 쓸
-// 자리. M10은 슬롯만 마련해 catch-all로 라우팅한다.
+// #NM(Device Not Available) — M11b(ADR-133, lazy FPU 전환)가 실제로
+// 쓴다. M10은 이 슬롯을 마련만 해 두고 catch-all로 라우팅했었다.
 inline constexpr uint8_t k_vector_nm = 7;
 
 // IDT를 구성하고 lidt로 적재한다. kernel_main 극초기, 첫 IPI/예외보다

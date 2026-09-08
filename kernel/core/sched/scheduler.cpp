@@ -18,12 +18,13 @@
 // (ADR-002 HAL 경계 — 이 파일은 x86_64 어셈블리를 전혀 모른다).
 // new_pml4_phys(M8 추가): 0이면 CR3 유지, 0이 아니면 그 물리주소로
 // 전환한다(context_switch.S 상단 주석).
-// old_fxsave_area/new_fxsave_area(M9, ADR-127): FXSAVE/FXRSTOR 대상
-// object::thread::fxsave_area 주소. old가 nullptr이면 저장을
-// 건너뛴다(context_switch.S 상단 주석 참고).
+// FPU(M9 ADR-127 → M11b ADR-133): M9 시절엔 이 함수가 매 스위치마다
+// 두 스레드의 fxsave_area를 받아 무조건 FXSAVE/FXRSTOR했다(eager).
+// M11b부터는 이 함수가 FPU 상태를 전혀 건드리지 않는다(CR0.TS만
+// 세운다) — 실제 저장/복원은 #NM 트랩(fpu.cpp)이 필요한 순간에만
+// 한다. 그래서 이 선언에는 더 이상 fxsave 포인터가 없다.
 extern "C" void arch_context_switch(uint64_t* old_rsp_out, uint64_t new_rsp,
-                                     uint64_t new_pml4_phys, void* old_fxsave_area,
-                                     void* new_fxsave_area);
+                                     uint64_t new_pml4_phys);
 
 // M8 — 새로 만든 유저 스레드가 "처음" 스케줄될 때 진입하는 자리
 // (create_kernel_thread의 entry 자리를 유저 스레드는 이걸로 대신한다).
@@ -40,6 +41,12 @@ extern "C" [[noreturn]] void arch_idle_halt();
 // 찾아본다 — kernel/core/sched는 APIC/LAPIC의 존재를 몰라도 된다
 // (ADR-002 HAL 경계, arch_context_switch와 같은 관례).
 extern "C" uint32_t arch_current_node_id();
+
+// M11b(ADR-133 §결정3) — 영구 종료하는 스레드가 어느 코어의 FPU
+// 소유자였다면 그 기록을 지운다. kernel/core/sched는 "FPU 소유자"라는
+// 개념 자체를 몰라도 된다 — arch 계층(x86_64: fpu.cpp)이 이 스레드
+// 포인터가 자기 내부 표에 남아 있는지만 확인한다.
+extern "C" void arch_fpu_thread_exiting(object::thread* t);
 
 namespace sched {
 
@@ -144,19 +151,34 @@ void init() {
     }
 }
 
-// M9(ADR-127 §결정3) — object::thread::fxsave_area는 이미 0으로
+// M9(ADR-127 §결정3) — object::thread::fpu_save_area는 이미 0으로
 // value-initialize돼 있다(kernel_objects.hpp의 `= {}`) — 여기서는
 // FCW/MXCSR만 프로세서 리셋 기본값으로 patch한다. 이 값이 아니면
-// 새 스레드가 처음 FXRSTOR될 때 예외를 마스킹하지 않은 채(FCW 전부
-// 0) x87 연산 중 스퓨리어스 예외를 낼 수 있다(Intel SDM Vol.1 §13.6).
+// 새 스레드가 처음 FXRSTOR/XRSTOR될 때 예외를 마스킹하지 않은 채(FCW
+// 전부 0) x87 연산 중 스퓨리어스 예외를 낼 수 있다(Intel SDM Vol.1
+// §13.6). legacy 영역(FCW@0, MXCSR@24)의 오프셋은 FXSAVE와 XSAVE가
+// 동일하므로(M11b, ADR-133) 이 함수는 XSAVE 사용 여부와 무관하게
+// 그대로 유효하다.
 constexpr uint16_t k_fpu_default_fcw = 0x037F;
 constexpr uint32_t k_fpu_default_mxcsr = 0x1F80;
 
-void init_fxsave_area(object::thread* t) {
-    auto* fcw = reinterpret_cast<uint16_t*>(&t->fxsave_area[0]);
-    auto* mxcsr = reinterpret_cast<uint32_t*>(&t->fxsave_area[24]);
+// ADR-138 — fpu_save_area는 슬랩이 아니라 별도 order-0 페이지에서
+// 나온다(slab_alloc이 64바이트 정렬을 보장하지 않아 XSAVE가 #GP를
+// 낸다, kernel_objects.hpp 상단 주석 참고). 실패하면 false — 호출자가
+// 이미 만든 thread/스택을 되돌려야 한다.
+bool alloc_fpu_save_area(object::thread* t, uint32_t node) {
+    auto page = mm::alloc_pages(0, node);
+    if (!page.is_ok()) {
+        return false;
+    }
+    t->fpu_save_area = static_cast<uint8_t*>(mm::phys_to_virt(page.value()));
+    __builtin_memset(t->fpu_save_area, 0, mm::k_page_size);
+
+    auto* fcw = reinterpret_cast<uint16_t*>(&t->fpu_save_area[0]);
+    auto* mxcsr = reinterpret_cast<uint32_t*>(&t->fpu_save_area[24]);
     *fcw = k_fpu_default_fcw;
     *mxcsr = k_fpu_default_mxcsr;
+    return true;
 }
 
 object::thread* create_kernel_thread(void (*entry)(), object::priority_band band,
@@ -168,7 +190,6 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     auto* t = new (mem) object::thread();
     t->sched.band = band;
     t->sched.preferred_node = preferred_node;
-    init_fxsave_area(t);
 
     // enqueue()는 이미 preferred_node를 g_node_count로 감싼다(존재하지
     // 않는 노드를 요청해도 항상 유효한 큐에 들어가도록) — 여기서도
@@ -181,9 +202,15 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     // 발견해 고쳤다.
     uint32_t alloc_node = preferred_node % g_node_count;
 
+    if (!alloc_fpu_save_area(t, alloc_node)) {
+        mm::slab_free(t, sizeof(object::thread));
+        return nullptr;
+    }
+
     constexpr uint32_t k_stack_order = 2;  // 16KiB (scheduler.hpp 상단 주석)
     auto stack_page = mm::alloc_pages(k_stack_order, alloc_node);
     if (!stack_page.is_ok()) {
+        mm::free_pages(mm::virt_to_phys(t->fpu_save_area), 0);
         mm::slab_free(t, sizeof(object::thread));
         return nullptr;
     }
@@ -219,7 +246,10 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     auto* t = new (mem) object::thread();
     t->sched.band = object::priority_band::user;
     t->sched.preferred_node = 0;
-    init_fxsave_area(t);
+    if (!alloc_fpu_save_area(t, 0)) {
+        mm::slab_free(t, sizeof(object::thread));
+        return nullptr;
+    }
     t->owner_space = space;
     t->handles = handles;
     t->user_entry_rip = entry_rip;
@@ -235,6 +265,7 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     constexpr uint32_t k_kstack_order = 2;
     auto stack_page = mm::alloc_pages(k_kstack_order, 0);
     if (!stack_page.is_ok()) {
+        mm::free_pages(mm::virt_to_phys(t->fpu_save_area), 0);
         mm::slab_free(t, sizeof(object::thread));
         return nullptr;
     }
@@ -278,24 +309,40 @@ void start() {
     }
 
     g_current = next;
-    arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next),
-                         nullptr, next->fxsave_area);
+    arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
 
 void yield() {
     object::thread* prev = g_current;
 
+    // prev를 먼저 다시 enqueue한 뒤에 고른다(이전에는 순서가
+    // 반대였다) — 그래야 "커널 밴드에 나 말고 아무도 없다"는 상황에서
+    // pick_next_with_stealing()이 나 자신을 정당한 후보로 본다. 순서가
+    // 뒤바뀌어 있으면(먼저 고르고 나중에 enqueue), 내가 유일하게 남은
+    // 커널 밴드 스레드인 채로 yield()하는 순간 커널 밴드가 "일시적으로"
+    // 비어 보여, ADR-014를 어기고 다른 노드/유저 밴드의 스레드가
+    // 나보다 먼저 뽑혀 버린다 — 그 스레드가 다시 yield/block/exit하지
+    // 않는 유저 스레드(예: initrun)라면 나는 영원히 다시 스케줄되지
+    // 않는다. M11b에서 8라운드짜리 FPU 데모 스레드(thread_fpu_c_entry)
+    // 하나만 오래 살아남는 상황을 만들고서야 이 버그가 실제로
+    // 재현됐다 — M1~M11까지는 항상 "함께 도는" 커널 밴드 스레드가
+    // 2개 이상이라 이 경합이 드러날 기회가 없었다.
+    enqueue(*prev);
     object::thread* next = pick_next_with_stealing();
-    if (next == nullptr) {
-        // 다른 runnable 스레드가 없다 — 계속 실행한다.
+    if (next == prev) {
+        // 나 말고는 아무도 실행 가능하지 않다 — 방금 넣은 나 자신을
+        // pick_next_with_stealing() 내부의 try_pick_band()가 그대로
+        // 다시 뽑아 큐에서 제거해 줬다(erase까지 이미 끝났다 — 지금
+        // "현재 실행 중" 상태로 돌아가는 것뿐이라 다시 큐에 넣을
+        // 필요가 없다). 실제로 스위치할 필요도 없다 — 스위치해도
+        // 결과는 같지만 arch_context_switch가 매번 CR0.TS를 다시
+        // 세워 불필요한 `#NM`을 유발한다(M11b, ADR-133).
         return;
     }
 
-    enqueue(*prev);
     g_current = next;
-    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next),
-                         prev->fxsave_area, next->fxsave_area);
+    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
     // arch_context_switch에서 돌아왔다는 것은 prev가 다시 스케줄되어
     // 이 지점부터 재개됐다는 뜻이다.
 }
@@ -313,14 +360,19 @@ void block() {
     // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
     // sched::enqueue()할 책임을 진다.
     g_current = next;
-    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next),
-                         prev->fxsave_area, next->fxsave_area);
+    arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
 }
 
 [[noreturn]] void exit() {
-    // prev(이전 g_current) 자체는 이 함수 안에서 다시 쓸 일이 없다 —
-    // block()과 달리 그 context_rsp를 아무도 저장/복원하지 않는다
+    // prev(이전 g_current) 자체의 context_rsp는 이 함수 안에서 다시
+    // 쓸 일이 없다 — block()과 달리 아무도 저장/복원하지 않는다
     // (scheduler.hpp exit() 주석: 다시 스케줄되지 않음이 핵심 보장).
+    // 다만 포인터 값 자체는 arch_fpu_thread_exiting()에 넘겨야 한다
+    // (M11b, ADR-133 §결정3) — 이 스레드를 아직 "FPU 소유자"로 기억하고
+    // 있는 코어가 있다면 끊어진 스레드를 계속 가리키지 않도록 지운다.
+    object::thread* prev = g_current;
+    arch_fpu_thread_exiting(prev);
+
     object::thread* next = pick_next_with_stealing();
     if (next == nullptr) {
         // 이 코어에서 더 이상 아무도 runnable하지 않다 — 진짜로 멈춘다.
@@ -334,8 +386,7 @@ void block() {
     // block()과 달리 그 무엇도 나중에 prev를 깨우지 않는다(어떤 대기열
     // 에도 prev를 넣어 두지 않았다) — 이 스레드는 여기서 영구히 끝난다.
     uint64_t discard_rsp;
-    arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next), nullptr,
-                         next->fxsave_area);
+    arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
 

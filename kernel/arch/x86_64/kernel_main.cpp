@@ -407,6 +407,35 @@ __attribute__((target("sse2"))) void thread_fpu_b_entry() {
     sched::exit();
 }
 
+// M11b(smp-fpu-bringup.md §M11b, ADR-133 검증목표(b)) — "같은 스레드가
+// 연속으로 FPU를 쓸 때 #NM이 두 번째부터는 발생하지 않음(또는 발생해도
+// 저장/복원 없이 즉시 리턴함)"을 보이는 전용 데모. thread_fpu_a/b보다
+// 반복 횟수를 훨씬 더 많이 잡아(k_fpu_lazy_iterations), 둘이 이미
+// sched::exit()로 영구 종료한 뒤에도 여러 라운드가 남게 한다 — 그
+// 시점부터는 이 스레드 말고 FPU를 쓰는 다른 스레드가 전혀 없으므로,
+// (fpu.cpp의 g_fpu_owner_by_apic_id가 계속 이 스레드를 가리킨 채라)
+// 매 라운드 #NM은 여전히 발생하지만(CR0.TS가 스위치마다 무조건 켜지므로,
+// arch_context_switch 상단 주석) 소유자가 안 바뀌었으니 저장/복원 없이
+// 즉시 리턴하는 경로([fpu] #NM ... owner_changed=0)를 QEMU 로그로 직접
+// 확인할 수 있다.
+constexpr int k_fpu_lazy_iterations = 8;
+
+__attribute__((target("sse2"))) void thread_fpu_c_entry() {
+    constexpr uint64_t k_pattern = 0xC0FFEEC0FFEEC0FFull;
+    bool all_preserved = true;
+    for (int i = 0; i < k_fpu_lazy_iterations; ++i) {
+        asm volatile("movq %0, %%xmm0" : : "r"(k_pattern) : "xmm0");
+        sched::yield();
+        uint64_t readback;
+        asm volatile("movq %%xmm0, %0" : "=r"(readback));
+        bool ok = (readback == k_pattern);
+        all_preserved = all_preserved && ok;
+        klog::printf("[fpu-lazy] thread C iteration %d xmm0 preserved=%u\n", i, ok);
+    }
+    klog::printf("[fpu-lazy] thread C done all_preserved=%u\n", all_preserved);
+    sched::exit();
+}
+
 // M11(smp-fpu-bringup.md §M11, ADR-053) — preferred_node=1로 만든
 // 스레드는 g_run_queues[1]에 들어간다. 이 협조적 스케줄러는 여전히
 // BSP 한 코어만 sched::start()/yield()를 실행하므로(계획 §M11 재해석
@@ -796,6 +825,10 @@ object::thread* setup_initrun_process() {
         sched::create_kernel_thread(&thread_fpu_b_entry, object::priority_band::kernel, 0);
     klog::printf("[fpu] create_kernel_thread a=%u b=%u\n", fpu_a != nullptr, fpu_b != nullptr);
 
+    object::thread* fpu_c =
+        sched::create_kernel_thread(&thread_fpu_c_entry, object::priority_band::kernel, 0);
+    klog::printf("[fpu-lazy] create_kernel_thread c=%u\n", fpu_c != nullptr);
+
     // M11(ADR-053) — preferred_node=1 고정. mm::node_count()가 1이면
     // enqueue()가 1 % 1 = 0으로 접어 그냥 노드 0에 들어간다(무해).
     object::thread* numa1 =
@@ -848,6 +881,9 @@ object::thread* setup_initrun_process() {
     }
     if (fpu_b != nullptr) {
         sched::enqueue(*fpu_b);
+    }
+    if (fpu_c != nullptr) {
+        sched::enqueue(*fpu_c);
     }
     if (numa1 != nullptr) {
         sched::enqueue(*numa1);

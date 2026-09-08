@@ -16,6 +16,10 @@
 # 진입) — initrd_blob.S(아래 configure_file)는 개발용 initrd 임베딩.
 # M9(smp-fpu-bringup.md, ADR-127): fpu.cpp가 CR0/CR4 FPU 활성화 시퀀스를
 # 제공하고, context_switch.S가 매 스위치마다 무조건 FXSAVE/FXRSTOR한다.
+# M11b(ADR-133): eager를 lazy로 개정 — context_switch.S는 CR0.TS만
+# 세우고, fpu.cpp가 CPUID로 XSAVE/AVX를 검사해 지원하면 XSETBV로 켠
+# 뒤 `#NM` 트랩(idt.cpp가 벡터 7로 라우팅)에서 실제 XSAVE/FXSAVE를
+# 수행한다.
 
 # init/initrun/CMakeLists.txt가 만든 initrd.img 경로를 읽어 .incbin
 # 소스를 생성한다 — 최상위 CMakeLists.txt가 init/initrun을 kernel보다

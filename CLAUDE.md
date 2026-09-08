@@ -84,11 +84,8 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
 - 설계 결정 색인: [docs/design/index.md](docs/design/index.md) (ADR-001~, 주제별 파일 안내)
 - 모든 문서 색인: [docs/index.md](docs/index.md)
 - [docs/plan/kernel-bootstrap.md](docs/plan/kernel-bootstrap.md)(M1~M8)과
-  [docs/plan/smp-fpu-bringup.md](docs/plan/smp-fpu-bringup.md)의
-  M9(FPU/SIMD 컨텍스트 스위칭)·M10(AP 기동·IPI·TLB shootdown)·
-  M11(다중 코어/NUMA 검증+락 순서 문서화)은 완료됨 — 결과는
-  [docs/done/](docs/done/) 참고. 다음 실행 대상은 같은 계획의
-  **M11b**(FPU lazy 전환+XSAVE/AVX 지원, ADR-133) — 아직 미착수.
-  그 이후는 [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
-  (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸)로
-  이어진다 — OPEN-29·OPEN-50은 ADR-131로 이미 해소돼 있다.
+  [docs/plan/smp-fpu-bringup.md](docs/plan/smp-fpu-bringup.md)
+  (M9~M11b) 전체가 완료됨 — 결과는 [docs/done/](docs/done/) 참고.
+  다음 실행 대상은 [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
+  (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸) —
+  아직 미착수. OPEN-29·OPEN-50은 ADR-131로 이미 해소돼 있다.

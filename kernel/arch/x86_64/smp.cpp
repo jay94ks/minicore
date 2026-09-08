@@ -1,6 +1,7 @@
 // AP 부팅 + IPI TLB shootdown 구현 (smp.hpp 상단 주석 참고).
 #include "smp.hpp"
 
+#include "fpu.hpp"
 #include "idt.hpp"
 #include "lapic.hpp"
 
@@ -168,6 +169,15 @@ extern "C" void ap_main(uint32_t cpu_index) {
     // 실수를 재현·확인했다). init_idt()는 같은 결과를 다시 계산할
     // 뿐이라 여러 코어가 반복 호출해도 안전하다(멱등).
     arch_x86_64::init_idt();
+
+    // M11b(ADR-133) — CR0/CR4/XCR0은 코어별 레지스터라 이 AP도 자기
+    // 몫으로 다시 설정해야 한다(안 하면 이 코어에서 FXSAVE/XSAVE가
+    // #UD를 낸다). init_idt()와 같은 이유로 멱등이라 안전하다. 이
+    // AP가 실제로 FPU를 쓰는 스레드를 실행하는 경로는 아직 없지만
+    // (M10/M11 done 보고 — AP는 협조적 스케줄러에 참여하지 않는다),
+    // `#NM`은 IDT를 공유하는 어떤 코어에서든 원리적으로 발생할 수
+    // 있어 미리 갖춰 둔다.
+    arch_x86_64::init_fpu();
 
     arch_x86_64::lapic_enable_this_core();
     uint32_t apic_id = arch_x86_64::lapic_id();

@@ -34,6 +34,15 @@
 #     memory_map에 추가 엔트리로 잡혀 selftest의 memory_map_count가
 #     4에서 5로 바뀐다(M1~M9는 4였다). SMP/AP 기동 자체의 검증은 opt-in
 #     이라 별도 스크립트(tools/smoke-test-smp-x86_64.sh)로 분리한다.
+#   M11b (smp-fpu-bringup.md, ADR-133): eager FXSAVE/FXRSTOR를 lazy
+#     CR0.TS/`#NM` 트랩으로 개정했다 — thread_fpu_a/b는 여전히 값
+#     보존을 확인하고(이제는 매 스위치가 아니라 실제로 FPU를 쓰는
+#     순간에만 저장/복원됨), 추가로 thread_fpu_c(8회 반복, a/b보다
+#     길게 산다)가 a/b가 먼저 끝난 뒤에는 소유자가 안 바뀌어 `#NM`
+#     자체가 더 이상 발생하지 않음(owner_changed=0 또는 트랩 자체가
+#     없음)을 보인다. AVX 유/무 두 QEMU 구성 검증은 opt-in
+#     MINICORE_QEMU_CPU로 별도 확인한다(기본 QEMU CPU는 XSAVE/AVX가
+#     없어 FXSAVE 폴백 경로를 그대로 검증한다).
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -87,6 +96,9 @@ declare -a EXPECTED=(
   "[fpu] thread B iteration 1 xmm0 preserved=1"
   "[fpu] thread B iteration 2 xmm0 preserved=1"
   "[fpu] thread B done all_preserved=1"
+  "[fpu] xsave_avail=0 avx_avail=0 using_xsave=0 area_size=512"
+  "[fpu-lazy] thread C iteration 7 xmm0 preserved=1"
+  "[fpu-lazy] thread C done all_preserved=1"
   "[smp] BSP apic_id=0"
   "[smp] online_cpu_count=1"
 )

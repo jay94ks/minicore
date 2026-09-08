@@ -1,7 +1,6 @@
 /*
  * arch_context_switch(uint64_t* old_rsp_out, uint64_t new_rsp,
- *                      uint64_t new_pml4_phys,
- *                      void* old_fxsave_area, void* new_fxsave_area) —
+ *                      uint64_t new_pml4_phys) —
  * docs/spec/scheduler.md, kernel/core/sched/scheduler.cpp가 부르는
  * 커널 전용 훅(ADR-002 HAL 경계 패턴 — arch_irq_save/restore와 동일).
  *
@@ -22,15 +21,19 @@
  * owner_space != nullptr)로 전환할 때 sched.cpp가 owner_space->
  * page_table_root를 그대로 넘긴다.
  *
- * old_fxsave_area/new_fxsave_area(M9, ADR-127 — 4·5번째 인자 rcx/r8):
- * FXSAVE/FXRSTOR 대상인 object::thread::fxsave_area(512바이트, 16바이트
- * 정렬)의 주소. eager 정책 — 스위치마다 무조건 저장/복원한다(lazy
- * CR0.TS/#NM 트랩 전환은 ADR-133, M11b 이후). old_fxsave_area가
- * nullptr이면 저장을 건너뛴다 — sched::start()(부팅 후 첫 스위치,
- * "이전 스레드"라는 게 아직 없다)와 sched::exit()(빠져나가는 스레드는
- * 다시 스케줄되지 않으므로 그 FPU 상태를 저장할 이유가 없다)가 이
- * 경우다. new_fxsave_area는 항상 유효해야 한다(모든 실제 스레드가
- * fxsave_area를 갖고 있으므로).
+ * FPU(M9 ADR-127 → M11b ADR-133 개정): M9는 여기서 매 스위치마다
+ * 무조건 FXSAVE/FXRSTOR했다(eager, 4·5번째 인자로 두 스레드의
+ * fxsave_area를 받았다). M11b부터는 이 함수가 FPU 레지스터 내용을
+ * 전혀 건드리지 않는다 — 대신 스위치마다 CR0.TS(bit3)만 무조건
+ * 켠다. 이후 어느 스레드든 FPU/SSE/AVX 명령을 실행하는 순간 CPU가
+ * `#NM`을 내고, 그 핸들러(fpu.cpp::arch_x86_64_handle_nm_trap,
+ * idt.cpp가 벡터 7로 라우팅)가 실제 저장/복원을 담당한다 — "레지스터의
+ * 실제 소유자가 바뀔 때만" 하므로, 소유자가 안 바뀌었으면(같은
+ * 스레드가 다음 스위치 전까지 유일하게 FPU를 썼으면) 그 핸들러조차
+ * 저장/복원 없이 즉시 리턴한다. 이 함수 자신은 그 구분을 전혀 몰라도
+ * 되므로 인자에서 fxsave_area 포인터 두 개가 완전히 빠졌다 —
+ * kernel/core/sched는 이제 FPU 버퍼 주소를 이 함수에 넘길 필요가
+ * 없다(scheduler.cpp도 함께 갱신됨).
  */
 .section .text
 .global arch_context_switch
@@ -44,19 +47,15 @@ arch_context_switch:
     push %r15
 
     mov %rsp, (%rdi)   /* *old_rsp_out = 현재 rsp */
-
-    test %rcx, %rcx    /* old_fxsave_area == nullptr? */
-    jz 1f
-    fxsave (%rcx)
-1:
-    fxrstor (%r8)
-
     mov %rsi, %rsp     /* rsp = new_rsp */
 
     test %rdx, %rdx
-    jz 2f
+    jz 1f
     mov %rdx, %cr3
-2:
+1:
+    mov %cr0, %rax
+    or $8, %rax        /* CR0.TS(bit3) — 다음 FPU/SSE/AVX 명령에서 #NM 유발 */
+    mov %rax, %cr0
 
     pop %r15
     pop %r14

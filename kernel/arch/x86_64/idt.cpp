@@ -17,6 +17,10 @@ extern "C" void* isr_stub_table[256];
 // 관례).
 extern "C" void smp_handle_tlb_shootdown_ipi();
 
+// fpu.cpp(M11b, ADR-133)가 정의한다 — lazy FPU 소유권 전환의 실제
+// XSAVE/FXSAVE 저장·복원은 그쪽 소유다.
+extern "C" void arch_x86_64_handle_nm_trap();
+
 // lapic.cpp(M10)가 정의한다 — 스퓨리어스 벡터는 EOI가 필요 없지만
 // (Intel SDM Vol.3 §11.9), IPI 벡터의 실제 EOI는 smp_handle_tlb_shootdown_ipi()
 // 자신이 처리한다(lapic.hpp 참고).
@@ -132,8 +136,13 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
         klog::printf("[idt] spurious interrupt (vector 0xFF) — ignored\n");
         return;
     }
+    if (frame->vector == arch_x86_64::k_vector_nm) {
+        // M11b(ADR-133) — M10이 마련해 둔 자리를 이제 실제로 채운다.
+        arch_x86_64_handle_nm_trap();
+        return;
+    }
 
-    // 나머지 전부(0~31 예외 + #NM 자리 + 아직 안 쓰는 벡터) — catch-all.
+    // 나머지 전부(0~31의 다른 예외 + 아직 안 쓰는 벡터) — catch-all.
     arch_x86_64::diagnose_and_halt(*frame);
 }
 

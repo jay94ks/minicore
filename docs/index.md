@@ -42,6 +42,7 @@
 | [smp-fpu-bringup-m9.md](done/smp-fpu-bringup-m9.md) | M9: eager FXSAVE/FXRSTOR로 FPU/SIMD 컨텍스트 스위칭 QEMU 확인(양성+음성 대조 모두), 그 과정에서 발견한 슬랩 청크 16바이트 정렬 누락 버그(ADR-134) 진단·수정 |
 | [smp-fpu-bringup-m10.md](done/smp-fpu-bringup-m10.md) | M10: IDT 기초(catch-all 예외 진단)+ACPI MADT 파싱(EBDA/BIOS ROM RSDP 스캔)+LAPIC 구동+AP 기동(INIT-SIPI-SIPI)+IPI 기반 TLB shootdown, `-smp N` QEMU로 AP 전원 온라인·shootdown 왕복 확인, 그 과정에서 발견한 SIPI 프로토콜·코어별 IDTR 버그(ADR-135) 진단·수정 |
 | [smp-fpu-bringup-m11.md](done/smp-fpu-bringup-m11.md) | M11: ACPI SRAT/SLIT 파싱+다중 NUMA 노드 물리 메모리 풀 분리+거리 기반 할당 폴백(ADR-054)+워크 스틸링(ADR-053, 범위 정정 ADR-137)+실제 락 순서 표(ADR-136), `-numa` QEMU로 검증 |
+| [smp-fpu-bringup-m11b.md](done/smp-fpu-bringup-m11b.md) | M11b(smp-fpu-bringup.md 전체 완료): CPUID 기반 XSAVE/AVX 검사+CR0.TS/`#NM` lazy 전환(ADR-133), 그 과정에서 발견한 slab 64바이트 정렬 미보장(ADR-138)·`sched::yield()` enqueue 순서 버그(ADR-139) 진단·수정, `-cpu` 유/무 두 QEMU 구성으로 검증 |
 
 ## design — 설계/상세
 

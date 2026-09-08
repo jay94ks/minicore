@@ -82,11 +82,19 @@ struct thread {
     uint64_t user_rsp = 0;            // 최초 유저모드 진입 시 RSP(유저 스택 top).
     uint64_t user_arg0 = 0;           // 최초 진입 시 RDI(boot.md §6 — "첫 인자" 관례. boot_info 등).
 
-    // M9(ADR-127) — FXSAVE/FXRSTOR 대상 영역. FXSAVE는 16바이트 정렬을
-    // 요구한다(정렬 안 된 주소로 실행하면 #GP). create_kernel_thread/
-    // create_user_thread(scheduler.cpp)가 0으로 채운 뒤 FCW/MXCSR
-    // 기본값을 patch한다 — 그 전까지는 내용이 정해지지 않은 상태다.
-    alignas(16) uint8_t fxsave_area[512] = {};
+    // M9(ADR-127)는 이 자리에 512바이트(FXSAVE 전용) 배열을 직접
+    // 내장했다. M11b(ADR-133, XSAVE/AVX)에서 1024바이트+alignas(64)로
+    // 바꿔봤다가 실제로 QEMU에서 `#GP`로 깨지는 것을 확인했다 —
+    // slab_alloc()이 보장하는 정렬은 16바이트뿐이다(ADR-134가 그
+    // 정도로 고쳤을 뿐, 64바이트를 보장하지 않는다). `object::thread`
+    // 자체가 slab에서 나오므로, 그 안의 배열에 아무리 `alignas(64)`를
+    // 붙여도 실제 런타임 주소는 지켜지지 않는다. 그래서 ADR-138로
+    // 이 필드를 "슬랩이 아니라 별도 페이지(mm::alloc_pages, 항상
+    // 4096바이트 정렬)에서 나온 포인터"로 바꿨다 —
+    // create_kernel_thread/create_user_thread(scheduler.cpp)가 그
+    // 페이지를 0으로 채운 뒤 FCW/MXCSR 기본값을 patch한다. nullptr이면
+    // 아직 할당되지 않은 상태(생성 실패 경로에서만 잠깐 존재).
+    uint8_t* fpu_save_area = nullptr;
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/
