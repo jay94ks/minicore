@@ -14,6 +14,12 @@ per_cpu_cache g_cpu_caches[k_max_cpus];
 uint32_t g_node_count = 0;
 bool g_initialized = false;
 
+// M11(ADR-054) — set_node_distance()가 실제로 호출되기 전까지는
+// false로 남아, alloc_pages()의 노드 폴백이 M1~M10과 완전히 동일한
+// 순서(라운드로빈)를 그대로 쓴다(has_distance_table 참고).
+uint8_t g_node_distance[k_max_numa_nodes][k_max_numa_nodes] = {};
+bool g_has_distance_table = false;
+
 // M1~M8은 BSP 단일 코어(ADR-035) — 실제 코어 식별(APIC ID 등)은
 // 스케줄러가 등장하는 M5 이후 과제다.
 uint32_t current_cpu_id() { return 0; }
@@ -209,6 +215,46 @@ void refill_cpu_cache(per_cpu_cache& cache) {
     }
 }
 
+// alloc_pages()가 시도할 노드 순서를 order_out[0..g_node_count-1]에
+// 채운다. order_out[0]은 항상 preferred_node다. g_has_distance_table이
+// false면(set_node_distance 미호출, M1~M10과 동일) 나머지는 노드
+// 번호 순 라운드로빈 — 기존 동작을 그대로 보존한다. true면(ADR-054)
+// preferred_node에서 가까운 노드부터 순서대로 채운다(제자리 선택
+// 정렬 — 노드 개수가 k_max_numa_nodes=8 이하로 작아 O(n^2)도 충분히
+// 빠르다).
+void build_fallback_order(uint32_t preferred_node, uint32_t* order_out) {
+    order_out[0] = preferred_node;
+    if (!g_has_distance_table) {
+        for (uint32_t attempt = 1; attempt < g_node_count; ++attempt) {
+            order_out[attempt] = (preferred_node + attempt) % g_node_count;
+        }
+        return;
+    }
+
+    uint32_t count = 0;
+    for (uint32_t n = 0; n < g_node_count; ++n) {
+        if (n != preferred_node) {
+            order_out[1 + count] = n;
+            ++count;
+        }
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t best = i;
+        for (uint32_t j = i + 1; j < count; ++j) {
+            uint32_t node_j = order_out[1 + j];
+            uint32_t node_best = order_out[1 + best];
+            if (g_node_distance[preferred_node][node_j] < g_node_distance[preferred_node][node_best]) {
+                best = j;
+            }
+        }
+        if (best != i) {
+            uint32_t tmp = order_out[1 + i];
+            order_out[1 + i] = order_out[1 + best];
+            order_out[1 + best] = tmp;
+        }
+    }
+}
+
 bool try_alloc_from_cpu_cache(uint64_t& out_addr) {
     per_cpu_cache& cache = g_cpu_caches[current_cpu_id()];
     if (cache.local_free_list == nullptr) {
@@ -287,11 +333,14 @@ result<uint64_t, alloc_error> alloc_pages(uint32_t order, uint32_t preferred_nod
         }
     }
 
-    // preferred_node부터 노드 인덱스 순서로 폴백한다(§4 4단계) — 실제
-    // ACPI SLIT/FDT 거리 행렬은 아직 파싱하지 않는다(page_allocator.hpp
-    // 상단 주석). 노드 1개(M1~M8)에서는 이 루프가 1회로 끝난다.
+    // preferred_node부터 폴백한다(§4 4단계) — set_node_distance()가
+    // 호출된 적 있으면(M11, ADR-054) 가까운 노드 순서, 아니면 M1~M10과
+    // 동일한 노드 번호 순 라운드로빈이다. 노드 1개(M1~M8)에서는 이
+    // 루프가 1회로 끝난다.
+    uint32_t fallback_order[k_max_numa_nodes];
+    build_fallback_order(preferred_node, fallback_order);
     for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
-        uint32_t node_id = (preferred_node + attempt) % g_node_count;
+        uint32_t node_id = fallback_order[attempt];
         per_node_pool& pool = g_node_pools[node_id];
         uint64_t addr;
         bool ok;
@@ -343,6 +392,18 @@ pool_stats stats(uint32_t node) {
     }
     const per_node_pool& pool = g_node_pools[node];
     return pool_stats{pool.total_bytes, pool.free_bytes, pool.reserved_bytes};
+}
+
+void set_node_distance(uint32_t node_count_arg, const uint8_t* distance) {
+    if (node_count_arg != g_node_count || node_count_arg > k_max_numa_nodes) {
+        return;  // 호출자가 잘못된 크기를 줬다 — 기존 순서를 그대로 유지.
+    }
+    for (uint32_t i = 0; i < node_count_arg; ++i) {
+        for (uint32_t j = 0; j < node_count_arg; ++j) {
+            g_node_distance[i][j] = distance[i * node_count_arg + j];
+        }
+    }
+    g_has_distance_table = true;
 }
 
 }  // namespace mm

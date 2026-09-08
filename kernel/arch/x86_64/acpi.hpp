@@ -31,4 +31,50 @@ struct madt_result {
 // 한다(boot.md §2 "토폴로지 정보 없음" 폴백과 같은 정신).
 bool find_and_parse_madt(uint64_t arch_data_addr, madt_result& out);
 
+// M11(smp-fpu-bringup.md §M11, ADR-036) — SRAT(Static Resource
+// Affinity Table)+SLIT(System Locality Information Table) 파싱. RSDP
+// 검색은 find_and_parse_madt()와 완전히 같은 경로(arch_data_addr 우선,
+// 없으면 EBDA/BIOS ROM 스캔)를 재사용한다 — QEMU가 `-numa` 옵션을 줬을
+// 때만 이 두 테이블이 실제로 존재한다(옵션 없으면 아래에서 false).
+//
+// 노드 번호 부여 규칙: SRAT의 "proximity domain" 값을 그대로 노드
+// 번호로 쓴다(재압축하지 않는다) — QEMU가 `-numa node,nodeid=N`으로
+// 지정한 값이 SRAT에 그대로 실리는 것을 실측으로 확인했다. 값이
+// k_max_numa_nodes를 넘는 도메인은 무시한다(골격 상한, mm::k_max_numa_nodes
+// 와 동일).
+constexpr uint32_t k_max_numa_nodes = 8;
+constexpr uint32_t k_max_memory_affinities = 32;
+
+struct memory_affinity_entry {
+    uint64_t base;
+    uint64_t length;
+    uint32_t node;
+};
+
+struct srat_slit_result {
+    uint32_t node_count;  // 관측된 최대 proximity domain + 1.
+
+    // cpu_node[i]는 madt_result::apic_ids[i]의 노드 번호다(같은 인덱스
+    // 순서 — boot_info.cpu_node_map_addr의 "cpu_id=배열 인덱스" 관례와
+    // 맞추기 위해 madt 열거 순서를 그대로 따른다). SRAT에 없는 CPU는
+    // 노드 0으로 취급한다.
+    uint32_t cpu_node[k_max_madt_cpus];
+
+    memory_affinity_entry mem_affinities[k_max_memory_affinities];
+    uint32_t mem_affinity_count;
+
+    // distance[i][j] — SLIT이 있으면 그 값, 없으면 ACPI 관례 기본값
+    // (같은 노드=10, 다른 노드=20)로 채운다. i==j는 항상 10(SLIT
+    // 유무와 무관 — ACPI 6.5 §5.2.17이 로컬 거리를 10으로 정의).
+    uint8_t distance[k_max_numa_nodes][k_max_numa_nodes];
+};
+
+// madt는 cpu_node[] 인덱스 순서(=cpu_id)를 madt.apic_ids와 맞추기 위해
+// 필요하다. SRAT을 못 찾으면 false — 호출자는 노드 1개(전부 노드
+// 0)로 취급해야 한다(boot.md §2 "토폴로지 정보 없음" 폴백과 같은
+// 정신). SRAT은 찾았지만 SLIT은 없는 경우는 실패가 아니다 — 기본
+// 거리값으로 distance를 채우고 true를 반환한다.
+bool find_and_parse_srat_slit(uint64_t arch_data_addr, const madt_result& madt,
+                               srat_slit_result& out);
+
 }  // namespace arch_x86_64

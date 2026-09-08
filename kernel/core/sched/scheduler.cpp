@@ -35,6 +35,12 @@ extern "C" [[noreturn]] void arch_user_thread_trampoline();
 // 없다(ADR-002 HAL 경계) — arch 계층이 제공한다(idle.S).
 extern "C" [[noreturn]] void arch_idle_halt();
 
+// M11(ADR-036/053) — "지금 이 코드를 실행 중인 코어가 속한 NUMA 노드
+// 번호". arch 계층(x86_64: smp.cpp)이 LAPIC ID를 읽어 SRAT가 준 표를
+// 찾아본다 — kernel/core/sched는 APIC/LAPIC의 존재를 몰라도 된다
+// (ADR-002 HAL 경계, arch_context_switch와 같은 관례).
+extern "C" uint32_t arch_current_node_id();
+
 namespace sched {
 
 namespace {
@@ -56,16 +62,61 @@ uint64_t next_pml4_phys(const object::thread& next) {
     return next.owner_space != nullptr ? next.owner_space->page_table_root : 0;
 }
 
-object::thread* pick_next_locked(run_queue& rq) {
-    if (!rq.kernel_band.empty()) {
+// kernel_band이 true면 kernel_band에서만, false면 user_band에서만 꺼낸다
+// — pick_next_with_stealing()이 "커널 밴드는 노드 경계를 넘어서도
+// 유저 밴드보다 항상 우선"(ADR-014)이라는 전역 순서를 만들 때 두
+// 밴드를 따로 조회할 수 있어야 하기 때문에 분리했다(기존
+// pick_next_locked()처럼 한 노드 안에서 두 밴드를 한 번에 보는
+// 버전은 "내 노드의 유저 밴드가 다른 노드의 커널 밴드보다 먼저
+// 뽑히는" 경우가 생겨 ADR-014를 어길 수 있다 — M11에서 실제로
+// preferred_node=1 데모 스레드가 이 이유로 전혀 스케줄되지 않는
+// 문제를 발견해 이렇게 고쳤다).
+object::thread* try_pick_band(run_queue& rq, bool kernel_band) {
+    scoped_lock<spinlock> guard(rq.lock);
+    if (kernel_band) {
+        if (rq.kernel_band.empty()) {
+            return nullptr;
+        }
         object::thread& t = rq.kernel_band.front();
         decltype(rq.kernel_band)::erase(t);
         return &t;
     }
-    if (!rq.user_band.empty()) {
-        object::thread& t = rq.user_band.front();
-        decltype(rq.user_band)::erase(t);
-        return &t;
+    if (rq.user_band.empty()) {
+        return nullptr;
+    }
+    object::thread& t = rq.user_band.front();
+    decltype(rq.user_band)::erase(t);
+    return &t;
+}
+
+// ADR-053(kernel-scheduler.md) — 이 코어의 노드가 비면 다른 노드의
+// run_queue에서 훔쳐온다. ADR-053 §영향은 "임계치·탐색 순서는 구현
+// 시 정한다"고 명시적으로 미뤄뒀다 — 이 협조적 스케줄러에는 타이머가
+// 없어(M10 계획 §범위 밖) "일정 시간 유휴"를 측정할 수단 자체가
+// 없으므로, 임계치는 사실상 0(자기 노드가 비면 즉시 훔쳐온다)이고
+// 탐색 순서는 노드 번호 순 라운드로빈으로 단순화한다(ADR-053이 이미
+// 이 정도의 구현 자유를 명시적으로 허용했다). 훔쳐온 스레드의
+// preferred_node는 그대로 둔다(§영향 — 다음 기회에 자기 노드로 돌아갈
+// 수 있게).
+//
+// 순서: (1) 내 노드의 커널 밴드 (2) 다른 노드의 커널 밴드(스틸) —
+// ADR-014("커널 밴드는 항상 유저 밴드보다 우선")를 노드 경계에도
+// 그대로 적용한다. 그다음에야 (3) 내 노드의 유저 밴드 (4) 다른
+// 노드의 유저 밴드(스틸).
+object::thread* pick_next_with_stealing() {
+    uint32_t my_node = arch_current_node_id() % g_node_count;
+
+    for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
+        uint32_t node = (my_node + attempt) % g_node_count;
+        if (object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/true)) {
+            return t;
+        }
+    }
+    for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
+        uint32_t node = (my_node + attempt) % g_node_count;
+        if (object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/false)) {
+            return t;
+        }
     }
     return nullptr;
 }
@@ -119,8 +170,19 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     t->sched.preferred_node = preferred_node;
     init_fxsave_area(t);
 
+    // enqueue()는 이미 preferred_node를 g_node_count로 감싼다(존재하지
+    // 않는 노드를 요청해도 항상 유효한 큐에 들어가도록) — 여기서도
+    // 같은 방식으로 감싸야 한다. 안 그러면 mm::alloc_pages가
+    // preferred_node를 그대로 "유효한 노드 인덱스"로 요구해(범위
+    // 밖이면 invalid_node로 실패) 정확히 같은 preferred_node 값인데도
+    // enqueue()는 받아주고 create_kernel_thread()는 거부하는
+    // 불일치가 생긴다 — M11에서 실제로 이 불일치 때문에 노드 1개뿐인
+    // 환경에서 preferred_node=1로 스레드 생성이 조용히 실패하는 것을
+    // 발견해 고쳤다.
+    uint32_t alloc_node = preferred_node % g_node_count;
+
     constexpr uint32_t k_stack_order = 2;  // 16KiB (scheduler.hpp 상단 주석)
-    auto stack_page = mm::alloc_pages(k_stack_order, preferred_node);
+    auto stack_page = mm::alloc_pages(k_stack_order, alloc_node);
     if (!stack_page.is_ok()) {
         mm::slab_free(t, sizeof(object::thread));
         return nullptr;
@@ -206,15 +268,11 @@ void enqueue(object::thread& t) {
 }
 
 void start() {
-    // M1~M8은 노드 1개(ADR-035) — 현재 코어가 보는 run_queue는 항상
-    // 노드 0이다(M9 이후 실제 다중 코어가 붙으면 "이 코어의 노드"를
-    // 조회하는 절차가 필요해진다).
-    run_queue& rq = g_run_queues[0];
-    object::thread* next;
-    {
-        scoped_lock<spinlock> guard(rq.lock);
-        next = pick_next_locked(rq);
-    }
+    // M1~M8은 노드 1개(ADR-035) — 그때는 항상 노드 0이었다. M11부터는
+    // 실제로 여러 노드가 있을 수 있어 pick_next_with_stealing()이
+    // "이 코어의 노드"를 먼저 보고, 비어 있으면 다른 노드를 훔쳐본다
+    // (ADR-053).
+    object::thread* next = pick_next_with_stealing();
     if (next == nullptr) {
         LIBK_PANIC("sched::start: no runnable thread");
     }
@@ -228,12 +286,7 @@ void start() {
 void yield() {
     object::thread* prev = g_current;
 
-    run_queue& rq = g_run_queues[0];
-    object::thread* next;
-    {
-        scoped_lock<spinlock> guard(rq.lock);
-        next = pick_next_locked(rq);
-    }
+    object::thread* next = pick_next_with_stealing();
     if (next == nullptr) {
         // 다른 runnable 스레드가 없다 — 계속 실행한다.
         return;
@@ -250,12 +303,7 @@ void yield() {
 void block() {
     object::thread* prev = g_current;
 
-    run_queue& rq = g_run_queues[0];
-    object::thread* next;
-    {
-        scoped_lock<spinlock> guard(rq.lock);
-        next = pick_next_locked(rq);
-    }
+    object::thread* next = pick_next_with_stealing();
     if (next == nullptr) {
         LIBK_PANIC("sched::block: no runnable thread (deadlock)");
     }
@@ -273,12 +321,7 @@ void block() {
     // prev(이전 g_current) 자체는 이 함수 안에서 다시 쓸 일이 없다 —
     // block()과 달리 그 context_rsp를 아무도 저장/복원하지 않는다
     // (scheduler.hpp exit() 주석: 다시 스케줄되지 않음이 핵심 보장).
-    run_queue& rq = g_run_queues[0];
-    object::thread* next;
-    {
-        scoped_lock<spinlock> guard(rq.lock);
-        next = pick_next_locked(rq);
-    }
+    object::thread* next = pick_next_with_stealing();
     if (next == nullptr) {
         // 이 코어에서 더 이상 아무도 runnable하지 않다 — 진짜로 멈춘다.
         // prev의 context_rsp는 이제 아무도 다시 읽지 않는다(scheduler.hpp

@@ -107,6 +107,10 @@ void append_owned_regions(uint32_t& region_count, const boot::boot_info& info) {
     }
 }
 
+// M11(ADR-036) — build_numa_boot_info()가 채우는 cpu_id→node 배열.
+// g_memory_regions와 같은 이유로 재호출 시 덮어써지는 정적 저장소다.
+uint32_t g_cpu_node_map[k_max_madt_cpus];
+
 }  // namespace
 
 boot::boot_info build_boot_info(uint32_t multiboot_magic, uint32_t multiboot_info_phys,
@@ -281,6 +285,43 @@ boot::boot_info run_boot_info_self_test(const boot::memory_region** out_regions)
     uint64_t phys = image_virt_to_phys(g_selftest_blob);
     return build_boot_info(k_multiboot2_bootloader_magic, static_cast<uint32_t>(phys),
                             out_regions);
+}
+
+boot::boot_info build_numa_boot_info(const madt_result& madt, const srat_slit_result& srat,
+                                      const boot::memory_region** out_regions,
+                                      const uint32_t** out_cpu_node_map) {
+    boot::boot_info info{};
+    info.magic = boot::k_boot_info_magic;
+    info.version = boot::k_boot_info_version;
+    info.cpu_count = madt.cpu_count;
+    info.numa_node_count = srat.node_count;
+
+    for (uint32_t i = 0; i < madt.cpu_count && i < k_max_madt_cpus; ++i) {
+        g_cpu_node_map[i] = srat.cpu_node[i];
+    }
+    info.cpu_node_map_addr = image_virt_to_phys(g_cpu_node_map);
+    *out_cpu_node_map = g_cpu_node_map;
+
+    // initrd_addr을 일부러 0으로 둔다 — 실제 initrd 바이트는 커널
+    // 이미지의 .rodata에 직접 임베딩돼 있어(ADR-119) 아래
+    // append_owned_regions()의 "kernel_image" exclusion에 이미
+    // 포함된다. 별도 initrd exclusion은 self-test fixture처럼 "가짜
+    // 겹침"을 일부러 만드는 경우에만 의미가 있다(run_boot_info_self_test
+    // 참고) — 이 NUMA 경로는 실제 주소만 다루므로 필요 없다.
+    uint32_t region_count = 0;
+    for (uint32_t i = 0; i < srat.mem_affinity_count && region_count < k_max_memory_regions; ++i) {
+        boot::memory_region& r = g_memory_regions[region_count++];
+        r.base = srat.mem_affinities[i].base;
+        r.length = srat.mem_affinities[i].length;
+        r.type = boot::k_region_usable;
+        r.node_id = srat.mem_affinities[i].node;
+    }
+    append_owned_regions(region_count, info);
+
+    *out_regions = g_memory_regions;
+    info.memory_map_addr = image_virt_to_phys(g_memory_regions);
+    info.memory_map_count = region_count;
+    return info;
 }
 
 }  // namespace arch_x86_64

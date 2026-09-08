@@ -26,6 +26,13 @@
 #                         QEMU를 -smp N으로 띄운다. 기본은 미설정(=1코어,
 #                         M1~M9와 동일한 동작 보존) — opt-in이라야
 #                         ADR-125의 "기본값 유지" 패턴과 일치한다.
+#   MINICORE_QEMU_NUMA=N  docs/plan/smp-fpu-bringup.md M11(ADR-036):
+#                         MINICORE_QEMU_SMP개 코어를 N개 NUMA 노드로
+#                         균등 분할하고(반드시 나누어져야 함), 노드마다
+#                         독립된 memory-backend-ram(128MiB)과
+#                         -numa dist(서로 다른 노드는 20)을 구성한다.
+#                         MINICORE_QEMU_SMP 없이는 쓸 수 없다. 기본은
+#                         미설정(=단일 노드, M1~M10과 동일).
 
 set -euo pipefail
 
@@ -44,18 +51,50 @@ case "$ARCH" in
     fi
 
     declare -a EXTRA_ARGS=()
+    MEM_ARG="256M"
     if [[ "${MINICORE_QEMU_GDB:-0}" == "1" ]]; then
       EXTRA_ARGS+=(-S -gdb tcp::1234)
     fi
     if [[ "${MINICORE_QEMU_TRACE:-0}" == "1" ]]; then
       EXTRA_ARGS+=(-d cpu_reset,guest_errors,int -D "${BUILD_DIR}/qemu-trace.log")
     fi
-    if [[ -n "${MINICORE_QEMU_SMP:-}" ]]; then
+
+    if [[ -n "${MINICORE_QEMU_NUMA:-}" ]]; then
+      NUMA_NODES="${MINICORE_QEMU_NUMA}"
+      SMP_CORES="${MINICORE_QEMU_SMP:?"MINICORE_QEMU_NUMA는 MINICORE_QEMU_SMP도 함께 설정해야 한다"}"
+      if (( SMP_CORES % NUMA_NODES != 0 )); then
+        echo "MINICORE_QEMU_SMP(${SMP_CORES})는 MINICORE_QEMU_NUMA(${NUMA_NODES})로 나누어져야 한다" >&2
+        exit 1
+      fi
+      CORES_PER_NODE=$((SMP_CORES / NUMA_NODES))
+      MEM_PER_NODE_MB=128
+      MEM_ARG="$((MEM_PER_NODE_MB * NUMA_NODES))M"
+
+      EXTRA_ARGS+=(-smp "${SMP_CORES},sockets=1,cores=${SMP_CORES},threads=1")
+      for ((n = 0; n < NUMA_NODES; ++n)); do
+        EXTRA_ARGS+=(-object "memory-backend-ram,id=m${n},size=${MEM_PER_NODE_MB}M")
+        EXTRA_ARGS+=(-numa "node,nodeid=${n},memdev=m${n}")
+      done
+      core_id=0
+      for ((n = 0; n < NUMA_NODES; ++n)); do
+        for ((c = 0; c < CORES_PER_NODE; ++c)); do
+          EXTRA_ARGS+=(-numa "cpu,node-id=${n},socket-id=0,core-id=${core_id}")
+          core_id=$((core_id + 1))
+        done
+      done
+      for ((n = 0; n < NUMA_NODES; ++n)); do
+        for ((m = 0; m < NUMA_NODES; ++m)); do
+          if ((n != m)); then
+            EXTRA_ARGS+=(-numa "dist,src=${n},dst=${m},val=20")
+          fi
+        done
+      done
+    elif [[ -n "${MINICORE_QEMU_SMP:-}" ]]; then
       EXTRA_ARGS+=(-smp "${MINICORE_QEMU_SMP}")
     fi
 
     exec "$QEMU_BIN" \
-      -M q35 -m 256M \
+      -M q35 -m "$MEM_ARG" \
       -no-reboot -no-shutdown -display none \
       -bios qboot.rom \
       -kernel "$KERNEL" \

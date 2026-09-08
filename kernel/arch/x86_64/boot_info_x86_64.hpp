@@ -3,6 +3,7 @@
 // 독립 boot::boot_info(kernel/include/boot_info.hpp)로 변환한다.
 #pragma once
 
+#include "acpi.hpp"
 #include "boot_info.hpp"
 
 #include <cstdint>
@@ -32,5 +33,18 @@ boot::boot_info build_boot_info(uint32_t multiboot_magic, uint32_t multiboot_inf
 // 실제 GRUB가 준 정보가 아니므로 호출자는 결과를 klog에 "selftest"
 // 태그로 구분해 출력해야 한다.
 boot::boot_info run_boot_info_self_test(const boot::memory_region** out_regions);
+
+// M11(smp-fpu-bringup.md §M11, ADR-036) — SRAT 메모리 어피니티가 실제로
+// 존재할 때(QEMU `-numa`로 노드별 memory-backend-ram이 구성됐을 때)
+// 그 실제 물리 범위를 usable 리전으로 삼아 boot_info를 구성한다 —
+// self-test fixture(단일 노드 0 가짜 데이터)와는 완전히 별개의 경로.
+// `srat.mem_affinity_count == 0`이면 호출하지 않고
+// `run_boot_info_self_test()`를 그대로 써야 한다(기존 M1~M10 경로
+// 보존, NUMA 미구성 시 관찰 가능한 차이 없음). *out_cpu_node_map에는
+// `madt.cpu_count`개짜리 uint32_t 배열의 역참조 가능한 포인터를
+// 채운다(다음 호출까지만 유효).
+boot::boot_info build_numa_boot_info(const madt_result& madt, const srat_slit_result& srat,
+                                      const boot::memory_region** out_regions,
+                                      const uint32_t** out_cpu_node_map);
 
 }  // namespace arch_x86_64

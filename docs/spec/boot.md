@@ -182,8 +182,35 @@ q35 machine이 부트 경로와 무관하게 항상 구성해 두는 실제 ACPI
 찾아내며(self-test fixture가 아니라 진짜 데이터), 여기서 얻은
 `local_apic_address`+MADT Processor Local APIC 엔트리(Enabled 비트만)로
 AP 기동에 필요한 APIC ID 목록을 얻는다. 얻은 개수를 `boot_info.cpu_count`
-에 반영한다(`cpu_node_map_addr`는 여전히 0 — ACPI SRAT/SLIT 파싱은
-M11 범위).
+에 반영한다.
+
+## 8. ACPI 파싱(x86_64, NUMA): SRAT/SLIT (docs/plan/smp-fpu-bringup.md §M11, ADR-036)
+
+`kernel/arch/x86_64/acpi.cpp::find_and_parse_srat_slit()`가 §7과 같은
+RSDP 경로로 SRAT(Static Resource Affinity Table)와 SLIT(System
+Locality Information Table)을 찾는다 — QEMU `-numa` 옵션을 줬을 때만
+이 두 테이블이 실제로 존재한다(없으면 실패를 반환, 호출자는 노드
+1개(전부 노드 0)로 취급). SRAT의 proximity domain 값을 그대로 노드
+번호로 쓴다(재압축하지 않는다) — QEMU가 `-numa node,nodeid=N`으로
+지정한 값이 그대로 실리는 것을 실측으로 확인했다.
+
+- **`cpu_node_map_addr`**: SRAT의 Processor Local APIC Affinity
+  엔트리(apic_id→proximity domain)를 MADT 열거 순서(§3의 "인덱스가
+  cpu_id"라는 관례)로 재정렬해 채운다.
+- **`memory_region.node_id`**: SRAT의 Memory Affinity 엔트리가 있으면
+  (즉 `-numa`로 노드별 `memory-backend-ram`이 실제로 구성됐을 때),
+  §2의 Multiboot2 메모리맵이나 self-test fixture 대신 **이 엔트리들을
+  그대로 usable 리전으로 채택**해 `boot_info`를 구성한다
+  (`arch_x86_64::build_numa_boot_info()`) — self-test fixture(항상
+  가짜 주소, 단일 노드 0)와 달리 이 경로는 QEMU가 실제로 구성한 물리
+  범위와 노드 태그를 그대로 쓰는 "진짜" 데이터다. `-numa`를 안 쓰면
+  이 경로 자체가 비활성화되고 self-test fixture로 완전히 되돌아간다
+  (M1~M10과 관찰 가능한 차이 없음).
+- **노드 간 거리**: SLIT이 있으면 그 행렬을, 없으면 ACPI 관례 기본값
+  (로컬=10, 원격=20)을 쓴다. 스케줄러의 워크 스틸링(ADR-053, M11)이
+  참고할 수 있게 설계됐지만 현재 구현(탐색 순서 라운드로빈,
+  kernel-scheduler.md ADR-053 §영향이 이미 구현 자유로 남겨둔 부분)은
+  이 거리값 자체를 쓰지 않는다 — 필요해지면 별도 결정.
 
 ## 아직 정하지 않은 것
 

@@ -55,6 +55,11 @@ atomic<uint32_t> g_shootdown_pending{0};
 constexpr uint32_t k_ap_stack_order = 2;  // 16KiB — create_kernel_thread와 같은 크기.
 constexpr uint64_t k_sipi_timeout_iterations = 50'000'000ull;
 
+// M11(ADR-036) — apic_id로 색인한 노드 번호. 256개(APIC ID 전체 공간)
+// 크기라 apic_id를 바로 인덱스로 쓸 수 있다 — set_cpu_node_map()이
+// 아직 안 불렸으면 전부 0(토폴로지 정보 없음 폴백).
+uint8_t g_apic_id_to_node[256] = {};
+
 }  // namespace
 
 void bring_up_aps(const madt_result& madt) {
@@ -114,6 +119,12 @@ void bring_up_aps(const madt_result& madt) {
 
 uint32_t online_cpu_count() { return g_cpu_count; }
 
+void set_cpu_node_map(const madt_result& madt, const srat_slit_result& srat) {
+    for (uint32_t i = 0; i < madt.cpu_count && i < k_max_madt_cpus; ++i) {
+        g_apic_id_to_node[madt.apic_ids[i]] = static_cast<uint8_t>(srat.cpu_node[i]);
+    }
+}
+
 void broadcast_tlb_shootdown(uint64_t vaddr) {
     if (g_cpu_count <= 1) {
         return;  // AP가 없다 — M1~M9와 동일하게 관찰 가능한 차이 없음.
@@ -141,6 +152,11 @@ extern "C" void smp_handle_tlb_shootdown_ipi() {
     asm volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
     arch_x86_64::g_shootdown_pending.fetch_add_relaxed(static_cast<uint32_t>(-1));
     lapic_eoi();
+}
+
+extern "C" uint32_t arch_current_node_id() {
+    uint32_t apic_id = arch_x86_64::lapic_id();
+    return arch_x86_64::g_apic_id_to_node[apic_id];
 }
 
 extern "C" void ap_main(uint32_t cpu_index) {

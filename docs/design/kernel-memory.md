@@ -543,3 +543,66 @@
     `alignas(N)`(N≤16)가 붙어 있어도 안전하다.
   - `docs/done/smp-fpu-bringup-m9.md`가 이 버그의 발견·진단 경위를
     상세히 기록한다.
+
+## ADR-136. 실제 락 순서 표 확정 (ADR-052 구체화, M11)
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: ADR-052가 "락 순서 규칙은 각 서브시스템 코드를 작성하며
+  확정하고 이 문서 체계에 갱신한다"고 미뤄둔 부분을, M10/M11 시점까지
+  실제로 만들어진 모든 락을 코드에서 직접 조사해 확정한다(런타임
+  검증기는 여전히 두지 않는다 — ADR-052의 v1 방침 그대로).
+
+  **락 목록**(전부 `libk::spinlock`, `ticket_lock`/`mcs_lock`은 정의만
+  있고 커널·서버 어디서도 실제로 쓰이지 않는다):
+
+  | 락 | 소유 구조체/위치 | 획득 지점 |
+  |---|---|---|
+  | `per_node_pool::lock` | `mm/page_allocator.hpp`, 노드당 1개 | `alloc_pages`, `free_to_node_pool`, `refill_cpu_cache`(노드별 루프) |
+  | `size_class_state::lock` | `mm/slab.cpp`, 슬랩 크기 클래스당 1개 | `slab_alloc`, `slab_free` |
+  | `run_queue::lock` | `sched/scheduler.hpp`, NUMA 노드당 1개 | `try_pick_band`, `enqueue` |
+  | `object::endpoint::lock` | `object/kernel_objects.hpp`, 엔드포인트당 1개 | `sys_call`, `sys_recv`(둘 다 성공/에러 경로 각각 재획득) |
+  | `object::notification::lock` | `object/kernel_objects.hpp`, notification당 1개 | `sys_notify`, `sys_wait` |
+  | `klog::g_log_lock`(`irq_safe<spinlock>`) | `core/klog.cpp` 전역 1개(ADR-037 예외) | `klog::write`, `klog::vprintf` |
+
+  **중첩(동시에 두 락을 쥐는) 경로는 현재 코드 전체에서 단 하나뿐이다**:
+  `slab_alloc()`이 `size_class_state::lock`을 쥔 채 비어 있으면
+  `grow_locked()` → `mm::alloc_pages()`를 호출하고, 그 안에서
+  `per_node_pool::lock`을 추가로 잡는다 — **순서: `size_class_state::lock`
+  (바깥) → `per_node_pool::lock`(안쪽)**. 이 방향으로만 발생하며,
+  반대 방향(`per_node_pool::lock`을 쥔 채 슬랩 락을 잡는 경로)은
+  코드 어디에도 없다 — 따라서 역전 가능성이 없다.
+
+  그 외 모든 락(`run_queue`, `endpoint`, `notification`, `klog`)은
+  항상 **리프(leaf) 락**이다 — 다른 어떤 락을 쥔 채로 이 락들을
+  잡는 경로가 없고, 이 락들을 쥔 채로 다른 락을 잡는 경로도 없다
+  (예: `sys_call`/`sys_recv`는 `endpoint::lock`을 놓은 뒤에야
+  `sched::enqueue`/`sched::block`을 부른다 — `run_queue::lock`과
+  절대 동시에 쥐지 않는다).
+
+  `pick_next_with_stealing()`(scheduler.cpp, M11 §M11 다중 코어 검증
+  도입)이 여러 노드의 `run_queue::lock`을 순회하며 조회하지만, 매
+  노드마다 **잠그고-확인하고-바로 풀어서 다음 노드로 넘어가는 방식**
+  이라 두 `run_queue::lock`을 동시에 쥐는 순간이 전혀 없다 — 같은
+  종류의 락을 여러 인스턴스에 걸쳐 순차적으로만 잡는 이 패턴은
+  `refill_cpu_cache()`/`alloc_pages()`의 노드별 폴백 루프도 동일하게
+  따른다.
+
+  `handle_table`은 **자체 락이 없다** — `create_owner`/`create_proxy`/
+  `close`/`handle_info` 전부 동기화 없이 동작한다. 지금까지(M1~M11)
+  안전한 이유는 이 함수들을 부르는 코드가 전부 논리적으로 1코어
+  (BSP, ADR-035/M10 done 보고 — AP는 스케줄러에 참여하지 않는다)에서만
+  실행되기 때문이다 — 락 순서 문제가 아니라 **아직 아무 락도 없다는
+  사실 자체**가 M12 이후(procsrv 등 실제 다중 프로세스 동시 접근이
+  생기는 시점) 반드시 재검토해야 할 결여로 남는다.
+- **근거**: 사용자가 M11 완료 기준으로 요구한 "락 순서 규칙 문서화"를
+  실제 코드 조사로 확정한다 — ADR-052가 이미 "빈도가 낮고 가짓수가
+  적어 정적 문서화로 충분하다"고 판단한 전제가 실측으로도 그대로
+  성립함을 확인했다(중첩 경로가 정확히 하나, 그것도 항상 같은
+  방향으로만 발생).
+- **영향**:
+  - 향후 새 락을 추가할 때는 이 표에 없는 새 중첩 경로를 만들지
+    않도록 검토한다 — 특히 `per_node_pool::lock`을 쥔 채 슬랩
+    함수를 부르는 코드는 절대 추가하지 않는다(역전 발생).
+  - `handle_table`의 무동기화 상태는 이 ADR이 해결하지 않는다 —
+    procsrv 등 M12 이후 계획에서 실제로 여러 프로세스가 동시에
+    핸들 테이블에 접근하게 되는 시점에 별도 결정이 필요하다.

@@ -178,12 +178,16 @@ void  slab_free(void* ptr, size_t size);
 `kernel-bootstrap.md` M3는 이 스펙의 §2~4(할당자 골격)와 §6(슬랩)을
 구현 대상으로 한다. §5(쿼터)와 정책 서버 연동은 procsrv/정책 서버가
 등장하는 이후 계획의 범위다 — M1~M8에서는 쿼터를 사실상 무제한
-(`limit_bytes = UINT64_MAX`)으로 두어 골격만 동작을 확인한다.
+(`limit_bytes = UINT64_MAX`)으로 두어 골격만 동작을 확인한다. M11
+(`smp-fpu-bringup.md`)이 §4 4단계(거리 기반 노드 폴백, ADR-054)를
+실제로 구현했다 — 노드 간 거리는 `uint8_t[k_max_numa_nodes][k_max_numa_nodes]`
+인접 행렬(`mm::set_node_distance()`가 채운다)로 보관하며, x86_64는
+ACPI SLIT에서 얻는다(없으면 관례 기본값 로컬=10/원격=20). 등록되지
+않았으면(SLIT 미발견, 즉 `-numa` 미사용) 이전과 동일한 노드 번호
+순 라운드로빈으로 폴백한다.
 
 ## 아직 정하지 않은 것
 
-- 노드 간 거리 행렬을 어떤 자료구조로 커널 내부에 보관할지(인접
-  행렬 vs 정렬된 이웃 목록)는 구현 시 정한다.
 - 새 프로세스의 기본 쿼터 크기, 슬랩 크기 클래스 목록의 최종 확정.
 - "캐시"의 정확한 정의·소유자와 회수 트리거 워터마크
   ([kernel-memory.md](../design/kernel-memory.md) ADR-105 §영향).

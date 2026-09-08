@@ -72,30 +72,103 @@ void dump_pool_stats(const char* tag) {
     }
 }
 
+// M11(smp-fpu-bringup.md §M11, ADR-036) — MADT/LAPIC/SRAT/SLIT 파싱
+// 결과를 한 곳에 모은다. mm::init()보다 먼저 계산해야 한다 — SRAT의
+// 메모리 어피니티가 있으면 mm::init() 자체가 그 실제 범위로 초기화되기
+// 때문이다(demo_mm 참고).
+struct acpi_topology {
+    arch_x86_64::madt_result madt;
+    arch_x86_64::srat_slit_result srat;
+    bool srat_ok;
+};
+
 // M10(ADR-055) — acpi.cpp의 MADT 파싱이 "real" boot_info.arch_data_addr가
 // 있으면 우선 그걸 신뢰하도록(GRUB/UEFI 실배포 경로 대비) 반환값으로
 // 넘겨준다. 이 개발 머신(QEMU PVH, ADR-114)에서는 항상 0이라 acpi.cpp
 // 자신의 EBDA/BIOS ROM 스캔 폴백이 실제로 타는 경로다.
-uint64_t demo_mm() {
+uint64_t dump_real_boot_info() {
     const boot::memory_region* regions = nullptr;
     boot::boot_info info = arch_x86_64::build_boot_info(mb2_magic, mb2_info_addr, &regions);
     boot::dump("real", info, regions);
+    return info.arch_data_addr;
+}
 
-    // 이 개발 머신에는 GRUB가 없어 QEMU 검증 경로(ADR-114, PVH)로는
-    // 위 "real" 결과가 항상 비어 있다 — build_boot_info()의 파싱 로직
-    // 자체가 올바른지는 아래 자체 테스트로 확인한다(docs/done/의 M2
-    // 완료 보고 참고).
-    const boot::memory_region* selftest_regions = nullptr;
-    boot::boot_info selftest_info = arch_x86_64::run_boot_info_self_test(&selftest_regions);
-    boot::dump("selftest", selftest_info, selftest_regions);
+// M10 — ACPI MADT를 파싱해 LAPIC을 켠다. M11 — 이어서 SRAT/SLIT까지
+// 파싱해 CPU→노드 매핑·메모리 어피니티·노드 간 거리를 얻는다. AP
+// 기동(bring_up_aps)은 여기서 하지 않는다 — mm::init()이 아직 끝나지
+// 않아 AP 커널 스택을 확보할 수 없다(kernel_main에서 mm::init() 이후
+// 별도로 호출).
+acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
+    acpi_topology s{};
+    bool madt_ok = arch_x86_64::find_and_parse_madt(real_arch_data_addr, s.madt);
+    klog::printf("[acpi] madt_ok=%u cpu_count=%u lapic_base=0x%lx\n", madt_ok, s.madt.cpu_count,
+                 static_cast<unsigned long>(s.madt.lapic_base_phys));
+    for (uint32_t i = 0; i < s.madt.cpu_count; ++i) {
+        klog::printf("[acpi] cpu[%u] apic_id=%u\n", i, s.madt.apic_ids[i]);
+    }
 
-    // mm::init은 실제 boot_info(현재 이 QEMU 경로에서는 항상 빈
-    // memory_map)가 아니라 위 self-test boot_info로 물리 페이지
-    // 할당자를 채운다 — "real"로 채우면 usable 영역이 0개라 이후
-    // 검증 자체가 불가능하다. 이것도 ADR-114/117이 이미 기록한 GRUB
-    // 부재 한계의 연장이다(docs/done/kernel-bootstrap-m3.md 참고).
-    mm::init(selftest_info, selftest_regions);
-    dump_pool_stats("init");
+    constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
+    arch_x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
+    klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
+
+    // MADT를 못 찾았어도(madt_ok==false) BSP 자신은 항상 "온라인 코어
+    // 1개"다 — 이후 bring_up_aps()가 BSP 등록도 함께 겸하므로(smp.cpp)
+    // 여기서 BSP 하나짜리 최소 madt_result로 확정해 둔다(AP 기동
+    // 루프는 cpu_count=1이라 아무 것도 더 하지 않는다).
+    if (!madt_ok) {
+        s.madt.cpu_count = 1;
+        s.madt.apic_ids[0] = arch_x86_64::lapic_id();
+    }
+
+    s.srat_ok = arch_x86_64::find_and_parse_srat_slit(real_arch_data_addr, s.madt, s.srat);
+    klog::printf("[numa] srat_ok=%u node_count=%u mem_affinity_count=%u\n", s.srat_ok,
+                 s.srat.node_count, s.srat.mem_affinity_count);
+    for (uint32_t i = 0; i < s.madt.cpu_count; ++i) {
+        klog::printf("[numa] cpu[%u] apic_id=%u node=%u\n", i, s.madt.apic_ids[i],
+                     s.srat.cpu_node[i]);
+    }
+    for (uint32_t i = 0; i < s.srat.mem_affinity_count; ++i) {
+        const auto& m = s.srat.mem_affinities[i];
+        klog::printf("[numa] mem[%u] base=0x%lx length=0x%lx node=%u\n", i,
+                     static_cast<unsigned long>(m.base), static_cast<unsigned long>(m.length),
+                     m.node);
+    }
+    for (uint32_t i = 0; i < s.srat.node_count; ++i) {
+        for (uint32_t j = 0; j < s.srat.node_count; ++j) {
+            klog::printf("[numa] distance[%u][%u]=%u\n", i, j, s.srat.distance[i][j]);
+        }
+    }
+    return s;
+}
+
+// M11 — SRAT 메모리 어피니티가 있으면(QEMU `-numa`로 노드별
+// memory-backend-ram이 실제로 구성됐을 때) 그 실제 범위로 mm::init()을
+// 채운다 — 처음으로 "가짜가 아닌" 다중 노드 물리 메모리 풀 분리를
+// 검증한다. 없으면(기본, `-numa` 미사용) M1~M10과 완전히 같은 self-test
+// fixture 경로를 그대로 쓴다.
+void demo_mm(const acpi_topology& acpi) {
+    const boot::memory_region* regions = nullptr;
+    boot::boot_info info{};
+    if (acpi.srat_ok && acpi.srat.mem_affinity_count > 0) {
+        const uint32_t* cpu_node_map = nullptr;
+        info = arch_x86_64::build_numa_boot_info(acpi.madt, acpi.srat, &regions, &cpu_node_map);
+        boot::dump("numa", info, regions);
+    } else {
+        info = arch_x86_64::run_boot_info_self_test(&regions);
+        boot::dump("selftest", info, regions);
+    }
+
+    mm::init(info, regions);
+
+    // M11(ADR-054) — SLIT 거리 행렬이 있으면(-numa 미사용 시는 항상
+    // srat_ok==false라 이 분기 자체를 안 탄다) mm에 등록해 노드 폴백을
+    // "가까운 노드부터"로 바꾼다. srat.distance는 uint8_t[8][8]이라
+    // 첫 원소 주소가 row-major 평탄화 포인터와 정확히 같다.
+    if (acpi.srat_ok && acpi.srat.mem_affinity_count > 0) {
+        mm::set_node_distance(acpi.srat.node_count, &acpi.srat.distance[0][0]);
+    }
+
+    dump_pool_stats("init");  // 노드 개수만큼 자동으로 순회한다(함수 내부 루프).
 
     auto page0 = mm::alloc_pages(0, 0);
     auto page2 = mm::alloc_pages(2, 0);
@@ -122,36 +195,6 @@ uint64_t demo_mm() {
         mm::slab_free(slab_b, 32);
     }
     klog::printf("[mm:slab] freed both chunks\n");
-    return info.arch_data_addr;
-}
-
-// M10(smp-fpu-bringup.md §M10, ADR-055) — ACPI MADT를 파싱해 LAPIC을
-// 켜고, 발견한 AP를 전부 순차 기동한다. mm::init()이 이미 끝난 뒤라야
-// 한다(bring_up_aps가 AP 커널 스택을 mm::alloc_pages로 확보한다).
-void demo_smp(uint64_t real_arch_data_addr) {
-    arch_x86_64::madt_result madt{};
-    bool madt_ok = arch_x86_64::find_and_parse_madt(real_arch_data_addr, madt);
-    klog::printf("[acpi] madt_ok=%u cpu_count=%u lapic_base=0x%lx\n", madt_ok, madt.cpu_count,
-                 static_cast<unsigned long>(madt.lapic_base_phys));
-    for (uint32_t i = 0; i < madt.cpu_count; ++i) {
-        klog::printf("[acpi] cpu[%u] apic_id=%u\n", i, madt.apic_ids[i]);
-    }
-
-    constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
-    arch_x86_64::lapic_init(madt_ok ? madt.lapic_base_phys : k_default_lapic_base);
-    klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
-
-    // MADT를 못 찾았어도(madt_ok==false) BSP 자신은 항상 "온라인 코어
-    // 1개"다 — bring_up_aps()는 BSP 등록도 함께 겸하므로(smp.cpp) 이
-    // 경우엔 BSP 하나짜리 최소 madt_result를 직접 구성해 그대로
-    // 넘긴다(AP 기동 루프는 cpu_count=1이라 아무 것도 더 하지 않는다).
-    arch_x86_64::madt_result effective = madt;
-    if (!madt_ok) {
-        effective.cpu_count = 1;
-        effective.apic_ids[0] = arch_x86_64::lapic_id();
-    }
-    arch_x86_64::bring_up_aps(effective);
-    klog::printf("[smp] online_cpu_count=%u\n", arch_x86_64::online_cpu_count());
 }
 
 // handle_table(64 엔트리, 엔트리마다 intrusive_list 센티널 포함)은
@@ -361,6 +404,21 @@ __attribute__((target("sse2"))) void thread_fpu_b_entry() {
         klog::printf("[fpu] thread B iteration %d xmm0 preserved=%u\n", i, ok);
     }
     klog::printf("[fpu] thread B done all_preserved=%u\n", all_preserved);
+    sched::exit();
+}
+
+// M11(smp-fpu-bringup.md §M11, ADR-053) — preferred_node=1로 만든
+// 스레드는 g_run_queues[1]에 들어간다. 이 협조적 스케줄러는 여전히
+// BSP 한 코어만 sched::start()/yield()를 실행하므로(계획 §M11 재해석
+// — AP는 온라인 신호만 보내고 스케줄러에는 참여하지 않는다,
+// docs/done/smp-fpu-bringup-m10.md 참고), BSP 자신의 노드(전형적으로
+// 0)가 아닌 노드의 큐에 있는 이 스레드는 work-stealing(ADR-053)이
+// 실제로 동작해야만 실행된다 — MINICORE_QEMU_NUMA가 없으면(노드 1개)
+// preferred_node=1도 결국 노드 0으로 접히므로(1 % g_node_count) 이
+// 데모는 항상 실행되지만, "훔쳐옴"이 실제로 필요한지는 노드 개수에
+// 따라 달라진다.
+void thread_numa_node1_entry() {
+    klog::printf("[numa-sched] thread on preferred_node=1 ran (stolen if node_count>1)\n");
     sched::exit();
 }
 
@@ -738,6 +796,12 @@ object::thread* setup_initrun_process() {
         sched::create_kernel_thread(&thread_fpu_b_entry, object::priority_band::kernel, 0);
     klog::printf("[fpu] create_kernel_thread a=%u b=%u\n", fpu_a != nullptr, fpu_b != nullptr);
 
+    // M11(ADR-053) — preferred_node=1 고정. mm::node_count()가 1이면
+    // enqueue()가 1 % 1 = 0으로 접어 그냥 노드 0에 들어간다(무해).
+    object::thread* numa1 =
+        sched::create_kernel_thread(&thread_numa_node1_entry, object::priority_band::kernel, 1);
+    klog::printf("[numa-sched] create_kernel_thread node1=%u\n", numa1 != nullptr);
+
     bool ipc_ready = demo_ipc_setup();
     klog::printf("[ipc] setup ok=%u\n", ipc_ready);
 
@@ -785,6 +849,9 @@ object::thread* setup_initrun_process() {
     if (fpu_b != nullptr) {
         sched::enqueue(*fpu_b);
     }
+    if (numa1 != nullptr) {
+        sched::enqueue(*numa1);
+    }
     if (c != nullptr) {
         sched::enqueue(*c);
     }
@@ -828,8 +895,21 @@ extern "C" [[noreturn]] void kernel_main() {
     // FXSAVE/FXRSTOR를 실행하면 #UD.
     arch_x86_64::init_fpu();
 
-    uint64_t real_arch_data_addr = demo_mm();
-    demo_smp(real_arch_data_addr);
+    uint64_t real_arch_data_addr = dump_real_boot_info();
+    acpi_topology acpi = demo_acpi_lapic(real_arch_data_addr);
+
+    // M11(ADR-036/053) — sched::init()/demo_sched()보다 반드시 먼저다:
+    // scheduler.cpp의 work-stealing이 arch_current_node_id()로 "지금
+    // 코어가 속한 노드"를 물어보는데, 이 표를 먼저 채워 둬야 한다.
+    arch_x86_64::set_cpu_node_map(acpi.madt, acpi.srat);
+
+    demo_mm(acpi);
+
+    // M10(ADR-055) — mm::init()이 끝난 뒤에야 AP 커널 스택을 확보할 수
+    // 있다(bring_up_aps가 mm::alloc_pages를 쓴다).
+    arch_x86_64::bring_up_aps(acpi.madt);
+    klog::printf("[smp] online_cpu_count=%u\n", arch_x86_64::online_cpu_count());
+
     demo_object_model();
     demo_page_table();
     demo_sched();

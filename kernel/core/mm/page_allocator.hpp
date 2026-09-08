@@ -103,4 +103,13 @@ struct pool_stats {
 uint32_t node_count();
 pool_stats stats(uint32_t node);
 
+// M11(smp-fpu-bringup.md §M11, ADR-054) — ACPI SLIT(x86_64) 등에서 얻은
+// 노드 간 거리 행렬을 등록한다. distance[i*node_count+j] = 노드 i에서
+// 노드 j까지의 거리(값이 작을수록 가깝다, ACPI 관례상 로컬=10). 등록
+// 전까지 alloc_pages()의 노드 폴백은 M1~M10과 동일한 순서(노드 번호
+// 순 라운드로빈)를 그대로 쓴다 — 이 함수를 부르는 순간부터만 "가까운
+// 노드부터"(ADR-054) 순서로 바뀐다. node_count는 mm::node_count()와
+// 같아야 한다(다르면 무시하고 기존 순서를 유지).
+void set_node_distance(uint32_t node_count, const uint8_t* distance);
+
 }  // namespace mm
