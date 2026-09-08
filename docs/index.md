@@ -24,7 +24,7 @@
 | [scaffold-repo-skeleton.md](plan/scaffold-repo-skeleton.md) | 저장소 디렉토리·CMake 골격 생성 계획 (실행 완료, 결과는 done 참고) |
 | [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M8 전부 완료 — 결과는 done 참고) |
 | [smp-fpu-bringup.md](plan/smp-fpu-bringup.md) | M9(FPU/SIMD 컨텍스트 스위칭)~M11(다중 코어/NUMA 검증+락 순서 문서화) — AP 기동·IPI·TLB shootdown 포함, kernel-bootstrap.md 이후 계획 |
-| [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe, virtio-blk, FAT32, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순 |
+| [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순 |
 
 ## done — 완료 보고
 | 문서 | 설명 |

@@ -1,8 +1,9 @@
 # 실행 계획: 시스템 서버 로드맵 (M12~M20) — procsrv부터 로그인 후 셸까지
 
 **관련 결정**: [kernel-ipc-objects.md](../design/kernel-ipc-objects.md),
-[filesystem.md](../design/filesystem.md), [boot-and-drivers.md](../design/boot-and-drivers.md)
-(ADR-038~043·056·057), [security-model.md](../design/security-model.md),
+[filesystem.md](../design/filesystem.md)(ADR-018·044~050·058~059·065·
+080·099~103·**128**), [boot-and-drivers.md](../design/boot-and-drivers.md)
+(ADR-038~043·056·057·**129·130**), [security-model.md](../design/security-model.md),
 [registry-decisions.md](../design/registry-decisions.md)(ADR-060~064)
 
 **선행 완료 전제**: [kernel-bootstrap.md](kernel-bootstrap.md)(M1~M8)과
@@ -22,9 +23,23 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 `docs/spec/`에 각 마일스톤 착수 시점에 개별 작성한다(ADR-043이 이미
 이 방식을 명시한 선례).
 
-예외적으로 딱 하나, **OPEN-29(initrun 기동 매니페스트 형식)**는 아직
-미결정이라 M12 착수 전에 새 ADR로 해소해야 한다 — 그 외에는 새로
-결정할 것이 거의 없다.
+이 계획을 세우면서 예외가 넷 생겼다 — 전부 이번에 새 ADR로 미리
+해소해뒀다:
+
+- **OPEN-29**(initrun 기동 매니페스트 형식) — 아직 미결정, M12 착수
+  전에 새 ADR로 해소해야 한다(이 계획 자체는 아직 그 ADR을 쓰지
+  않았다 — M12 §선행 결정 필요 참고).
+- **ADR-128**(filesystem.md) — M16에 ext4를 추가하려면 FS마다 다른
+  "파일 신원"을 가리키는 공통 개념이 있어야 하는데(공유 모드 충돌
+  판별 등, ADR-101이 암묵적으로 요구해왔다) 지금까지 정의된 적이
+  없었다 — `fs_node_id`라는 불투명 식별자로 새로 정의했다.
+- **ADR-129**(boot-and-drivers.md) — ext4를 로드맵에 추가하면서
+  구현 범위(extent만, 저널 재생 없음, htree 미사용)를 명시적으로
+  좁혔다 — 안 그러면 M16 하나가 별도 프로젝트급이 된다.
+- **ADR-130**(boot-and-drivers.md) — M14에 PS/2·USB를 추가하려니
+  기존 ADR-038~041이 전부 PCIe 전용이라 USB(중첩 버스)와 PS/2(버스
+  아님, 고정 레거시 프로브)를 담을 자리가 없었다 — 입력 장치
+  클래스를 새로 정의했다.
 
 ## M12. procsrv 골격 — 프로세스 테이블·fork/exec·계정 모델·fd 진실 공급원
 
@@ -53,13 +68,24 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 - **목표**: M12의 두 번째 프로세스가 VFS 경유로 memfs에 파일을 쓰고
   다시 읽어 내용이 일치함을 확인한다.
 
-## M14. devmgr + PCIe 버스 열거
+## M14. devmgr + PCIe 버스 열거 + 입력 장치(PS/2·USB)
 
 - **구현**: [pcie.md](../spec/pcie.md), boot-and-drivers.md
   ADR-038~041(ECAM 설정공간 접근, devmgr 버스 열거, 핫플러그, 동적
-  드라이버 등록). 아직 실제 드라이버는 만들지 않는다 — 열거만.
+  드라이버 등록) — PCIe 열거 자체는 아직 스토리지/NIC/GPU 드라이버를
+  만들지 않는다(열거만). 여기에 새 **ADR-130**(입력 장치 로드맵)에
+  따라 두 입력 드라이버를 실제로 만든다:
+  - `servers/drivers/ps2` — devmgr 열거를 거치지 않는 고정 레거시
+    프로브(`0x60`/`0x64`), M17(콘솔/로그인)이 필요로 하는 키보드
+    입력의 1순위 경로.
+  - `servers/drivers/usb` — xHCI 컨트롤러(PCIe 장치로 발견)를
+    devmgr가 ADR-130이 새로 정의한 "중첩 버스 열거"로 다루고, 그
+    위에 최소 HID 클래스 드라이버를 얹는다.
 - **목표**: QEMU가 붙인 `virtio-blk`/`virtio-net`/`virtio-gpu` 각
-  장치의 벤더/클래스 ID를 devmgr가 읽어 로그로 남긴다.
+  장치의 벤더/클래스 ID를 devmgr가 읽어 로그로 남긴다. PS/2
+  드라이버는 QEMU 키 입력을 스캔코드로 수신해 로그로 남기고, USB HID
+  드라이버는 devmgr가 열거한 xHCI 포트 위의 HID 장치(QEMU
+  `-device usb-kbd` 등)를 인식했음을 로그로 남긴다.
 
 ## M15. virtio-blk 드라이버 — 첫 실제 유저 드라이버
 
@@ -69,13 +95,28 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 - **목표**: 알려진 패턴을 QEMU가 붙인 디스크 이미지에 블록 단위로
   쓰고 다시 읽어 일치함을 확인한다.
 
-## M16. FAT32 FS 서버 (ADR-057)
+## M16. FAT32 + ext4 FS 서버 (ADR-057, ADR-128, ADR-129)
 
-- **구현**: ADR-057(FAT32를 virtio-blk 검증 직후 착수하기로 이미
-  확정). `fs/fat32` 서버를 M15의 블록 드라이버 위에 올리고 M13의
-  VFS에 마운트 지점으로 연결한다.
-- **목표**: 호스트에서 미리 만든 FAT32 이미지의 파일을, 마운트 후
-  VFS 경유로 열어 내용을 읽어낸다.
+- **선행 결정**: [filesystem.md](../design/filesystem.md) ADR-128이
+  FS 서버 공통 프로토콜의 파일 신원 개념(`fs_node_id`)을 이미
+  정의했다 — FAT32는 첫 클러스터 번호로, ext4는 네이티브 inode
+  번호를 그대로 써서 합성한다. 새로 결정할 것 없이 그대로 구현만
+  하면 된다.
+- **구현**:
+  - `fs/fat32`(ADR-057, FAT32를 virtio-blk 검증 직후 착수하기로
+    이미 확정) — M15의 블록 드라이버 위에 올리고 M13의 VFS에 마운트
+    지점으로 연결한다.
+  - `fs/ext4`(**ADR-129**) — FAT32 다음 순서. v1 범위는 ADR-129가
+    이미 좁혀뒀다: extent 트리 기반 블록 매핑만, 저널(JBD2) 재생
+    없음(clean 저널만 마운트, 없으면 읽기전용/거부), htree 인덱스는
+    안 쓰고 디렉터리 블록 선형 스캔, 지원 안 하는
+    `feature_incompat`/`feature_ro_compat` 비트가 있으면 마운트
+    거부.
+- **목표**: 호스트에서 미리 만든 FAT32 이미지와, **정상 unmount(clean
+  저널)한 ext4 이미지** 양쪽에서 각각 파일을 마운트 후 VFS 경유로
+  열어 내용을 읽어낸다. 두 FS가 서로 다른 `fs_node_id` 매핑 전략을
+  쓰면서도 같은 VFS 프로토콜로 동시에 동작함을 확인하는 것이
+  ADR-128 설계가 실제로 성립함을 보여주는 핵심 검증이다.
 
 ## M17. 콘솔/TTY 드라이버 + 로그인 흐름
 
@@ -118,8 +159,8 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
   글루로 `syscall`/VFS(M13)/procsrv(M12) IPC에 연결한다(repo-layout.md
   §libc/userland).
 - **목표**: M17의 로그인 프롬프트를 통과하면 셸 프롬프트가 뜨고,
-  `ls`/`cat` 같은 기본 명령으로 M13(memfs)·M16(FAT32) 위의 파일을
-  조회할 수 있다 — **이 계획 전체의 최종 완료 기준**.
+  `ls`/`cat` 같은 기본 명령으로 M13(memfs)·M16(FAT32/ext4) 위의
+  파일을 조회할 수 있다 — **이 계획 전체의 최종 완료 기준**.
 
 ## 범위 밖 (M20 이후로 미룸)
 
@@ -132,6 +173,11 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
   **우선순위 승격·정책 서버**(ADR-025/027, ADR-051) — 메모리/스케줄러
   쪽 후속 정책 과제로, 이 계획은 "다중 프로세스 시스템이 최소한
   동작한다"는 수직 슬라이스에 집중한다.
+- **ext4 저널(JBD2) 재생/쓰기, htree 인덱스 활용, 64bit/metadata_csum/
+  encrypt 등 확장 기능**(ADR-129가 v1 범위에서 명시적으로 제외) —
+  필요성이 확인되면 별도 ADR.
+- **USB Mass Storage·USB 네트워크 어댑터 등 HID 이외의 USB 장치
+  클래스**(ADR-130이 명시적으로 제외) — 필요해지면 별도 ADR.
 - **aarch64 이식** — 여전히 x86_64 우선(ADR-009), 별도 계획.
 - **자동화 CI 파이프라인** — 이전 계획들과 동일하게 범위 밖.
 
