@@ -1,0 +1,12 @@
+# CMake 빌드 산출물
+build/
+build-*/
+
+# 에디터/IDE
+.vscode/
+.idea/
+*.swp
+
+# OS 잡파일
+.DS_Store
+Thumbs.db

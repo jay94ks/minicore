@@ -1,0 +1,38 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "x86_64-clang",
+      "displayName": "x86_64 / Clang (기본)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/x86_64-clang",
+      "toolchainFile": "${sourceDir}/toolchain/x86_64-clang.cmake",
+      "cacheVariables": { "MINICORE_ARCH": "x86_64" }
+    },
+    {
+      "name": "x86_64-gcc",
+      "displayName": "x86_64 / GCC (폴백)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/x86_64-gcc",
+      "toolchainFile": "${sourceDir}/toolchain/x86_64-gcc.cmake",
+      "cacheVariables": { "MINICORE_ARCH": "x86_64" }
+    },
+    {
+      "name": "aarch64-clang",
+      "displayName": "aarch64 / Clang (기본)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/aarch64-clang",
+      "toolchainFile": "${sourceDir}/toolchain/aarch64-clang.cmake",
+      "cacheVariables": { "MINICORE_ARCH": "aarch64" }
+    },
+    {
+      "name": "aarch64-gcc",
+      "displayName": "aarch64 / GCC (폴백)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/aarch64-gcc",
+      "toolchainFile": "${sourceDir}/toolchain/aarch64-gcc.cmake",
+      "cacheVariables": { "MINICORE_ARCH": "aarch64" }
+    }
+  ]
+}

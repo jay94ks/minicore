@@ -1,0 +1,7 @@
+# 서드파티/포팅 소스 submodule 등록 (ADR-022).
+# 실제 포팅 대상(libc, coreutils류, 셸 등)이 확정되면 여기에 추가한다.
+#
+# 예시:
+# [submodule "third_party/<project>"]
+#     path = third_party/<project>
+#     url  = https://example.org/<project>.git
