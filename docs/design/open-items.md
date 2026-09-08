@@ -13,7 +13,7 @@
 |---|---|---|---|
 | OPEN-32 | result/optional의 `[[nodiscard]]` 강제 여부 최종 확정 시점 | ADR-010, ADR-068, ADR-069 | [libk.md](libk.md) |
 | OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
-| OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스"의 정체성(procsrv 자신인지 별도 컴포넌트인지)과, 그것이 프로세스 트리의 새 루트가 되는 절차 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스" — procsrv 등 코어 서버가 아닌 **별도의 유저랜드 서비스 관리자 데몬**(정체성 확정, Linux systemd에 대응)이 프로세스 트리의 새 루트가 되는 구체적 절차·컴포넌트 이름·책임 범위 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
 
 ## 해결된 항목 (이력)
