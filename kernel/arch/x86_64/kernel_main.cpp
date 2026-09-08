@@ -4,7 +4,8 @@
 // docs/plan/kernel-bootstrap.md M1: QEMU 시리얼 콘솔에 "hello from
 // kernel" 출력. M2: boot_info(Multiboot2 태그 파싱) 파이프라인. M3:
 // mm(물리 페이지 할당자 + 슬랩 힙) 초기화·왕복 확인. M4: 핸들 테이블
-// (objects.md) + 페이지테이블 조작 API 왕복 확인.
+// (objects.md) + 페이지테이블 조작 API 왕복 확인. M5: 커널 스레드
+// 2개가 협조적으로 번갈아 실행됨을 확인.
 #include "boot_info.hpp"
 #include "boot_info_x86_64.hpp"
 #include "klog.hpp"
@@ -17,6 +18,7 @@
 #include <mm/slab.hpp>
 #include <object/handle_table.hpp>
 #include <object/kernel_objects.hpp>
+#include <sched/scheduler.hpp>
 
 // boot.S(_start32)가 부트로더 진입 시점의 EAX/EBX(Multiboot2 매직/info
 // 물리주소)를 저장해 둔 전역 변수. .boot.bss(저지대, 항등 매핑 유지)에
@@ -214,6 +216,57 @@ void demo_page_table() {
     klog::printf("[pgtbl] query after unmap: present=%u (expect 0)\n", q3.present);
 }
 
+// M5(scheduler.md §1~3) — 커널 스레드 2개가 yield()로 번갈아 실행됨을
+// 시리얼 로그로 확인한다(kernel-bootstrap.md M5의 완료 기준). 각
+// 스레드는 정해진 횟수만큼 돌고 나서 무한 hlt 루프로 들어간다 —
+// sched::start() 이후로는 커널 스레드들만 남고 kernel_main으로는
+// 돌아오지 않으므로, 이 데모의 마지막 스레드가 사실상 그 전까지
+// kernel_main이 하던 "idle" 역할을 이어받는다.
+constexpr int k_sched_demo_iterations = 3;
+
+void thread_a_entry() {
+    for (int i = 0; i < k_sched_demo_iterations; ++i) {
+        klog::printf("[sched] thread A iteration %d\n", i);
+        sched::yield();
+    }
+    klog::printf("[sched] thread A done\n");
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+void thread_b_entry() {
+    for (int i = 0; i < k_sched_demo_iterations; ++i) {
+        klog::printf("[sched] thread B iteration %d\n", i);
+        sched::yield();
+    }
+    klog::printf("[sched] thread B done\n");
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+[[noreturn]] void demo_sched() {
+    sched::init();
+
+    object::thread* a =
+        sched::create_kernel_thread(&thread_a_entry, object::priority_band::kernel, 0);
+    object::thread* b =
+        sched::create_kernel_thread(&thread_b_entry, object::priority_band::kernel, 0);
+    klog::printf("[sched] create_kernel_thread a=%u b=%u\n", a != nullptr, b != nullptr);
+
+    if (a != nullptr) {
+        sched::enqueue(*a);
+    }
+    if (b != nullptr) {
+        sched::enqueue(*b);
+    }
+
+    // 여기서부터는 절대 돌아오지 않는다 — 이후로는 위 스레드들 사이의
+    // yield()로만 제어가 옮겨간다.
+    sched::start();
+}
+
 }  // namespace
 
 extern "C" [[noreturn]] void kernel_main() {
@@ -223,8 +276,5 @@ extern "C" [[noreturn]] void kernel_main() {
     demo_mm();
     demo_object_model();
     demo_page_table();
-
-    for (;;) {
-        asm volatile("hlt");
-    }
+    demo_sched();
 }

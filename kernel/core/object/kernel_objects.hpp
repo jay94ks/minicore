@@ -36,6 +36,12 @@ struct thread {
     thread_sched_fields sched;
     address_space* owner_space = nullptr;
     list_hook run_queue_hook;  // scheduler.md의 run_queue(intrusive_list)가 M5부터 이 훅을 쓴다.
+
+    // 스레드가 실행 중이 아닐 때, 재개 시 이어서 실행할 지점의 스택
+    // 포인터(M5, kernel/core/sched). 값의 실제 의미(스택에 무엇이 쌓여
+    // 있는지)는 arch::context_switch(arch가 정의)만 알고 있다 — 이
+    // 필드 자체는 "불투명한 재개 지점"으로만 다뤄 arch 독립을 유지한다.
+    uint64_t context_rsp = 0;
 };
 
 }  // namespace object

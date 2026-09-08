@@ -9,11 +9,14 @@
 # 제공한다.
 # M4: page_table.cpp가 임의 주소공간(PML4)에 대한 매핑/해제/권한 변경
 # API를 제공한다.
+# M5: context_switch.S가 kernel/core/sched의 arch_context_switch 훅을
+# 제공한다.
 
 add_executable(minicore_kernel_x86_64
     boot/boot.S
     boot/paging_setup.cpp
     boot_info_x86_64.cpp
+    context_switch.S
     irq.cpp
     kernel_main.cpp
     klog_uart.cpp
