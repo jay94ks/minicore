@@ -11,7 +11,17 @@
 # 스크립트의 범위 밖이다 — 이 스크립트는 QEMU 개발 반복 전용이다.
 #
 # 환경 변수:
-#   MINICORE_QEMU_BIN   qemu-system-<arch> 실행파일 경로 (기본: PATH 탐색)
+#   MINICORE_QEMU_BIN     qemu-system-<arch> 실행파일 경로 (기본: PATH 탐색)
+#   MINICORE_QEMU_GDB=1   ADR-125: QEMU를 -S(즉시 정지)로 띄우고 GDB
+#                         스텁을 tcp::1234에 연다. 기본은 off — 켜면
+#                         GDB가 붙을 때까지 부팅이 멈추므로
+#                         smoke-test-x86_64.sh 같은 고정 타임아웃
+#                         자동화 경로와는 같이 쓰지 않는다. 다른
+#                         터미널에서 tools/debug-gdb.sh <arch>로 붙인다.
+#   MINICORE_QEMU_TRACE=1 ADR-125: 트리플폴트/예외 진단용 QEMU 트레이스
+#                         (-d cpu_reset,guest_errors,int)를 <빌드
+#                         디렉토리>/qemu-trace.log에 남긴다. 기본은
+#                         off — 로그량이 커 일반 부팅 경로에는 부담.
 
 set -euo pipefail
 
@@ -29,12 +39,21 @@ case "$ARCH" in
       exit 1
     fi
 
+    declare -a EXTRA_ARGS=()
+    if [[ "${MINICORE_QEMU_GDB:-0}" == "1" ]]; then
+      EXTRA_ARGS+=(-S -gdb tcp::1234)
+    fi
+    if [[ "${MINICORE_QEMU_TRACE:-0}" == "1" ]]; then
+      EXTRA_ARGS+=(-d cpu_reset,guest_errors,int -D "${BUILD_DIR}/qemu-trace.log")
+    fi
+
     exec "$QEMU_BIN" \
       -M q35 -m 256M \
       -no-reboot -no-shutdown -display none \
       -bios qboot.rom \
       -kernel "$KERNEL" \
-      -chardev stdio,id=char0,mux=off -serial chardev:char0
+      -chardev stdio,id=char0,mux=off -serial chardev:char0 \
+      "${EXTRA_ARGS[@]}"
     ;;
   aarch64)
     echo "aarch64 부트 스텁은 아직 없다 (docs/plan/kernel-bootstrap.md 범위 밖 — ADR-009 참고)" >&2

@@ -244,3 +244,46 @@ CMake·툴체인·저장소 레이아웃·서드파티 소스 관리에 관한 �
   - `kernel/core/freestanding_mem.cpp`는 임시 위치다 — M3(libk) 착수
     시 정식 위치(libk 또는 별도 컴파일러 지원 라이브러리)로 옮기는
     것을 검토한다(파일 자체 주석에도 명시).
+
+## ADR-125. 커널 디버깅 인프라: 디버그 심볼 상시 포함 + QEMU 진단 플래그는 opt-in 환경변수
+
+- **상태**: 확정 (2026-09-08)
+- **결정**:
+  1. `toolchain/common.cmake`의 `MINICORE_COMMON_COMPILE_OPTIONS`에
+     `-g`와 `-fno-omit-frame-pointer`를 조건 분기 없이 상시 추가한다
+     (release/최적화 빌드 프리셋 자체가 아직 없으므로 지금은 켜고 끄고를
+     구분할 대상이 없다 — 그런 프리셋이 생기면 그때 그 프리셋에서만
+     빼는 후속 결정을 한다). `-fno-omit-frame-pointer`는
+     [boot-and-drivers.md ADR-126](boot-and-drivers.md)의 패닉 스택
+     백트레이스가 rbp/x29 프레임 체인을 걷는 전제 조건이다.
+  2. `tools/run-qemu.sh`에 두 개의 opt-in 환경변수를 추가한다 —
+     기본값(미설정)에서는 기존 동작과 완전히 동일하다:
+     - `MINICORE_QEMU_GDB=1`: QEMU에 `-S -gdb tcp::1234`를 추가해
+       CPU를 즉시 정지시키고 GDB 스텁을 연다. 별도 터미널에서 새로
+       만든 `tools/debug-gdb.sh <arch>`로 붙는다(같은 커널 ELF를
+       심볼과 함께 그대로 읽는다 — 1번 결정 덕분에 별도 준비 불필요).
+     - `MINICORE_QEMU_TRACE=1`: `-d cpu_reset,guest_errors,int -D
+       <빌드 디렉토리>/qemu-trace.log`를 추가해 트리플폴트·CPU 리셋·
+       (아직 IDT는 없지만 이후를 대비한) 인터럽트 이벤트를 파일로
+       남긴다.
+- **근거**: `tools/smoke-test-x86_64.sh`는 고정 타임아웃(15초) 뒤 QEMU를
+  강제 종료해 로그를 검사하는 완전 자동화 경로다 — `-S`로 QEMU가 GDB를
+  기다리며 멈추면 이 경로는 항상 타임아웃 실패로 깨진다. 그래서 GDB
+  스텁은 기본 off인 opt-in이어야 한다. 트레이스 로그도 이벤트가 많으면
+  파일이 커지고 매 부팅마다 남길 이유가 없어 같은 opt-in 패턴을 따른다.
+  `-g`는 QEMU의 PVH ELF Note 직접 부팅 경로(ADR-114)가 표준 섹션만
+  로드하고 디버그 섹션(`.debug_*`)은 그냥 무시하므로 부팅 동작에
+  영향이 없다 — 상시 켜 둬도 손해가 없고, 껐다 켰다 할 대상(release
+  빌드)이 아직 없으므로 조건부로 만들 이유도 없다. 실제로 `-g`/
+  `-fno-omit-frame-pointer` 추가 후 `smoke-test-x86_64.sh`를 재실행해
+  기존 M1~M8 전체 검증 문자열이 그대로 통과함을 확인했다.
+- **영향**:
+  - 이후 release/최적화 빌드 프리셋이 생기면, 그 프리셋에서 `-g`를
+    빼거나 별도 `objcopy --strip-debug` 단계를 추가할지는 그 시점의
+    새 ADR 대상이다 — 이 ADR은 "지금은 상시 포함"만 확정한다.
+  - `tools/debug-gdb.sh`는 호스트에 (크로스가 아닌) 일반 `gdb`가 있고
+    x86_64 타깃을 지원한다는 전제로 만들었다 — 이 개발 머신에서
+    `gdb`(mingw64 배포판) 존재만 확인했고, 실제 브레이크포인트·소스
+    라인 스테핑까지 왕복 검증하지는 않았다(`-S -gdb tcp::1234`로
+    QEMU가 올바르게 멈춰 대기하는 것과, 그 상태에서 커널이 정상
+    부팅 로그를 낸다는 것만 확인했다).

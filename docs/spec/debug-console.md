@@ -1,6 +1,6 @@
 # 디버그 콘솔 스펙 (Debug Console)
 
-**관련 결정**: ADR-007, ADR-037
+**관련 결정**: ADR-007, ADR-037, ADR-125, ADR-126
 **관련 계획**: [kernel-bootstrap.md](../plan/kernel-bootstrap.md) M1
 
 ## 1. 목적
@@ -54,7 +54,60 @@ namespace klog {
 `DEBUG`/`INFO`/`WARN`/`ERROR`/`PANIC` 등 자유롭게 정의하며, 이 스펙은
 형식을 강제하지 않고 §3의 원시 출력 API만 규정한다.
 
-## 5. kernel-bootstrap.md M1과의 관계
+## 5. 패닉 시 스택 백트레이스 (ADR-126)
+
+`libk_detail::panic_hook`(§3의 `LIBK_PANIC` 매크로가 부르는 훅,
+`kernel/core/panic.cpp`)은 `[PANIC] file:line: msg`를 찍은 뒤 스택
+백트레이스를 함께 남긴다:
+
+```
+[PANIC] kernel/core/mm/page_allocator.cpp:273: mm::alloc_pages called before mm::init
+[PANIC] backtrace:
+  #0 0xffffffff8010adf4
+  #1 0xffffffff80110f72
+  #2 0xffffffff801102b9
+  ...
+```
+
+- rbp(x86_64)/x29(aarch64) 프레임포인터 체인을 최대 16단까지 걸어
+  return address만 raw hex로 출력한다. **함수명은 커널 안에서
+  해석하지 않는다** — 빌드 호스트에서
+  `llvm-addr2line -e <kernel.elf> <addr>` 또는
+  `llvm-symbolizer -e <kernel.elf>`로 사후 변환한다. `<kernel.elf>`는
+  `build/<arch>-clang/kernel/arch/<arch>/minicore_kernel_<arch>.elf`
+  (ADR-125로 항상 `-g` 포함, strip 안 함).
+- 이 백트레이스가 유효하려면 프레임포인터가 보존돼야 한다 —
+  `toolchain/common.cmake`가 모든 컴파일 단위에 `-fno-omit-frame-pointer`를
+  상시 적용한다(ADR-125).
+- CPU 레지스터 전체 덤프(GPR)는 아직 없다 — IDT/예외 핸들러가 생기는
+  시점(M9 이후)에 별도로 다룬다(ADR-126 근거 참고).
+- 스택 자체가 손상된 경우(더블 폴트 등) 체인이 중간에 끊기거나
+  무의미할 수 있다 — 이 경우는 §6의 GDB 원격 디버깅으로 직접
+  들여다본다.
+
+## 6. GDB 원격 디버깅 (ADR-125)
+
+`tools/run-qemu.sh`에 `MINICORE_QEMU_GDB=1`을 주면 QEMU가 CPU를 즉시
+정지시킨 채(`-S`) `tcp::1234`에 GDB 스텁을 연다. 기본(미설정)은 기존과
+동일하게 즉시 부팅하므로, `tools/smoke-test-x86_64.sh` 같은 고정
+타임아웃 자동화 경로와는 이 변수를 같이 쓰지 않는다.
+
+```
+# 터미널 1
+MINICORE_QEMU_GDB=1 tools/run-qemu.sh x86_64
+
+# 터미널 2
+tools/debug-gdb.sh x86_64
+```
+
+`debug-gdb.sh`는 같은 커널 ELF를 심볼과 함께(ADR-125로 항상 `-g`)
+그대로 읽어 `target remote :1234`로 붙는다 — 소스 라인 브레이크포인트,
+`step`/`next`, 지역변수 조회가 gdb가 지원하는 그대로 된다. 또한
+`MINICORE_QEMU_TRACE=1`을 주면 트리플폴트/CPU 리셋/인터럽트 이벤트를
+`<빌드 디렉토리>/qemu-trace.log`에 남긴다 — 원인 불명의 hang을
+살펴볼 때 GDB 붙이기 전에 먼저 확인하기 좋다.
+
+## 7. kernel-bootstrap.md M1과의 관계
 
 M1의 완료 기준("QEMU에서 시리얼 포트로 hello from kernel 출력")은 곧
 이 스펙 §2~3의 최소 구현 완료 기준과 같다. M1을 구현하는 순서는:
@@ -68,5 +121,8 @@ M1의 완료 기준("QEMU에서 시리얼 포트로 hello from kernel 출력")�
 
 - 인터럽트 기반 비동기 로깅 — 현재는 폴링/블로킹만 규정한다. 필요성이
   확인되면 후속 결정으로 추가한다.
-- 커널 패닉 시 로그 출력·스택 덤프·시스템 정지 절차는 별도 스펙(추후)
-  대상이다.
+- 커널 이미지에 심볼 테이블을 직접 임베딩해 패닉 시점에 함수명까지
+  바로 보여주는 것(§5는 raw 주소만 출력하고 `llvm-symbolizer` 사후
+  변환에 의존한다, ADR-126) — 필요성이 확인되면 별도 ADR 대상이다.
+- 예외/인터럽트 핸들러(IDT) 도입 시점의 CPU 레지스터 전체 덤프(GPR) —
+  M9 이후 범위(ADR-126 근거 참고).

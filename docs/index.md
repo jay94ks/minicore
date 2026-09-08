@@ -7,7 +7,7 @@
 |---|---|
 | [boot.md](spec/boot.md) | 커널 진입점(Multiboot2/UEFI/FDT), boot_info 구조체(NUMA 토폴로지 포함), initrd 포맷, initrun 전달 |
 | [ipc.md](spec/ipc.md) | Call/Reply·Notification 시스템 콜, message 구조, 도네이션 우선순위, 에러 코드 |
-| [debug-console.md](spec/debug-console.md) | 커널 내장 시리얼(16550/PL011) 디버그 로깅 경로, klog API |
+| [debug-console.md](spec/debug-console.md) | 커널 내장 시리얼(16550/PL011) 디버그 로깅 경로, klog API, 패닉 시 스택 백트레이스, QEMU GDB 원격 디버깅 |
 | [pcie.md](spec/pcie.md) | ECAM/레거시 설정공간 접근, devmgr 버스 열거, 핫플러그, PnP 드라이버 등록 |
 | [objects.md](spec/objects.md) | 핸들 테이블, 프록시 트리, 핸들 전달·cascade revoke 절차 |
 | [memory.md](spec/memory.md) | 노드별/코어별 페이지 할당자, 커널 힙(슬랩), 프로세스 쿼터 |

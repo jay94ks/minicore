@@ -23,12 +23,17 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 # 없어 <cstdint>/<cstddef>/<cstdarg>가 어디에도 없다 — 자체 shim으로
 # 보강한다(ADR-113, OPEN-48). 컴파일러 내장 헤더보다 먼저 탐색되어야
 # 하므로 -isystem으로 추가한다.
+# ADR-125: 디버그 심볼(-g)은 release 빌드 개념이 아직 없으므로 조건
+# 분기 없이 상시 포함한다. -fno-omit-frame-pointer는 ADR-126의 패닉
+# 스택 백트레이스가 rbp/x29 프레임 체인을 걷는 전제 조건이다.
 set(MINICORE_COMMON_COMPILE_OPTIONS
     -ffreestanding
     -fno-exceptions
     -fno-rtti
     -fno-stack-protector
     -fno-pic
+    -g
+    -fno-omit-frame-pointer
     -isystem ${CMAKE_CURRENT_LIST_DIR}/freestanding-cxx
     -Wall
     -Wextra
