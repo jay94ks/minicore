@@ -1,6 +1,6 @@
 # 설정 리포지터리(레지스트리) 스펙
 
-**관련 결정**: ADR-006, ADR-011, ADR-060~064
+**관련 결정**: ADR-006, ADR-011, ADR-060~064, ADR-074
 **관련 설계**: [repo-layout.md](../design/repo-layout.md) (`servers/cfgsrv`)
 **관련 스펙**: [ipc.md](ipc.md) (전송 계층), [objects.md](objects.md) (`trusted` 프로세스),
 [vfs-layout.md](vfs-layout.md) (VFS와는 완전히 분리됨을 대조 확인)
@@ -155,7 +155,9 @@ struct address_space_trust_fields {
   아직 존재하지 않음)에서 대상이 `trusted`이면 무조건 거부해야 한다
   — 이는 그런 syscall이 나중에 추가될 때 지켜야 할 선제적 제약이다.
 - `trusted` 플래그를 설정할 수 있는 권한(누가, 언제 부여하는지)은
-  아직 정하지 않았다. → **미결정 (OPEN-30)**
+  [security-model.md](../design/security-model.md)의 ADR-074가 정한다 —
+  커널→initrun(무조건) → initrun→cfgsrv(기동 시, 위임 캐패빌리티 사용)
+  순서의 위임 체인이다.
 - 스왑 서브시스템이 생기면 `trusted` 프로세스의 페이지는 스왑
   금지 대상이 되어야 한다(ADR-063 영향 항목, 아직 스왑 자체가 미설계).
 
@@ -170,9 +172,11 @@ struct address_space_trust_fields {
 
 ## 아직 정하지 않은 것
 
-- **OPEN-30**: `trusted` 프로세스 플래그의 발급 권한·절차.
-- `owner_uid`/`group_gid` 발급 주체 — procsrv의 사용자 계정 모델
-  설계와 함께 정한다.
+- `owner_uid`/`group_gid`는 [security-model.md](../design/security-model.md)
+  ADR-079의 `user_account`/`group_account`(각각 `@global/system/users`,
+  `@global/system/groups` 테이블에 저장)가 발급 주체다 — 이 두 테이블
+  자체를 registry.md의 §1~3 형식으로 구체적으로 스키마화하는 작업은
+  아직 여기 반영되지 않았다(다음 registry.md 갱신 대상).
 - `special_bits`(§3)의 정확한 의미 — setuid류 확장이 실제로
   필요해지는 시점에 정의한다.
 - 변경 알림(레지스트리의 `RegNotifyChangeKeyValue`류) 지원 여부 —

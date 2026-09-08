@@ -15,6 +15,8 @@
 | [cxx-conventions.md](spec/cxx-conventions.md) | 언어 부분집합, snake_case+`_interface` 네이밍, libk 구성 요소 |
 | [vfs-layout.md](spec/vfs-layout.md) | 런타임 VFS 디렉토리 트리, 경로별 소유 서버, POSIX 경로 호환 전략 |
 | [registry.md](spec/registry.md) | 설정 리포지터리(cfgsrv): 스키마/테이블 주소 체계, 권한 모델, 전용 IPC 프로토콜, 비밀 데이터 보호 |
+| [virtual-memory-layout.md](spec/virtual-memory-layout.md) | 아키텍처별 커널 가상메모리 레이아웃: physmap/스택/이미지 영역 주소, 부팅 시 페이지테이블 구성 순서 |
+| [procsrv.md](spec/procsrv.md) | 프로세스 서버: 프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원 프로토콜, 계정 생성·로그인·session_program 프로토콜 (에스컬레이션/su·sudo/쿼터/콘솔 연동은 후속) |
 
 ## plan — 실행 계획 (실행 전)
 | 문서 | 설명 |
@@ -26,6 +28,7 @@
 | 문서 | 설명 |
 |---|---|
 | [scaffold-repo-skeleton.md](done/scaffold-repo-skeleton.md) | 저장소 스캐폴딩 실행 결과 및 크로스 툴체인 부재 검증 한계 |
+| [toolchain-setup.md](done/toolchain-setup.md) | Clang/LLVM 크로스 툴체인 설치 및 x86_64/aarch64 CMake 프리셋 구성 검증 |
 
 ## design — 설계/상세
 
@@ -33,7 +36,7 @@
 
 | 문서 | 설명 |
 |---|---|
-| [design/index.md](design/index.md) | **설계 문서 전체 목록** — 주제별로 분리된 ADR 파일(ADR-001~065)과 미결정 항목, repo-layout.md 안내 |
+| [design/index.md](design/index.md) | **설계 문서 전체 목록** — 주제별로 분리된 ADR 파일(ADR-001~107)과 미결정 항목, repo-layout.md 안내 |
 
 ## remind — 기억 사항
 | 문서 | 설명 |

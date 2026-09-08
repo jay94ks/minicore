@@ -1,8 +1,10 @@
 # 메모리 관리 스펙
 
-**관련 결정**: ADR-010, ADR-012, ADR-024, ADR-033, ADR-036
+**관련 결정**: ADR-010, ADR-012, ADR-024, ADR-033, ADR-036, ADR-078, ADR-104~108
 **관련 설계**: [repo-layout.md](../design/repo-layout.md) (`kernel/core/mm`)
-**관련 스펙**: [boot.md](boot.md) §3(`memory_region`, `numa_node_count`, `cpu_node_map`)
+**관련 스펙**: [boot.md](boot.md) §3(`memory_region`, `numa_node_count`, `cpu_node_map`),
+[virtual-memory-layout.md](virtual-memory-layout.md) §5(`phys_to_virt`/`virt_to_phys`),
+[ipc.md](ipc.md) §7(메모리 압박 Notification, ADR-107)
 
 이 문서는 물리 페이지 할당자, 커널 힙, 프로세스 메모리 쿼터를
 구현 가능한 수준으로 정의한다. ADR-012(전통적 슬랩/페이지 할당자),
@@ -44,6 +46,9 @@ struct per_node_pool {
     page_frame* free_lists[k_max_order + 1];   // buddy 자유 목록, order별
     uint64_t    total_bytes;
     uint64_t    free_bytes;
+    uint64_t    reserved_bytes;   // ADR-104 — 스왑/장치 IO 전용 예약분,
+                                    // 일반 alloc_pages는 침범 불가 (기본 10%,
+                                    // @global/system/memory의 reserve_percent로 조정)
 };
 
 struct per_cpu_cache {
@@ -54,6 +59,11 @@ struct per_cpu_cache {
 per_node_pool  g_node_pools[k_max_numa_nodes];   // ADR-034/036
 per_cpu_cache  g_cpu_caches[k_max_cpus];          // ADR-033
 ```
+
+`page_frame.physical_address`는 순수 물리주소이며, 커널이 그 내용을
+실제로 읽거나 쓰려면 [virtual-memory-layout.md](virtual-memory-layout.md)
+§5의 `phys_to_virt()`(ADR-078의 물리 다이렉트맵 오프셋 덧셈)를 거쳐야
+한다 — `page_frame`에 가상주소 필드를 별도로 두지 않는다.
 
 ## 3. 초기화
 
@@ -70,10 +80,17 @@ enum class alloc_error : uint32_t {
     out_of_memory,
     quota_exceeded,
     invalid_node,
+    try_again,   // ADR-106 — 논블로킹 요청이 즉시 충족 불가, 회수(ADR-105) 시도 중
+};
+
+enum class alloc_flags : uint32_t {
+    none            = 0,
+    blocking        = 1 << 0,  // ADR-106 — 명시하지 않으면 논블로킹이 기본값
+    allow_reserve   = 1 << 1,  // ADR-104 — SWAPFS 등 예약분 접근 전용 호출자만 사용
 };
 
 // preferred_node: 요청자의 선호 노드 (scheduler.md의 thread.preferred_node에서 옴, ADR-036)
-result<uint64_t, alloc_error> alloc_pages(uint32_t order, uint32_t preferred_node, handle owner_process);
+result<uint64_t, alloc_error> alloc_pages(uint32_t order, uint32_t preferred_node, handle owner_process, alloc_flags flags = alloc_flags::none);
 void free_pages(uint64_t physical_address, uint32_t order, handle owner_process);
 ```
 
@@ -83,15 +100,24 @@ void free_pages(uint64_t physical_address, uint32_t order, handle owner_process)
    있으면 거기서 즉시 반환한다(락 없음).
 2. 그 외의 경우 `owner_process`의 쿼터(§5)를 먼저 확인한다 — 초과 시
    `alloc_error::quota_exceeded`.
-3. `preferred_node`의 `per_node_pool.lock`을 잡고 buddy 분할로 할당한다.
-4. 3단계가 실패하면(해당 노드 고갈) **거리가 가까운 노드부터 순차로
-   자동 폴백**한다(ADR-054) — 노드 간 거리 행렬은 §3에서 확보한
-   ACPI SLIT/FDT distance-map 정보를 사용하며, 토폴로지 정보가 없는
-   환경(노드 1개)에서는 이 단계가 자명하게 스킵된다. 모든 노드가
-   실패해야 `alloc_error::out_of_memory`를 반환한다. 폴백으로 할당된
-   페이지는 요청 스레드의 `preferred_node`와 다른 노드에 있을 수
-   있다는 점을 호출자가 감안해야 한다.
-5. `order == 0` 할당이 반복적으로 같은 코어에서 일어나면 `per_cpu_cache`
+3. `preferred_node`의 `per_node_pool.lock`을 잡고 buddy 분할로 할당한다
+   — `flags`에 `allow_reserve`가 없으면 `reserved_bytes`(ADR-104)를
+   침범하는 할당은 이 단계에서 실패로 취급한다.
+4. 3단계가 실패하면(해당 노드 고갈, 또는 예약분 침범) **거리가 가까운
+   노드부터 순차로 자동 폴백**한다(ADR-054) — 노드 간 거리 행렬은
+   §3에서 확보한 ACPI SLIT/FDT distance-map 정보를 사용하며, 토폴로지
+   정보가 없는 환경(노드 1개)에서는 이 단계가 자명하게 스킵된다.
+   폴백으로 할당된 페이지는 요청 스레드의 `preferred_node`와 다른
+   노드에 있을 수 있다는 점을 호출자가 감안해야 한다.
+5. 모든 노드가 실패하면: `flags`에 `blocking`이 없으면(기본값)
+   [kernel-memory.md](../design/kernel-memory.md) ADR-105의 회수
+   절차(캐시 회수 → 최저 우선순위 프로세스 스왑 아웃)를 트리거만 해
+   두고 **즉시 `alloc_error::try_again`을 반환**한다(ADR-106 — 대기
+   하지 않는다, 재시도는 호출자 책임). `blocking`이 있으면 회수가
+   충분히 진행되어 재시도가 성공하거나 완전히 불가능하다고 판단될
+   때까지 블록한 뒤 `out_of_memory`를 반환한다(정확한 블로킹 상한은
+   ADR-106 §영향에서 후속 결정 대상).
+6. `order == 0` 할당이 반복적으로 같은 코어에서 일어나면 `per_cpu_cache`
    보충(refill)이 일어난다 — 캐시가 `k_per_cpu_cache_limit`의 절반
    이하로 떨어지면 노드 풀에서 그만큼 가져온다.
 
@@ -159,3 +185,12 @@ void  slab_free(void* ptr, size_t size);
 - 노드 간 거리 행렬을 어떤 자료구조로 커널 내부에 보관할지(인접
   행렬 vs 정렬된 이웃 목록)는 구현 시 정한다.
 - 새 프로세스의 기본 쿼터 크기, 슬랩 크기 클래스 목록의 최종 확정.
+- "캐시"의 정확한 정의·소유자와 회수 트리거 워터마크
+  ([kernel-memory.md](../design/kernel-memory.md) ADR-105 §영향).
+- `blocking` 플래그의 정확한 대기 상한(타임아웃 유무) — ADR-106 §영향.
+- `allow_reserve`를 사용할 수 있는 호출자를 구분하는 정확한 방식
+  (별도 caller 식별 vs 권한 검사) — ADR-104 §영향.
+- 메모리 압박 Notification(ADR-107)을 받을 프로세스 선정 기준과
+  libc/할당자 쪽 처리 방식.
+- 스왑 아웃 압축(ADR-108)의 "스케줄링 빈도" 측정 방식(OPEN-46)과
+  압축·해제 루틴의 구현 위치(OPEN-47).

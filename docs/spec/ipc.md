@@ -1,7 +1,7 @@
 # IPC 스펙
 
-**관련 결정**: ADR-004, ADR-011, ADR-013, ADR-014, ADR-015, ADR-023, ADR-028, ADR-029
-**관련 설계**: [repo-layout.md](../design/repo-layout.md)
+**관련 결정**: ADR-004, ADR-011, ADR-013, ADR-014, ADR-015, ADR-023, ADR-028, ADR-029, ADR-084
+**관련 설계**: [repo-layout.md](../design/repo-layout.md), [security-model.md](../design/security-model.md) (`badge`를 통한 신원 전파, ADR-084)
 
 ## 1. 개요
 
@@ -34,9 +34,11 @@
 | `sys_notify` | `handle`, `u64 bits` | `void` | 대상 비트셋에 OR, 실패 없음 |
 | `sys_wait` | `handle` | `u64` | 비트셋이 0이 아니면 즉시 반환 후 원자적 clear, 0이면 블록 |
 
-- `badge`는 호출자를 식별하는 값으로, 엔드포인트 프록시 발급 시 커널이
-  부여한 식별자다(서버가 "누가 호출했는지" 구분하는 용도, ADR-023의 프록시
-  체계와 연동).
+- `badge`는 호출자를 식별하는 값으로, 엔드포인트 프록시 발급 시 정해지는
+  식별자다(서버가 "누가 호출했는지" 구분하는 용도, ADR-023의 프록시
+  체계와 연동). 정확한 부여·상속 규칙(재위임 시 불변)은
+  [objects.md](objects.md) §3, procsrv가 신원 정보를 직접 인코딩하는
+  방식은 [security-model.md](../design/security-model.md) ADR-084를 참고.
 - `sys_reply`는 대응하는 `sys_recv`가 없는 상태에서 호출되면 아무 동작도
   하지 않는다(오류 아님 — 단일 스레드가 반드시 recv→reply 순서로 쓴다는
   전제하의 단순화; 잘못된 사용은 상위 계층의 버그로 취급).

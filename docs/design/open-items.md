@@ -3,7 +3,7 @@
 [← 설계 문서 색인](index.md)
 
 모든 카테고리 파일에 흩어진 미결정 항목을 한 곳에 모은 문서. 새
-미결정 항목은 다음 번호(`OPEN-31`부터)로 여기에 추가하고, 해당
+미결정 항목은 다음 번호(`OPEN-48`부터)로 여기에 추가하고, 해당
 결정을 다루는 카테고리 파일에도 같은 번호로 언급한다. 해결되면
 `~~OPEN-N~~`으로 취소선 처리하고 해결한 ADR 번호를 적는다.
 
@@ -12,12 +12,29 @@
 | ID | 내용 | 관련 ADR | 다루는 문서 |
 |---|---|---|---|
 | OPEN-29 | initrun 기동 매니페스트 형식(서버 실행 순서·인자 기술 방법) | ADR-017, ADR-030 | [boot-and-drivers.md](boot-and-drivers.md) |
-| OPEN-30 | trusted 프로세스 플래그 발급 권한·절차 | ADR-063 | [registry-decisions.md](registry-decisions.md) |
+| OPEN-32 | result/optional의 `[[nodiscard]]` 강제 여부 최종 확정 시점 | ADR-010, ADR-068, ADR-069 | [libk.md](libk.md) |
+| OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성 자체는 ADR-096으로 이미 해결됨 | ADR-093, ADR-096 | [security-model.md](security-model.md) |
+| OPEN-43 | 콘솔 드라이버 상세 프로토콜(문자 버퍼 형식, 프레임버퍼 글리프 렌더링, TTY 전환 키 조합 등) | ADR-097 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-46 | "최근 스케줄링 빈도" 측정·기록 방식(스왑 압축 대상 선정용) | ADR-108 | [kernel-memory.md](kernel-memory.md) |
+| OPEN-47 | 스왑 압축·해제 루틴의 정확한 구현 위치(커널 내부 vs SWAPFS 서버) | ADR-108 | [kernel-memory.md](kernel-memory.md) |
 
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-44~~ | SWAPFS 압박 상황이 물리 메모리 할당자·정책 서버 쿼터에 어떻게 반영되는지 | ADR-104, ADR-105, ADR-106, ADR-107 |
+| ~~OPEN-45~~ | 파일 잠금의 범위(파일 전체만 vs `fcntl`류 바이트 범위 잠금까지) | ADR-102 |
+| ~~OPEN-39~~ | 로그인 프롬프트 프로세스와 실제 콘솔/tty 드라이버의 연결 방식, 다중 콘솔 기동 방식 | ADR-097, ADR-098 |
+| ~~OPEN-41~~ | 신원 위임의 승인 타임아웃 재조정 규칙(시스템 전역·위임자 개인 설정) | ADR-095 |
+| ~~OPEN-40~~ | sudoers류 승인 정책(대상 계정 자격 증명 없이 정책만으로 su/sudo 허가하는 방식) | ADR-093 |
+| ~~OPEN-30~~ | trusted 프로세스 플래그 발급 권한·절차 | ADR-074 |
+| ~~OPEN-31~~ | 다중 코어 실경합 시 spinlock(TTAS) 확장성, ticket/MCS 전환 필요성 | ADR-076 |
+| ~~OPEN-33~~ | libk 단위 테스트 전략(호스트 네이티브 vs QEMU 간접 검증) | ADR-077 |
+| ~~OPEN-34~~ | 아키텍처별 커널 가상메모리 레이아웃(higher-half 기준 주소, identity map 범위 등) | ADR-078 |
+| ~~OPEN-35~~ | procsrv 사용자 계정 모델(uid/gid 발급, ROOT/Supervisor 식별, 권한 상승 인증 수단) | ADR-079 |
+| ~~OPEN-36~~ | jail(J) 비트의 구체적 격리 메커니즘(VFS 루트 제한) | ADR-081 |
+| ~~OPEN-37~~ | jail/guest 상태에서 `/sys/proc`·`/sys/dev`·`/sys/live` 가시성 필터링 범위 | ADR-083 |
+| ~~OPEN-38~~ | super/root의 badge 붙은 핸들을 jail/guest에게 의도적으로 재위임하는 "confused deputy"류 경로 | ADR-085 |
 | ~~OPEN-1~~ | 구체적 아키텍처 조합과 1순위 타겟 | ADR-002, ADR-009 |
 | ~~OPEN-2~~ | C++ 언어 부분집합 정책 (예외/RTTI/STL 범위) | ADR-003, ADR-010 |
 | ~~OPEN-3~~ | IPC 메시지 전달 방식 | ADR-004, ADR-013 |

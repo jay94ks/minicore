@@ -1,7 +1,7 @@
 # 커널 객체·핸들 스펙
 
-**관련 결정**: ADR-011, ADR-012, ADR-016, ADR-023, ADR-027, ADR-029, ADR-032, ADR-063
-**관련 설계**: [repo-layout.md](../design/repo-layout.md) (`kernel/core/object`)
+**관련 결정**: ADR-011, ADR-012, ADR-016, ADR-023, ADR-027, ADR-029, ADR-032, ADR-063, ADR-074, ADR-084
+**관련 설계**: [repo-layout.md](../design/repo-layout.md) (`kernel/core/object`), [security-model.md](../design/security-model.md) (`trusted` 부여 절차, `badge` 신원 전파)
 **관련 스펙**: [ipc.md](ipc.md) §4(핸들 전달), §8(체인 정책)
 
 이 문서는 ADR-011이 정한 "프로세스당 단순 핸들 테이블" 모델과, ADR-023의
@@ -38,8 +38,23 @@ enum class object_kind : uint32_t {
 디버그 접근(메모리 읽기, ptrace류 attach)을 할 수 없다 — 커널이
 syscall 수준에서 무조건 거부한다. 이 프로젝트에는 아직 그런
 디버그 syscall 자체가 없으므로, 이는 향후 추가될 기능이 지켜야 할
-선제적 제약이다. `trusted`를 설정할 수 있는 권한·절차는 미정이다
-(**OPEN-30**, registry.md §6.2에서 cfgsrv 보호 용도로 처음 요구됨).
+선제적 제약이다. `trusted`를 설정할 수 있는 권한·절차는
+[security-model.md](../design/security-model.md)의 ADR-074가 정한다 —
+커널이 initrun의 address_space만 무조건 `trusted`로 생성하고,
+이후 initrun이 "trusted 부여 권한" 캐패빌리티를 사용해 필요한
+서버(cfgsrv 등)에 재부여한다. 이 권한의 정확한 캐패빌리티 표현
+(`rights` 비트 vs 별도 `object_kind`)은 프로세스 생성 syscall/서버
+API를 실제 설계하는 시점에 정한다.
+
+### 2.2 address_space의 `confinement_tier` 속성 (ADR-085)
+
+`address_space` 객체는 `confinement_tier`(`uint8_t`: `normal`=0,
+`guest`=1, `jail`=2) 필드를 갖는다. 프로세스 생성 시 정확히 한 번
+설정되며 이후 변경할 수 없다. `trusted`와 마찬가지로 이 값을
+`normal` 외의 값으로 설정할 수 있는 권한은 별도 캐패빌리티("confinement
+설정 권한")로 표현되며, 커널이 initrun에게 부여하고 initrun이
+procsrv에게 위임한다([security-model.md](../design/security-model.md)
+ADR-085). 이 필드는 §4의 handle_transfer 절차에서 직접 검사된다.
 
 ## 3. 핸들 테이블 항목과 프록시 트리 (ADR-023, ADR-032)
 
@@ -56,6 +71,8 @@ struct handle_entry {
                                    //  CAN_MOVE/CAN_MAP, ADR-029)
     void*       object;           // 커널 내부 포인터. 유저에게 절대 노출 안 함
     bool        valid;            // false면 철회된 상태 — 모든 연산이 실패
+    uint64_t    badge;             // endpoint 프록시에서만 의미 있음 (ADR-084).
+                                   // 소유 핸들은 항상 0.
 
     // 트리 메타데이터 (소유 핸들은 parent == nullptr)
     handle_entry* parent;
@@ -68,6 +85,13 @@ struct handle_entry {
 - `rights`는 프록시 생성 시 부모의 부분집합만 가질 수 있다(ADR-029) —
   즉 `child.rights == (parent.rights & requested_mask)`이고
   `requested_mask`가 `parent.rights`를 벗어나는 비트를 요구하면 거부된다.
+- `badge`는 **오직 "재위임 가능한 마스터" 캐패빌리티로부터 새로 배지가
+  붙은 프록시를 만드는 시점에만** 값이 정해진다(호출자가 지정) — 그
+  이후 그 프록시에서 다시 파생되는 모든 자손 프록시는 `rights`는
+  더 좁아질 수 있어도 **`badge`는 부모 것을 그대로 상속**하며 변경할
+  수 없다. `sys_recv`(ipc.md §3)가 반환하는 값이 바로 이 필드다 —
+  서버는 이 값으로 호출자를 구분한다(ADR-023 원 취지, ADR-084의
+  구체적 신원 인코딩 — `identity_badge`).
 - `depth = parent.depth + 1`이며, 소유 핸들의 `depth = 0`이다.
 
 ## 4. 핸들 전달 (ipc.md §4의 `handles[]` 처리 절차)
@@ -87,14 +111,23 @@ struct handle_entry {
    자체는 계속 진행 — 부분 실패는 수신자에게 `handle_count`가 실제보다
    적게 채워지는 방식으로 나타난다. 구체적인 부분 실패 보고 형식은
    구현 시 정한다).
-4. 순환 검사: `src_entry`가 이미 수신자 프로세스 소유의 노드에서 파생된
+4. **super badge의 jail/guest 유입 차단(ADR-085)**: `src_entry.badge`를
+   `identity_badge`(ADR-084)로 해석해 `flags`의 super 비트가 설정되어
+   있고, 수신 프로세스의 `address_space.confinement_tier`(§2.2)가
+   `guest` 또는 `jail`이면, 발신자가 누구든 이 핸들 전달만
+   `ipc_error::permission_denied`로 실패 처리한다(3단계와 동일한
+   부분 실패 방식). 이 검사는 `kind == endpoint`가 아닌 핸들(badge가
+   항상 0인 소유 핸들 등)에는 영향이 없다 — super 비트가 꺼진
+   badge(0 포함)는 항상 통과한다.
+5. 순환 검사: `src_entry`가 이미 수신자 프로세스 소유의 노드에서 파생된
    프록시라 하더라도(즉 왕복 위임) 새 프록시는 `src_entry`를 부모로
    하는 **새 노드**이므로 구조적으로 순환이 생기지 않는다(§6 참고) —
    따라서 이 단계에서는 깊이 검사만으로 충분하다.
-5. 수신자의 핸들 테이블에 새 `handle_entry`(kind, `new_rights`, 같은
-   `object` 포인터, `parent = src_entry`, `depth = src_entry.depth + 1`)를
-   할당하고, `src_entry.children`에 이 노드를 등록한다.
-6. 수신자 쪽 `message.handles[i].src_handle` 필드를 새로 할당된 핸들
+6. 수신자의 핸들 테이블에 새 `handle_entry`(kind, `new_rights`, 같은
+   `object` 포인터, `badge = src_entry.badge`(ADR-084, 변경 없이 상속),
+   `parent = src_entry`, `depth = src_entry.depth + 1`)를 할당하고,
+   `src_entry.children`에 이 노드를 등록한다.
+7. 수신자 쪽 `message.handles[i].src_handle` 필드를 새로 할당된 핸들
    번호로 **덮어써서** 반환한다 — 즉 이 필드는 송신 시엔 "무엇을
    보낼지", 수신 후엔 "무엇을 받았는지"를 담는 in/out 파라미터다.
 

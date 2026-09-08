@@ -83,3 +83,51 @@ CMake·툴체인·저장소 레이아웃·서드파티 소스 관리에 관한 �
     산출물도 커밋하지 않는다.
   - 저장소 스캐폴딩([repo-layout.md](repo-layout.md), [scaffold-repo-skeleton.md](../done/scaffold-repo-skeleton.md))에는
     변경이 필요 없다 — 애초에 툴체인 소스를 담은 디렉토리를 만든 적이 없다.
+
+## ADR-091. QEMU 기능 공백 대응: 필요하면 자체 fork로 보강, ADR-031과 동일하게 저장소 밖에서 관리
+
+- **상태**: 확정 (2026-09-08)
+- **결정**:
+  1. minicore 테스트/검증(kernel-bootstrap.md의 QEMU 부팅 검증,
+     `tools/run-qemu.sh`)에 필요한 에뮬레이션 기능이 upstream QEMU에
+     없거나(미구현), 구현될 계획이 없으면(로드맵에 없음), **"기본은
+     stock upstream QEMU를 쓴다"는 원칙에 대한 예외**로 QEMU를 fork해
+     필요한 구현을 직접 보강한다.
+  2. 기본값은 항상 **stock upstream QEMU**다 — fork는 특정
+     마일스톤/테스트를 실제로 막는 구체적 기능 공백이 확인되었을
+     때만 만든다. "나중에 필요할 수도 있어서" 미리 fork해두지 않는다.
+  3. fork는 **ADR-031의 크로스 툴체인과 동일한 원칙**을 따른다 —
+     minicore 저장소 안에 QEMU 소스를 vendoring(서브모듈 포함)하지
+     않는다. upstream QEMU를 fork한 **완전히 별도의 저장소**로
+     관리하며, 그 저장소를 별도로 clone/빌드해 저장소 밖(예:
+     `$HOME/.minicore/qemu-fork`)에 설치한다. `tools/run-qemu.sh`는
+     PATH 또는 설정 가능한 경로 변수로 그 결과물
+     (`qemu-system-x86_64`/`qemu-system-aarch64`)만 참조한다.
+  4. fork 저장소는 upstream QEMU를 주기적으로 추적(rebase/merge)하며,
+     minicore의 추가 구현은 식별 가능한 커밋/브랜치로 분리 유지한다 —
+     upstream이 나중에 같은 기능을 자체 구현하면 그 델타를 쉽게
+     제거할 수 있게 하기 위함이다.
+- **근거**: ADR-031이 이미 "minicore를 만드는/검증하는 도구"는
+  minicore의 산출물이 아니므로 저장소 밖에서 관리한다고 정했다 —
+  QEMU도 정확히 같은 범주다: minicore가 배포하거나 대상 하드웨어에서
+  실행하는 것이 아니라 개발 중 검증에만 쓰는 도구다. QEMU 소스 트리도
+  LLVM/GCC와 마찬가지로 커서, 저장소에 얽매이면 클론·CI 비용이
+  커진다는 점도 동일하다. ADR-022(포팅 소프트웨어의 서브모듈+패치
+  방식)를 쓰지 않는 이유는, 그 방식은 "minicore가 이식해서 **실행**
+  하는 대상 소프트웨어"를 위한 것이고 QEMU는 그 범주가 아니기
+  때문이다 — 또한 fork를 우리가 직접 소유하므로, 별도 패치 파일을
+  관리하는 것보다 fork 자체의 커밋 이력으로 변경을 추적하는 편이
+  더 간단하다.
+- **영향**:
+  - `tools/run-qemu.sh`(현재 스텁, [scaffold-repo-skeleton.md](../done/scaffold-repo-skeleton.md))가
+    실제로 작성되는 시점에 QEMU 바이너리 경로를 PATH 탐색 또는 캐시
+    변수로 해석하도록 구현해야 한다(ADR-031의 크로스 컴파일러
+    툴체인 파일과 동일한 패턴) — 지금은 정책만 정하며, 스크립트
+    자체는 아직 수정하지 않는다.
+  - fork가 실제로 필요해지는 시점(구체적 기능 공백이 확인되는
+    시점)에: (a) fork 저장소를 만들고, (b) 무엇이 왜 부족했는지·어떤
+    구현으로 보강했는지를 관련 설계 문서(예: [boot-and-drivers.md](boot-and-drivers.md)류)에
+    후속 ADR로 기록한다 — 이 ADR은 정책만 정할 뿐, 이 시점에 확인된
+    구체적 기능 공백은 없다.
+  - fork 저장소의 정확한 이름·호스팅 위치는 실제로 fork를 만드는
+    시점에 정한다.

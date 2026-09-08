@@ -1,7 +1,7 @@
 # 부팅 스펙 (Boot Specification)
 
-**관련 결정**: ADR-009, ADR-017, ADR-026, ADR-030
-**관련 설계**: [repo-layout.md](../design/repo-layout.md)
+**관련 결정**: ADR-009, ADR-017, ADR-026, ADR-030, ADR-074
+**관련 설계**: [repo-layout.md](../design/repo-layout.md), [security-model.md](../design/security-model.md) (§4의 trusted 부여)
 
 이 문서는 커널이 어떻게 진입되고, 무엇을 초기화하며, initrun에게 무엇을
 어떤 형태로 넘기는지를 구현 가능한 수준으로 정의한다.
@@ -15,6 +15,9 @@
 - GRUB 등 Multiboot2 로더가 32비트 보호모드로 진입 → `_start32`가 최소
   GDT 설정, 페이지테이블(항등 매핑 + higher-half) 구성 후 long mode로
   전환 → `_start64`(멀티부트 정보 포인터를 EBX/RDI로 전달받음)로 점프.
+  higher-half 페이지테이블(physmap/커널 스택/커널 이미지 영역)의
+  정확한 주소·구성 순서는 [virtual-memory-layout.md](virtual-memory-layout.md)
+  §2.1(ADR-078)에서 정의한다.
 - `_start64`가 Multiboot2 태그(memory map, module)를 파싱해 공통
   `boot_info`(§3)로 변환한다.
 
@@ -33,7 +36,9 @@
 - `_start`(아키텍처 진입 스텁)이 스택 설정 등 최소 초기화 후, 자체
   구현한 FDT 파서(ADR-006 — 서드파티 FDT 라이브러리 금지)가
   `/memory`, `/chosen`(initrd, bootargs) 노드를 읽어 `boot_info`(§3)로
-  변환한다.
+  변환한다. TTBR1 higher-half 페이지테이블(physmap/커널 스택/커널
+  이미지 영역) 구성 순서는 [virtual-memory-layout.md](virtual-memory-layout.md)
+  §4.1(ADR-078)에서 정의한다.
 
 ## 2. 소스별 → boot_info 변환 규칙
 
@@ -101,8 +106,15 @@ struct boot_info {
    페이지테이블, 물리 메모리 할당자·힙(ADR-012), 스케줄러(ADR-014).
 2. `boot_info.initrd_*`가 가리키는 영역을 initrd(§5)로 파싱.
 3. initrd에서 `"initrun"` 항목을 찾아 ELF로 로드 — 새 주소공간과
-   스레드를 생성한다(ADR-011 객체 모델).
-4. initrun 첫 스레드에게 `boot_info`를 전달(§6)하고 유저모드로 진입.
+   스레드를 생성한다(ADR-011 객체 모델). 이때 커널은 이 주소공간을
+   **무조건 `trusted = true`**로 생성한다(ADR-074) — initrun은 시스템의
+   유일한 최초 신뢰 루트이며, 다른 어떤 프로세스도 이렇게 자동으로
+   `trusted`를 받지 않는다.
+4. initrun 첫 스레드에게 `boot_info`를 전달(§6)하고, "trusted 부여
+   권한" 캐패빌리티([security-model.md](../design/security-model.md)
+   ADR-074)를 함께 쥐어준 뒤 유저모드로 진입시킨다 — initrun은 이후
+   자신이 기동하는 서버 중 신뢰 보호가 필요한 것(예: cfgsrv)에 한해
+   이 권한을 사용해 `trusted`를 재부여할 수 있다.
 
 ## 5. Initrd 포맷: MCPACK v1 (자체 구현, ADR-006)
 
