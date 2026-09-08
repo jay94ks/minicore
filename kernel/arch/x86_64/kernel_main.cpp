@@ -5,7 +5,8 @@
 // kernel" 출력. M2: boot_info(Multiboot2 태그 파싱) 파이프라인. M3:
 // mm(물리 페이지 할당자 + 슬랩 힙) 초기화·왕복 확인. M4: 핸들 테이블
 // (objects.md) + 페이지테이블 조작 API 왕복 확인. M5: 커널 스레드
-// 2개가 협조적으로 번갈아 실행됨을 확인.
+// 2개가 협조적으로 번갈아 실행됨을 확인. M6: 커널 스레드 2개 사이의
+// Call → Recv → Reply 왕복 확인.
 #include "boot_info.hpp"
 #include "boot_info_x86_64.hpp"
 #include "klog.hpp"
@@ -13,6 +14,7 @@
 
 #include <cstdint>
 
+#include <ipc/endpoint.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
 #include <mm/slab.hpp>
@@ -246,6 +248,99 @@ void thread_b_entry() {
     }
 }
 
+// M6(ipc.md §3~5) — 커널 스레드 2개(서버/클라이언트) 사이에
+// Call → Recv → Reply 왕복이 성공함을 시리얼 로그로 확인한다
+// (kernel-bootstrap.md M6의 완료 기준). 핸들 테이블 하나를 공유한다 —
+// M4 데모와 같은 이유(아직 프로세스/procsrv가 없어 스레드마다 별도
+// 테이블을 가질 이유가 없다)로 "커널 컨텍스트 하나"로 취급한다.
+object::handle_table* g_ipc_table = nullptr;
+object::handle g_ipc_recv_handle = object::k_invalid_handle;  // 서버용: CAN_RECV만
+object::handle g_ipc_send_handle = object::k_invalid_handle;  // 클라이언트용: CAN_SEND만 + 커스텀 badge
+
+constexpr uint64_t k_ipc_demo_badge = 0xCAFEull;
+
+bool demo_ipc_setup() {
+    g_ipc_table = create_handle_table();
+    if (g_ipc_table == nullptr) {
+        return false;
+    }
+
+    void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+    if (ep_mem == nullptr) {
+        return false;
+    }
+    auto* ep = new (ep_mem) object::endpoint();
+
+    auto owner = g_ipc_table->create_owner(
+        object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+    if (!owner.is_ok()) {
+        return false;
+    }
+
+    // 서버용: CAN_RECV만 남긴 프록시(ADR-029 — 원본 권한의 부분집합만).
+    auto recv_proxy =
+        g_ipc_table->create_proxy(owner.value(), object::k_right_can_recv, *g_ipc_table,
+                                   /*badge_override=*/0, /*has_badge_override=*/false);
+    // 클라이언트용: CAN_SEND만 남기고 커스텀 badge를 붙인 프록시 —
+    // objects.md §3의 "재위임 가능한 마스터가 새 badge를 붙이는 시점"을
+    // 흉내낸다. 서버는 이 badge를 sys_recv의 반환값으로 그대로 받아야
+    // 한다(아래 thread_c_server_entry에서 확인).
+    auto send_proxy =
+        g_ipc_table->create_proxy(owner.value(), object::k_right_can_send, *g_ipc_table,
+                                   k_ipc_demo_badge, /*has_badge_override=*/true);
+    if (!recv_proxy.is_ok() || !send_proxy.is_ok()) {
+        return false;
+    }
+
+    g_ipc_recv_handle = recv_proxy.value();
+    g_ipc_send_handle = send_proxy.value();
+    return true;
+}
+
+void thread_c_server_entry() {
+    ipc::message in{};
+    auto recv_result = ipc::sys_recv(*g_ipc_table, g_ipc_recv_handle, in);
+    klog::printf(
+        "[ipc] server sys_recv ok=%u badge=0x%lx (expect 0x%lx) label=0x%x regs0=%lu\n",
+        recv_result.is_ok(), static_cast<unsigned long>(recv_result.is_ok() ? recv_result.value() : 0),
+        static_cast<unsigned long>(k_ipc_demo_badge), in.label,
+        static_cast<unsigned long>(in.regs[0]));
+
+    ipc::message out{};
+    out.label = 0x5EED;
+    out.regs[0] = in.regs[0] + 1;
+    ipc::sys_reply(out);
+    klog::printf("[ipc] server sys_reply sent\n");
+
+    // sys_reply는 클라이언트를 run_queue에 다시 넣기만 할 뿐, 이
+    // 협조적 스케줄러(M5)는 아무도 yield()하지 않으면 그 클라이언트를
+    // 영영 스케줄하지 않는다 — 여기서 곧장 hlt 루프로 들어가면
+    // 클라이언트가 응답을 확인하는 로그를 볼 기회 자체가 사라진다
+    // (실제로 이 문제로 한 번 멈춰서 확인했다). 한 번 양보해 다른
+    // 스레드가 최소 한 차례는 더 돌 기회를 준다.
+    sched::yield();
+
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+void thread_d_client_entry() {
+    ipc::message out{};
+    out.label = 0x1234;
+    out.regs[0] = 41;
+
+    ipc::message in{};
+    auto call_result = ipc::sys_call(*g_ipc_table, g_ipc_send_handle, out, in);
+    klog::printf(
+        "[ipc] client sys_call ok=%u reply_label=0x%x (expect 0x5eed) reply_regs0=%lu (expect 42)\n",
+        call_result.is_ok(), in.label, static_cast<unsigned long>(in.regs[0]));
+
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
 [[noreturn]] void demo_sched() {
     sched::init();
 
@@ -255,15 +350,31 @@ void thread_b_entry() {
         sched::create_kernel_thread(&thread_b_entry, object::priority_band::kernel, 0);
     klog::printf("[sched] create_kernel_thread a=%u b=%u\n", a != nullptr, b != nullptr);
 
+    bool ipc_ready = demo_ipc_setup();
+    klog::printf("[ipc] setup ok=%u\n", ipc_ready);
+
+    object::thread* c = nullptr;
+    object::thread* d = nullptr;
+    if (ipc_ready) {
+        c = sched::create_kernel_thread(&thread_c_server_entry, object::priority_band::kernel, 0);
+        d = sched::create_kernel_thread(&thread_d_client_entry, object::priority_band::kernel, 0);
+    }
+
     if (a != nullptr) {
         sched::enqueue(*a);
     }
     if (b != nullptr) {
         sched::enqueue(*b);
     }
+    if (c != nullptr) {
+        sched::enqueue(*c);
+    }
+    if (d != nullptr) {
+        sched::enqueue(*d);
+    }
 
     // 여기서부터는 절대 돌아오지 않는다 — 이후로는 위 스레드들 사이의
-    // yield()로만 제어가 옮겨간다.
+    // yield()/sys_call/sys_recv/sys_reply로만 제어가 옮겨간다.
     sched::start();
 }
 

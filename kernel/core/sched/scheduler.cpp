@@ -157,6 +157,27 @@ void yield() {
     // 이 지점부터 재개됐다는 뜻이다.
 }
 
+void block() {
+    object::thread* prev = g_current;
+
+    run_queue& rq = g_run_queues[0];
+    object::thread* next;
+    {
+        scoped_lock<spinlock> guard(rq.lock);
+        next = pick_next_locked(rq);
+    }
+    if (next == nullptr) {
+        LIBK_PANIC("sched::block: no runnable thread (deadlock)");
+    }
+
+    // yield()와 달리 prev를 다시 enqueue하지 않는다 — 호출자(예: M6의
+    // sys_call/sys_recv)가 prev를 이미 다른 대기열(endpoint의
+    // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
+    // sched::enqueue()할 책임을 진다.
+    g_current = next;
+    arch_context_switch(&prev->context_rsp, next->context_rsp);
+}
+
 object::thread* current() { return g_current; }
 
 }  // namespace sched

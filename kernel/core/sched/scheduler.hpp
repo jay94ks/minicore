@@ -57,6 +57,14 @@ void enqueue(object::thread& t);
 // 반환한다.
 void yield();
 
+// 현재 스레드를 run_queue에 다시 넣지 않고 다음 스레드로 전환한다 —
+// M6(kernel/core/ipc)이 sys_call/sys_recv의 블로킹 대기에 쓴다. 다른
+// 누군가(보통 상대방 IPC 스레드)가 나중에 sched::enqueue()로 이
+// 스레드를 다시 깨워야 한다 — 그러지 않으면 영원히 멈춘다. 전환할
+// 다른 runnable 스레드가 없으면 LIBK_PANIC(교착 상태 — 이 협조적
+// 스케줄러에는 idle 스레드가 없다).
+void block();
+
 object::thread* current();
 
 }  // namespace sched

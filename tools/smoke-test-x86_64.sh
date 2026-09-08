@@ -15,6 +15,8 @@
 #     왕복.
 #   M5 (scheduler.md §1~3): 커널 스레드 2개가 yield()로 번갈아 실행됨
 #     (협조적 라운드로빈, 타이머 선점 없음 — 아직 IDT가 없다).
+#   M6 (ipc.md §3~5): 커널 스레드 2개 사이의 Call → Recv → Reply 왕복,
+#     프록시 badge가 sys_recv까지 정확히 전파됨.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -48,6 +50,8 @@ declare -a EXPECTED=(
   "[sched] thread B iteration 1"
   "[sched] thread A iteration 2"
   "[sched] thread B iteration 2"
+  "[ipc] server sys_recv ok=1 badge=0xcafe (expect 0xcafe) label=0x1234 regs0=41"
+  "[ipc] client sys_call ok=1 reply_label=0x5eed (expect 0x5eed) reply_regs0=42 (expect 42)"
 )
 
 LOG_FILE="$(mktemp)"

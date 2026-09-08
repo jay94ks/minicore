@@ -8,6 +8,14 @@
 #include <cstdint>
 
 #include <libk/intrusive_list.hpp>
+#include <libk/spinlock.hpp>
+
+// ipc::message는 kernel/core/ipc(레이어상 object 위에 있음)가 정의한다 —
+// 여기서는 포인터만 보관하므로 전방 선언으로 충분하다(ADR-002와 같은
+// 정신의 계층 분리: object는 ipc를 몰라야 한다).
+namespace ipc {
+struct message;
+}
 
 namespace object {
 
@@ -32,16 +40,47 @@ struct thread_sched_fields {
     uint64_t base_time_slice_us = 0;
 };
 
+struct thread;  // ipc_state가 포인터로만 참조 — 아래 thread 정의보다 먼저 필요.
+
+// M6(ipc.md §3/§5) — sys_call/sys_recv/sys_reply가 스레드별로 들고 있어야
+// 하는 상태. sys_reply가 handle을 받지 않고 "가장 최근 sys_recv로 받은
+// 호출"에 답하는 스펙 규칙(ipc.md §3) 자체가 이 상태를 요구한다.
+struct ipc_state {
+    const ipc::message* pending_call_msg = nullptr;  // sys_call이 서버 대기 중 blocked일 때: 보낼 메시지
+    uint64_t pending_call_badge = 0;                 // 위와 짝 — 이 호출에 쓰인 handle의 badge
+    ipc::message* recv_dest = nullptr;               // sys_recv가 caller 대기 중 blocked일 때: 받을 목적지
+    uint64_t recv_badge = 0;                          // 위와 짝 — sys_recv가 반환할 badge
+    ipc::message* reply_dest = nullptr;               // sys_call 완료 대기 중: 응답을 받을 목적지
+    thread* reply_target = nullptr;                    // sys_recv로 받은 뒤: sys_reply가 깨울 대상
+    uint32_t saved_boost_level = 0;                     // 도네이션 복원용(ADR-028)
+};
+
 struct thread {
     thread_sched_fields sched;
     address_space* owner_space = nullptr;
     list_hook run_queue_hook;  // scheduler.md의 run_queue(intrusive_list)가 M5부터 이 훅을 쓴다.
+    list_hook ipc_wait_hook;   // endpoint의 대기열(M6, kernel/core/ipc)이 이 훅을 쓴다.
+    ipc_state ipc;
 
     // 스레드가 실행 중이 아닐 때, 재개 시 이어서 실행할 지점의 스택
     // 포인터(M5, kernel/core/sched). 값의 실제 의미(스택에 무엇이 쌓여
     // 있는지)는 arch::context_switch(arch가 정의)만 알고 있다 — 이
     // 필드 자체는 "불투명한 재개 지점"으로만 다뤄 arch 독립을 유지한다.
     uint64_t context_rsp = 0;
+};
+
+// ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/
+// CAN_MOVE/CAN_MAP(ADR-029). M6은 CAN_SEND/CAN_RECV만 실제로 검사한다 —
+// CAN_MOVE/CAN_MAP은 페이지·핸들 전달이 생기는 M7에서 쓰인다.
+constexpr uint32_t k_right_can_send = 1u << 0;
+constexpr uint32_t k_right_can_recv = 1u << 1;
+constexpr uint32_t k_right_can_move = 1u << 2;
+constexpr uint32_t k_right_can_map = 1u << 3;
+
+struct endpoint {
+    spinlock lock;
+    intrusive_list<thread, &thread::ipc_wait_hook> waiting_servers;  // sys_recv 대기 중
+    intrusive_list<thread, &thread::ipc_wait_hook> waiting_callers;  // sys_call 대기 중(서버가 아직 없음)
 };
 
 }  // namespace object

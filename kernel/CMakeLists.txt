@@ -1,11 +1,12 @@
 # 커널 (직접 구현, ADR-006).
 #
 #   core/          arch 독립 코어 (ADR-004/011/012/013/014/015/016).
-#                  M1~M5 현재는 klog(debug-console.md), boot_info 덤프
+#                  M1~M6 현재는 klog(debug-console.md), boot_info 덤프
 #                  (boot.md §3), panic_hook(ADR-067), mm(물리 페이지
 #                  할당자+슬랩 힙, memory.md), object(핸들 테이블+프록시
 #                  트리, objects.md), sched(run_queue+협조적 라운드로빈,
-#                  scheduler.md §1~3)가 있다 — ipc는 M6에서 채워진다.
+#                  scheduler.md §1~3), ipc(Call/Reply+도네이션, ipc.md
+#                  §3~5)가 있다 — 페이지·핸들 전달은 M7에서 채워진다.
 #   arch/${MINICORE_ARCH}/  arch 의존 코드 (ADR-002/009/017) — 부트 스텁,
 #                  실제 부팅 가능한 커널 실행파일은 여기서 링크한다.
 
@@ -27,6 +28,7 @@ add_library(minicore_kernel_core OBJECT
     core/mm/slab.cpp
     core/object/handle_table.cpp
     core/sched/scheduler.cpp
+    core/ipc/endpoint.cpp
 )
 target_link_libraries(minicore_kernel_core PUBLIC minicore_kernel)
 
