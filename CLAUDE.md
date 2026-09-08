@@ -37,6 +37,18 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   함께 갱신한다** — "해결됨"이라고만 결정 기록에 적고 실제 스펙
   본문은 옛 상태로 방치하지 않는다.
 
+## 답변 파일 (docs/reply.md)
+
+`tools/docs-dashboard` 웹 대시보드의 "답변 입력" 탭에서 사용자가 입력한
+내용이 `docs/reply.md`에 쌓인다. 항목은 관련 `OPEN-N` 추적 코드와 함께
+기록되거나(미결정 항목에 대한 답변), 추적 코드 없이 일반 메모로 기록된다.
+
+- `docs/reply.md`는 **미처리 답변함**이다 — 영구 로그가 아니다.
+- 이 파일의 항목을 실제로 반영했다면(ADR 작성, spec/design 문서 갱신,
+  `open-items.md`의 해당 `OPEN-N` 해결 처리 등) **그 즉시 해당 항목을
+  `docs/reply.md`에서 삭제한다.** 처리 완료 후에도 남겨두지 않는다.
+- 파일이 비면(모든 항목 삭제) 헤더만 남기거나 파일 자체를 지워도 된다.
+
 ## 코딩 컨벤션
 
 [docs/spec/cxx-conventions.md](docs/spec/cxx-conventions.md) 참고. 핵심:
