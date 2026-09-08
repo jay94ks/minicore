@@ -11,9 +11,9 @@
 | [foundations.md](foundations.md) | ADR-001~003, 005~010, 042, 049 | 프로젝트 목표, 아키텍처 범위, 언어, 코드 소유 경계, 네이밍 컨벤션 |
 | [build-system.md](build-system.md) | ADR-019~022, 031, 091, 113, 115, 116 | CMake, 툴체인, 저장소 구조, 서드파티 소스 관리, QEMU fork 정책, freestanding C++ 헤더 확보, freestanding memset/memcpy 제공 |
 | [kernel-ipc-objects.md](kernel-ipc-objects.md) | ADR-004, 011, 013, 015, 023, 028, 029, 032 | IPC 원시, 핸들·프록시 객체 모델 |
-| [kernel-memory.md](kernel-memory.md) | ADR-012, 016, 024, 033, 036, 051, 052, 054, 078, 104~108, 110 | 메모리 할당, 쿼터, NUMA, 락 모델, 가상메모리 레이아웃, 메모리 예약·회수·압박 신호, 스왑 압축, 압축 실행 위치(SWAPFS 서버) |
-| [kernel-scheduler.md](kernel-scheduler.md) | ADR-014, 025, 027, 034, 035, 053, 055, 109 | 우선순위 밴드, NUMA 런큐, 승격, 도네이션, 최근 스케줄링 빈도 측정 |
-| [boot-and-drivers.md](boot-and-drivers.md) | ADR-017, 026, 030, 037~041, 043, 046, 056, 057, 097, 111, 114, 117 | 부트 프로토콜, 디버그 콘솔, PCIe, 드라이버 로드맵, 콘솔/TTY 드라이버(상세 프로토콜은 기존 표준 채택), QEMU 검증용 PVH 직접 부팅, Multiboot2 파서 self-test 검증 전략 |
+| [kernel-memory.md](kernel-memory.md) | ADR-012, 016, 024, 033, 036, 051, 052, 054, 078, 104~108, 110, 121 | 메모리 할당, 쿼터, NUMA, 락 모델, 가상메모리 레이아웃, 메모리 예약·회수·압박 신호, 스왑 압축, 압축 실행 위치(SWAPFS 서버), 유저 주소공간의 저지대 항등 매핑(GDT) 공유 |
+| [kernel-scheduler.md](kernel-scheduler.md) | ADR-014, 025, 027, 034, 035, 053, 055, 109, 124 | 우선순위 밴드, NUMA 런큐, 승격, 도네이션, 최근 스케줄링 빈도 측정, 스레드 영구 종료(sched::exit) |
+| [boot-and-drivers.md](boot-and-drivers.md) | ADR-017, 026, 030, 037~041, 043, 046, 056, 057, 097, 111, 114, 117, 119, 120, 122, 123 | 부트 프로토콜, 디버그 콘솔, PCIe, 드라이버 로드맵, 콘솔/TTY 드라이버(상세 프로토콜은 기존 표준 채택), QEMU 검증용 PVH 직접 부팅, Multiboot2 파서 self-test 검증 전략, initrd 임베딩(개발 환경), .boot.bss 명시적 제로화, SYSCALL ABI 관례, initrun 링크 주소 |
 | [filesystem.md](filesystem.md) | ADR-018, 044, 045, 047, 048, 050, 058, 059, 065, 080, 099~103 | fd 라우팅, VFS 런타임 디렉토리 구성, 마운트 네임스페이스·오버레이, 유저 영역 FS(FUSE류), SWAPFS(파티션/파일 백엔드), 파일 잠금·공유 모드(파일 단위) |
 | [registry-decisions.md](registry-decisions.md) | ADR-060~064 | 설정 리포지터리(cfgsrv) 서브시스템 |
 | [libk.md](libk.md) | ADR-066~073(073은 076으로 대체), 076~077, 118 | libk(커널·서버 공용 프리스탠딩 코어 라이브러리): result/optional/span/intrusive_list/atomic/spinlock·ticket_lock·mcs_lock, 검증 전략, 전역 constexpr 초기화 요구사항 |

@@ -1,0 +1,21 @@
+/*
+ * initrd 이미지를 커널 이미지 자체에 심는다(docs/plan/kernel-bootstrap.md
+ * M8) — 이 개발 머신에 GRUB가 없어(ADR-114) QEMU PVH 직접 부팅 경로로는
+ * 진짜 Multiboot2 모듈 전달을 검증할 수 없다는, M1(boot.md)부터 이어진
+ * 한계의 연장이다. mcpack 파서(kernel/core/initrd/mcpack.cpp)와 ELF
+ * 로더(elf_loader.cpp)는 실제 데이터를 파싱하는 진짜 코드다 — 다만 그
+ * 데이터의 "출처"만 진짜 Multiboot2 모듈 태그가 아니라 이 .incbin으로
+ * 대체됐다(ADR-117의 self-test 계열과 같은 정신).
+ *
+ * CMakeLists.txt(configure_file)가 @MINICORE_INITRD_IMAGE@를 실제
+ * initrd.img 경로로 치환해 이 파일을 생성한다 — 원본은 .in이라 CMake가
+ * 관리하지 않으면 컴파일되지 않는다(add_dependencies로 순서 보장, 같은
+ * CMakeLists.txt 참고).
+ */
+.section .rodata.initrd_blob, "a"
+.balign 4096
+.global g_embedded_initrd_start
+g_embedded_initrd_start:
+.incbin "@MINICORE_INITRD_IMAGE@"
+.global g_embedded_initrd_end
+g_embedded_initrd_end:

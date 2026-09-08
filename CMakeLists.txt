@@ -13,9 +13,16 @@ if(NOT MINICORE_ARCH STREQUAL "x86_64" AND NOT MINICORE_ARCH STREQUAL "aarch64")
 endif()
 
 # 커널과 공용 코어 라이브러리는 모든 아키텍처에서 빌드한다 (ADR-002, ADR-009).
+#
+# init/initrun을 kernel보다 먼저 추가한다: M8(kernel-bootstrap.md)부터
+# 커널이 initrun.elf를 MCPACK으로 패키징한 이미지를 .incbin으로 자신에
+# 심는다(kernel/arch/x86_64/initrd_blob.S.in) — 그 파일 경로를 담는
+# GLOBAL PROPERTY(init/initrun/CMakeLists.txt가 설정)를 kernel/arch/x86_64가
+# configure_file 시점에 읽어야 하므로, 이 순서가 아니면 아직 설정되지
+# 않은 프로퍼티를 읽게 된다.
 add_subdirectory(libk)
-add_subdirectory(kernel)
 add_subdirectory(init/initrun)
+add_subdirectory(kernel)
 
 # 1차 타겟(x86_64)만 전체 스택(시스템 서버·libc·유저랜드)을 빌드 대상으로 삼는다.
 # aarch64는 현재 범위에서 커널 컴파일 검증까지만 다룬다 (ADR-009).

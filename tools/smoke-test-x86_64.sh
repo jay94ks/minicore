@@ -20,17 +20,25 @@
 #   M7 (ipc.md §4/§7): 1페이지 데이터를 copy 모드로 전달(내용 검증
 #     포함), IPC로 위임된 핸들이 실제로 쓸 수 있는 핸들임을 그 핸들로
 #     직접 sys_wait해서 확인, sys_notify로 그 대기를 깨움.
+#   M8 (boot.md §4~6, kernel-bootstrap.md 최종 완료 기준): MCPACK
+#     initrd에서 initrun ELF를 찾아 로드하고, 새 주소공간(GDT 등
+#     저지대 공유 매핑 포함)·핸들 테이블을 가진 유저 스레드로 SYSCALL/
+#     SYSRET 기반 IRETQ 진입시켜, initrun이 SYSCALL로 보낸 IPC Call에
+#     커널이 응답한다.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
 #
 # 사용법: tools/smoke-test-x86_64.sh [빌드 디렉토리(기본: build/x86_64-clang)]
+#
+# 환경 변수:
+#   MINICORE_QEMU_BIN   qemu-system-x86_64 실행파일 경로(run-qemu.sh로 그대로 전달)
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=12
+TIMEOUT_SEC=15
 
 declare -a EXPECTED=(
   "hello from kernel"
@@ -58,6 +66,10 @@ declare -a EXPECTED=(
   "[ipc2] receiver sys_recv ok=1 page_count=1 content_ok=1 handle_count=1 received_handle_kind=3 (expect notification=3)"
   "[ipc2] sender sys_call ok=1 ack_label=0xacc0"
   "[ipc2] receiver sys_wait ok=1 bits=0x2 (expect 0x2)"
+  "[initrun] mcpack find_entry ok=1"
+  "[initrun] load_elf ok=1"
+  "[initrun] setup_initrun_process ok=1"
+  "[initrun] kernel received boot call ok=1 label=0xb007 (expect 0xb007) - 부팅 성공"
 )
 
 LOG_FILE="$(mktemp)"

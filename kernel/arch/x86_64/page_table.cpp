@@ -114,6 +114,16 @@ result<uint64_t, map_error> create_address_space_root() {
     table[k_physmap_pml4_index] = pml4[k_physmap_pml4_index];
     table[k_kernel_image_pml4_index] = pml4[k_kernel_image_pml4_index];
 
+    // pml4[0] — boot.S가 구성한 저지대 항등 매핑(물리 [0, 8MiB)),
+    // GDT(gdt64_start)를 포함한 .boot 섹션 전체가 여기 산다(link.ld:
+    // .boot는 higher-half가 아니라 VMA==LMA로 낮은 물리주소에 그대로
+    // 링크된다). M8에서 이 엔트리를 안 옮기면 CR3가 새 주소공간으로
+    // 바뀐 뒤 GDT 자체가 매핑 밖이 되어, IRETQ가 새 CS/SS 디스크립터를
+    // 읽으려는 순간 #PF가 난다(실제로 QEMU에서 CR2=GDT 안의 정확한
+    // 오프셋으로 재현 확인함) — 모든 주소공간이 이 저지대 매핑도
+    // physmap/커널 이미지와 똑같이 공유해야 한다.
+    table[0] = pml4[0];
+
     return result<uint64_t, map_error>::ok(new_pml4_phys);
 }
 

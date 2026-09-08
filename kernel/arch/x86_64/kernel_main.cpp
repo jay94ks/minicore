@@ -7,14 +7,19 @@
 // (objects.md) + 페이지테이블 조작 API 왕복 확인. M5: 커널 스레드
 // 2개가 협조적으로 번갈아 실행됨을 확인. M6: 커널 스레드 2개 사이의
 // Call → Recv → Reply 왕복 확인. M7: 페이지 1개 copy 전달 + 핸들 위임 +
-// notification 왕복 확인.
+// notification 왕복 확인. M8: initrd에서 initrun ELF를 로드해 유저모드로
+// 진입시키고, initrun이 SYSCALL로 보낸 IPC Call에 커널이 응답 — 이
+// 계획의 최종 완료 기준(kernel-bootstrap.md M8).
 #include "boot_info.hpp"
 #include "boot_info_x86_64.hpp"
+#include "elf_loader.hpp"
 #include "klog.hpp"
 #include "page_table.hpp"
+#include "syscall.hpp"
 
 #include <cstdint>
 
+#include <initrd/mcpack.hpp>
 #include <ipc/endpoint.hpp>
 #include <ipc/notification.hpp>
 #include <mm/page_allocator.hpp>
@@ -23,6 +28,15 @@
 #include <object/handle_table.hpp>
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
+
+// init/initrun/CMakeLists.txt가 만들고 kernel/arch/x86_64/initrd_blob.S.in이
+// .incbin으로 커널 이미지에 심은 MCPACK 이미지(M8, initrd_blob.S.in
+// 상단 주석 참고) — 일반 .rodata라 higher-half 커널 가상주소로 이미
+// 바로 역참조 가능하다(phys_to_virt 불필요).
+extern "C" {
+extern const uint8_t g_embedded_initrd_start[];
+extern const uint8_t g_embedded_initrd_end[];
+}
 
 // boot.S(_start32)가 부트로더 진입 시점의 EAX/EBX(Multiboot2 매직/info
 // 물리주소)를 저장해 둔 전역 변수. .boot.bss(저지대, 항등 매핑 유지)에
@@ -222,28 +236,25 @@ void demo_page_table() {
 
 // M5(scheduler.md §1~3) — 커널 스레드 2개가 yield()로 번갈아 실행됨을
 // 시리얼 로그로 확인한다(kernel-bootstrap.md M5의 완료 기준). 각
-// 스레드는 정해진 횟수만큼 돌고 나서 무한 hlt 루프로 들어간다 —
+// 스레드는 정해진 횟수만큼 돌고 나서 sched::exit()로 영구 종료한다 —
 // sched::start() 이후로는 커널 스레드들만 남고 kernel_main으로는
-// 돌아오지 않으므로, 이 데모의 마지막 스레드가 사실상 그 전까지
-// kernel_main이 하던 "idle" 역할을 이어받는다.
+// 돌아오지 않는다.
+//
+// **M8에서 바뀐 부분**: M6/M7까지는 각자 "전체 스레드 수보다 넉넉히"
+// yield()한 뒤 스스로 무한 hlt 루프로 들어가는 flush_yield() 관례를
+// 썼다. M8에서 이 방식이 근본적으로 취약함이 드러났다 — 서로 다른
+// 스레드가 완료까지 필요로 하는 총 yield 횟수가 다르면(예: 이 데모의
+// "I"처럼 사전 작업이 없는 스레드는 16번만에 끝나지만, "A"/"B"는 반복
+// 3회의 yield가 추가로 필요하다), **가장 적게 필요한 스레드가 가장
+// 먼저 끝나 hlt로 들어가 버리는 바로 그 순간에 자신이 "현재 실행
+// 중"이었다면**, 아직 안 끝난 다른 스레드가 run_queue에 아무리 남아
+// 있어도 아무도 그들을 깨워 줄 수 없어(타이머 인터럽트가 없어 hlt는
+// 영원히 안 돌아온다) 기계 전체가 멈춰 버린다. M8에서 유저 스레드
+// (initrun)가 처음 생기면서 정확히 이 경합이 재현 가능하게 실제로
+// 발생했다 — 대신 sched::exit()(kernel/core/sched/scheduler.hpp 상단
+// 주석)로 스레드 수·필요 yield 횟수에 무관하게 항상 정확한, 스케줄러
+// 자신이 보장하는 종료로 바꿨다.
 constexpr int k_sched_demo_iterations = 3;
-
-// 협조적 스케줄러(M5)는 누군가 계속 yield()해야 회전이 유지된다 — 한
-// 스레드가 자기 할 일을 마치고 곧장 무한 hlt로 들어가면, 아직 run_queue
-// 에 남아 제 차례를 못 받은 다른 스레드가 영영 스케줄되지 않을 수 있다
-// (M6/M7에서 실제로 두 번 겪었다 — 각각 서버가 sys_reply 직후, 송신자가
-// sys_call 반환 직후 곧장 hlt로 들어가 상대방이 멈춘 경우). 매번 "이번엔
-// 몇 번 양보해야 충분한가"를 개별적으로 따지는 대신, 마지막 hlt 루프
-// 전에 전체 스레드 수보다 넉넉히 많이 양보해 라운드로빈이 모두를 최소
-// 한 바퀴 이상 돌게 만든다 — 남은 스레드가 없으면 yield()는 그냥
-// 즉시 반환하므로(sched.cpp) 과하게 불러도 무해하다.
-constexpr int k_flush_yield_count = 16;
-
-void flush_yield() {
-    for (int i = 0; i < k_flush_yield_count; ++i) {
-        sched::yield();
-    }
-}
 
 void thread_a_entry() {
     for (int i = 0; i < k_sched_demo_iterations; ++i) {
@@ -251,10 +262,7 @@ void thread_a_entry() {
         sched::yield();
     }
     klog::printf("[sched] thread A done\n");
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
-    }
+    sched::exit();
 }
 
 void thread_b_entry() {
@@ -263,10 +271,7 @@ void thread_b_entry() {
         sched::yield();
     }
     klog::printf("[sched] thread B done\n");
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
-    }
+    sched::exit();
 }
 
 // M6(ipc.md §3~5) — 커널 스레드 2개(서버/클라이언트) 사이에
@@ -333,10 +338,7 @@ void thread_c_server_entry() {
     ipc::sys_reply(out);
     klog::printf("[ipc] server sys_reply sent\n");
 
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
-    }
+    sched::exit();
 }
 
 void thread_d_client_entry() {
@@ -350,10 +352,7 @@ void thread_d_client_entry() {
         "[ipc] client sys_call ok=%u reply_label=0x%x (expect 0x5eed) reply_regs0=%lu (expect 42)\n",
         call_result.is_ok(), in.label, static_cast<unsigned long>(in.regs[0]));
 
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
-    }
+    sched::exit();
 }
 
 // M7(ipc.md §4/§7) — 페이지 1개를 copy 모드로, 핸들 1개를 두 스레드
@@ -439,10 +438,7 @@ void thread_g_sender_entry() {
     auto call_result = ipc::sys_call(*g_ipc_table, g_ipc2_send_handle, out, in);
     klog::printf("[ipc2] sender sys_call ok=%u ack_label=0x%x\n", call_result.is_ok(), in.label);
 
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
-    }
+    sched::exit();
 }
 
 void thread_h_receiver_entry() {
@@ -483,24 +479,162 @@ void thread_h_receiver_entry() {
                  static_cast<unsigned long>(wait_result.is_ok() ? wait_result.value() : 0),
                  static_cast<unsigned long>(k_notify_bits));
 
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
-    }
+    sched::exit();
 }
 
 void thread_i_notifier_entry() {
     auto notify_result = ipc::sys_notify(*g_ipc_table, g_notify_send_handle, k_notify_bits);
     klog::printf("[ipc2] notifier sys_notify ok=%u\n", notify_result.is_ok());
 
-    flush_yield();
-    for (;;) {
-        asm volatile("hlt");
+    sched::exit();
+}
+
+// M8(boot.md §4/§6, kernel-bootstrap.md) — initrd에서 initrun ELF를
+// 찾아 로드하고, 새 주소공간·핸들 테이블을 가진 유저 스레드로 진입시킨다.
+// init/initrun/main.cpp 상단 주석과 짝을 이루는 값 — 두 실행파일이
+// 서로 다른 컴파일 단위라 공유 헤더로 두지 않고 각자 정의했다(레이블
+// 값 자체는 uapi.hpp의 syscall ABI와 달리 이 데모 하나만의 관례라
+// kernel/include로 옮길 만큼의 재사용 가치가 없다고 판단했다).
+constexpr uint32_t k_initrun_boot_label = 0xB007;
+
+object::handle g_initrun_boot_recv_handle = object::k_invalid_handle;  // 커널(수신) 쪽 핸들
+
+// initrun이 syscall로 보낸 부팅 성공 알림을 받는다 — 이 스레드가
+// initrun main.cpp 상단 주석이 말하는 "유일한 출력 관찰 수단"이다.
+void thread_initrun_boot_server_entry() {
+    ipc::message in{};
+    auto recv_result = ipc::sys_recv(*g_ipc_table, g_initrun_boot_recv_handle, in);
+    klog::printf(
+        "[initrun] kernel received boot call ok=%u label=0x%x (expect 0x%x) - 부팅 성공\n",
+        recv_result.is_ok(), in.label, k_initrun_boot_label);
+
+    ipc::message ack{};
+    ack.label = 0xB0A0;
+    ipc::sys_reply(ack);
+
+    sched::exit();
+}
+
+// initrd 파싱 + ELF 로드 + 새 주소공간/핸들 테이블/유저 스레드 생성까지
+// 전부 이 함수 하나가 맡는다(§4의 1~4단계). 실패하면 nullptr — 호출자가
+// klog로 이미 각 단계를 보고했으므로 추가 보고 없이 그냥 포기한다.
+object::thread* setup_initrun_process() {
+    // 1) endpoint 하나 — 커널(수신) 쪽은 g_ipc_table에 소유 핸들로 둔다
+    //    (M6/M7과 같은 "커널 컨텍스트" 관례 — 이 엔드포인트의 서버는
+    //    실제로 커널 스레드다).
+    void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+    if (ep_mem == nullptr) {
+        return nullptr;
     }
+    auto* ep = new (ep_mem) object::endpoint();
+    auto owner = g_ipc_table->create_owner(
+        object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+    if (!owner.is_ok()) {
+        return nullptr;
+    }
+    auto recv_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_recv,
+                                                 *g_ipc_table, 0, false);
+    if (!recv_proxy.is_ok()) {
+        return nullptr;
+    }
+    g_initrun_boot_recv_handle = recv_proxy.value();
+
+    // 2) initrun 전용 handle_table — 이 테이블에 넣는 첫 핸들이 반드시
+    //    1이 되도록(handle_table.cpp::allocate_slot이 1부터 채운다) 이
+    //    CAN_SEND 프록시를 가장 먼저, 유일하게 만든다 — init/initrun/
+    //    main.cpp의 k_boot_endpoint_handle=1 고정 관례가 여기서 성립한다.
+    object::handle_table* initrun_handles = create_handle_table();
+    if (initrun_handles == nullptr) {
+        return nullptr;
+    }
+    auto send_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_send,
+                                                 *initrun_handles, 0, false);
+    if (!send_proxy.is_ok() || send_proxy.value() != 1) {
+        klog::printf("[initrun] boot send handle != 1 (got %u) - main.cpp 고정 관례 위반\n",
+                     send_proxy.is_ok() ? send_proxy.value() : 0);
+        return nullptr;
+    }
+
+    // 3) initrd(§5, MCPACK v1)에서 "initrun" 엔트리를 찾는다.
+    uint64_t initrd_size =
+        static_cast<uint64_t>(g_embedded_initrd_end - g_embedded_initrd_start);
+    auto entry = initrd::find_entry(g_embedded_initrd_start, initrd_size, "initrun");
+    klog::printf("[initrun] mcpack find_entry ok=%u size=0x%lx\n", entry.is_ok(),
+                 static_cast<unsigned long>(entry.is_ok() ? entry.value().size : 0));
+    if (!entry.is_ok()) {
+        return nullptr;
+    }
+
+    // 4) 새 주소공간 — ADR-074: initrun은 무조건 trusted=true(시스템의
+    //    유일한 최초 신뢰 루트, boot.md §4 3단계).
+    auto root = arch_x86_64::create_address_space_root();
+    if (!root.is_ok()) {
+        return nullptr;
+    }
+    uint64_t pml4_phys = root.value();
+
+    void* space_mem = mm::slab_alloc(sizeof(object::address_space));
+    if (space_mem == nullptr) {
+        return nullptr;
+    }
+    auto* space = new (space_mem) object::address_space();
+    space->trusted = true;
+    space->page_table_root = pml4_phys;
+
+    auto load_result = arch_x86_64::load_elf(pml4_phys, entry.value().data, entry.value().size);
+    klog::printf("[initrun] load_elf ok=%u entry=0x%lx\n", load_result.is_ok(),
+                 static_cast<unsigned long>(load_result.is_ok() ? load_result.value() : 0));
+    if (!load_result.is_ok()) {
+        return nullptr;
+    }
+
+    // 5) 유저 스택(16KiB) — demo_page_table()과 같은 유저 영역 임의
+    //    주소대(하위 절반)를 쓴다.
+    constexpr uint64_t k_user_stack_top = 0x0000700000000000ull;
+    constexpr uint32_t k_user_stack_pages = 4;
+    for (uint32_t i = 0; i < k_user_stack_pages; ++i) {
+        auto page = mm::alloc_pages(0, 0);
+        if (!page.is_ok()) {
+            return nullptr;
+        }
+        uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * mm::k_page_size;
+        auto mapped = arch_x86_64::map_page(
+            pml4_phys, vaddr, page.value(),
+            arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
+        if (!mapped.is_ok()) {
+            return nullptr;
+        }
+    }
+
+    // 6) boot_info 한 페이지를 읽기전용으로 매핑하고 그 유저 가상주소를
+    //    RDI로 넘긴다(§6). 이 마일스톤은 아직 진짜 Multiboot2 boot_info가
+    //    없어(GRUB 부재, ADR-114) self-test 값을 그대로 싣는다 —
+    //    memory_map_addr 등 물리주소 필드는 유저 쪽에서 아직 무의미하다
+    //    (init/initrun/main.cpp는 이 내용을 읽지 않는다, 위 주석 참고).
+    constexpr uint64_t k_boot_info_user_vaddr = 0x0000700000001000ull;
+    auto bi_page = mm::alloc_pages(0, 0);
+    if (!bi_page.is_ok()) {
+        return nullptr;
+    }
+    const boot::memory_region* bi_regions = nullptr;
+    boot::boot_info bi = arch_x86_64::run_boot_info_self_test(&bi_regions);
+    void* bi_virt = mm::phys_to_virt(bi_page.value());
+    __builtin_memset(bi_virt, 0, mm::k_page_size);
+    __builtin_memcpy(bi_virt, &bi, sizeof(bi));
+    auto bi_mapped =
+        arch_x86_64::map_page(pml4_phys, k_boot_info_user_vaddr, bi_page.value(),
+                               arch_x86_64::page_perm::user);  // write 비트 없음 = 읽기전용.
+    if (!bi_mapped.is_ok()) {
+        return nullptr;
+    }
+
+    return sched::create_user_thread(load_result.value(), k_user_stack_top,
+                                      k_boot_info_user_vaddr, space, initrun_handles);
 }
 
 [[noreturn]] void demo_sched() {
     sched::init();
+    arch_x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
 
     object::thread* a =
         sched::create_kernel_thread(&thread_a_entry, object::priority_band::kernel, 0);
@@ -532,6 +666,17 @@ void thread_i_notifier_entry() {
                                           0);
     }
 
+    // M8 — g_ipc_table이 demo_ipc_setup()에서 이미 만들어진 뒤라야
+    // setup_initrun_process()가 그 위에 boot endpoint를 만들 수 있다.
+    object::thread* k = nullptr;
+    object::thread* initrun = nullptr;
+    if (ipc_ready) {
+        k = sched::create_kernel_thread(&thread_initrun_boot_server_entry,
+                                         object::priority_band::kernel, 0);
+        initrun = setup_initrun_process();
+    }
+    klog::printf("[initrun] setup_initrun_process ok=%u\n", initrun != nullptr);
+
     if (a != nullptr) {
         sched::enqueue(*a);
     }
@@ -553,10 +698,16 @@ void thread_i_notifier_entry() {
     if (ii != nullptr) {
         sched::enqueue(*ii);
     }
+    if (k != nullptr) {
+        sched::enqueue(*k);
+    }
+    if (initrun != nullptr) {
+        sched::enqueue(*initrun);
+    }
 
     // 여기서부터는 절대 돌아오지 않는다 — 이후로는 위 스레드들 사이의
-    // yield()/sys_call/sys_recv/sys_reply/sys_notify/sys_wait로만
-    // 제어가 옮겨간다.
+    // yield()/sys_call/sys_recv/sys_reply/sys_notify/sys_wait/SYSCALL로만
+    // 제어가 옮겨간다(M8부터 initrun은 유저모드에서 SYSCALL로 들어온다).
     sched::start();
 }
 

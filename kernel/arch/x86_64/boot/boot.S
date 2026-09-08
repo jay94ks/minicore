@@ -27,9 +27,17 @@ mb2_header_start:
     .long 8                                                     /* end tag: size */
 mb2_header_end:
 
-/* ---- GDT: null, code32, data32, code64, data64 (docs/spec 없음 — 부트
- * 스텁 내부 구현 세부, x86_64 아키텍처 매뉴얼의 세그먼트 디스크립터
- * 인코딩을 그대로 따른다). ---- */
+/* ---- GDT: null, code32, data32, code64, data64, user_data64, user_code64
+ * (docs/spec 없음 — 부트 스텁 내부 구현 세부, x86_64 아키텍처 매뉴얼의
+ * 세그먼트 디스크립터 인코딩을 그대로 따른다).
+ *
+ * user_data64/user_code64(0x28/0x30, DPL=3)는 M8(kernel-bootstrap.md,
+ * boot.md §4)이 유저모드로 진입할 때 IRETQ/SYSRET가 쓴다 — 부팅 시점엔
+ * 아무도 이 두 엔트리를 적재하지 않는다(harmless). 순서가 중요하다:
+ * SYSRET(64비트)는 CS = STAR[63:48]+16, SS = STAR[63:48]+8로 계산하므로
+ * "data 먼저, 그 바로 다음이 code" 순서를 지켜야 한다(Intel SDM의 잘
+ * 알려진 SYSRET 규약) — syscall.cpp가 STAR를 이 배치에 맞춰 설정한다.
+ * ---- */
 .section .boot.rodata, "a"
 .balign 8
 gdt64_start:
@@ -38,6 +46,8 @@ gdt64_start:
     .quad 0x00CF92000000FFFF   /* 0x10: data32, flat, base=0 limit=4G */
     .quad 0x00A09A0000000000   /* 0x18: code64, L=1 */
     .quad 0x0000920000000000   /* 0x20: data64 */
+    .quad 0x0000F20000000000   /* 0x28: user_data64, DPL=3 */
+    .quad 0x00A0FA0000000000   /* 0x30: user_code64, DPL=3, L=1 */
 gdt64_end:
 
 gdt64_pointer:
@@ -64,8 +74,22 @@ gdt64_pointer:
 .set SEL_DATA32, 0x10
 .set SEL_CODE64, 0x18
 .set SEL_DATA64, 0x20
+.set SEL_USER_DATA64, 0x28  /* M8 — usermode.S/syscall.cpp가 쓴다. */
+.set SEL_USER_CODE64, 0x30
 
-.set PAGE_PRESENT_RW, 0x03
+/* PAGE_PRESENT_RW(중간 레벨: pml4[0], low_pdpt[0])는 USER 비트(0x04)도
+ * 켠다 — x86 페이징은 유저모드 접근을 허용하려면 "모든" 레벨이 U/S
+ * 비트를 갖고 있어야 한다(AND 관계). M8 전까지는 이 저지대 항등
+ * 매핑이 부팅 시점 페이지테이블 구성용(커널 전용)이라 필요 없었지만,
+ * page_table.cpp의 create_address_space_root()가 GDT 접근을 위해
+ * pml4[0]을 모든 새 주소공간에 공유해야 하게 되면서(M8) 그 아래
+ * 새로 만들어지는 유저 매핑(예: ELF 로더가 매핑하는 initrun 코드
+ * 페이지)이 이 두 중간 레벨 때문에 막히는 문제를 실제로 겪었다(리프
+ * PTE 자체는 USER 비트가 정확히 켜져 있어도, 부모 레벨이 없으면
+ * 전체 경로가 supervisor 전용으로 취급된다) — low_pd[0..3](물리
+ * [0,8MiB) 항등 매핑 리프 자신)은 이 상수를 안 쓰므로(PAGE_PRESENT_RW_PS)
+ * 여전히 supervisor 전용으로 남는다, 의도한 그대로. */
+.set PAGE_PRESENT_RW, 0x07
 .set PAGE_PRESENT_RW_PS, 0x83
 .set CR4_PAE, 0x20
 .set CR0_PG, 0x80000000
@@ -86,6 +110,21 @@ _start32:
      * 그래도 가장 먼저, 다른 어떤 것도 eax/ebx를 쓰기 전에 저장한다. */
     movl %eax, mb2_magic
     movl %ebx, mb2_info_addr
+
+    /* pml4/low_pdpt/low_pd(.boot.bss, 연속 배치)를 명시적으로 0으로
+     * 채운다. NOBITS 섹션은 ELF 관례상 로더가 0으로 채워 줘야 하지만,
+     * 이 커널을 실제로 띄우는 qboot.rom(PVH 직접 부팅 경로, ADR-114)이
+     * 그 관례를 지키는지는 보장할 수 없다 — 실제로 M8에서 low_pd의
+     * (아래서 명시적으로 채우는 [0,3] 밖) 미기록 엔트리에 쓰레기 값이
+     * 남아 있어, 새 주소공간을 만들 때 그 쓰레기를 유효한 다음 레벨
+     * 페이지테이블 포인터로 오인하는 문제를 실제로 겪었다(ELF 로더가
+     * 4KiB 페이지를 매핑하려는 가상주소가 low_pd의 명시적으로 채운
+     * [0,3] 범위 밖에 있어서 처음 노출됐다) — 그래서 이 가정 자체를
+     * 없앤다. */
+    mov $pml4, %edi
+    xor %eax, %eax
+    mov $(3 * 4096 / 4), %ecx
+    rep stosl
 
     lgdt (gdt64_pointer)
 

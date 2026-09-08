@@ -45,6 +45,18 @@ void init();
 object::thread* create_kernel_thread(void (*entry)(), object::priority_band band,
                                       uint32_t preferred_node);
 
+// M8(kernel-bootstrap.md, boot.md §4) — 유저모드로 진입할 스레드를
+// 만든다. entry_rip/user_rsp/arg0은 이미 space(호출자가 arch_x86_64::
+// create_address_space_root + map_page 등으로 다 구성해 둔 것)의
+// 유저 영역 가상주소다 — 이 함수 자신은 매핑을 전혀 하지 않는다(ADR-002
+// HAL 경계: kernel/core/sched는 page_table을 모른다). 이 스레드가 처음
+// 스케줄될 때 arch_user_thread_trampoline(arch 훅, create_kernel_thread의
+// entry 자리를 대신함)이 실행되어 CR3를 space로 전환하고(scheduler.cpp가
+// context switch 시점에 이미 해 둔다) IRETQ로 유저모드에 진입시킨다.
+// 실패하면 nullptr.
+object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
+                                    object::address_space* space, object::handle_table* handles);
+
 void enqueue(object::thread& t);
 
 // run_queue에서 스레드를 하나 뽑아 그리로 실행을 넘긴다. 이 함수
@@ -64,6 +76,28 @@ void yield();
 // 다른 runnable 스레드가 없으면 LIBK_PANIC(교착 상태 — 이 협조적
 // 스케줄러에는 idle 스레드가 없다).
 void block();
+
+// 현재 스레드를 영구적으로 끝낸다 — block()과 달리 그 누구도 이 스레드를
+// 다시 깨우지 않는다(어차피 아무도 참조를 들고 있지 않다). 다음 runnable
+// 스레드로 전환한다(kernel_band 우선, 그다음 user_band — pick_next_locked과
+// 동일한 우선순위). 아무도 남지 않았으면 이 코어를 arch_idle_halt()로
+// 멈춘다.
+//
+// 왜 필요한가: 이전에는(M7까지) 각 데모 스레드가 "충분히 넉넉한 횟수"
+// yield()한 뒤 스스로 무한 hlt 루프로 들어가는 flush_yield 관례를
+// 썼다 — 그러나 이 방식은 근본적으로 취약하다: 서로 다른 스레드가
+// 완료까지 필요로 하는 총 yield 횟수가 다르면(예: 사전 작업이 없는
+// 스레드 vs 여러 단계를 거치는 스레드), "가장 적게 필요한" 스레드가
+// 가장 먼저 자기 몫을 다 쓰고 hlt로 들어가 버릴 수 있다 — 그 순간
+// 그 스레드가 "현재 실행 중"이었다면, 아직 끝나지 않은 다른 스레드가
+// run_queue에 아무리 남아 있어도 그들을 깨워 줄 존재가 더 이상 없어
+// 기계 전체가 멈춘다(이 협조적 스케줄러에는 타이머 인터럽트가 없어
+// hlt는 영원히 되돌아오지 않는다). exit()는 "내가 다시 스케줄되지
+// 않는다"를 스케줄러 자신이 보장하므로(재적재하지 않음), kernel_band가
+// 스레드가 하나씩 끝날 때마다 단조롭게 줄어들어 결국 진짜로 비고,
+// 그제서야 user_band(유저 스레드)가 제 차례를 받는다 — M8부터 유저
+// 스레드가 처음 생기면서 이 보장이 실제로 필요해졌다.
+[[noreturn]] void exit();
 
 object::thread* current();
 

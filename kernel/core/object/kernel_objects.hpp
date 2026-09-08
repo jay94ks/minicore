@@ -20,6 +20,11 @@ struct message;
 
 namespace object {
 
+class handle_table;  // handle_table.hpp(같은 namespace)가 정의 — thread가
+                      // M8부터 자신의 핸들 테이블을 포인터로 들고 있어야
+                      // 해서(유저 스레드의 syscall 진입점이 "현재 스레드의
+                      // 테이블"을 찾아야 한다) 전방 선언만 둔다.
+
 // ADR-085. jail/guest 격리 메커니즘 자체(§2.2가 말하는 실제 정책 적용)는
 // security-model.md 영역이라 M1~M8 범위 밖이다 — 여기서는 값만 보관한다.
 enum class confinement_tier : uint8_t { normal = 0, guest = 1, jail = 2 };
@@ -68,6 +73,14 @@ struct thread {
     // 있는지)는 arch::context_switch(arch가 정의)만 알고 있다 — 이
     // 필드 자체는 "불투명한 재개 지점"으로만 다뤄 arch 독립을 유지한다.
     uint64_t context_rsp = 0;
+
+    // M8(kernel-bootstrap.md, boot.md §4/§6) — 유저 스레드에만 의미
+    // 있는 필드. owner_space가 nullptr이면(지금까지의 모든 커널
+    // 스레드) 아래 필드는 전부 미사용이다.
+    handle_table* handles = nullptr;  // syscall 진입 시 "이 스레드의 테이블"을 찾는 경로(syscall.cpp).
+    uint64_t user_entry_rip = 0;      // 최초 유저모드 진입 시 RIP(ELF e_entry).
+    uint64_t user_rsp = 0;            // 최초 유저모드 진입 시 RSP(유저 스택 top).
+    uint64_t user_arg0 = 0;           // 최초 진입 시 RDI(boot.md §6 — "첫 인자" 관례. boot_info 등).
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/

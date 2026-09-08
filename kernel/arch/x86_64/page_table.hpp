@@ -42,9 +42,12 @@ inline bool has_perm(page_perm p, page_perm bit) {
 }
 
 // 새 PML4를 하나 만들고 커널 higher-half 매핑(physmap + 커널 이미지,
-// M1의 pml4[256]/pml4[511])을 그대로 복사해 넣는다 — 모든 주소공간이
-// 이 두 엔트리를 공유해야 CR3를 바꿔도 커널 코드/데이터가 계속
-// 접근 가능하다. 유저 영역(하위 절반)은 비어 있다.
+// M1의 pml4[256]/pml4[511])과 저지대 항등 매핑(pml4[0] — GDT가 사는
+// .boot 섹션, M8에서 추가: IRETQ가 새 CS/SS 디스크립터를 읽으려면
+// GDT 자체가 어느 CR3에서도 접근 가능해야 한다)을 그대로 복사해
+// 넣는다 — 모든 주소공간이 이 세 엔트리를 공유해야 CR3를 바꿔도
+// 커널 코드/데이터/GDT가 계속 접근 가능하다. 유저 영역(하위 절반의
+// 나머지)은 비어 있다.
 result<uint64_t, map_error> create_address_space_root();
 
 result<void, map_error> map_page(uint64_t pml4_phys, uint64_t virt, uint64_t phys,

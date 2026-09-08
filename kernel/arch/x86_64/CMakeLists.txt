@@ -11,16 +11,48 @@
 # API를 제공한다.
 # M5: context_switch.S가 kernel/core/sched의 arch_context_switch 훅을
 # 제공한다.
+# M8: elf_loader.cpp(ELF64 PT_LOAD 로더), syscall_entry.S+syscall.cpp
+# (SYSCALL/SYSRET), usermode.S+user_thread.cpp(IRETQ로 최초 유저모드
+# 진입) — initrd_blob.S(아래 configure_file)는 개발용 initrd 임베딩.
+
+# init/initrun/CMakeLists.txt가 만든 initrd.img 경로를 읽어 .incbin
+# 소스를 생성한다 — 최상위 CMakeLists.txt가 init/initrun을 kernel보다
+# 먼저 add_subdirectory해 둔 덕분에 이 시점에 프로퍼티가 이미 설정돼
+# 있다(initrd_blob.S.in 주석 참고).
+get_property(MINICORE_INITRD_IMAGE GLOBAL PROPERTY MINICORE_INITRD_IMAGE_PATH)
+configure_file(initrd_blob.S.in ${CMAKE_CURRENT_BINARY_DIR}/initrd_blob.S @ONLY)
 
 add_executable(minicore_kernel_x86_64
     boot/boot.S
     boot/paging_setup.cpp
     boot_info_x86_64.cpp
     context_switch.S
+    elf_loader.cpp
+    idle.S
     irq.cpp
     kernel_main.cpp
     klog_uart.cpp
     page_table.cpp
+    syscall.cpp
+    syscall_entry.S
+    usermode.S
+    user_thread.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/initrd_blob.S
+)
+
+# initrd_blob.S의 .incbin이 실제로 그 시점에 파일이 존재하길 요구한다 —
+# configure_file은 경로 문자열만 넣을 뿐 파일 내용(빌드 결과물)까지
+# 기다려 주지 않으므로 빌드 순서를 명시적으로 강제한다.
+add_dependencies(minicore_kernel_x86_64 minicore_initrd_image)
+
+# add_dependencies만으로는 "순서"만 보장된다 — ninja는 .incbin 안쪽까지
+# 들여다보지 않으므로, initrd.img "내용"이 바뀌어도 이미 컴파일된
+# initrd_blob.S.obj를 그대로 재사용해 버린다(실제로 겪은 문제 —
+# mkinitrd.py를 고쳐 initrd.img가 다시 만들어졌는데도 커널 바이너리에
+# 반영되지 않았다). OBJECT_DEPENDS로 그 obj가 이 파일에도 의존한다고
+# 명시해야 재컴파일이 트리거된다.
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/initrd_blob.S PROPERTIES
+    OBJECT_DEPENDS ${MINICORE_INITRD_IMAGE}
 )
 
 # ADR-010 공통 정책(-ffreestanding 등)은 toolchain/common.cmake가 이미

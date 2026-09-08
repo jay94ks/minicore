@@ -152,8 +152,8 @@ struct mcpack_header {
 };
 ```
 
-`tools/mkinitrd.*`(현재 스텁 — [scaffold-repo-skeleton.md](../done/scaffold-repo-skeleton.md))가
-이 포맷으로 패키징하는 역할을 맡는다.
+`tools/mkinitrd.py`([kernel-bootstrap-m8.md](../done/kernel-bootstrap-m8.md)에서
+구현)가 이 포맷으로 패키징하는 역할을 맡는다.
 
 ## 6. boot_info 전달 메커니즘 (해결: OPEN-22 → ADR-030)
 
