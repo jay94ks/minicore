@@ -22,7 +22,7 @@
 | 문서 | 설명 |
 |---|---|
 | [scaffold-repo-skeleton.md](plan/scaffold-repo-skeleton.md) | 저장소 디렉토리·CMake 골격 생성 계획 (실행 완료, 결과는 done 참고) |
-| [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M6 완료, M7~M8 미실행 — 결과는 done 참고) |
+| [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M7 완료, M8 미실행 — 결과는 done 참고) |
 
 ## done — 완료 보고
 | 문서 | 설명 |
@@ -35,6 +35,7 @@
 | [kernel-bootstrap-m4.md](done/kernel-bootstrap-m4.md) | M4: 핸들 테이블+프록시 트리(cascade revoke)·페이지테이블 조작 API, QEMU 왕복 검증 |
 | [kernel-bootstrap-m5.md](done/kernel-bootstrap-m5.md) | M5: run_queue+협조적 라운드로빈, 커널 스레드 2개 컨텍스트 스위치 QEMU 확인 |
 | [kernel-bootstrap-m6.md](done/kernel-bootstrap-m6.md) | M6: IPC endpoint+Call/Reply+도네이션, 커널 스레드 2개 사이 왕복 + badge 전파 QEMU 확인 |
+| [kernel-bootstrap-m7.md](done/kernel-bootstrap-m7.md) | M7: IPC 페이지(copy)·핸들 전달 + notification, 위임된 핸들로 직접 sys_wait까지 QEMU 확인 |
 
 ## design — 설계/상세
 

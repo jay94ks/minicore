@@ -7,6 +7,7 @@
 
 #include <cstdint>
 
+#include <libk/atomic.hpp>
 #include <libk/intrusive_list.hpp>
 #include <libk/spinlock.hpp>
 
@@ -81,6 +82,18 @@ struct endpoint {
     spinlock lock;
     intrusive_list<thread, &thread::ipc_wait_hook> waiting_servers;  // sys_recv 대기 중
     intrusive_list<thread, &thread::ipc_wait_hook> waiting_callers;  // sys_call 대기 중(서버가 아직 없음)
+};
+
+// ipc.md §7 — 64비트 대기 중 비트셋 하나. sys_notify는 OR할 뿐 절대
+// 실패하지 않는다(큐잉·버퍼링 없음) — sys_wait로 아직 아무도 기다리지
+// 않아도 비트는 유지된다. waiter는 최대 하나만 추적한다 — 스펙이 여러
+// 스레드의 동시 sys_wait를 다루지 않는다(ipc.md "아직 정하지 않은 것"
+// 참고, 그건 sys_recv의 다중 클라이언트 이야기이지 notification은
+// 아니다 — 최소 구현에서는 단일 대기자로 충분하다고 판단했다).
+struct notification {
+    spinlock lock;  // waiter 필드 보호(ADR-033)
+    atomic<uint64_t> bits{0};
+    thread* waiter = nullptr;
 };
 
 }  // namespace object

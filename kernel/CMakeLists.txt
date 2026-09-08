@@ -29,6 +29,7 @@ add_library(minicore_kernel_core OBJECT
     core/object/handle_table.cpp
     core/sched/scheduler.cpp
     core/ipc/endpoint.cpp
+    core/ipc/notification.cpp
 )
 target_link_libraries(minicore_kernel_core PUBLIC minicore_kernel)
 

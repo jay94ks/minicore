@@ -6,7 +6,8 @@
 // mm(물리 페이지 할당자 + 슬랩 힙) 초기화·왕복 확인. M4: 핸들 테이블
 // (objects.md) + 페이지테이블 조작 API 왕복 확인. M5: 커널 스레드
 // 2개가 협조적으로 번갈아 실행됨을 확인. M6: 커널 스레드 2개 사이의
-// Call → Recv → Reply 왕복 확인.
+// Call → Recv → Reply 왕복 확인. M7: 페이지 1개 copy 전달 + 핸들 위임 +
+// notification 왕복 확인.
 #include "boot_info.hpp"
 #include "boot_info_x86_64.hpp"
 #include "klog.hpp"
@@ -15,6 +16,7 @@
 #include <cstdint>
 
 #include <ipc/endpoint.hpp>
+#include <ipc/notification.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
 #include <mm/slab.hpp>
@@ -226,12 +228,30 @@ void demo_page_table() {
 // kernel_main이 하던 "idle" 역할을 이어받는다.
 constexpr int k_sched_demo_iterations = 3;
 
+// 협조적 스케줄러(M5)는 누군가 계속 yield()해야 회전이 유지된다 — 한
+// 스레드가 자기 할 일을 마치고 곧장 무한 hlt로 들어가면, 아직 run_queue
+// 에 남아 제 차례를 못 받은 다른 스레드가 영영 스케줄되지 않을 수 있다
+// (M6/M7에서 실제로 두 번 겪었다 — 각각 서버가 sys_reply 직후, 송신자가
+// sys_call 반환 직후 곧장 hlt로 들어가 상대방이 멈춘 경우). 매번 "이번엔
+// 몇 번 양보해야 충분한가"를 개별적으로 따지는 대신, 마지막 hlt 루프
+// 전에 전체 스레드 수보다 넉넉히 많이 양보해 라운드로빈이 모두를 최소
+// 한 바퀴 이상 돌게 만든다 — 남은 스레드가 없으면 yield()는 그냥
+// 즉시 반환하므로(sched.cpp) 과하게 불러도 무해하다.
+constexpr int k_flush_yield_count = 16;
+
+void flush_yield() {
+    for (int i = 0; i < k_flush_yield_count; ++i) {
+        sched::yield();
+    }
+}
+
 void thread_a_entry() {
     for (int i = 0; i < k_sched_demo_iterations; ++i) {
         klog::printf("[sched] thread A iteration %d\n", i);
         sched::yield();
     }
     klog::printf("[sched] thread A done\n");
+    flush_yield();
     for (;;) {
         asm volatile("hlt");
     }
@@ -243,6 +263,7 @@ void thread_b_entry() {
         sched::yield();
     }
     klog::printf("[sched] thread B done\n");
+    flush_yield();
     for (;;) {
         asm volatile("hlt");
     }
@@ -312,14 +333,7 @@ void thread_c_server_entry() {
     ipc::sys_reply(out);
     klog::printf("[ipc] server sys_reply sent\n");
 
-    // sys_reply는 클라이언트를 run_queue에 다시 넣기만 할 뿐, 이
-    // 협조적 스케줄러(M5)는 아무도 yield()하지 않으면 그 클라이언트를
-    // 영영 스케줄하지 않는다 — 여기서 곧장 hlt 루프로 들어가면
-    // 클라이언트가 응답을 확인하는 로그를 볼 기회 자체가 사라진다
-    // (실제로 이 문제로 한 번 멈춰서 확인했다). 한 번 양보해 다른
-    // 스레드가 최소 한 차례는 더 돌 기회를 준다.
-    sched::yield();
-
+    flush_yield();
     for (;;) {
         asm volatile("hlt");
     }
@@ -336,6 +350,150 @@ void thread_d_client_entry() {
         "[ipc] client sys_call ok=%u reply_label=0x%x (expect 0x5eed) reply_regs0=%lu (expect 42)\n",
         call_result.is_ok(), in.label, static_cast<unsigned long>(in.regs[0]));
 
+    flush_yield();
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+// M7(ipc.md §4/§7) — 페이지 1개를 copy 모드로, 핸들 1개를 두 스레드
+// 사이에 전달하고, notification으로 한 스레드가 다른 스레드를 깨우는
+// 것까지 확인한다(kernel-bootstrap.md M7 완료 기준: "1페이지 데이터를
+// 두 스레드 사이에 copy 모드로 전달 성공"). M6 데모(C/D, endpoint 1개)와
+// 섞이지 않도록 endpoint를 하나 더 둔다 — handle_table은 계속 공유
+// (M4/M6과 같은 "커널 컨텍스트 하나" 단순화).
+object::handle g_ipc2_recv_handle = object::k_invalid_handle;
+object::handle g_ipc2_send_handle = object::k_invalid_handle;
+object::handle g_notify_owner_handle = object::k_invalid_handle;  // G가 H에게 넘길 핸들
+object::handle g_notify_send_handle = object::k_invalid_handle;   // I가 직접 notify할 핸들(같은 객체)
+
+uint64_t g_page_source_phys = 0;
+uint64_t g_page_dest_phys = 0;
+
+constexpr uint32_t k_page_pattern_seed = 0x11223344u;
+constexpr uint64_t k_notify_bits = 0x2ull;
+
+bool demo_ipc2_setup() {
+    void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+    if (ep_mem == nullptr) {
+        return false;
+    }
+    auto* ep = new (ep_mem) object::endpoint();
+    auto owner = g_ipc_table->create_owner(
+        object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+    if (!owner.is_ok()) {
+        return false;
+    }
+    auto recv_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_recv,
+                                                 *g_ipc_table, 0, false);
+    auto send_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_send,
+                                                 *g_ipc_table, 0, false);
+    if (!recv_proxy.is_ok() || !send_proxy.is_ok()) {
+        return false;
+    }
+    g_ipc2_recv_handle = recv_proxy.value();
+    g_ipc2_send_handle = send_proxy.value();
+
+    void* n_mem = mm::slab_alloc(sizeof(object::notification));
+    if (n_mem == nullptr) {
+        return false;
+    }
+    auto* n = new (n_mem) object::notification();
+    // objects.md는 notification 전용 rights 비트를 정의하지 않는다 —
+    // 0으로 둔다(어차피 sys_notify/sys_wait는 rights를 검사하지 않는다).
+    auto notify_owner = g_ipc_table->create_owner(object::object_kind::notification, 0, n);
+    auto notify_proxy = g_ipc_table->create_proxy(notify_owner.value(), 0, *g_ipc_table, 0, false);
+    if (!notify_owner.is_ok() || !notify_proxy.is_ok()) {
+        return false;
+    }
+    g_notify_owner_handle = notify_owner.value();  // 이걸 G가 H에게 IPC로 위임한다.
+    g_notify_send_handle = notify_proxy.value();   // I는 이 프록시로 직접 notify한다.
+
+    auto src_page = mm::alloc_pages(0, 0);
+    auto dst_page = mm::alloc_pages(0, 0);
+    if (!src_page.is_ok() || !dst_page.is_ok()) {
+        return false;
+    }
+    g_page_source_phys = src_page.value();
+    g_page_dest_phys = dst_page.value();
+
+    // 소스 페이지에 알려진 패턴을 써 둔다 — 목적지 페이지는 일부러
+    // 건드리지 않는다(진짜 복사됐는지 나중에 값으로 구분하기 위해).
+    auto* src_words = static_cast<uint32_t*>(mm::phys_to_virt(g_page_source_phys));
+    for (size_t i = 0; i < mm::k_page_size / sizeof(uint32_t); ++i) {
+        src_words[i] = k_page_pattern_seed + static_cast<uint32_t>(i);
+    }
+
+    return true;
+}
+
+void thread_g_sender_entry() {
+    ipc::message out{};
+    out.page_count = 1;
+    out.pages[0] = {reinterpret_cast<uint64_t>(mm::phys_to_virt(g_page_source_phys)),
+                    mm::k_page_size, ipc::transfer_mode::copy};
+    out.handle_count = 1;
+    out.handles[0] = {g_notify_owner_handle, 0xFFFFFFFFu};
+
+    ipc::message in{};
+    auto call_result = ipc::sys_call(*g_ipc_table, g_ipc2_send_handle, out, in);
+    klog::printf("[ipc2] sender sys_call ok=%u ack_label=0x%x\n", call_result.is_ok(), in.label);
+
+    flush_yield();
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+void thread_h_receiver_entry() {
+    ipc::message in{};
+    in.page_count = 1;
+    in.pages[0] = {reinterpret_cast<uint64_t>(mm::phys_to_virt(g_page_dest_phys)), mm::k_page_size,
+                   ipc::transfer_mode::copy};
+
+    auto recv_result = ipc::sys_recv(*g_ipc_table, g_ipc2_recv_handle, in);
+
+    auto* dst_words = static_cast<uint32_t*>(mm::phys_to_virt(g_page_dest_phys));
+    bool content_ok = true;
+    for (size_t i = 0; i < mm::k_page_size / sizeof(uint32_t); ++i) {
+        if (dst_words[i] != k_page_pattern_seed + static_cast<uint32_t>(i)) {
+            content_ok = false;
+            break;
+        }
+    }
+
+    auto handle_info = g_ipc_table->handle_info(in.handles[0].src_handle);
+    klog::printf(
+        "[ipc2] receiver sys_recv ok=%u page_count=%u content_ok=%u handle_count=%u "
+        "received_handle_kind=%u (expect notification=%u)\n",
+        recv_result.is_ok(), in.page_count, content_ok, in.handle_count,
+        handle_info.is_ok() ? static_cast<uint32_t>(handle_info.value().kind) : 0xFF,
+        static_cast<uint32_t>(object::object_kind::notification));
+
+    ipc::message ack{};
+    ack.label = 0xACC0;
+    ipc::sys_reply(ack);
+
+    // 방금 IPC로 받은 새 핸들(원본과 다른 핸들 번호지만 같은 객체를
+    // 가리킴)로 직접 기다린다 — 핸들 위임이 "진짜로 쓸 수 있는"
+    // 핸들을 만들어 냈음을 보여준다.
+    auto wait_result = ipc::sys_wait(*g_ipc_table, in.handles[0].src_handle);
+    klog::printf("[ipc2] receiver sys_wait ok=%u bits=0x%lx (expect 0x%lx)\n",
+                 wait_result.is_ok(),
+                 static_cast<unsigned long>(wait_result.is_ok() ? wait_result.value() : 0),
+                 static_cast<unsigned long>(k_notify_bits));
+
+    flush_yield();
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+void thread_i_notifier_entry() {
+    auto notify_result = ipc::sys_notify(*g_ipc_table, g_notify_send_handle, k_notify_bits);
+    klog::printf("[ipc2] notifier sys_notify ok=%u\n", notify_result.is_ok());
+
+    flush_yield();
     for (;;) {
         asm volatile("hlt");
     }
@@ -360,6 +518,20 @@ void thread_d_client_entry() {
         d = sched::create_kernel_thread(&thread_d_client_entry, object::priority_band::kernel, 0);
     }
 
+    bool ipc2_ready = demo_ipc2_setup();
+    klog::printf("[ipc2] setup ok=%u\n", ipc2_ready);
+
+    object::thread* g = nullptr;
+    object::thread* hh = nullptr;
+    object::thread* ii = nullptr;
+    if (ipc2_ready) {
+        g = sched::create_kernel_thread(&thread_g_sender_entry, object::priority_band::kernel, 0);
+        hh = sched::create_kernel_thread(&thread_h_receiver_entry, object::priority_band::kernel,
+                                          0);
+        ii = sched::create_kernel_thread(&thread_i_notifier_entry, object::priority_band::kernel,
+                                          0);
+    }
+
     if (a != nullptr) {
         sched::enqueue(*a);
     }
@@ -372,9 +544,19 @@ void thread_d_client_entry() {
     if (d != nullptr) {
         sched::enqueue(*d);
     }
+    if (g != nullptr) {
+        sched::enqueue(*g);
+    }
+    if (hh != nullptr) {
+        sched::enqueue(*hh);
+    }
+    if (ii != nullptr) {
+        sched::enqueue(*ii);
+    }
 
     // 여기서부터는 절대 돌아오지 않는다 — 이후로는 위 스레드들 사이의
-    // yield()/sys_call/sys_recv/sys_reply로만 제어가 옮겨간다.
+    // yield()/sys_call/sys_recv/sys_reply/sys_notify/sys_wait로만
+    // 제어가 옮겨간다.
     sched::start();
 }
 

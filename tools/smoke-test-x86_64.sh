@@ -17,6 +17,9 @@
 #     (협조적 라운드로빈, 타이머 선점 없음 — 아직 IDT가 없다).
 #   M6 (ipc.md §3~5): 커널 스레드 2개 사이의 Call → Recv → Reply 왕복,
 #     프록시 badge가 sys_recv까지 정확히 전파됨.
+#   M7 (ipc.md §4/§7): 1페이지 데이터를 copy 모드로 전달(내용 검증
+#     포함), IPC로 위임된 핸들이 실제로 쓸 수 있는 핸들임을 그 핸들로
+#     직접 sys_wait해서 확인, sys_notify로 그 대기를 깨움.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -52,6 +55,9 @@ declare -a EXPECTED=(
   "[sched] thread B iteration 2"
   "[ipc] server sys_recv ok=1 badge=0xcafe (expect 0xcafe) label=0x1234 regs0=41"
   "[ipc] client sys_call ok=1 reply_label=0x5eed (expect 0x5eed) reply_regs0=42 (expect 42)"
+  "[ipc2] receiver sys_recv ok=1 page_count=1 content_ok=1 handle_count=1 received_handle_kind=3 (expect notification=3)"
+  "[ipc2] sender sys_call ok=1 ack_label=0xacc0"
+  "[ipc2] receiver sys_wait ok=1 bits=0x2 (expect 0x2)"
 )
 
 LOG_FILE="$(mktemp)"
