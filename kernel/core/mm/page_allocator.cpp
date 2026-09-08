@@ -239,12 +239,13 @@ void init(const boot::boot_info& info, const boot::memory_region* regions) {
         g_node_count = k_max_numa_nodes;
     }
 
-    // 커널 자신/initrd가 차지한 물리 범위(boot_info_x86_64.cpp의
-    // append_owned_regions가 표시)는 usable 엔트리와 겹칠 수 있다 —
-    // add_free_region_excluding_all이 그 겹침을 잘라낸다.
-    exclusion_range exclusions[2];
+    // 커널 자신/initrd/AP 트램폴린 스크래치 페이지(M10, ADR-055)가
+    // 차지한 물리 범위(boot_info_x86_64.cpp의 append_owned_regions가
+    // 표시)는 usable 엔트리와 겹칠 수 있다 — add_free_region_excluding이
+    // 그 겹침을 잘라낸다.
+    exclusion_range exclusions[3];
     size_t exclusion_count = 0;
-    for (uint32_t i = 0; i < info.memory_map_count && exclusion_count < 2; ++i) {
+    for (uint32_t i = 0; i < info.memory_map_count && exclusion_count < 3; ++i) {
         const boot::memory_region& r = regions[i];
         if (r.type == boot::k_region_kernel_image || r.type == boot::k_region_initrd_image) {
             exclusions[exclusion_count++] = exclusion_range{r.base, r.length};

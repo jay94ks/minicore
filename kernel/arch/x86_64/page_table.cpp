@@ -2,6 +2,7 @@
 #include "page_table.hpp"
 
 #include "memory_layout.hpp"
+#include "smp.hpp"
 
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
@@ -140,6 +141,13 @@ result<void, map_error> map_page(uint64_t pml4_phys, uint64_t virt, uint64_t phy
         return result<void, map_error>::err(map_error::already_mapped);
     }
     pt_table[idx.pt] = (phys & k_pte_addr_mask) | leaf_flags(perm);
+
+    // M10(ADR-055) — 매핑이 바뀔 때마다 즉시 IPI 브로드캐스트. 이
+    // 매핑은 방금 새로 생겼으니 다른 코어 TLB에 stale 엔트리가 있을 수는
+    // 없지만(존재하지 않던 가상주소), 계획 §M10은 map_page도 명시적으로
+    // 포함한다 — 나중에 같은 물리 프레임이 재사용될 때의 잠재적 위험을
+    // 없애는 일관된 정책으로 유지한다.
+    broadcast_tlb_shootdown(virt);
     return result<void, map_error>::ok();
 }
 
@@ -155,8 +163,14 @@ result<void, map_error> unmap_page(uint64_t pml4_phys, uint64_t virt) {
         return result<void, map_error>::err(map_error::not_mapped);
     }
     pt_table[idx.pt] = 0;
-    // TLB 무효화(invlpg)는 아직 하지 않는다 — page_table.hpp 상단 주석:
-    // M4는 이 주소공간을 실제로 활성화(CR3 전환)하지 않는다.
+
+    // M10(ADR-055) — 이 주소공간이 실제로 여러 코어에서 활성화됐는지와
+    // 무관하게(M1~M9와 같은 이유로 page_table.hpp 상단 주석은 여전히
+    // 유효하다), 모든 매핑 변경마다 무조건 IPI를 브로드캐스트한다 —
+    // "그 매핑을 볼 수 있는 다른 코어들"을 개별적으로 추적하지 않는
+    // 단순한 v1 정책(계획 §M10)이다. AP가 없으면(기본) 이 호출은
+    // 즉시 반환한다.
+    broadcast_tlb_shootdown(virt);
     return result<void, map_error>::ok();
 }
 
@@ -173,6 +187,8 @@ result<void, map_error> protect_page(uint64_t pml4_phys, uint64_t virt, page_per
     }
     uint64_t phys = pt_table[idx.pt] & k_pte_addr_mask;
     pt_table[idx.pt] = phys | leaf_flags(new_perm);
+
+    broadcast_tlb_shootdown(virt);  // M10(ADR-055) — unmap_page과 같은 정책.
     return result<void, map_error>::ok();
 }
 

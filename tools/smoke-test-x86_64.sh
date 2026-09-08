@@ -28,6 +28,12 @@
 #   M9 (smp-fpu-bringup.md, ADR-127): 서로 다른 두 커널 스레드가 xmm0에
 #     넣어 둔 값이 yield()를 여러 차례 거쳐도 서로 오염되지 않음을
 #     확인한다(eager FXSAVE/FXRSTOR).
+#   M10 (smp-fpu-bringup.md, ADR-055): IDT+ACPI MADT 파싱+LAPIC 구동이
+#     BSP 단일 코어 경로에서도 항상 실행된다 — AP 트램폴린 스크래치
+#     페이지(kernel/arch/x86_64/smp.hpp::k_ap_trampoline_phys)가
+#     memory_map에 추가 엔트리로 잡혀 selftest의 memory_map_count가
+#     4에서 5로 바뀐다(M1~M9는 4였다). SMP/AP 기동 자체의 검증은 opt-in
+#     이라 별도 스크립트(tools/smoke-test-smp-x86_64.sh)로 분리한다.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -45,7 +51,7 @@ TIMEOUT_SEC=15
 
 declare -a EXPECTED=(
   "hello from kernel"
-  "[boot_info:selftest] memory_map_count=4"
+  "[boot_info:selftest] memory_map_count=5"
   "[boot_info:selftest] initrd_addr=0x1000000 initrd_size=0x100000"
   "[mm:init] node[0]"
   "[mm:alloc] order0 ok=1"
@@ -81,6 +87,8 @@ declare -a EXPECTED=(
   "[fpu] thread B iteration 1 xmm0 preserved=1"
   "[fpu] thread B iteration 2 xmm0 preserved=1"
   "[fpu] thread B done all_preserved=1"
+  "[smp] BSP apic_id=0"
+  "[smp] online_cpu_count=1"
 )
 
 LOG_FILE="$(mktemp)"

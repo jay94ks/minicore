@@ -22,6 +22,10 @@
 #                         (-d cpu_reset,guest_errors,int)를 <빌드
 #                         디렉토리>/qemu-trace.log에 남긴다. 기본은
 #                         off — 로그량이 커 일반 부팅 경로에는 부담.
+#   MINICORE_QEMU_SMP=N   docs/plan/smp-fpu-bringup.md M10(ADR-055):
+#                         QEMU를 -smp N으로 띄운다. 기본은 미설정(=1코어,
+#                         M1~M9와 동일한 동작 보존) — opt-in이라야
+#                         ADR-125의 "기본값 유지" 패턴과 일치한다.
 
 set -euo pipefail
 
@@ -45,6 +49,9 @@ case "$ARCH" in
     fi
     if [[ "${MINICORE_QEMU_TRACE:-0}" == "1" ]]; then
       EXTRA_ARGS+=(-d cpu_reset,guest_errors,int -D "${BUILD_DIR}/qemu-trace.log")
+    fi
+    if [[ -n "${MINICORE_QEMU_SMP:-}" ]]; then
+      EXTRA_ARGS+=(-smp "${MINICORE_QEMU_SMP}")
     fi
 
     exec "$QEMU_BIN" \

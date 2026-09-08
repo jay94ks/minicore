@@ -168,10 +168,25 @@ struct mcpack_header {
   강제하지 않는다 — 각 서버에게 어떤 시작 인자를 줄지는 initrun
   자신의 설계(기동 매니페스트, 아직 미정)에 맡긴다.
 
+## 7. ACPI 파싱(x86_64, SMP): MADT — RSDP 획득 경로 확장 (docs/plan/smp-fpu-bringup.md §M10, ADR-055/135)
+
+§2 표는 `arch_data`(ACPI RSDP)를 Multiboot2 태그 14/15로 얻는 경로만
+명시했다. 이 개발 머신은 QEMU PVH 직접 부팅(ADR-114)이라 그 태그가
+전달되지 않아 `boot_info.arch_data_addr`가 항상 0이다 — 그래서
+`kernel/arch/x86_64/acpi.cpp::find_and_parse_madt()`는
+`arch_data_addr==0`일 때 ACPI 스펙이 원래 정의하는 표준 폴백 경로
+(EBDA 첫 1KiB + BIOS ROM 영역 `[0xE0000, 0x100000)`을 16바이트 경계로
+`"RSD PTR "` 시그니처 스캔, ACPI 6.5 §5.2.5.1)로 RSDP를 직접 찾는다 —
+부트로더 종류와 무관하게 항상 성립하는 경로다. 이 스캔은 실제로 QEMU
+q35 machine이 부트 경로와 무관하게 항상 구성해 두는 실제 ACPI 테이블을
+찾아내며(self-test fixture가 아니라 진짜 데이터), 여기서 얻은
+`local_apic_address`+MADT Processor Local APIC 엔트리(Enabled 비트만)로
+AP 기동에 필요한 APIC ID 목록을 얻는다. 얻은 개수를 `boot_info.cpu_count`
+에 반영한다(`cpu_node_map_addr`는 여전히 0 — ACPI SRAT/SLIT 파싱은
+M11 범위).
+
 ## 아직 정하지 않은 것
 
 - 코어 서버들의 기동 순서·의존성을 기술하는 매니페스트 형식은 이
   스펙의 범위 밖이다 — initrun 자체의 설계 문제로 넘긴다. 이
   스펙은 "커널이 initrun 하나를 유저모드로 띄운다"까지만 다룬다.
-- ACPI(x86_64) 파싱은 SMP·전원관리가 필요해지는 시점에 `arch_data_addr`을
-  통해 확장한다.

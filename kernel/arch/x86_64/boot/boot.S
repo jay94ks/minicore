@@ -50,6 +50,7 @@ gdt64_start:
     .quad 0x00A0FA0000000000   /* 0x30: user_code64, DPL=3, L=1 */
 gdt64_end:
 
+.global gdt64_pointer   /* M10(ap_trampoline.S) — AP가 64비트 진입 후 이 진짜 GDT로 다시 적재한다. */
 gdt64_pointer:
     .word gdt64_end - gdt64_start - 1
     .quad gdt64_start

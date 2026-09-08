@@ -25,6 +25,8 @@ get_property(MINICORE_INITRD_IMAGE GLOBAL PROPERTY MINICORE_INITRD_IMAGE_PATH)
 configure_file(initrd_blob.S.in ${CMAKE_CURRENT_BINARY_DIR}/initrd_blob.S @ONLY)
 
 add_executable(minicore_kernel_x86_64
+    acpi.cpp
+    ap_trampoline.S
     boot/boot.S
     boot/paging_setup.cpp
     boot_info_x86_64.cpp
@@ -32,10 +34,14 @@ add_executable(minicore_kernel_x86_64
     elf_loader.cpp
     fpu.cpp
     idle.S
+    idt.cpp
     irq.cpp
+    isr_stubs.S
     kernel_main.cpp
     klog_uart.cpp
+    lapic.cpp
     page_table.cpp
+    smp.cpp
     syscall.cpp
     syscall_entry.S
     usermode.S

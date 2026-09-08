@@ -13,13 +13,22 @@
 //
 // docs/plan/smp-fpu-bringup.md M9(ADR-127): FPU/SIMD 컨텍스트 스위칭 —
 // 서로 다른 두 스레드가 각자 xmm 레지스터에 넣어 둔 값이 yield()를
-// 여러 번 거쳐도 섞이지 않음을 확인.
+// 여러 번 거쳐도 섞이지 않음을 확인. M10(ADR-055): IDT 기초 + ACPI
+// MADT 파싱 + LAPIC 구동 + AP 기동(INIT-SIPI-SIPI) + IPI 기반 TLB
+// shootdown — MINICORE_QEMU_SMP=N으로 띄우면 BSP를 제외한 나머지
+// N-1개 AP가 전부 온라인되고, 이후 map_page/unmap_page/protect_page
+// 호출마다(demo_page_table 등 기존 M1~M9 데모 전체 포함) IPI shootdown이
+// 실제로 왕복함을 확인.
+#include "acpi.hpp"
 #include "boot_info.hpp"
 #include "boot_info_x86_64.hpp"
 #include "elf_loader.hpp"
 #include "fpu.hpp"
+#include "idt.hpp"
 #include "klog.hpp"
+#include "lapic.hpp"
 #include "page_table.hpp"
+#include "smp.hpp"
 #include "syscall.hpp"
 
 #include <cstdint>
@@ -63,7 +72,11 @@ void dump_pool_stats(const char* tag) {
     }
 }
 
-void demo_mm() {
+// M10(ADR-055) — acpi.cpp의 MADT 파싱이 "real" boot_info.arch_data_addr가
+// 있으면 우선 그걸 신뢰하도록(GRUB/UEFI 실배포 경로 대비) 반환값으로
+// 넘겨준다. 이 개발 머신(QEMU PVH, ADR-114)에서는 항상 0이라 acpi.cpp
+// 자신의 EBDA/BIOS ROM 스캔 폴백이 실제로 타는 경로다.
+uint64_t demo_mm() {
     const boot::memory_region* regions = nullptr;
     boot::boot_info info = arch_x86_64::build_boot_info(mb2_magic, mb2_info_addr, &regions);
     boot::dump("real", info, regions);
@@ -109,6 +122,36 @@ void demo_mm() {
         mm::slab_free(slab_b, 32);
     }
     klog::printf("[mm:slab] freed both chunks\n");
+    return info.arch_data_addr;
+}
+
+// M10(smp-fpu-bringup.md §M10, ADR-055) — ACPI MADT를 파싱해 LAPIC을
+// 켜고, 발견한 AP를 전부 순차 기동한다. mm::init()이 이미 끝난 뒤라야
+// 한다(bring_up_aps가 AP 커널 스택을 mm::alloc_pages로 확보한다).
+void demo_smp(uint64_t real_arch_data_addr) {
+    arch_x86_64::madt_result madt{};
+    bool madt_ok = arch_x86_64::find_and_parse_madt(real_arch_data_addr, madt);
+    klog::printf("[acpi] madt_ok=%u cpu_count=%u lapic_base=0x%lx\n", madt_ok, madt.cpu_count,
+                 static_cast<unsigned long>(madt.lapic_base_phys));
+    for (uint32_t i = 0; i < madt.cpu_count; ++i) {
+        klog::printf("[acpi] cpu[%u] apic_id=%u\n", i, madt.apic_ids[i]);
+    }
+
+    constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
+    arch_x86_64::lapic_init(madt_ok ? madt.lapic_base_phys : k_default_lapic_base);
+    klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
+
+    // MADT를 못 찾았어도(madt_ok==false) BSP 자신은 항상 "온라인 코어
+    // 1개"다 — bring_up_aps()는 BSP 등록도 함께 겸하므로(smp.cpp) 이
+    // 경우엔 BSP 하나짜리 최소 madt_result를 직접 구성해 그대로
+    // 넘긴다(AP 기동 루프는 cpu_count=1이라 아무 것도 더 하지 않는다).
+    arch_x86_64::madt_result effective = madt;
+    if (!madt_ok) {
+        effective.cpu_count = 1;
+        effective.apic_ids[0] = arch_x86_64::lapic_id();
+    }
+    arch_x86_64::bring_up_aps(effective);
+    klog::printf("[smp] online_cpu_count=%u\n", arch_x86_64::online_cpu_count());
 }
 
 // handle_table(64 엔트리, 엔트리마다 intrusive_list 센티널 포함)은
@@ -776,12 +819,17 @@ extern "C" [[noreturn]] void kernel_main() {
     klog::init();
     klog::printf("hello from kernel\n");
 
+    // M10(smp-fpu-bringup.md, ADR-055) — IDT를 가장 먼저 건다. 이후의
+    // 모든 예외(원인 불명 정지 포함)가 catch-all로 진단 가능해진다.
+    arch_x86_64::init_idt();
+
     // M9(ADR-127) — 첫 arch_context_switch(=첫 FXSAVE/FXRSTOR, demo_sched()
     // 안에서 발생)보다 반드시 먼저 호출해야 한다. CR4.OSFXSR 없이
     // FXSAVE/FXRSTOR를 실행하면 #UD.
     arch_x86_64::init_fpu();
 
-    demo_mm();
+    uint64_t real_arch_data_addr = demo_mm();
+    demo_smp(real_arch_data_addr);
     demo_object_model();
     demo_page_table();
     demo_sched();

@@ -3,6 +3,7 @@
 // boot::boot_info는 arch 독립이다).
 #include "boot_info_x86_64.hpp"
 #include "memory_layout.hpp"
+#include "smp.hpp"
 
 #include <mm/phys_map.hpp>
 
@@ -85,6 +86,23 @@ void append_owned_regions(uint32_t& region_count, const boot::boot_info& info) {
         r.base = info.initrd_addr;
         r.length = info.initrd_size;
         r.type = boot::k_region_initrd_image;
+        r.node_id = 0;
+    }
+
+    // M10(ADR-055) — AP 트램폴린 스크래치 페이지(smp.hpp::k_ap_trampoline_phys)
+    // 도 커널 자신/initrd와 같은 이유로 물리 할당자에서 영구히 빼야
+    // 한다 — smp.cpp가 부팅 극초기에 이 페이지에 트램폴린 코드를 써
+    // 두고, 이후 AP가 언제든 그 코드를 다시 실행할 수 있어 mm::alloc_pages가
+    // 이 페이지를 다른 용도로 내주면 안 된다. k_region_kernel_image를
+    // 그대로 재사용한다(새 type 값을 추가하지 않는다) — 이 영역도
+    // "커널이 이미 소유한 물리 범위"라는 점에서 실제 커널 이미지와
+    // 배제 처리 방식이 정확히 같다(page_allocator.cpp init()의 exclusion
+    // 목록이 이 type 값을 그대로 걸러낸다).
+    if (region_count < k_max_memory_regions) {
+        boot::memory_region& r = g_memory_regions[region_count++];
+        r.base = arch_x86_64::k_ap_trampoline_phys;
+        r.length = arch_x86_64::k_ap_trampoline_size;
+        r.type = boot::k_region_kernel_image;
         r.node_id = 0;
     }
 }
