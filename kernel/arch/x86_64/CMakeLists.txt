@@ -115,3 +115,8 @@ set_target_properties(minicore_kernel_x86_64 PROPERTIES
     LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/link.ld
     SUFFIX ".elf"
 )
+
+# UEFI 진입 스텁(docs/design/boot-and-drivers.md ADR-174) — 이 타깃이
+# 만들어진 뒤에 add_subdirectory해야 efi_stub/CMakeLists.txt가
+# $<TARGET_FILE:minicore_kernel_x86_64>를 참조할 수 있다.
+add_subdirectory(efi_stub)

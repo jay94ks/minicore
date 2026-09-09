@@ -1559,3 +1559,119 @@
     오래된 실기, 또는 IOAPIC이 아예 없는 극단적 환경)는 이 커널의
     현재 로드맵(ADR-009: x86_64 우선, LAPIC/MADT 전제)에 없다 —
     필요해지면 별도 ADR.
+
+## ADR-174. initrun/devmgr에 전달되는 arch_data_addr을 self-test 고정값(0)이 아니라 실제 감지값으로 교체
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: `kernel_main.cpp::setup_initrun_process()`가 initrun에게
+  넘기는 `boot_info`(유저 가상주소로 매핑되는 그 페이지)의
+  `arch_data_addr` 필드를 `run_boot_info_self_test()`의 고정값(항상
+  0)이 아니라, `dump_real_boot_info()`가 이미 계산해 둔 **실제
+  감지값**(Multiboot2 RSDP 태그 또는 ADR-175의 UEFI RSDP)으로
+  덮어쓴다. 새 전역 `g_real_arch_data_addr`(kernel_main.cpp, `g_mcfg`
+  와 같은 부트스트랩 전역 관례)로 그 값을 `dump_real_boot_info()`
+  호출 시점부터 `setup_initrun_process()` 호출 시점까지 들고 온다.
+  `boot_info`의 나머지 필드(메모리맵 등)는 여전히 self-test 값이다
+  — initrun 자신은 그 필드들을 읽지 않는다(기존 주석 그대로).
+- **근거**: M12(system-servers-bringup.md) 시절 "GRUB가 없어(ADR-114)
+  진짜 Multiboot2 boot_info가 없다"는 전제로 self-test 값을 그대로
+  실었던 코드가 M20까지 그대로 남아 있었다 — `servers/devmgr`의
+  자체 EBDA/BIOS ROM RSDP 스캔 폴백(`scan_for_rsdp()`)이 QEMU
+  PVH 개발 경로와 실제 SeaBIOS+GRUB 경로 양쪽에서 우연히 계속
+  성공해 이 결함이 드러나지 않았을 뿐이다. ADR-175(UEFI 경로)를
+  실제로 검증하며 처음으로 드러났다 — OVMF는 그 폴백 영역에 legacy
+  호환 RSDP 사본을 남기지 않아, devmgr의 ACPI/MCFG 파싱이 조용히
+  실패했다(실측: `[devmgr] mcfg ecam_base=0xffffffffffffffff
+  device_count=0x0`, 이후 usb/virtio-blk/fat32/ext4가 전부 "BAR
+  없음"으로 건너뛰고 최종적으로 스케줄러 데드락 PANIC까지 이어졌다).
+- **영향**:
+  - 세 경로(PVH 개발/실제 GRUB/UEFI) 전부에서 devmgr가 이제 **진짜**
+    ACPI RSDP를 받는다 — 폴백 스캔에 더 이상 의존하지 않는다(폴백
+    자체는 그대로 남아 있다, 두 경로 모두 우연히 잘 동작해 왔으므로
+    제거할 근거가 없다).
+  - 이 수정은 UEFI 전용이 아니다 — PVH/GRUB 경로도 이전에는 항상
+    0을 받다가 이제 실제 값을 받는다(동작 결과는 두 경로 모두
+    바뀌지 않았다 — 표준 스모크 테스트 82개+SMP/NUMA/AVX 회귀
+    스위트 재확인, 회귀 없음).
+
+## ADR-175. 실제 UEFI 부팅 경로 최초 구현 — 별도 PE32+ EFI 스텁이 커널 ELF를 GRUB처럼 로드
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: `docs/spec/boot.md` §1.2가 정의만 해 두고 실제로는 전혀
+  없던 UEFI 진입 경로를 만든다. 커널 ELF 자체를 PE32+로 다시 빌드하는
+  것이 아니라(이 커널의 higher-half 설계는 ELF의 `AT()`/`p_paddr`
+  물리 적재 주소 분리 기능에 의존하는데, PE/COFF 포맷에는 그
+  대응 개념이 없다 — VMA/RVA만 있고 "파일이 적재되는 물리주소와
+  실행되는 가상주소가 다르다"는 것을 표현할 방법이 없다), **별도의
+  작은 PE32+ EFI 애플리케이션**(`kernel/arch/x86_64/efi_stub/`)이
+  기존 커널 ELF를 자기 안에 통째로 심어 두고 GRUB의 Multiboot2
+  로더가 하는 일을 UEFI Boot Services로 그대로 재현한다.
+  1. **커널 임베딩**: `kernel_blob.S.in`(`kernel/arch/x86_64/
+     initrd_blob.S.in`과 완전히 같은 패턴)이 `.incbin`으로 커널
+     ELF 전체를 심는다.
+  2. **ELF 로딩**: `efi_main.cpp`가 그 ELF의 PT_LOAD 프로그램 헤더를
+     직접 파싱해 각 세그먼트를 **`p_paddr`**(가상주소가 아니라)에
+     그대로 복사한다 — `p_memsz > p_filesz`인 나머지는 0으로 채운다
+     (`.bss` 관례). `AllocatePages(EFI_ALLOCATE_ADDRESS)`로 그 물리
+     범위를 먼저 예약한다.
+  3. **ACPI RSDP**: `EFI_CONFIGURATION_TABLE`에서 ACPI 2.0 GUID
+     (`8868e871-e4f1-11d3-bc22-0080c73c8881`, 없으면 1.0 GUID
+     `eb9d2d30-2d88-11d3-9a16-0090273fc14d`)로 찾아, 커널의
+     `efi_acpi_rsdp_phys`(신규, `.boot.bss`, `mb2_magic`/
+     `mb2_info_addr` 옆) 물리주소에 직접 써 넣는다 — 이 값은 빌드
+     시점에 `tools/gen-efi-entry-addr.py`가 `llvm-nm`으로 뽑는다
+     (이 커널은 ASLR/PIE가 없어 재현 가능, `_efi_entry`의 물리주소도
+     같은 방식으로 뽑는다). `kernel_main.cpp::dump_real_boot_info()`
+     는 이 값이 0이 아니면 Multiboot2 태그 파싱 대신 그대로
+     `arch_data_addr`로 채택한다(코드 3줄 추가).
+  4. **Boot Services 반납**: `GetMemoryMap`+`ExitBootServices`를
+     스펙대로 호출한다(실패 시 표준 재시도 관례 한 번).
+  5. **커널로 점프**: `_efi_entry`(신규, `boot.S`, `.boot.text` —
+     물리 [0,8MiB) 안이라 CR3를 바꿔도 이 코드 자신의 페이지가
+     매핑에서 빠지지 않는다)로 점프한다. UEFI는 **이미 long
+     mode(페이징 켜짐)로 진입**하므로 `_start32`의 32비트 보호모드
+     단계를 통째로 건너뛰고, `_start32`가 하던 일 중 필요한 부분
+     (저지대 8MiB 항등 매핑 구성, 커널 자신의 GDT 재적재)만 64비트로
+     다시 써서 재현한 뒤, 기존 `_start64`가 이미 쓰는
+     `boot_setup_paging()`+`kernel_main()` 진입 꼬리를 그대로
+     재사용한다.
+- **근거**: 커널 본체(mm/sched/ipc/objects/servers 전부)를 통째로
+  다시 빌드/링크하는 대신 "이미 완성된 ELF를 그대로 다른 방식으로
+  적재하는 로더"만 새로 만드는 쪽이 검증된 코드를 건드리지 않는다
+  — GRUB가 이미 정확히 이 역할을 하고 있고(ADR-173으로 처음
+  검증됨), UEFI 스텁은 그 로더 역할을 UEFI Boot Services로
+  다시 구현한 것뿐이다.
+- **실행 중 발견하고 고친 버그 — retf 트릭이 UEFI의 원래 스택에
+  push함**: CR3를 우리 페이지테이블(저지대 8MiB identity map만
+  있음)로 바꾼 뒤, CS를 우리 GDT의 `SEL_CODE64`로 바꾸려고
+  `push $CS; push $RIP; lretq` 트릭을 쓰는데, 이 시점의 RSP가 여전히
+  UEFI가 `efi_main`에 넘겨준 원래 스택(대개 저지대 8MiB 밖)이었다
+  — push 자체가 새 페이지테이블에 없는 주소에 쓰려다 실패하고, 이
+  시점엔 유효한 IDT도 없어 아무 진단도 없이 조용히 멈췄다. 그 시점엔
+  `klog`/`printf`가 전혀 없어(IDT조차 아직 없다) 포트 0x3F8에 문자
+  하나씩(`'A'`~`'F'`) 직접 `outb`하는 체크포인트를 단계마다 심어
+  원인을 좁혔다 — C(CR3 교체 직후)까지는 찍히고 D(retf 이후)부터
+  안 찍혀, retf 직전 push가 원인임을 확인했다. retf 전에
+  `low_boot_stack_top`(저지대, 항등 매핑 보장)으로 먼저 옮기도록
+  순서를 바꿔 고쳤다.
+- **영향**:
+  - `docs/done/real-hardware-boot-verification.md`에 UEFI 경로
+    검증 결과를 추가했다 — ADR-114/173이 시작한 "실제 배포 경로
+    검증" 작업의 연장이다.
+  - **알려진 제약(고치지 않고 남긴 것)**: USB xHCI 컨트롤러 리셋
+    자체 테스트가 OVMF에서만 실패한다(`hcrst_done=0
+    controller_ready=0`, `bar_phys=0x10000`처럼 명백히 잘못된 BAR
+    값을 읽는다 — PCI 열거 자체는 xHCI 장치를 정확히 찾는다). OVMF가
+    자신이 안 쓰는 PCI 장치의 BAR를 SeaBIOS와 달리 미리 구성해
+    두지 않고, devmgr의 BAR 재사용/신규 배정 판단 로직(M15/M16,
+    ADR-158/163)이 이 "미구성" 상태를 잘못 해석하는 것으로 보인다
+    — 다운스트림에서 크래시나 행을 유발하지 않고(자체 테스트만
+    실패로 기록), USB HID 실제 열거는 이미 M14 완료 보고서가 범위
+    밖으로 명시해 뒀던 항목이라 더 깊이 조사하지 않고 알려진 한계로
+    남긴다.
+  - PE32+/UEFI 빌드는 `x86_64` 전용이다(다른 아키텍처의 UEFI
+    스텁은 없다, ADR-009와 같은 우선순위).
+  - `configure_file()`은 `$<TARGET_FILE:...>` 같은 제네레이터
+    표현식을 평가하지 않는다는 것(구성 단계 vs 생성 단계의 시점
+    차이) — 구현 중 실제로 겪은 실수라 여기 기록해 둔다. 커널 ELF의
+    출력 경로를 문자열로 직접 구성해 피했다.

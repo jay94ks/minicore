@@ -1,14 +1,14 @@
-# 완료 보고: 실제 GRUB Multiboot2 부팅 경로 최초 검증 (마일스톤 외 확인 작업)
+# 완료 보고: 실제 부팅 경로(GRUB Multiboot2 + UEFI) 최초 검증 (마일스톤 외 확인 작업)
 
 **대상**: 어떤 `docs/plan/*.md` 마일스톤에도 속하지 않는다 —
 `system-servers-bringup.md`의 M12~M20이 이미 전부 완료된 뒤, 사용자가
-"도전 실기 부팅 확인해보자(GRUB Multiboot2 경로)"로 요청한 별도
-확인 작업이다.
+"도전 실기 부팅 확인해보자(GRUB Multiboot2 경로)", 이어서 "UEFI 경로도
+검증해보자" → "실제로 구현해줘"로 요청한 별도 확인/구현 작업이다.
 **관련 결정**: [boot-and-drivers.md](../design/boot-and-drivers.md)
 ADR-017(Multiboot2/UEFI 이중 지원), ADR-114(QEMU PVH 직접 부팅 —
 "실제 GRUB 기반 검증은 여전히 하지 않은 상태로 남는다"고 명시했던
-바로 그 갭), ADR-173(이번에 실제로 검증하며 발견·수정한 레거시
-8259 PIC 버그)
+바로 그 갭), ADR-173(레거시 8259 PIC 버그), ADR-174(initrun/devmgr
+arch_data_addr 실값 전달), ADR-175(UEFI 부팅 최초 구현)
 **실행일**: 2026-09-10
 
 ## 배경
@@ -133,10 +133,134 @@ qemu-system-x86_64 -M q35 -m 256M -no-reboot -no-shutdown -display none \
 - **알려진 한계**: 물리 실기 검증은 여전히 하지 않았다(이 환경엔
   물리 하드웨어가 없다) — 이번 확인은 "QEMU 개발 지름길이 아닌
   진짜 BIOS+GRUB 경로"까지다. UEFI 경로(ADR-017이 함께 요구한 두
-  번째 진입 방식)도 이번 확인 대상이 아니다.
+  번째 진입 방식)는 바로 다음 절에서 이어서 다룬다.
+
+---
+
+## 2부: 실제 UEFI(OVMF) 부팅 경로 최초 구현
+
+GRUB 경로를 검증한 뒤 사용자가 "UEFI 경로도 검증해보자"고 요청했다.
+확인해 보니 `docs/spec/boot.md` §1.2가 UEFI 진입점(`efi_main`)을
+스펙으로만 정의해 뒀을 뿐, **실제 구현이 전혀 없었다**(Multiboot2
+경로는 최소한 부트 스텁 코드가 이미 있어 "검증만" 하면 됐지만, UEFI는
+"만드는 것부터" 시작해야 했다) — 그래서 사용자에게 규모를 미리
+알리고("실제로 구현해줘"로 확인받은 뒤) 처음부터 구현했다. 상세
+설계는 [boot-and-drivers.md](../design/boot-and-drivers.md) ADR-175
+참고, 여기서는 실행 과정과 검증 결과만 기록한다.
+
+### D4. Docker 기반 OVMF 확보
+
+MSYS2에 `ovmf` 패키지도 없다(GRUB와 같은 사정) — `debian:bookworm-slim`
+컨테이너에 `ovmf` apt 패키지를 설치해 `OVMF_CODE.fd`/`OVMF_VARS.fd`를
+꺼냈다.
+
+### D5. EFI 스텁 구현 (`kernel/arch/x86_64/efi_stub/`)
+
+ADR-175가 상세를 다룬다 — 요약하면 별도 PE32+ EFI 애플리케이션이
+커널 ELF를 통째로 심고, GRUB의 Multiboot2 로더가 하는 일(PT_LOAD
+세그먼트를 `p_paddr`에 복사, ACPI RSDP를 찾아 넘김)을 UEFI Boot
+Services로 재현한 뒤 커널의 새 진입점(`_efi_entry`, `boot.S`)으로
+점프한다.
+
+### D6. 발견하고 고친 버그 — retf가 UEFI의 원래 스택에 push함 (ADR-175)
+
+CR3를 우리 페이지테이블로 바꾼 직후, CS를 우리 GDT로 바꾸는 retf
+트릭이 여전히 UEFI의 원래 스택(새 페이지테이블 밖)에 push하려다
+조용히 멈췄다 — 그 시점엔 `klog`도 IDT도 없어 아무 진단도 안
+나왔다. 포트 0x3F8에 문자를 하나씩 직접 쓰는 임시 체크포인트
+(`'A'`~`'F'`)로 정확한 위치(CR3 교체 이후, retf 이전)를 좁혔다.
+retf 전에 저지대 스택으로 먼저 옮겨 고쳤다.
+
+### D7. 발견하고 고친 버그 — initrun/devmgr가 항상 arch_data_addr=0을 받음 (ADR-174)
+
+여기까지 고친 뒤 커널 자체(`kernel_main`)는 정상 동작했지만
+(`madt_ok=1`, `mcfg_ok=1` — ACPI RSDP를 UEFI Configuration Table에서
+찾아 넘긴 것은 성공), 부트 디스크·xHCI 등 전체 장치를 붙이고
+다시 부팅하니 `[devmgr] mcfg ecam_base=0xffffffffffffffff
+device_count=0x0`으로 PCI 열거가 완전히 실패하고 결국 스케줄러
+데드락 PANIC까지 이어졌다. 원인은 `kernel_main`이 아니라 **M12부터
+있던 별개의 오래된 결함**이었다 — `setup_initrun_process()`가
+initrun에게 넘기는 `boot_info`가 항상 self-test 고정값(arch_data_addr
+=0)이었고, `servers/devmgr`의 EBDA/BIOS ROM 스캔 폴백이 QEMU PVH와
+실제 SeaBIOS+GRUB 양쪽에서 우연히 그 공백을 메워 왔을 뿐이었다 —
+OVMF만 그 폴백 영역에 legacy RSDP를 남기지 않아 처음으로 드러났다.
+자세한 내용과 수정은 ADR-174 참고.
+
+### 검증 결과 (QEMU 실측)
+
+```bash
+qemu-system-x86_64 -M q35 -m 256M -no-reboot -no-shutdown -display none \
+  -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE.fd \
+  -drive if=pflash,format=raw,file=OVMF_VARS_rw.fd \
+  -drive file=fat:rw:<ESP 디렉터리>,format=raw \
+  -drive if=none,id=bootdisk,format=raw,file=bootdisk.img -device virtio-blk-pci,drive=bootdisk,addr=04.0 \
+  -device qemu-xhci,addr=05.0 \
+  -drive if=none,id=testdisk,format=raw,file=testdisk.img -device virtio-blk-pci,drive=testdisk,addr=06.0 \
+  -drive if=none,id=fat32disk,format=raw,file=fat32-test.img -device virtio-blk-pci,drive=fat32disk,addr=07.0 \
+  -drive if=none,id=ext4disk,format=raw,file=ext4-test.img -device virtio-blk-pci,drive=ext4disk,addr=08.0 \
+  -chardev stdio,id=char0,mux=off -serial chardev:char0
+# <ESP 디렉터리>/EFI/BOOT/BOOTX64.EFI = minicore_kernel_x86_64_efi.efi
+```
+
+실측 로그(발췌 — 두 버그를 모두 고친 뒤, 최종 시도):
+
+```
+[efi_stub] entered, kernel blob size=0x0000000000085008
+[efi_stub] kernel segments loaded
+[efi_stub] acpi rsdp=0x000000000f77e014
+[efi_stub] exited boot services, jumping to kernel at 0x00000000001000f9
+hello from kernel
+[boot_info:real] magic=0x4d434249(ok) version=3 cpu_count=1
+[acpi] madt_ok=1 cpu_count=1 lapic_base=0xfee00000
+[acpi] mcfg_ok=1 ecam_base=0xb0000000
+...
+[devmgr] device_count=0x9
+[virtio-blk] write/read roundtrip ok=1
+[fat32] mount ok=0x1
+[ext4] mount ok=0x1
+[procsrv] cfgsrv full protocol ok=1
+[shell] session started
+[procsrv] shell session start ok=1
+[login] auth ok=1
+[login] su delegated ok=1
+[login] su denied ok=1
+[shell] no keyboard input, running self-test commands
+[shell] ls ok=1
+[shell] cat ok=1
+[shell] self-test done
+```
+
+- **확인함**: 실제 UEFI 펌웨어(OVMF)가 이 커널의 EFI 스텁을 정상
+  로드·실행하고, 스텁이 GRUB와 동등한 방식으로 커널을 적재해
+  M1~M20 전체가 GRUB/PVH 경로와 동일한 최종 상태(로그인, su
+  위임/거부, cfgsrv 왕복+권한 모델, fat32/ext4 마운트+읽기,
+  virtio-blk 왕복, 셸 `ls`/`cat` 자체 테스트)에 도달한다 — 공식
+  스모크 테스트 `EXPECTED` 82개 문자열 중 80개가 이 로그에서
+  발견됐다(GRUB 검증과 같은 방법론 — `tools/smoke-test-x86_64.sh`
+  자체는 PVH 경로 전용이라 이 로그를 직접 대조했다).
+- **알려진 제약(고치지 않고 남긴 것) — USB xHCI**: 남은 2개
+  미일치는 전부 `[usb] xhci hcrst_done=0x1`/`controller_ready=0x1`
+  이다 — OVMF에서만 `hcrst_done=0x0 controller_ready=0x0`,
+  `bar_phys=0x10000`(다른 두 경로에서는 `0xC0000000`대의 정상적인
+  MMIO 주소)처럼 명백히 잘못된 BAR 값을 읽는다. PCI 열거 자체는
+  xHCI 장치(`vendor=0x1b36 device=0xd class=0xc0330`)를 정확히
+  찾는다 — devmgr가 그 장치의 BAR를 읽거나 재사용하는 판단(M15/M16,
+  ADR-158/163)이 OVMF의 "안 쓰는 장치는 BAR를 안 구성해 둔다"는
+  상태를 잘못 해석하는 것으로 보인다. 다운스트림 크래시나 행을
+  유발하지 않고(자체 테스트만 실패), USB HID 실제 열거는 이미 M14
+  완료 보고서가 범위 밖으로 명시해 둔 항목이라 더 조사하지 않고
+  알려진 한계로 남긴다.
+- **고친 버그 이후 회귀 확인**: `tools/smoke-test-x86_64.sh`(82/82,
+  2회 연속), `tools/smoke-test-smp-x86_64.sh`(11/11),
+  `tools/smoke-test-numa-x86_64.sh`(24/24),
+  `tools/smoke-test-avx-x86_64.sh`(12/12) 전부 PVH 개발 경로에서
+  재확인, GRUB 경로도 갱신된 커널로 다시 부팅해 82개 문자열 전부
+  재확인 — `g_real_arch_data_addr` 배선(ADR-174)이 기존 두 경로에
+  아무 영향을 주지 않았다.
 
 ## 다음 단계
 
-이 확인 작업에 뒤따르는 별도 계획은 없다 — ADR-114가 남겨 둔 갭
-중 "GRUB를 구할 수 있는 환경에서의 검증"은 이것으로 해소됐다.
-남은 것(물리 실기, UEFI 경로)은 필요해지는 시점에 별도로 다룬다.
+이 확인 작업에 뒤따르는 별도 계획은 없다 — ADR-114/017이 남겨 둔
+갭 중 "GRUB/UEFI를 구할 수 있는 환경에서의 검증"은 둘 다 이것으로
+해소됐다. 남은 것(물리 실기 검증, OVMF에서의 USB xHCI BAR 문제)은
+필요해지는 시점에 별도로 다룬다.

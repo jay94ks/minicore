@@ -1,0 +1,15 @@
+/*
+ * 커널 ELF(minicore_kernel_x86_64.elf) 전체를 이 EFI 스텁 PE 이미지
+ * 안에 그대로 심는다 — kernel/arch/x86_64/initrd_blob.S.in과 완전히
+ * 같은 정신(CMakeLists.txt의 configure_file이 @MINICORE_KERNEL_ELF@를
+ * 실제 경로로 치환). efi_main.cpp가 이 바이트를 ELF PT_LOAD 세그먼트별로
+ * p_paddr(물리주소)에 그대로 복사한다 — GRUB의 Multiboot2 로더가 하는
+ * 일과 정확히 같다(docs/design/boot-and-drivers.md ADR-174).
+ */
+.section .rdata, "dr"
+.balign 8
+.global g_kernel_blob_start
+g_kernel_blob_start:
+.incbin "@MINICORE_KERNEL_ELF@"
+.global g_kernel_blob_end
+g_kernel_blob_end:

@@ -62,6 +62,7 @@ extern const uint8_t g_embedded_initrd_end[];
 extern "C" {
 extern uint32_t mb2_magic;
 extern uint32_t mb2_info_addr;
+extern uint64_t efi_acpi_rsdp_phys;  // ADR-174 — UEFI 경로에서만 0이 아니다.
 }
 
 namespace {
@@ -93,6 +94,12 @@ struct acpi_topology {
 uint64_t dump_real_boot_info() {
     const boot::memory_region* regions = nullptr;
     boot::boot_info info = arch_x86_64::build_boot_info(mb2_magic, mb2_info_addr, &regions);
+    // ADR-174 — UEFI 경로는 Multiboot2 태그가 아예 없다(mb2_magic이
+    // 항상 0). efi_stub이 EFI_CONFIGURATION_TABLE에서 직접 찾은 ACPI
+    // RSDP 물리주소를 여기서 그대로 채택한다.
+    if (info.arch_data_addr == 0 && efi_acpi_rsdp_phys != 0) {
+        info.arch_data_addr = efi_acpi_rsdp_phys;
+    }
     boot::dump("real", info, regions);
     return info.arch_data_addr;
 }
@@ -106,6 +113,19 @@ uint64_t dump_real_boot_info() {
 // 읽는다(부트 디바이스 BAR 배정에 ECAM 베이스가 필요, g_ipc_table 등
 // 다른 부트스트랩 전역과 같은 관례).
 arch_x86_64::mcfg_result g_mcfg{};
+
+// ADR-174 — setup_initrun_process()가 initrun에게 넘길 boot_info를
+// 지금까지 항상 run_boot_info_self_test()의 고정값(arch_data_addr=0)
+// 으로만 채웠다(M12 시절 GRUB이 없어 "진짜 값이 없다"는 전제로 쓴
+// 주석이 그대로 남아 있었다) — devmgr가 자체 EBDA/BIOS ROM 스캔
+// 폴백으로 대신 RSDP를 찾아 왔던 덕에 QEMU PVH 경로도, 실제
+// GRUB(SeaBIOS) 경로도 지금까지 드러나지 않았지만, UEFI(OVMF)는 그
+// 폴백 영역에 legacy RSDP 사본을 남기지 않아 devmgr의 ACPI/MCFG
+// 파싱이 조용히 실패했다(실측: ecam_base=0xffffffffffffffff,
+// device_count=0). dump_real_boot_info()가 계산한 실제 arch_data_addr
+// (Multiboot2 태그 또는 efi_acpi_rsdp_phys)를 여기 저장해
+// setup_initrun_process()가 self-test 값 대신 쓰게 한다.
+uint64_t g_real_arch_data_addr = 0;
 
 acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     acpi_topology s{};
@@ -916,6 +936,12 @@ object::thread* setup_initrun_process() {
     }
     const boot::memory_region* bi_regions = nullptr;
     boot::boot_info bi = arch_x86_64::run_boot_info_self_test(&bi_regions);
+    // ADR-174 — arch_data_addr만큼은 self-test 고정값(항상 0)이 아니라
+    // 실제로 감지된 값을 쓴다(devmgr의 ACPI/MCFG 파싱이 이 값을 그대로
+    // 물려받는다, init/initrun/main.cpp 상단 주석 참고) — 나머지
+    // memory_map 등 필드는 여전히 self-test 값이다(initrun 자신은 이
+    // 내용을 읽지 않는다, 위 주석과 동일).
+    bi.arch_data_addr = g_real_arch_data_addr;
 
     // M12(ADR-131/146) — initrd의 "disk.cfg" 엔트리(tools/mkinitrd.py의
     // --disk-cfg가 채워 둔다)를 찾아 그대로 boot_info.boot_device에
@@ -1133,6 +1159,7 @@ extern "C" [[noreturn]] void kernel_main() {
     arch_x86_64::init_fpu();
 
     uint64_t real_arch_data_addr = dump_real_boot_info();
+    g_real_arch_data_addr = real_arch_data_addr;
     acpi_topology acpi = demo_acpi_lapic(real_arch_data_addr);
 
     // M11(ADR-036/053) — sched::init()/demo_sched()보다 반드시 먼저다:

@@ -202,6 +202,101 @@ _start64:
     movabs $kernel_main, %rax
     jmp *%rax
 
+/*
+ * _efi_entry — UEFI 부팅 경로 전용 진입점(docs/spec/boot.md §1.2,
+ * kernel/arch/x86_64/efi_stub/). _start32/_start64와 달리 **32비트
+ * 보호모드를 거치지 않는다** — UEFI는 이미 long mode(페이징 켜짐)로
+ * 진입하므로, 그 상태에서 곧바로 이 64비트 코드로 들어온다.
+ *
+ * 호출 규약: efi_stub(별도의 PE32+ 애플리케이션, kernel/arch/x86_64/
+ * efi_stub/efi_main.cpp)이 이 심볼의 물리주소를(빌드 시점에 llvm-nm으로
+ * 뽑아 상수로 굽는다) 이 커널 ELF의 PT_LOAD 세그먼트를 p_paddr에
+ * 그대로 복사해 넣은 뒤(GRUB의 Multiboot2 로더와 정확히 같은 절차 —
+ * ELF의 p_paddr=LMA, p_vaddr=VMA를 그대로 존중한다) 여기로 점프한다.
+ * 이 지점에서: 이 심볼 자신이 물리 [0,8MiB) 안(.boot.text)에 있어
+ * 아래에서 CR3를 바꿔도 이 함수 자신의 코드 페이지가 매핑에서
+ * 빠지지 않는다(=_start32/_start64와 같은 이유로 안전).
+ *
+ * mb2_magic/mb2_info_addr(.boot.bss)은 efi_stub이 세그먼트를 복사할
+ * 때 이미 0으로 채워져 있다(.boot.bss는 NOLOAD라 p_filesz<p_memsz —
+ * efi_stub이 그 차이를 표준 ELF 로더처럼 0으로 메운다) — kernel_main이
+ * 이걸 보고 "Multiboot2 태그 없음"으로 정확히 처리한다(boot_info_x86_64.cpp
+ * ::build_boot_info()의 기존 분기, 코드 변경 불필요).
+ *
+ * pml4/low_pdpt/low_pd를 명시적으로 다시 0으로 채우는 이유는 _start32의
+ * 같은 방어적 이유(주석 참고) — efi_stub의 NOBITS 처리를 100% 믿지
+ * 않는다.
+ */
+.code64
+.global _efi_entry
+.type _efi_entry, @function
+_efi_entry:
+    lea pml4(%rip), %rdi
+    xor %eax, %eax
+    mov $(3 * 4096 / 8), %rcx
+    rep stosq
+
+    /* low_pd[0..3] = 물리 [0, 8MiB)에 대한 2MiB 항등 매핑 4개
+     * (_start32와 동일한 내용, 64비트 레지스터로 다시 쓴 것뿐). */
+    lea low_pd(%rip), %rdi
+    mov $PAGE_PRESENT_RW_PS, %rax
+    mov $4, %rcx
+1:
+    mov %rax, (%rdi)
+    add $0x200000, %rax
+    add $8, %rdi
+    loop 1b
+
+    lea low_pdpt(%rip), %rdi
+    lea low_pd(%rip), %rax
+    or $PAGE_PRESENT_RW, %rax
+    mov %rax, (%rdi)
+
+    lea pml4(%rip), %rdi
+    lea low_pdpt(%rip), %rax
+    or $PAGE_PRESENT_RW, %rax
+    mov %rax, (%rdi)
+
+    lea pml4(%rip), %rax
+    mov %rax, %cr3
+
+    /* retf 트릭(바로 아래)이 스택에 push한다 — 이 시점의 RSP는 여전히
+     * UEFI가 efi_main에 넘겨준 원래 스택인데, 그 주소는 대개 우리가
+     * 방금 올린 pml4[0]의 저지대 8MiB identity map 밖이다. CR3를
+     * 바꾼 뒤 그 스택에 push하면 새 페이지테이블엔 없는 주소라 #PF가
+     * 나고, 그 시점엔 아직 유효한 IDT도 없어 조용히 멈춘다(실제로
+     * 겪은 버그 — retf 이전에 이 줄이 없었을 때 CR3 교체까지는
+     * 성공했지만 그 직후부터 아무 것도 안 찍혔다). retf 전에 반드시
+     * 저지대(.boot.bss, 항등 매핑 보장 범위 안)의 임시 스택으로 먼저
+     * 옮긴다. */
+    movabs $low_boot_stack_top, %rsp
+
+    /* UEFI 자신의 GDT는 우리 IDT 게이트의 selector(k_sel_code64=0x18)와
+     * 무관하다 — 첫 인터럽트/예외가 오는 순간 잘못된 셀렉터로 #GP가
+     * 난다. lgdt 자체는 64비트 모드에서도 안전하다(gdt64_pointer가
+     * 이미 10바이트 64비트 GDTR 형식). CS는 mov로 못 바꾸므로 retf
+     * 트릭으로 SEL_CODE64로 바꾼다. */
+    lgdt gdt64_pointer(%rip)
+
+    lea 2f(%rip), %rax
+    push $SEL_CODE64
+    push %rax
+    lretq
+2:
+    mov $SEL_DATA64, %ax
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %ss
+    mov %ax, %fs
+    mov %ax, %gs
+
+    movabs $low_boot_stack_top, %rsp
+    call boot_setup_paging
+
+    movabs $kernel_boot_stack_top, %rsp
+    movabs $kernel_main, %rax
+    jmp *%rax
+
 .section .boot.bss, "aw", @nobits
 .balign 4
 .global mb2_magic
@@ -210,6 +305,18 @@ mb2_magic:
 .global mb2_info_addr
 mb2_info_addr:
     .skip 4
+
+/* UEFI 경로 전용(docs/design/boot-and-drivers.md ADR-174) — efi_stub이
+ * EFI_CONFIGURATION_TABLE에서 찾은 ACPI RSDP의 물리주소를 커널 세그먼트
+ * 복사가 끝난 뒤 이 자리에 직접 써 넣는다(그 물리주소는 빌드 시점에
+ * llvm-nm으로 뽑는다, tools/gen-efi-entry-addr.py). Multiboot2 경로에서는
+ * 항상 0이다(efi_stub이 안 건드리면 NOBITS 관례대로 0으로 남는다) —
+ * kernel_main.cpp::dump_real_boot_info()가 이 값이 0이 아니면 Multiboot2
+ * 태그 파싱을 거치지 않고 곧바로 arch_data_addr로 채택한다. */
+.balign 8
+.global efi_acpi_rsdp_phys
+efi_acpi_rsdp_phys:
+    .skip 8
 
 .balign 4096
 .global pml4
