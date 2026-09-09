@@ -907,3 +907,45 @@
   `k_syscall_alloc_dma_buffer`/`dma_buffer_result` 추가. 스모크
   테스트(50개 어써션 전체)로 이 syscall 추가가 기존 경로에 회귀를
   일으키지 않음을 확인했다(QEMU 재검증, 전부 통과).
+
+## ADR-149. M12 self_info 브릿지를 `build_process()`로 일반화(procsrv도 자기 자신을 fork/exec할 수 있게) + 고정 vaddr 간격 버그 수정
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: `kernel_main.cpp::setup_initrun_process()`가 initrun 최초
+  스폰에서만 하던 "원본 ELF 바이트를 새 주소공간에도 복사해 두고
+  그 위치/크기를 `uapi::m12_self_info`로 알려 준다"를
+  `process_ops.cpp::build_process()`로 옮겨 **일반화**한다 —
+  `sys_process_spawn`/`sys_exec`로 만들어지는 **모든** 프로세스가
+  이제 이 self_info를 자동으로 받는다. 이렇게 하면 initrun이
+  `sys_process_spawn`으로 만드는 procsrv도, initrun 자신의 self-test
+  데모와 똑같은 방식(`uapi::k_m12_self_info_user_vaddr`를 읽어
+  `sys_fork`+`sys_exec`)으로 "자기 자신을 fork/exec"할 수 있다 —
+  M12 QEMU 검증 목표(procsrv가 자기 자신을 fork/exec)가 요구하는
+  조건이 정확히 이것뿐이다.
+- **근거**: procsrv는 아직 VFS(M13)가 없어 "자기 자신을 다시 실행"할
+  방법이 initrun의 self-test 데모와 동일한 제약을 받는다(경로로 열어
+  다시 실행할 파일시스템이 없음) — 이미 있는 M12 임시 배선을 재사용하는
+  것이 새로운 프로세스 간 통신/매핑 syscall을 또 만드는 것보다
+  훨씬 싸다. `uapi.hpp`의 `m12_self_info` 주석이 이미 "procsrv/cpio가
+  실제로 생기면 통째로 제거된다"고 명시해 뒀지만, 그 문구는 "이 임시
+  다리가 언젠가 사라진다"는 뜻이지 "procsrv가 이걸 못 써야 한다"는
+  뜻이 아니다 — procsrv 자신도 이 마일스톤이 요구하는 self-test
+  데모를 도는 동안은 이 다리가 여전히 필요하다.
+- **발견한 버그와 수정**: 이 작업 도중 `k_m12_self_elf_user_vaddr`
+  (0x...3000)과 `k_m12_self_info_user_vaddr`(0x...10000) 사이의 간격
+  (0xD000≈52KiB)이 원본 ELF 바이트 복사 공간의 **암묵적 상한**이었다는
+  걸 실제로 겪었다 — `virtio_blk.cpp` 추가로 initrun.elf가
+  0xcc50→0xf270바이트로 커지면서 그 상한을 실제로 넘어, self_elf
+  복사 루프가 self_info용 페이지 자리까지 덮어 매핑을 시도해
+  `already_mapped`로 실패했다(`setup_initrun_process ok=0`으로 QEMU에서
+  재현). `k_m12_self_info_user_vaddr`를 0x...100000(약 1MiB 여유)으로
+  옮겨 해소했다.
+- **영향**: `process_ops.cpp::build_process()`가 이제 프로세스마다
+  self_elf 페이지들(가변 개수) + self_info 페이지 1개를 추가로
+  소비한다(무시할 수 있는 비용). `uapi.hpp`의 두 상수 사이 간격이
+  약 1MiB로 넓어져, initrun.elf가 앞으로 더 커져도(virtio-blk/cpio/ini
+  파서가 계속 붙는 추세) 당분간 이 충돌이 재발하지 않는다 — 다만
+  여전히 **고정 크기 가정**이라는 근본적 취약점은 남아 있다(이후
+  self_elf_size를 self_info에 실은 뒤 그 크기만큼만 정확히 예약하는
+  방식으로 바꾸는 게 더 견고하지만, M12 범위 밖으로 미룬다). 스모크
+  테스트 50개 어써션 전체가 이 수정 후 QEMU에서 통과했다.

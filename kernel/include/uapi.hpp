@@ -86,8 +86,14 @@ struct dma_buffer_result {
 // 실제로 생기면 이 배선은 통째로 제거된다** — 지금은 M12의 커널
 // 프리미티브(fork/process_spawn/exec)를 실제 userland 코드로 검증할
 // 방법이 이것뿐이라 임시로 둔다.
+// self_elf_user_vaddr부터 self_info_user_vaddr 전까지가 원본 ELF
+// 바이트를 담을 수 있는 최대 크기다(0xFD000=약 1MiB) — initrun.elf가
+// virtio_blk.cpp 추가로 0xcc50→0xf270바이트로 커지면서 이전 간격
+// (0xD000=약52KiB)을 실제로 넘어서 self_info 페이지 매핑이
+// already_mapped로 깨지는 걸 겪었다(2026-09-09) — 앞으로도 계속
+// 커질 걸 감안해 여유를 크게 둔다.
 inline constexpr uint64_t k_m12_self_elf_user_vaddr = 0x0000700000003000ull;
-inline constexpr uint64_t k_m12_self_info_user_vaddr = 0x0000700000010000ull;
+inline constexpr uint64_t k_m12_self_info_user_vaddr = 0x0000700000100000ull;
 struct m12_self_info {
     uint64_t elf_addr = 0;
     uint64_t elf_size = 0;

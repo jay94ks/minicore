@@ -15,6 +15,8 @@
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
 
+#include <uapi.hpp>
+
 // usermode.S(M8) — 유저모드로 직접 진입한다(IRETQ). sys_exec가 성공
 // 경로에서 곧바로 이걸 부른다(create_user_thread류의 "다음에 스케줄될
 // 때" 방식이 아니라, 지금 이 스레드가 바로 새 이미지로 뛰어드는
@@ -105,6 +107,51 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
             return process_spawn_error::out_of_memory;
         }
         arg0 = k_argv_user_vaddr;
+    }
+
+    // M12(uapi.hpp::k_m12_self_info_user_vaddr 주석) — kernel_main.cpp::
+    // setup_initrun_process가 initrun의 최초 스폰에서만 하던 "원본 ELF
+    // 바이트를 새 주소공간에도 복사해 self_info로 알려 준다"를 여기
+    // build_process()로 일반화한다 — process_spawn/exec_current로 만드는
+    // **모든** 프로세스가 다 이걸 받는다. procsrv도 initrun의
+    // sys_process_spawn으로 만들어지는 이상 이 경로를 그대로 타므로,
+    // initrun과 똑같은 방식(uapi::k_m12_self_info_user_vaddr을 읽어
+    // sys_fork+sys_exec)으로 "자기 자신을 fork/exec"할 수 있다 — M12
+    // QEMU 목표(procsrv 자기 자신 fork/exec)가 요구하는 조건이 이것뿐.
+    uint64_t self_elf_pages = (elf_size + mm::k_page_size - 1) / mm::k_page_size;
+    for (uint64_t i = 0; i < self_elf_pages; ++i) {
+        auto page = mm::alloc_pages(0, 0);
+        if (!page.is_ok()) {
+            mm::slab_free(space, sizeof(object::address_space));
+            return process_spawn_error::out_of_memory;
+        }
+        void* virt = mm::phys_to_virt(page.value());
+        uint64_t offset = i * mm::k_page_size;
+        uint64_t remaining = elf_size - offset;
+        uint64_t copy_len = remaining < mm::k_page_size ? remaining : mm::k_page_size;
+        __builtin_memset(virt, 0, mm::k_page_size);
+        __builtin_memcpy(virt, elf_data + offset, copy_len);
+        auto mapped = map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset, page.value(),
+                                page_perm::user);
+        if (!mapped.is_ok()) {
+            mm::slab_free(space, sizeof(object::address_space));
+            return process_spawn_error::out_of_memory;
+        }
+    }
+
+    auto info_page = mm::alloc_pages(0, 0);
+    if (!info_page.is_ok()) {
+        mm::slab_free(space, sizeof(object::address_space));
+        return process_spawn_error::out_of_memory;
+    }
+    auto* self_info = static_cast<uapi::m12_self_info*>(mm::phys_to_virt(info_page.value()));
+    self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
+    self_info->elf_size = elf_size;
+    auto info_mapped = map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr, info_page.value(),
+                                 page_perm::user);
+    if (!info_mapped.is_ok()) {
+        mm::slab_free(space, sizeof(object::address_space));
+        return process_spawn_error::out_of_memory;
     }
 
     out.space = space;
