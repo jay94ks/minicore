@@ -48,6 +48,12 @@
 #                         CMakeLists.txt의 --disk-cfg=0,4,0,0과
 #                         반드시 일치해야 한다)로 붙인다. 기본은
 #                         미설정(장치 없음, M1~M11과 동일).
+#   MINICORE_QEMU_XHCI=1  docs/plan/system-servers-bringup.md M14
+#                         (ADR-130): QEMU 기본 xHCI 컨트롤러(qemu-xhci)
+#                         를 bus0/device5에 붙인다(virtio-blk의 device4와
+#                         겹치지 않는 자리) — devmgr/usb 드라이버가 실제로
+#                         찾아 리셋/포트 상태 스캔을 시도할 대상. USB
+#                         장치 자체는 붙이지 않는다. 기본은 미설정.
 
 set -euo pipefail
 
@@ -115,6 +121,15 @@ case "$ARCH" in
     if [[ -n "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
       EXTRA_ARGS+=(-drive "if=none,id=bootdisk,format=raw,file=${MINICORE_QEMU_BOOTDISK}")
       EXTRA_ARGS+=(-device "virtio-blk-pci,drive=bootdisk,addr=04.0")
+    fi
+
+    if [[ "${MINICORE_QEMU_XHCI:-0}" == "1" ]]; then
+      # M14(system-servers-bringup.md, ADR-130) — devmgr/usb 드라이버가
+      # 실제로 찾을 xHCI 컨트롤러. bus0/device5 고정(virtio-blk의
+      # device4와 겹치지 않는 자리) — QEMU의 기본 xHCI 모델(qemu-xhci)
+      # 하나만 붙인다, USB 장치 자체는 아직 붙이지 않는다(포트
+      # 리셋/상태 스캔까지만 검증, servers/drivers/usb/main.cpp 참고).
+      EXTRA_ARGS+=(-device "qemu-xhci,addr=05.0")
     fi
 
     exec "$QEMU_BIN" \

@@ -60,6 +60,17 @@
 #     "[procsrv] vfs write/read roundtrip ok=1"로 확인한다(klog가
 #     유저에 노출된 적이 없어 새 sys_debug_log syscall로만 관찰
 #     가능 — uapi.hpp 참고).
+#   M14 (system-servers-bringup.md, ADR-154/156, docs/spec/pcie.md):
+#     부트 디스크에 devmgr/ps2/usb가 추가된다(의존 순서 devmgr→usb,
+#     ps2는 devmgr와 무관 — ADR-130의 고정 레거시 프로브). devmgr가
+#     ACPI RSDP/MCFG를 유저랜드에서 직접 파싱해(sys_map_phys, ADR-156)
+#     PCIe bus 0을 ECAM으로 열거하고, ps2는 8042 컨트롤러 자체
+#     테스트(사용자 입력과 무관하게 결정적)를 수행하며(sys_io_activate,
+#     ADR-154), usb는 devmgr에게 등록해 위임받은 xHCI BAR를 매핑해
+#     컨트롤러 리셋(HCRST)과 포트 상태(PORTSC) 스캔까지 시도한다 —
+#     실제 USB 장치 열거/HID는 범위 밖(docs/done/
+#     system-servers-bringup-m14.md 참고). QEMU에 `qemu-xhci`
+#     컨트롤러를 기본으로 붙인다(MINICORE_QEMU_XHCI, 아래 참고).
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -69,24 +80,34 @@
 # 환경 변수:
 #   MINICORE_QEMU_BIN        qemu-system-x86_64 실행파일 경로(run-qemu.sh로 그대로 전달)
 #   MINICORE_QEMU_BOOTDISK   기본값은 <빌드 디렉토리>/servers/bootdisk.img
-#                            (servers/CMakeLists.txt가 memfs+vfs+procsrv를 담아
-#                            만든다, M13) — M12부터 항상 실제 부트 디스크를 붙여야
-#                            procsrv 경로가 검증되므로 비워 두면 이 스크립트가 그
-#                            경로를 채워 넣는다. 그 파일이 없으면(아직 빌드 안 함)
-#                            디스크 없이 부팅하고 그만큼의 어써션은 실패한다 — 먼저
+#                            (servers/CMakeLists.txt가 memfs+vfs+procsrv+devmgr+
+#                            ps2+usb를 담아 만든다, M13~M14) — M12부터 항상 실제
+#                            부트 디스크를 붙여야 procsrv 경로가 검증되므로 비워
+#                            두면 이 스크립트가 그 경로를 채워 넣는다. 그 파일이
+#                            없으면(아직 빌드 안 함) 디스크 없이 부팅하고 그만큼의
+#                            어써션은 실패한다 — 먼저
 #                            `cmake --build <빌드 디렉토리> --target minicore_bootdisk_image`.
+#   MINICORE_QEMU_XHCI       기본값 1(M14부터 usb 드라이버 검증을 위해 항상 켠다) —
+#                            0으로 설정하면 xHCI 컨트롤러 없이 부팅한다(usb 관련
+#                            어써션은 실패한다).
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=25  # M12부터 initrun.elf가 커지는 추세라 여유를 좀 더 둔다.
+TIMEOUT_SEC=60  # M14부터 부트 디스크가 6개 서비스(memfs/vfs/procsrv/devmgr/ps2/usb)를 담아 훨씬 오래 걸린다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
-  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M13부터 memfs+vfs+procsrv 셋 다(servers/CMakeLists.txt).
+  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M13부터 memfs+vfs+procsrv+devmgr+ps2+usb(servers/CMakeLists.txt).
   if [[ -f "$DEFAULT_BOOTDISK" ]]; then
     export MINICORE_QEMU_BOOTDISK="$DEFAULT_BOOTDISK"
   fi
+fi
+
+# M14 — usb 드라이버가 실제로 찾을 xHCI 컨트롤러도 기본으로 붙인다
+# (run-qemu.sh 상단 주석 참고).
+if [[ -z "${MINICORE_QEMU_XHCI:-}" ]]; then
+  export MINICORE_QEMU_XHCI=1
 fi
 
 declare -a EXPECTED=(
@@ -142,6 +163,12 @@ declare -a EXPECTED=(
   "[smp] BSP apic_id=0"
   "[smp] online_cpu_count=1"
   "[procsrv] vfs write/read roundtrip ok=1"
+  "[devmgr] mcfg ecam_base=0xb0000000"
+  "[devmgr]   class=0xc0330"
+  "[ps2] controller self-test ok=1"
+  "[usb] xhci hcrst_done=0x1"
+  "[usb] xhci controller_ready=0x1"
+  "[usb] xhci reset+port scan done"
 )
 
 LOG_FILE="$(mktemp)"

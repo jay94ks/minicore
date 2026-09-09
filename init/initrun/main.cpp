@@ -253,6 +253,7 @@ struct spawn_ctx {
     uint32_t spawned_count = 0;
     service_registry_entry registry[k_max_registered_services];
     uint32_t registry_count = 0;
+    uint64_t arch_data_addr = 0;  // M14 — devmgr에게 그대로 넘겨줄 ACPI RSDP 물리주소(boot_info).
 };
 
 uint32_t find_registered_handle(const spawn_ctx& ctx, const char* name) {
@@ -298,8 +299,30 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
     req.elf_size = elf_entry.value().size;
     req.argv_blob = reinterpret_cast<uint64_t>(k_service_argv_marker);
     req.argv_size = sizeof(k_service_argv_marker);
-    req.grant_trusted = false;  // M12/M13의 서비스는 하드웨어를 직접 다루지 않는다.
     req.create_endpoint = true;  // M13(ADR-152) — 모든 서비스가 handle 1로 자기 endpoint를 받는다.
+
+    // M14(ADR-147/154/156) — lib/*.ini의 trusted=1 키로 표시된 서비스만
+    // sys_alloc_dma_buffer/sys_io_activate/sys_map_phys를 쓸 수 있게
+    // trusted를 부여한다(하드코딩된 결정 — initrun이 스폰하는 쪽이라
+    // 이 권한을 최초로 쥐고 있다, ADR-154 §결정4).
+    req.grant_trusted = false;
+    auto trusted_val = ini::find_value(data, size, "trusted");
+    if (trusted_val.is_ok() && span_equals(trusted_val.value().data(), trusted_val.value().size(),
+                                            "1")) {
+        req.grant_trusted = true;
+    }
+
+    // M14 — devmgr는 일반 마커 대신 실제 ACPI RSDP 물리주소(boot_info.
+    // arch_data_addr)를 argv로 받아야 자기 ECAM을 찾을 수 있다
+    // (servers/devmgr/main.cpp 상단 주석). ctx는 spawn_visit이 끝나도
+    // 살아 있는(mount_boot_device_and_spawn_services의 스택 프레임)
+    // spawn_ctx라 그 안의 arch_data_addr 주소를 그대로 argv_blob으로
+    // 써도 안전하다 — process_spawn이 이 syscall 안에서 즉시 그 8바이트를
+    // 새 프로세스의 argv 페이지로 복사하기 때문이다.
+    if (cstr_equals(service_name, "devmgr")) {
+        req.argv_blob = reinterpret_cast<uint64_t>(&ctx->arch_data_addr);
+        req.argv_size = sizeof(ctx->arch_data_addr);
+    }
 
     auto depends_val = ini::find_value(data, size, "depends");
     if (depends_val.is_ok()) {
@@ -376,6 +399,7 @@ bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
     spawn_ctx ctx;
     ctx.archive = archive;
     ctx.archive_size = archive_len;
+    ctx.arch_data_addr = bi.arch_data_addr;
     auto walked = cpio::for_each_entry(archive, archive_len, &spawn_visit, &ctx);
     return walked.is_ok() && ctx.spawned_count > 0;
 }

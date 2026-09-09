@@ -23,6 +23,12 @@ initrun이 이 키를 보면 그 의존 서비스의 endpoint 프록시 핸들�
 inherited_handles로 넘겨 스폰한다(init/initrun/main.cpp 참고). 서비스
 하나가 가질 수 있는 depends는 M13 한정 최대 1개다.
 
+--trusted=<이름>(반복 가능)은 M14(ADR-147/154/156)의 trusted 프로세스
+지정과 맞물린다 — 해당 서비스의 ini에 trusted=1을 써 넣고, initrun의
+스폰 루프가 이 키를 보면 sys_process_spawn의 grant_trusted를 켠다
+(sys_alloc_dma_buffer/sys_map_phys/sys_io_activate는 trusted 프로세스
+만 쓸 수 있다 — devmgr/ps2/usb가 실제 하드웨어를 다루려면 필요하다).
+
 cpio(newc) 헤더 레이아웃은 init/initrun/main.cpp의 write_cpio_entry()
 (자체 self-test용으로 손으로 쓴 것과 동일)와 필드 하나까지 맞춘다 —
 서드파티 cpio/tar 라이브러리 대신 이 최소 자체 구현을 쓴다(ADR-006).
@@ -76,6 +82,7 @@ def main(argv):
     out_path = argv[1]
     services = []
     depends = {}
+    trusted = set()
     for arg in argv[2:]:
         if arg.startswith("--service="):
             spec = arg[len("--service="):]
@@ -91,6 +98,8 @@ def main(argv):
                 return 1
             name, dep = spec.split(":", 1)
             depends[name] = dep
+        elif arg.startswith("--trusted="):
+            trusted.add(arg[len("--trusted="):])
         else:
             print(f"알 수 없는 인자: {arg}", file=sys.stderr)
             return 1
@@ -104,6 +113,8 @@ def main(argv):
         ini_text = f"[{name}]\nexec=bin/{name}\n"
         if name in depends:
             ini_text += f"depends={depends[name]}\n"
+        if name in trusted:
+            ini_text += "trusted=1\n"
         ini_name = f"lib/{index:03d}-{name}.ini".encode("utf-8")
         chunks.append(_cpio_entry(ini_name, ini_text.encode("utf-8")))
 

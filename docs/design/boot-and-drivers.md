@@ -1220,3 +1220,78 @@
   자리). `uapi.hpp`에 `k_syscall_map_phys`(9)/`map_phys_request`/
   `k_max_mmio_map_bytes`(16MiB 상한) 추가. `syscall.cpp`에 새 case.
   devmgr/USB 드라이버(M14)가 이 syscall의 첫 실제 소비자다.
+
+## ADR-157. M14 완성: devmgr(유저랜드 ACPI/PCIe ECAM 열거) + PS/2 컨트롤러 자체 테스트 + USB(xHCI) 리셋·포트 스캔
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: system-servers-bringup.md §M14를 다음 범위로 구현했다.
+  1. `servers/devmgr/main.cpp` — `kernel/arch/x86_64/acpi.cpp`의
+     RSDP 검색(EBDA/BIOS ROM 스캔, arch_data_addr 우선)과 MCFG 파싱
+     절차를 **유저랜드용으로 다시 구현**한다(ADR-006/039 — devmgr는
+     커널 코드를 호출할 수 없다, 커널 자신의 부트스트랩 전용 구현과
+     의도적으로 분리된 채 유지된다 — ADR-131 §근거와 같은 정신).
+     `sys_map_phys`(ADR-156)로 물리 메모리를 필요할 때마다 다시
+     매핑하는 작은 "물리 창(phys window)" 캐시 하나로 임의 위치의
+     ACPI 테이블/ECAM 설정공간을 전부 읽는다. bus 0의 device 0~31,
+     function 0만 열거한다(PCI-PCI 브리지 재귀·멀티펑션은 M14 범위
+     밖 — pcie.md §2의 완전한 재귀 요구를 아직 만족하지 않는 알려진
+     단순화, QEMU의 virtio-blk/xHCI가 전부 bus 0에 있어 이 정도로
+     충분히 검증된다).
+  2. 드라이버 등록/매칭(pcie.md §4)의 **M14 최소 버전** — devmgr의
+     `register_driver`(label=1) 요청 **자체의 응답**에 매칭된 장치의
+     BAR 정보를 바로 싣는다(pcie.md가 원래 그려 둔 "devmgr가 나중에
+     `device_claimed`로 먼저 말을 거는" 비동기 push 경로는 핫플러그
+     (ADR-040)가 아직 없는 지금 필요 없다 — 정적으로 한 번 매칭하는
+     것으로 충분). BAR0 배정은 ADR-147의 I/O BAR 배정 절차를 **메모리
+     BAR**로 일반화한 것 — PVH 직접 부팅이라 여기서도 아무 펌웨어가
+     대신해 주지 않는다. 32비트 메모리 BAR만 다룬다(M14가 실제로
+     만나는 xHCI가 그렇다).
+  3. `servers/drivers/ps2/main.cpp` — ADR-130의 고정 레거시 프로브.
+     실제 키 입력이 QEMU 자동화 환경에 주입되지 않으므로, 8042
+     컨트롤러 자체 테스트(커맨드 0xAA → 항상 결정적으로 0x55) 핸드셰이크
+     로 검증 가능한 결과를 얻는다 — `sys_io_activate`(ADR-154)로
+     포트 0x60~0x64를 스레드 자신에게 활성화한다.
+  4. `servers/drivers/usb/main.cpp` — devmgr에 PCI 클래스 코드
+     `0x0C0330`(xHCI)로 등록해 BAR0(물리주소+크기)을 위임받고,
+     `sys_map_phys`로 매핑해 캐패빌리티 레지스터(HCIVERSION/
+     MaxSlots/MaxPorts)를 읽는다. 여기서 멈추지 않고 **컨트롤러
+     리셋(USBCMD.HCRST)**을 실제로 수행하고, USBSTS.CNR이 꺼질
+     때까지 기다린 뒤 각 포트의 PORTSC를 읽어 로그로 남긴다.
+  5. `tools/mkbootdisk.py`에 `--trusted=<이름>` 추가(해당 서비스의
+     ini에 `trusted=1`을 써 넣는다) — devmgr/ps2/usb는
+     `sys_alloc_dma_buffer`/`sys_io_activate`/`sys_map_phys`를 쓰려면
+     trusted가 필요하다(ADR-147/154/156). `init/initrun/main.cpp`의
+     스폰 루프가 이 키를 읽어 `grant_trusted`를 켜고, devmgr에게는
+     일반 마커 대신 `boot_info.arch_data_addr`를 실제 argv로 넘긴다.
+     `tools/run-qemu.sh`에 `MINICORE_QEMU_XHCI=1`(기본 켬, 스모크
+     테스트) — QEMU 기본 `qemu-xhci` 컨트롤러를 bus0/device5에 붙인다.
+- **근거**: pcie.md/ADR-038~041/130이 이미 상세 설계를 정해 뒀으므로
+  이 ADR은 새로운 아키텍처 결정이 아니라 그 설계를 처음으로 실제
+  코드로 만든 것이다(ADR-131이 M12에서 했던 것과 같은 성격). 유저
+  프로세스 3개(devmgr/ps2/usb)가 처음으로 실제 하드웨어 레지스터에
+  직접 접근하는 마일스톤이라, M14 스폰 시점부터 ADR-154(IOPB)/
+  ADR-156(MMIO 매핑)이 실전에서 검증됐다.
+- **검증 결과(QEMU 실측)**: 기본 `tools/smoke-test-x86_64.sh`(58개
+  어써션, M13의 52개+신규 6개) 전체 통과, SMP/NUMA/AVX 스위트도
+  회귀 없음. 실측 로그 발췌:
+  ```
+  [devmgr] mcfg ecam_base=0xb0000000        ← 커널 자신의 독립 MCFG 파싱과 정확히 일치(교차검증)
+  [devmgr]   vendor=0x1b36 device=0xd class=0xc0330   ← QEMU qemu-xhci
+  [devmgr] device_count=0x6
+  [ps2] self-test result=0x55
+  [ps2] controller self-test ok=1
+  [usb] xhci bar_phys=0xe0000000 bar_size=0x4000
+  [usb] xhci hci_version=0x100 max_slots=0x40 max_ports=0x8
+  [usb] xhci hcrst_done=0x1
+  [usb] xhci controller_ready=0x1
+  [usb] portsc=0x202a0 (×8, CCS=0 — 다운스트림 장치를 안 붙였으므로 예상대로)
+  ```
+- **알려진 단순화(M14 범위 밖으로 명시적으로 남긴 것)**: PCI-PCI
+  브리지 재귀·멀티펑션 열거, PCIe 핫플러그/PME notification(ADR-040,
+  여전히 미착수), 레거시 I/O 포트 설정공간 폴백(pcie.md §1의
+  "MCFG 없으면 0xCF8/0xCFC" — QEMU가 항상 MCFG를 주므로 필요 없었다),
+  관리자 설정 기반 드라이버 바인딩 오버라이드(ADR-056), **실제 USB
+  장치 열거(디바이스 컨텍스트 배열·명령/이벤트 링·SET_ADDRESS/
+  GET_DESCRIPTOR)와 HID 클래스 드라이버**(컨트롤러 리셋+포트 상태
+  스캔까지만 — 이것만으로도 별도 마일스톤급 작업이라 명시적으로
+  범위 밖으로 남긴다, 사용자 확인 하에 결정).
