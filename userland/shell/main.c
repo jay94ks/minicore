@@ -19,6 +19,7 @@
 // test.txt)을 결정적으로 실행해 검증한다.
 #include <mc/console_client.h>
 #include <mc/fs_client.h>
+#include <mc/heap.h>
 #include <mc/ps2_client.h>
 #include <mc/syscall.h>
 #include <mc/util.h>
@@ -162,10 +163,19 @@ static void run_self_test(void) {
     int ls_ok = builtin_ls();
     debug(ls_ok ? "[shell] ls ok=1\n" : "[shell] ls ok=0\n");
 
-    char content[MAX_CAT_LEN];
+    // M24(general-purpose-completion.md §M24, ADR-180) — cat의 버퍼를
+    // 스택 배열이 아니라 mc_malloc()(sys_brk 위의 최소 범프 할당자,
+    // libmc/include/mc/heap.h)으로 얻어 실제로 쓴다 — 유저랜드
+    // 동적 메모리 왕복 자체를 이 기존 경로 위에서 증명한다.
+    char* content = (char*)mc_malloc(MAX_CAT_LEN);
+    debug(content != 0 ? "[shell] malloc buffer ok=1\n" : "[shell] malloc buffer ok=0\n");
+
     uint64_t len = 0;
-    int cat_opened = builtin_cat("test.txt", content, sizeof(content) - 1, &len);
-    content[len] = '\0';
+    int cat_opened =
+        content != 0 && builtin_cat("test.txt", content, MAX_CAT_LEN - 1, &len);
+    if (content != 0) {
+        content[len] = '\0';
+    }
     int cat_ok = cat_opened && mc_bytes_equal(content, "hello vfs", mc_cstr_len("hello vfs")) &&
                  len == mc_cstr_len("hello vfs");
     debug(cat_ok ? "[shell] cat ok=1\n" : "[shell] cat ok=0\n");

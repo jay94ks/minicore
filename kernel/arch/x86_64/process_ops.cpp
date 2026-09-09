@@ -55,6 +55,17 @@ constexpr uint64_t k_dma_buffer_user_vaddr = 0x0000700000200000ull;
 // 겹치지 않게 자리를 분리해 둔다.
 constexpr uint64_t k_mmio_user_vaddr = 0x0000700000300000ull;
 
+// M24(general-purpose-completion.md §M24, ADR-180) — sys_brk의 힙
+// 영역. kernel-memory.md ADR-160의 슬롯 표를 따른다 — 슬롯 4
+// (k_ipc_mapped_pages_user_vaddr=0x...400000, kernel/core/ipc/message.hpp)
+// 다음, 슬롯 5(k_user_stack_top + 5*1MiB). 다른 슬롯과 달리 이
+// 영역은 "가변 크기로 계속 자라는" 용도라 슬롯 하나(1MiB) 전체를
+// 예산으로 쓴다 — M24가 요구하는 검증(셸이 malloc 몇 번 쓰는 정도)
+// 에는 차고 넘친다. 더 큰 힙이 필요해지면 이 상수 하나만 넓히면
+// 된다(다음 슬롯이 아직 비어 있다, ADR-160 §결정2의 "5+: 예약").
+constexpr uint64_t k_heap_user_vaddr = 0x0000700000500000ull;
+constexpr uint64_t k_heap_region_size = 0x100000ull;  // 1MiB.
+
 process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size, bool trusted,
                                    built_process& out) {
@@ -489,6 +500,59 @@ process_kill_error process_kill(object::handle_table& caller_handles, uint32_t h
     }
     sched::request_kill(*static_cast<object::thread*>(e->object));
     return process_kill_error::ok;
+}
+
+// M24(general-purpose-completion.md §M24, ADR-180) — sys_brk. 지연
+// 초기화(heap_top==0이면 이 프로세스의 첫 호출) 후, increment>0이면
+// heap_mapped_top부터 새 heap_top까지 필요한 페이지를 4KiB 단위로
+// 새로 매핑한다(이미 매핑된 페이지는 다시 건드리지 않는다 —
+// heap_mapped_top이 "지금까지 실제로 매핑된 경계"를 정확히 추적하는
+// 이유). increment==0은 순수 조회 — 아무것도 매핑하지 않고
+// out_old_top만 채운다.
+process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
+    object::thread* self = sched::current();
+    if (self == nullptr || self->owner_space == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+    object::address_space& space = *self->owner_space;
+
+    if (space.heap_top == 0) {
+        space.heap_top = k_heap_user_vaddr;
+        space.heap_mapped_top = k_heap_user_vaddr;
+    }
+
+    uint64_t old_top = space.heap_top;
+    out_old_top = old_top;
+    if (increment == 0) {
+        return process_spawn_error::ok;
+    }
+    if (increment < 0) {
+        // 힙 축소는 이번 라운드 범위 밖(general-purpose-completion.md
+        // §M24 — "익명 페이지를 늘리는 최소 기능이면 충분하다").
+        return process_spawn_error::invalid_argument;
+    }
+
+    uint64_t new_top = old_top + static_cast<uint64_t>(increment);
+    if (new_top < old_top || new_top > k_heap_user_vaddr + k_heap_region_size) {
+        // 오버플로 또는 슬롯 예산(1MiB) 초과.
+        return process_spawn_error::out_of_memory;
+    }
+
+    while (space.heap_mapped_top < new_top) {
+        auto page = mm::alloc_pages(0, 0);
+        if (!page.is_ok()) {
+            return process_spawn_error::out_of_memory;
+        }
+        auto mapped = map_page(space.page_table_root, space.heap_mapped_top, page.value(),
+                                page_perm::write | page_perm::user);
+        if (!mapped.is_ok()) {
+            return process_spawn_error::out_of_memory;
+        }
+        space.heap_mapped_top += mm::k_page_size;
+    }
+
+    space.heap_top = new_top;
+    return process_spawn_error::ok;
 }
 
 }  // namespace arch_x86_64

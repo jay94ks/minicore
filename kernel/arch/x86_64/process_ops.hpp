@@ -130,4 +130,14 @@ process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_vi
 process_spawn_error io_activate(uint16_t io_base, uint16_t count);
 process_spawn_error io_deactivate();
 
+// sys_brk(general-purpose-completion.md §M24, ADR-180) — 호출한
+// 프로세스의 힙(익명 페이지)을 늘린다. increment==0은 조회
+// (out_old_top에 현재 heap_top만 채운다). increment<0은
+// invalid_argument(축소 미지원, 이번 라운드 범위 밖). 성공하면
+// out_old_top에 증가 **전** heap_top(고전적 sbrk() 관례 — 새로
+// 확보된 영역의 시작 주소)을 채운다. 고정 가상주소 슬롯 하나
+// (1MiB, kernel-memory.md ADR-160 슬롯 5)를 예산으로 쓴다 — 그
+// 이상을 요청하면 out_of_memory.
+process_spawn_error brk(int64_t increment, uint64_t& out_old_top);
+
 }  // namespace arch_x86_64

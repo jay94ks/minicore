@@ -33,6 +33,20 @@ struct address_space {
     bool trusted = false;                                // ADR-063
     confinement_tier confinement = confinement_tier::normal;  // ADR-085
     uint64_t page_table_root = 0;  // arch별 최상위 페이지테이블 물리주소(x86_64는 PML4)
+
+    // M24(general-purpose-completion.md §M24, ADR-180) — sys_brk의
+    // per-process 상태. heap_top==0은 "아직 sys_brk를 한 번도 부르지
+    // 않음"을 뜻한다(첫 호출에서 process_ops.cpp가 지연 초기화한다) —
+    // 유저모드 가상주소 0은 애초에 절대 유효한 브레이크 위치가 될 수
+    // 없어(canonical하지 않거나 항상 예약됨) 이 sentinel이 안전하다.
+    // heap_top: 바이트 단위 정확한 brk 포인터(요청한 그대로, 페이지
+    // 정렬 안 될 수 있음). heap_mapped_top: 지금까지 실제로 페이지를
+    // 매핑해 둔 경계(항상 페이지 정렬) — brk가 요청 크기만큼 정확히
+    // 실시간으로 페이지를 매핑하려면 이 둘을 따로 추적해야 한다
+    // (heap_top 하나만으로는 "다음 매핑을 어디서부터 시작할지"를
+    // 페이지 경계로 정확히 복원할 수 없다).
+    uint64_t heap_top = 0;
+    uint64_t heap_mapped_top = 0;
 };
 
 // scheduler.md §2 그대로 — band/preferred_node/boost_level/타임슬라이스.

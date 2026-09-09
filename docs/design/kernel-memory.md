@@ -1153,3 +1153,49 @@
     복제한다 — 부모가 다른 스레드에 대한 kill 권한을 쥐고 있었다면
     자식도 그 권한을 그대로 물려받는다(실제 POSIX fork()의 fd 상속
     의미론과 일치, 의도된 동작이다).
+
+## ADR-180. `sys_brk` — 프로세스당 고정 1MiB 힙 슬롯 + libmc 범프 할당자
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: 새 syscall `sys_brk`(번호 13,
+  [uapi.hpp::brk_request](../../kernel/include/uapi.hpp)) — `a1`=이
+  구조체의 유저 가상주소, `increment`(byte, 0=조회, 음수=미지원)를
+  받아 `object::address_space`에 새로 추가한 `heap_top`/
+  `heap_mapped_top` 두 필드([kernel_objects.hpp](../../kernel/core/object/kernel_objects.hpp))
+  로 지연 초기화·페이지 매핑을 관리한다. 힙 가상주소는 ADR-160의
+  슬롯 표를 따라 **슬롯 5**(`k_heap_user_vaddr = k_user_stack_top +
+  5 * 0x100000`, 슬롯 4는 이미 ADR-159의 IPC `pages[]` 매핑이 차지)
+  에 두고, 슬롯 하나(1MiB)를 그대로 힙 전체의 예산으로 쓴다(다른
+  슬롯처럼 "시작 지점 근처 몇 페이지"가 아니라 "가변 크기로 계속
+  자라는" 유일한 슬롯이라는 차이만 있다). [libmc/include/mc/heap.h](../../libmc/include/mc/heap.h)
+  가 이 syscall 위에 `mc_malloc`/`mc_free`(순수 범프 할당자, 4페이지
+  단위로 미리 확보해 syscall 왕복을 줄인다 — `free()`는 회수하지
+  않는 no-op)를 얹는다.
+- **근거**: [general-purpose-completion.md](../plan/general-purpose-completion.md)
+  §M24가 요구한 것은 "이름과 정확한 시맨틱은 착수 시점에 확정,
+  익명 페이지를 늘리는 최소 기능이면 충분하다"는 정도였다 —
+  `sbrk()` 관례(호출 전 `heap_top`을 반환)를 그대로 채택해 별도
+  설계 고민 없이 구현했다. 힙을 고정 1MiB 슬롯으로 예산을 못박은
+  것은 ADR-160이 이미 확립한 "슬롯 크기를 균일하게 통일해 매번
+  안전 여유를 다시 계산하지 않는다"는 원칙을 그대로 따른 것이다 —
+  이번 라운드의 검증 목표(셸이 malloc 몇 번 쓰는 정도)에는 차고
+  넘친다.
+- **검증 결과(QEMU 실측)**: [general-purpose-completion-m24.md](../done/general-purpose-completion-m24.md)
+  참고 — `userland/shell`의 `cat` 빌트인이 스택 배열 대신
+  `mc_malloc()`으로 받은 버퍼를 실제로 써서 `test.txt`를 정확히
+  읽어냄을 확인했다(`"[shell] malloc buffer ok=1"`+기존 `"[shell]
+  cat ok=1"` 동시 만족, `tools/smoke-test-x86_64.sh`에 추가). M21~M23
+  과 달리 이번 라운드는 QEMU 첫 실행에 곧바로 통과했다(추가
+  디버깅 불필요). smoke/SMP/NUMA/AVX 4개 스위트 전부 회귀 없음.
+- **알려진 단순화**:
+  - 힙 축소(`increment<0`)를 지원하지 않는다 — `invalid_argument`로
+    거부한다. 계획이 명시한 "늘리는 최소 기능"만 충족한다.
+  - `mc_free()`는 아무 것도 회수하지 않는다(순수 범프 할당자) —
+    긴 시간 동작하는 프로세스가 malloc/free를 반복하면 1MiB 슬롯이
+    결국 소진된다. 실제 free-list/버디 할당자가 필요해지는
+    시점까지는 이 라운드의 "왕복 증명"에는 문제가 되지 않는다.
+  - 힙이 스레드별이 아니라 **프로세스(address_space)별**이다 — 한
+    프로세스 안에 유저 스레드가 여러 개 생기면(현재 아키텍처에서는
+    아직 일어나지 않는다) `heap_top`/`heap_mapped_top` 갱신에
+    동시성 보호가 없다. 이 라운드의 모든 유저 프로세스는 스레드
+    하나뿐이라 실제로 드러나지 않는다.

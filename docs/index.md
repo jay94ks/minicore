@@ -26,7 +26,7 @@
 | [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M8 전부 완료 — 결과는 done 참고) |
 | [smp-fpu-bringup.md](plan/smp-fpu-bringup.md) | M9(FPU/SIMD 컨텍스트 스위칭)~M11b(lazy XSAVE/AVX 전환) — AP 기동·IPI·TLB shootdown(M10), 다중 코어/NUMA 검증+락 순서 문서화(M11) 포함, kernel-bootstrap.md 이후 계획 |
 | [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순. libmc(네이티브 C API 라이브러리)가 전 구간 교차 트랙. **M12~M20 전부 완료** — 결과는 done 참고 |
-| [general-purpose-completion.md](plan/general-purpose-completion.md) | M21(선점형 스케줄링)~M26(실제 libc 포팅 재도전) — 프로세스 생명주기(wait/시그널), 진짜 fork/exec의 fd 상속, 유저랜드 동적 메모리, 최소 네트워킹까지. aarch64 이식보다 먼저 하기로 결정된 계획. **M21~M23 완료** — 결과는 done 참고, 다음은 M24 |
+| [general-purpose-completion.md](plan/general-purpose-completion.md) | M21(선점형 스케줄링)~M26(실제 libc 포팅 재도전) — 프로세스 생명주기(wait/시그널), 진짜 fork/exec의 fd 상속, 유저랜드 동적 메모리, 최소 네트워킹까지. aarch64 이식보다 먼저 하기로 결정된 계획. **M21~M24 완료** — 결과는 done 참고, 다음은 M25 |
 
 ## done — 완료 보고
 | 문서 | 설명 |
@@ -59,6 +59,7 @@
 | [general-purpose-completion-m21.md](done/general-purpose-completion-m21.md) | M21(완료): LAPIC 타이머 기반 선점형 스케줄링(ADR-176, BSP·ring3 한정) — 새 IDT 벡터+`sched::on_timer_tick()`+`run_queue::lock`을 `irq_safe`로 승격, `init/preempt_demo/`(busy/counter)로 QEMU 실측 검증. 이 과정에서 TSS.RSP0 전역 공유 버그를 발견·수정(ADR-177, M12 ADR-141과 같은 문제 형태) — 스모크/SMP/NUMA/AVX 4개 스위트 전부 회귀 없음 확인 |
 | [general-purpose-completion-m22.md](done/general-purpose-completion-m22.md) | M22(완료): 프로세스 생명주기 최소 구현(ADR-178) — `sys_process_kill`(스케줄러가 대상을 다음에 뽑으려는 시점에 폐기)+procsrv가 자기 자신을 wait/kill 타깃으로 재스폰하는 자기테스트. wait는 procsrv의 기존 공유 로그인 endpoint 대신 자식 전용 새 endpoint로 방향을 뒤집어 servers/login의 큐잉된 Call과의 충돌을 해결(실제 재현) — procsrv.md의 완전한 프로세스 테이블/외부 OP_WAIT·OP_KILL 프로토콜은 범위 밖(OPEN-64) |
 | [general-purpose-completion-m23.md](done/general-purpose-completion-m23.md) | M23(완료): 진짜 fork/exec 최소 구현(ADR-179) — `sys_fork`가 handle_table 전체를 프록시로 복제(이전에는 자식이 빈 테이블로 시작). procsrv가 test.txt를 부분 읽고 fork+exec한 완전히 새 이미지에서 나머지를 이어 읽어 확인 — open_file_id가 서버측(memfs) 상태이므로 procsrv 매개 fd 프로토콜(procsrv.md §3.6/§4.1) 없이도 오프셋 공유가 성립함을 실측 확인 |
+| [general-purpose-completion-m24.md](done/general-purpose-completion-m24.md) | M24(완료): 유저랜드 동적 메모리(ADR-180) — 새 syscall `sys_brk`(고정 1MiB 힙 슬롯, 슬롯 5)+libmc 최소 malloc(`mc_malloc`, 순수 범프 할당자). userland/shell의 cat 빌트인이 스택 배열 대신 malloc 버퍼를 실제로 써서 파일을 정확히 읽어냄을 확인 |
 
 ## design — 설계/상세
 

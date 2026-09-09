@@ -214,6 +214,14 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             auto err = arch_x86_64::process_kill(*self->handles, static_cast<uint32_t>(a1));
             return static_cast<uint64_t>(err);
         }
+        case uapi::k_syscall_brk: {
+            auto* req = reinterpret_cast<uapi::brk_request*>(a1);
+            if (req == nullptr) {
+                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+            }
+            auto err = arch_x86_64::brk(req->increment, req->out_old_top);
+            return static_cast<uint64_t>(err);
+        }
         default:
             return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
     }

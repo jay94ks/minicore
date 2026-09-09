@@ -217,6 +217,21 @@ inline constexpr uint64_t k_syscall_io_deactivate = 11;
 // process_ops.hpp::process_kill_error 값.
 inline constexpr uint64_t k_syscall_process_kill = 12;
 
+// M24(general-purpose-completion.md §M24, ADR-180) — a1 = 이 구조체의
+// 유저 가상주소, a2/a3 미사용. increment==0이면 조회만(현재 heap_top
+// 을 out_old_top에 채우고 아무것도 매핑하지 않는다). 음수 increment
+// (힙 축소)는 이번 라운드에 지원하지 않는다 — invalid_argument로
+// 거부한다(process_ops.hpp::process_spawn_error 값, 반환값). 성공
+// 시 반환값은 0이고 req->out_old_top에 증가 **전** heap_top이
+// 채워진다(고전적 sbrk() 관례 — 호출자가 새로 확보된 영역의 시작을
+// 안다).
+inline constexpr uint64_t k_syscall_brk = 13;
+
+struct brk_request {
+    int64_t increment = 0;
+    uint64_t out_old_top = 0;  // 출력.
+};
+
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process가
 // initrun 자신의 원본 ELF 바이트를(자기 자신을 fork/process_spawn/exec으로
 // 다시 만들어 볼 수 있게) initrun의 주소공간에도 매핑해 두고, 그

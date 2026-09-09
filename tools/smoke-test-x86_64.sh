@@ -134,7 +134,7 @@
 #     남긴다("[procsrv] kill requested ok=1"/"[sched] thread killed
 #     (discarded before scheduling)" — 스케줄러가 다음에 그 스레드를
 #     뽑으려는 시점에 실제로 폐기한다).
-#   M23 (general-purpose-completion.md §M23, kernel-scheduler.md
+#   M23 (general-purpose-completion.md §M23, kernel-memory.md
 #     ADR-179): sys_fork가 이제 부모의 handle_table 전체를 자식에게
 #     프록시로 복제한다(이전에는 자식이 빈 테이블로 시작했다).
 #     procsrv가 test.txt를 열어 앞 5바이트("hello")만 읽어 서버 쪽
@@ -145,6 +145,14 @@
 #     read ok=1") — open_file_id가 커널 핸들/발신자 신원과 무관하게
 #     서버 쪽(memfs)에 상태를 두므로, 별도의 procsrv 매개 fd 복제
 #     프로토콜(procsrv.md §3.6/§4.1) 없이도 오프셋 공유가 성립한다.
+#   M24 (general-purpose-completion.md §M24, kernel-memory.md
+#     ADR-180): 새 syscall sys_brk(고정 1MiB 힙 슬롯, 슬롯 5) +
+#     libmc의 최소 malloc(mc_malloc, 순수 범프 할당자 — free는
+#     no-op)를 셸의 cat 빌트인이 실제로 쓴다(스택 배열 대신
+#     mc_malloc으로 받은 버퍼). 버퍼 확보 자체("[shell] malloc
+#     buffer ok=1")와 그 버퍼로 읽은 파일 내용이 여전히 정확함
+#     ("[shell] cat ok=1", 기존 M20 검증과 동일 기준)을 함께 확인해
+#     유저랜드 동적 메모리 왕복을 증명한다.
 #   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
 #     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
 #     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
@@ -305,6 +313,7 @@ declare -a EXPECTED=(
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"
   "[shell] ls ok=1"
+  "[shell] malloc buffer ok=1"
   "[shell] cat ok=1"
   "[shell] self-test done"
 )

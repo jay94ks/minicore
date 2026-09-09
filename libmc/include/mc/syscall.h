@@ -83,3 +83,22 @@ static inline _Noreturn void mc_thread_exit(void) {
         __asm__ volatile("pause");
     }
 }
+
+// M24(general-purpose-completion.md §M24, ADR-180) — sys_brk.
+// kernel/include/uapi.hpp::brk_request와 바이트 단위로 동일해야
+// 한다. increment==0이면 조회만(현재 heap_top을 out_old_top에
+// 채운다) — 음수 increment(축소)는 이번 라운드에 지원하지 않는다
+// (커널이 invalid_argument로 거부).
+#define MC_SYSCALL_BRK 13u
+
+typedef struct {
+    int64_t increment;
+    uint64_t out_old_top;
+} mc_brk_request;
+
+// 반환: 0=성공(req.out_old_top에 증가 전 heap_top이 채워진다),
+// 그 외는 process_ops.hpp::process_spawn_error 값(대개
+// out_of_memory — 힙 슬롯 예산 초과).
+static inline uint64_t mc_brk(mc_brk_request* req) {
+    return mc_raw_syscall(MC_SYSCALL_BRK, (uint64_t)(uintptr_t)req, 0, 0);
+}

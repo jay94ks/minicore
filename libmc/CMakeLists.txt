@@ -17,6 +17,7 @@ add_library(minicore_libmc STATIC
     src/ipc/fs_client.c
     src/ipc/console_client.c
     src/ipc/ps2_client.c
+    src/mem/heap.c
     src/x86_64/start.c
 )
 
