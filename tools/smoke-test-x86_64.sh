@@ -56,7 +56,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=15
+TIMEOUT_SEC=25  # M12부터 initrun.elf가 커지는 추세라 여유를 좀 더 둔다.
 
 declare -a EXPECTED=(
   "hello from kernel"
@@ -92,6 +92,7 @@ declare -a EXPECTED=(
   "[initrun] load_elf ok=1"
   "[initrun] setup_initrun_process ok=1"
   "[initrun] kernel received boot call ok=1 label=0xb007 (expect 0xb007) - 부팅 성공"
+  "[initrun] cpio/ini self-test ok=1"
   "[process] fork ok"
   "[process] exec ok entry=0x10000000"
   "[process] spawn ok entry=0x10000000 trusted=0"

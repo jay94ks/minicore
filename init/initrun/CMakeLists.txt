@@ -8,11 +8,18 @@ if(NOT MINICORE_ARCH STREQUAL "x86_64")
   return()
 endif()
 
-add_executable(minicore_initrun_elf main.cpp)
+add_executable(minicore_initrun_elf
+    main.cpp
+    cpio_reader.cpp
+    ini_parser.cpp
+    panic_stub.cpp
+)
 
 target_include_directories(minicore_initrun_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/kernel/include
 )
+
+target_link_libraries(minicore_initrun_elf PRIVATE minicore_libk)
 
 # 유저 프로세스도 SSE/MMX를 쓰지 않는다 — 이 마일스톤 어디서도
 # CR4.OSFXSR을 설정하지 않아(IDT/#NM 처리 없음, kernel/arch/x86_64/
@@ -60,6 +67,7 @@ add_custom_command(
     OUTPUT ${MINICORE_INITRD_IMAGE}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mkinitrd.py
             ${MINICORE_INITRD_IMAGE}
+            --disk-cfg=0,4,0,0
             initrun=$<TARGET_FILE:minicore_initrun_elf>
     DEPENDS minicore_initrun_elf ${CMAKE_SOURCE_DIR}/tools/mkinitrd.py
     COMMENT "Packaging initrd.img (MCPACK v1) from initrun.elf"

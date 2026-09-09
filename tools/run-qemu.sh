@@ -40,6 +40,14 @@
 #                         "[fpu] xsave_avail=.. avx_avail=.."로 실제
 #                         반영 여부를 확인한다). 기본은 미설정(QEMU
 #                         기본 CPU 모델).
+#   MINICORE_QEMU_BOOTDISK=<경로>  docs/plan/system-servers-bringup.md
+#                         M12(ADR-131/147): 그 경로의 파일을
+#                         virtio-blk-pci 장치(bus 0, device 4,
+#                         function 0 고정 — initrun의 disk.cfg가
+#                         이 BDF를 그대로 가리킨다, init/initrun/
+#                         CMakeLists.txt의 --disk-cfg=0,4,0,0과
+#                         반드시 일치해야 한다)로 붙인다. 기본은
+#                         미설정(장치 없음, M1~M11과 동일).
 
 set -euo pipefail
 
@@ -102,6 +110,11 @@ case "$ARCH" in
 
     if [[ -n "${MINICORE_QEMU_CPU:-}" ]]; then
       EXTRA_ARGS+=(-cpu "${MINICORE_QEMU_CPU}")
+    fi
+
+    if [[ -n "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
+      EXTRA_ARGS+=(-drive "if=none,id=bootdisk,format=raw,file=${MINICORE_QEMU_BOOTDISK}")
+      EXTRA_ARGS+=(-device "virtio-blk-pci,drive=bootdisk,addr=04.0")
     fi
 
     exec "$QEMU_BIN" \

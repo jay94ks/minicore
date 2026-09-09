@@ -19,7 +19,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=20
+TIMEOUT_SEC=40  # M12부터 initrun.elf가 눈에 띄게 커져(cpio/INI 파서 추가) 20s가 종종 부족했다.
 export MINICORE_QEMU_SMP="${MINICORE_QEMU_SMP:-4}"
 export MINICORE_QEMU_NUMA="${MINICORE_QEMU_NUMA:-2}"
 

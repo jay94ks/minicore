@@ -5,10 +5,16 @@
 파이썬으로 작성해도 ADR-010 제약(예외/RTTI 금지 등)의 대상이 아니다.
 
 사용법:
-    mkinitrd.py <출력경로> <name1>=<path1> [<name2>=<path2> ...]
+    mkinitrd.py <출력경로> [--disk-cfg=BUS,DEVICE,FUNCTION,FS_TAG] <name1>=<path1> [...]
 
 각 <path>의 파일 내용을 그대로 담고, mcpack_header/mcpack_entry(§5)
 그대로의 바이너리 레이아웃으로 출력한다.
+
+--disk-cfg는 "disk.cfg" 엔트리를 추가한다(docs/spec/boot.md §3의
+boot::boot_device_descriptor 그대로의 바이트, ADR-131/146) — 실제
+OS 설치 절차가 아직 없는 이 프로젝트에서, 그 절차가 채울 값을 이
+개발 도구가 대신 고정으로 써 넣는다. FS_TAG는 지금 0(cpio/newc)
+하나뿐이다.
 """
 import struct
 import sys
@@ -16,6 +22,10 @@ import sys
 MCPACK_MAGIC = 0x4D43504B  # "MCPK"
 MCPACK_VERSION = 1
 NAME_LEN = 60
+
+# struct boot::boot_device_descriptor { uint32 valid, pci_bus, pci_device,
+# pci_function, fs_tag; } — 전부 uint32_t라 정렬 패딩이 없다.
+DISK_CFG_FMT = "<5I"
 
 # struct mcpack_header { uint32 magic; uint32 version; uint32 entry_count; uint32 _pad; };
 HEADER_FMT = "<IIII"
@@ -36,6 +46,16 @@ def main(argv):
     out_path = argv[1]
     specs = []
     for arg in argv[2:]:
+        if arg.startswith("--disk-cfg="):
+            parts = arg[len("--disk-cfg="):].split(",")
+            if len(parts) != 4:
+                print("--disk-cfg는 BUS,DEVICE,FUNCTION,FS_TAG 4개 값이 필요하다",
+                      file=sys.stderr)
+                return 1
+            bus, device, function, fs_tag = (int(p, 0) for p in parts)
+            disk_cfg = struct.pack(DISK_CFG_FMT, 1, bus, device, function, fs_tag)
+            specs.append((b"disk.cfg", disk_cfg))
+            continue
         if "=" not in arg:
             print(f"잘못된 인자(형식은 name=path): {arg}", file=sys.stderr)
             return 1

@@ -77,4 +77,22 @@ struct srat_slit_result {
 bool find_and_parse_srat_slit(uint64_t arch_data_addr, const madt_result& madt,
                                srat_slit_result& out);
 
+// M12(system-servers-bringup.md §M12, ADR-131/147) — MCFG(PCI Express
+// Memory-mapped Configuration space table, ACPI 6.5 §5.2.6.6) 파싱.
+// initrun의 임베디드 virtio-blk 클라이언트가 부트 디바이스(고정
+// BDF, boot_info.boot_device)의 설정공간을 ECAM으로 읽으려면 이
+// 세그먼트 0의 ECAM 베이스 물리주소가 필요하다. RSDP 검색은
+// find_and_parse_madt()와 완전히 같은 경로를 재사용한다.
+struct mcfg_result {
+    uint64_t ecam_base_phys;  // PCI segment 0의 ECAM 베이스. 실패하면 의미 없음.
+    bool ok;
+};
+
+// segment 0 엔트리를 찾으면 true — 없으면(MCFG 자체가 없거나 segment
+// 0 엔트리가 없음) false. ECAM 방식만 다룬다(ADR-038의 "ECAM 우선"
+// 결정 재사용) — 레거시 0xCF8/0xCFC 폴백은 이 최소 클라이언트의
+// 범위 밖이다(§근거: 부트스트랩 1회성 전용, QEMU q35는 항상 MCFG를
+// 제공한다).
+bool find_and_parse_mcfg(uint64_t arch_data_addr, mcfg_result& out);
+
 }  // namespace arch_x86_64

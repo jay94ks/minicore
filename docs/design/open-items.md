@@ -19,6 +19,7 @@
 | OPEN-55 | OPEN-52(서비스 준비완료 신호 프로토콜)가 아직 별도 설계로 미착수인 상태에서, M12가 지금 당장 써야 할 **임시 방편**(정해진 타임아웃 vs 단순 notification 1회 등, 계획 §M12 §구현1이 이미 이렇게 임시로 진행하라고 명시)의 구체적 선택 | ADR-131 | [system-servers-bringup.md](../plan/system-servers-bringup.md) |
 | OPEN-56 | procsrv.md §5(계정 생성)/§7(로그인)/§8(su/sudo)를 M12에서 완전히 스킵하고 "프로토콜 골격만"(계획 §M12 §구현2가 이미 이렇게 scope했다) 남기는 정확한 경계 — 골격만 만든다는 게 정확히 어디까지인지(예: 코드상 handler 자리는 만들되 항상 실패 반환? 아예 라우팅도 안 함?) | (미정) | [procsrv.md](../spec/procsrv.md) |
 | OPEN-57 | virtio-blk 클라이언트·cpio(newc) 파서·INI 파서·`tools/mkbootdisk.py`의 구현 순서와 각각의 최소 범위(예: virtio-blk 큐 협상을 얼마나 단순화할지) — system-servers-bringup.md §M12가 뭘 만들지는 정했지만 어느 순서로 쌓을지는 구현자 재량으로 남겨 뒀다 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-58 | ADR-147의 TSS IOPB(I/O 포트 허가 비트맵)가 코어당 TSS 하나에 전역으로 공유된다 — 신뢰하지 않는 유저 프로세스가 생기는 시점(M12 이후, procsrv의 진짜 다중 프로세스)에는 initrun을 위해 열어 둔 포트 범위가 그 프로세스에게도 그대로 노출된다. 스레드별 TSS(코어당 컨텍스트 스위치 시 TSS 재적재)나 그 외 격리 방안 재검토 필요 | ADR-147 | [boot-and-drivers.md](boot-and-drivers.md) |
 
 ## 해결된 항목 (이력)
 

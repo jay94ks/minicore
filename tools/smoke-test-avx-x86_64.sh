@@ -16,7 +16,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=15
+TIMEOUT_SEC=25  # M12부터 initrun.elf가 커지는 추세라 여유를 좀 더 둔다.
 
 declare -a COMMON_EXPECTED=(
   "hello from kernel"

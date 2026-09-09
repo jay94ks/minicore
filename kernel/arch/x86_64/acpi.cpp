@@ -299,7 +299,42 @@ void fill_default_distance(srat_slit_result& out) {
     }
 }
 
+// MCFG(ACPI 6.5 §5.2.6.6) — SDT(36) + reserved(8) = 44바이트 헤더 뒤에
+// 16바이트짜리 엔트리(base_address:u64, pci_segment_group:u16,
+// start_bus:u8, end_bus:u8, reserved:u32)가 이어진다.
+bool parse_mcfg_body(uint64_t mcfg_phys, mcfg_result& out) {
+    sdt_view mcfg = read_sdt(mcfg_phys);
+    constexpr uint32_t k_header_size = 44;
+    constexpr uint32_t k_entry_size = 16;
+    if (mcfg.length < k_header_size + k_entry_size) {
+        return false;
+    }
+    uint32_t entry_count = (mcfg.length - k_header_size) / k_entry_size;
+    const uint8_t* entries = mcfg.base + k_header_size;
+    for (uint32_t i = 0; i < entry_count; ++i) {
+        const uint8_t* e = entries + i * k_entry_size;
+        uint16_t segment = static_cast<uint16_t>(e[8] | (static_cast<uint16_t>(e[9]) << 8));
+        if (segment == 0) {
+            out.ecam_base_phys = read_u64(e);
+            out.ok = true;
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
+
+bool find_and_parse_mcfg(uint64_t arch_data_addr, mcfg_result& out) {
+    out.ecam_base_phys = 0;
+    out.ok = false;
+
+    uint64_t mcfg_phys = find_acpi_table(arch_data_addr, "MCFG");
+    if (mcfg_phys == 0) {
+        return false;
+    }
+    return parse_mcfg_body(mcfg_phys, out);
+}
 
 bool find_and_parse_madt(uint64_t arch_data_addr, madt_result& out) {
     out.lapic_base_phys = k_default_lapic_base;

@@ -15,8 +15,7 @@ namespace {
 
 // Intel SDM Vol.3 §8.7 Figure 8-11 — 64비트 TSS 구조체. 이 프로젝트는
 // RSP0만 쓴다(IST는 전부 미사용 — #DF/#NM처럼 스택 자체가 깨졌을 때만
-// 필요한 별도 스택 전환이라 M12 범위 밖, 아직 필요해진 적 없다). IOPB는
-// 두지 않는다(iomap_base를 구조체 크기로 둬 "이 안에 없다"는 뜻).
+// 필요한 별도 스택 전환이라 M12 범위 밖, 아직 필요해진 적 없다).
 struct __attribute__((packed)) tss_struct {
     uint32_t reserved0 = 0;
     uint64_t rsp0 = 0;
@@ -36,7 +35,21 @@ struct __attribute__((packed)) tss_struct {
 };
 static_assert(sizeof(tss_struct) == 104, "TSS 구조체 크기가 Intel SDM Vol.3 §8.7과 다르다");
 
-tss_struct g_tss;
+// M12(ADR-147) — I/O 허가 비트맵(IOPB, Intel SDM Vol.3 §8.7 "I/O
+// Permission Bit Map"). 포트 0~65535 전체를 담으려면 8192바이트(1
+// 비트/포트)가 필요하고, CPU가 마지막 포트 확인 시 그 바로 다음
+// 바이트까지 읽으므로 스펙이 요구하는 대로 1바이트를 더 붙인다
+// (8193바이트). TSS 바로 뒤에 물리적으로 이어 붙여야
+// iomap_base(TSS 안의 오프셋)로 가리킬 수 있다 — 그래서 별도
+// 구조체가 아니라 이 하나의 struct 안에 둔다. 기본값 전부
+// 0xFF(모든 포트 접근 거부) — grant_io_port_range()가 필요한
+// 범위만 0으로 지운다.
+struct __attribute__((packed)) tss_with_iopb {
+    tss_struct tss;
+    uint8_t iopb[8193];
+};
+
+tss_with_iopb g_tss;
 
 // boot.S::gdt64_start(null+code32+data32+code64+data64+user_data64+
 // user_code64, 7개×8바이트=56바이트)를 그대로 복사하고, 시스템
@@ -80,11 +93,12 @@ void init_tss() {
     auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
     uint64_t stack_top = reinterpret_cast<uint64_t>(stack_base) +
                           (static_cast<uint64_t>(mm::k_page_size) << k_exception_stack_order);
-    g_tss.rsp0 = stack_top;
-    g_tss.iomap_base = sizeof(tss_struct);
+    g_tss.tss.rsp0 = stack_top;
+    g_tss.tss.iomap_base = sizeof(tss_struct);  // IOPB가 TSS 바로 뒤에서 시작.
+    __builtin_memset(g_tss.iopb, 0xFF, sizeof(g_tss.iopb));  // 기본: 모든 포트 접근 거부.
 
     uint64_t tss_base = reinterpret_cast<uint64_t>(&g_tss);
-    uint64_t limit = sizeof(tss_struct) - 1;
+    uint64_t limit = sizeof(tss_with_iopb) - 1;
 
     // Intel SDM Vol.3 §8.2.3 Figure 8-4 — 64비트 TSS 디스크립터(16바이트).
     uint64_t low = (limit & 0xFFFFull) | ((tss_base & 0xFFFFFFull) << 16) |
@@ -102,6 +116,12 @@ void init_tss() {
 
     constexpr uint16_t k_sel_tss = 0x38;
     asm volatile("ltr %w0" : : "r"(k_sel_tss));
+}
+
+void grant_io_port_range(uint16_t io_base, uint16_t count) {
+    for (uint32_t port = io_base; port < static_cast<uint32_t>(io_base) + count; ++port) {
+        g_tss.iopb[port / 8] &= static_cast<uint8_t>(~(1u << (port % 8)));
+    }
 }
 
 }  // namespace arch_x86_64

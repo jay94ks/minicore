@@ -8,9 +8,112 @@
 // 로그를 통해서만 가능하다. RDI로 boot_info 포인터를 규약대로(ADR-030/
 // boot.md §6) 받지만, 이 데모는 아직 그 내용을 읽지 않는다(procsrv 등
 // 실제로 부팅 정보가 필요한 이후 서버가 등장할 때 의미가 생긴다).
+#include "cpio_reader.hpp"
+#include "ini_parser.hpp"
+
 #include <uapi.hpp>
 
 namespace {
+
+// cpio(newc) 엔트리 하나를 buf에 써 넣고 쓴 바이트 수를 돌려준다 —
+// 8자리 16진수 필드를 손으로 인코딩하는 이 함수 자체가
+// cpio_reader.cpp의 디코딩과 대칭을 이룬다(테스트 목적: 실제
+// 아카이브를 만드는 tools/mkbootdisk.py 없이도 이 파서를 QEMU에서
+// 실제로 실행해 검증할 수 있게 한다).
+void write_hex8(uint8_t* out, uint32_t v) {
+    for (int i = 7; i >= 0; --i) {
+        uint32_t digit = v & 0xF;
+        out[i] = static_cast<uint8_t>(digit < 10 ? ('0' + digit) : ('a' + digit - 10));
+        v >>= 4;
+    }
+}
+
+uint64_t write_cpio_entry(uint8_t* buf, const char* name, const uint8_t* data,
+                           uint32_t filesize) {
+    uint64_t off = 0;
+    buf[off++] = '0';
+    buf[off++] = '7';
+    buf[off++] = '0';
+    buf[off++] = '7';
+    buf[off++] = '0';
+    buf[off++] = '1';
+    uint32_t namesize = 0;
+    while (name[namesize] != '\0') {
+        ++namesize;
+    }
+    ++namesize;  // NUL 포함.
+    for (int field = 0; field < 13; ++field) {
+        uint32_t v = 0;
+        if (field == 6) {
+            v = filesize;
+        } else if (field == 11) {
+            v = namesize;
+        }
+        write_hex8(buf + off, v);
+        off += 8;
+    }
+    for (uint32_t i = 0; i < namesize; ++i) {
+        buf[off + i] = static_cast<uint8_t>(name[i]);
+    }
+    off += namesize;
+    while (off % 4 != 0) {
+        buf[off++] = 0;
+    }
+    for (uint32_t i = 0; i < filesize; ++i) {
+        buf[off + i] = data[i];
+    }
+    off += filesize;
+    while (off % 4 != 0) {
+        buf[off++] = 0;
+    }
+    return off;
+}
+
+bool span_equals(const char* data, uint64_t size, const char* expect) {
+    uint64_t i = 0;
+    for (; expect[i] != '\0'; ++i) {
+        if (i >= size || data[i] != expect[i]) {
+            return false;
+        }
+    }
+    return i == size;
+}
+
+// cpio_reader/ini_parser를 실제로 실행해 검증한다(호스트 단위 테스트가
+// 없는 대신, 이 프로젝트의 mcpack/elf_loader와 같은 방식 — QEMU에서
+// 커널 스레드/유저 스레드 데모로 왕복 확인). 손으로 만든 최소 cpio
+// 아카이브(파일 하나 + TRAILER) + INI 텍스트 하나로 두 파서 모두
+// 한 번에 확인한다.
+bool test_cpio_and_ini() {
+    static uint8_t archive[256];
+    const uint8_t file_data[] = {'h', 'i'};
+    uint64_t off = write_cpio_entry(archive, "hello.txt", file_data, sizeof(file_data));
+    off += write_cpio_entry(archive + off, "TRAILER!!!", nullptr, 0);
+
+    auto found = cpio::find_entry(archive, off, "hello.txt");
+    if (!found.is_ok() || found.value().size != 2 || found.value().data[0] != 'h' ||
+        found.value().data[1] != 'i') {
+        return false;
+    }
+    auto missing = cpio::find_entry(archive, off, "nope.txt");
+    if (missing.is_ok()) {
+        return false;
+    }
+
+    static const char ini_text[] = "[svc]\nexec=bin/svc\nargs=--foo bar\n; comment\nexec2=x\n";
+    constexpr uint64_t ini_size = sizeof(ini_text) - 1;
+    auto exec_val = ini::find_value(reinterpret_cast<const uint8_t*>(ini_text), ini_size, "exec");
+    if (!exec_val.is_ok() || !span_equals(exec_val.value().data(), exec_val.value().size(),
+                                          "bin/svc")) {
+        return false;
+    }
+    auto args_val = ini::find_value(reinterpret_cast<const uint8_t*>(ini_text), ini_size, "args");
+    if (!args_val.is_ok() || !span_equals(args_val.value().data(), args_val.value().size(),
+                                          "--foo bar")) {
+        return false;
+    }
+    return true;
+}
 
 // 커널이 이 프로세스의 handle_table을 만들 때 이 IPC 호출용 endpoint
 // 프록시 핸들을 항상 가장 먼저(그리고 유일하게) 만들어 넣는다는 M8
@@ -79,9 +182,13 @@ extern "C" [[noreturn]] void _start(const void* boot_info_or_null) {
         quiet_exit();  // exec 실패 시에만 도달.
     }
 
-    // 부모 — 기존 M8 boot IPC call(변화 없음).
+    // 부모 — 기존 M8 boot IPC call. regs[0]에 cpio/INI 파서 자체
+    // 검증 결과(1=통과)를 실어 커널 로그로 확인한다(호스트 단위
+    // 테스트가 없는 이 종류의 파서에 대한 이 프로젝트의 관례 —
+    // mcpack/elf_loader와 마찬가지로 QEMU 왕복으로 검증).
     uapi::message out{};
     out.label = k_boot_label;
+    out.regs[0] = test_cpio_and_ini() ? 1 : 0;
     uapi::message in{};
     do_syscall(uapi::k_syscall_ipc_call, k_boot_endpoint_handle,
                reinterpret_cast<uint64_t>(&out), reinterpret_cast<uint64_t>(&in));

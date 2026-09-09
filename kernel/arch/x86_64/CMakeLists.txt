@@ -46,6 +46,7 @@ add_executable(minicore_kernel_x86_64
     lapic.cpp
     page_fault.cpp
     page_table.cpp
+    pci_bringup.cpp
     process_ops.cpp
     smp.cpp
     syscall.cpp

@@ -922,3 +922,93 @@
   - AP(다중 코어)는 여전히 TSS를 적재하지 않는다 — AP는 유저모드에
     진입하지 않으므로(M10/M11 done 보고에 이미 명시) ring3→ring0
     전환 자체가 없어 필요 없다.
+
+## ADR-146. boot_info에 boot_device_descriptor 필드 추가(ADR-131 §결정2 구체화)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [boot_info.hpp](../../kernel/include/boot_info.hpp)에
+  `boot_device_descriptor{valid, pci_bus, pci_device, pci_function,
+  fs_tag, io_port_ok, io_port_base}`를 추가하고(`k_boot_info_version`을
+  3으로 올림), `boot_info.boot_device`로 담는다. 앞 5개 필드(정적,
+  20바이트)는 initrd의 `"disk.cfg"` 엔트리(값 그대로 바이트 복사)에서
+  오고, 뒤 2개(런타임)는 커널이 부팅 중 실제로 BAR를 배정한 결과로
+  채운다(ADR-147). `tools/mkinitrd.py`에 `--disk-cfg=BUS,DEVICE,
+  FUNCTION,FS_TAG` 옵션을 추가해 그 정적 부분을 만든다.
+- **근거**: ADR-131 §결정2가 "장치 식별자+파일시스템 종류"라고
+  개념만 정해 두고 "정확한 바이트 레이아웃은 M12 착수 시점에 확정"
+  이라고 미뤄 뒀던 부분을 실제로 정한다. `io_port_ok`/`io_port_base`
+  를 disk.cfg가 아니라 커널이 채우기로 한 이유는 ADR-147의 발견(BAR가
+  실제로 배정돼 있지 않다) 때문이다 — 정적 설정값이 아니라 매 부팅
+  마다 새로 계산해야 하는 값이라 애초에 disk.cfg에 넣을 수 없다.
+- **영향**: disk.cfg 엔트리 크기(20바이트)와
+  `sizeof(boot_device_descriptor)`(28바이트)가 더 이상 같지 않다 —
+  `kernel_main.cpp::setup_initrun_process()`가 disk.cfg를 읽을 때
+  전체 구조체 크기가 아니라 정적 부분(5×4바이트)만으로 크기를
+  검증하고 그만큼만 복사한다(실제로 처음엔 전체 크기로 비교해
+  disk.cfg가 있는데도 항상 무효로 읽히는 버그를 만들었다가 QEMU에서
+  `[pci]` 로그가 전혀 안 찍히는 것을 보고 발견·수정했다).
+
+## ADR-147. virtio-blk 부트 디바이스의 PCI BAR를 커널이 직접 배정 + I/O 포트 IOPB로 initrun에 위임
+
+- **상태**: 확정 (2026-09-10)
+- **결정**:
+  1. **MCFG 파싱** — [acpi.hpp](../../kernel/arch/x86_64/acpi.hpp)/
+     [.cpp](../../kernel/arch/x86_64/acpi.cpp)에
+     `find_and_parse_mcfg()`를 추가한다(PCI segment 0의 ECAM 베이스만
+     — ADR-038의 "ECAM 우선" 그대로, 레거시 0xCF8/0xCFC 폴백은
+     다루지 않는다). RSDP 검색은 `find_and_parse_madt()`와 완전히
+     같은 경로(기존 파일 지역 `find_acpi_table()`)를 재사용한다.
+  2. **BAR 배정** — 새 파일
+     [pci_bringup.hpp](../../kernel/arch/x86_64/pci_bringup.hpp)/
+     [.cpp](../../kernel/arch/x86_64/pci_bringup.cpp)에
+     `assign_virtio_blk_bar(ecam_base, bus, device, function)`을
+     추가한다. disk.cfg가 가리키는 그 **하나의 BDF만** 다룬다 —
+     devmgr(M14~M16)의 진짜 버스 열거(ADR-039)와는 무관하다. 크기
+     탐색(0xFFFFFFFF를 써 보고 되읽어 마스크 확인) 후 고정 포트
+     베이스(0xC000)에 배정하고, PCI COMMAND 레지스터의 I/O space
+     enable 비트를 켠다.
+  3. **TSS IOPB** — [tss.cpp](../../kernel/arch/x86_64/tss.cpp)가
+     TSS 바로 뒤에 8193바이트 IOPB(Intel SDM Vol.3 §8.7)를 붙여
+     기본값 전부 거부(0xFF)로 초기화하고, 새 함수
+     `grant_io_port_range(base, count)`로 배정된 포트 범위만 허용
+     (0)으로 지운다 — `kernel_main.cpp`가 BAR 배정 성공 직후
+     [io_port_base, io_port_base+0x20)에 대해 이걸 호출해, ring3의
+     initrun이 `inb`/`outb`로 그 포트를 직접 두드릴 수 있게 한다.
+- **근거**: 이 필요성 자체가 QEMU에서 실측으로 드러났다 — 이
+  프로젝트는 PVH 직접 부팅(ADR-114)이라 SeaBIOS 등 어떤 펌웨어도
+  PCI 리소스(BAR) 배정을 대신해 주지 않는다. bus0/device4/function0
+  (disk.cfg가 가리키는 자리에 `-device virtio-blk-pci`를 붙인 것)의
+  BAR0을 커널 진단 코드로 직접 읽어 보니 `vendor=0x1af4 device=0x1001
+  bar0=0x1`이었다 — vendor/device는 정상(virtio-blk legacy)이지만
+  BAR0의 낮은 비트(I/O 공간 표시)만 리셋 상태로 서 있고 실제 주소
+  부분은 0이었다. 즉 **누군가 BAR에 실제 주소를 배정해 줘야
+  장치를 쓸 수 있는 상태**였다 — 이걸 커널이 부팅 중 한 번 대신
+  해 주면, initrun은 ECAM이나 PCI 열거를 전혀 몰라도 되고 그냥
+  넘겨받은 포트 베이스로 legacy virtio 레지스터를 두드리기만 하면
+  된다(모던 virtio의 MMIO BAR+capability list 파싱보다 훨씬
+  단순하다 — QEMU virtio-blk-pci가 기본으로 노출하는 것도 legacy
+  인터페이스였다, device id 0x1001이 이를 확인해 준다).
+- **검증 결과(QEMU 실측)**: `tools/run-qemu.sh`에
+  `MINICORE_QEMU_BOOTDISK` 환경변수(가짜 1MiB 파일로 시작)를 추가해
+  `-device virtio-blk-pci,drive=bootdisk,addr=04.0`을 붙인 뒤,
+  `[pci] assign_virtio_blk_bar ok=1 vendor=0x1af4 device=0x1001
+  io_base=0xc000`을 실제로 확인했다. 장치를 안 붙인 기본 스모크
+  테스트 경로(disk.cfg는 있지만 실제 PCI 장치가 없음)에서는
+  `ok=0 vendor=0x0 device=0x0`으로 안전하게 실패하며, 이 경로가
+  포함된 `tools/smoke-test-x86_64.sh`(50개)를 포함한 4개 스위트
+  전부 회귀 없이 통과했다.
+- **영향**:
+  - `kernel/arch/x86_64/CMakeLists.txt`에 `pci_bringup.cpp` 추가.
+  - `tools/run-qemu.sh`에 `MINICORE_QEMU_BOOTDISK` 환경변수 추가 —
+    설정하면 그 파일을 `virtio-blk-pci`(bus0/device4/function0
+    고정, `init/initrun/CMakeLists.txt`의 `--disk-cfg=0,4,0,0`과
+    반드시 일치해야 한다)로 붙인다.
+  - **알려진 단순화**: IOPB는 TSS 하나에 전역으로 공유된다(코어당
+    TSS 하나) — 지금은 유일한 트러스트 프로세스(initrun)만
+    존재해 문제가 없지만, 신뢰하지 않는 유저 프로세스가 생기는
+    시점에는 이 접근이 그 프로세스에게도 그대로 열려 있다는 뜻이다.
+    docs/design/open-items.md에 재검토 항목으로 등록한다(OPEN-58).
+  - 이 커널 측 BAR 배정은 이 프로젝트가 관리하는 **단 하나의 알려진
+    장치**에만 통한다 — devmgr(M14~M16)이 실제로 여러 PCI 장치를
+    다뤄야 할 때는 이 코드를 재사용하지 않고 ADR-039의 일반
+    열거+배정 알고리즘을 새로 구현해야 한다.

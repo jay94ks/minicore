@@ -28,6 +28,7 @@
 #include "klog.hpp"
 #include "lapic.hpp"
 #include "page_fault.hpp"
+#include "pci_bringup.hpp"
 #include "page_table.hpp"
 #include "smp.hpp"
 #include "syscall.hpp"
@@ -101,6 +102,11 @@ uint64_t dump_real_boot_info() {
 // 기동(bring_up_aps)은 여기서 하지 않는다 — mm::init()이 아직 끝나지
 // 않아 AP 커널 스택을 확보할 수 없다(kernel_main에서 mm::init() 이후
 // 별도로 호출).
+// M12(ADR-147) — demo_acpi_lapic()이 채우고 setup_initrun_process()가
+// 읽는다(부트 디바이스 BAR 배정에 ECAM 베이스가 필요, g_ipc_table 등
+// 다른 부트스트랩 전역과 같은 관례).
+arch_x86_64::mcfg_result g_mcfg{};
+
 acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     acpi_topology s{};
     bool madt_ok = arch_x86_64::find_and_parse_madt(real_arch_data_addr, s.madt);
@@ -113,6 +119,14 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
     arch_x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
     klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
+
+    // M12(ADR-147) — initrun의 임베디드 virtio-blk 클라이언트가 필요로
+    // 하는 ECAM 베이스를 여기서 미리 확인해 둔다(부팅 초기 진단 —
+    // 실제 사용은 initrun에게 이 값을 넘겨야 할 때, 아래 §M12 계속
+    // 참고).
+    bool mcfg_ok = arch_x86_64::find_and_parse_mcfg(real_arch_data_addr, g_mcfg);
+    klog::printf("[acpi] mcfg_ok=%u ecam_base=0x%lx\n", mcfg_ok,
+                 static_cast<unsigned long>(g_mcfg.ecam_base_phys));
 
     // MADT를 못 찾았어도(madt_ok==false) BSP 자신은 항상 "온라인 코어
     // 1개"다 — 이후 bring_up_aps()가 BSP 등록도 함께 겸하므로(smp.cpp)
@@ -787,6 +801,10 @@ void thread_initrun_boot_server_entry() {
     klog::printf(
         "[initrun] kernel received boot call ok=%u label=0x%x (expect 0x%x) - 부팅 성공\n",
         recv_result.is_ok(), in.label, k_initrun_boot_label);
+    // M12(system-servers-bringup.md §M12) — main.cpp::test_cpio_and_ini()의
+    // 결과. cpio/INI 파서는 호스트 단위 테스트가 없다(mcpack/elf_loader와
+    // 같은 이 프로젝트 관례 — QEMU 왕복으로 검증).
+    klog::printf("[initrun] cpio/ini self-test ok=%u\n", static_cast<unsigned>(in.regs[0]));
 
     ipc::message ack{};
     ack.label = 0xB0A0;
@@ -898,6 +916,43 @@ object::thread* setup_initrun_process() {
     }
     const boot::memory_region* bi_regions = nullptr;
     boot::boot_info bi = arch_x86_64::run_boot_info_self_test(&bi_regions);
+
+    // M12(ADR-131/146) — initrd의 "disk.cfg" 엔트리(tools/mkinitrd.py의
+    // --disk-cfg가 채워 둔다)를 찾아 그대로 boot_info.boot_device에
+    // 싣는다. 없거나 크기가 안 맞으면 valid=0으로 남겨 둔다(이미
+    // boot::boot_info bi{}의 기본 초기화가 전부 0이므로 별도 처리가
+    // 필요 없다) — initrun은 이 경우 부팅을 실패로 처리한다(M12는
+    // ADR-131 §결정3의 PCIe 폴백 스캔을 구현하지 않는다).
+    // disk.cfg는 boot_device_descriptor **전체**가 아니라 tools/mkinitrd.py
+    // --disk-cfg가 쓰는 정적 부분(valid/pci_bus/pci_device/pci_function/
+    // fs_tag, 5개 uint32_t = 20바이트)만 담는다 — io_port_ok/io_port_base
+    // 는 커널이 부팅 중 실제로 BAR를 배정한 뒤 채우는 런타임 전용
+    // 필드라 disk.cfg에는 존재하지 않는다(boot_info.hpp 상단 주석).
+    constexpr uint64_t k_disk_cfg_static_size = 5 * sizeof(uint32_t);
+    auto disk_cfg_entry = initrd::find_entry(g_embedded_initrd_start, initrd_size, "disk.cfg");
+    if (disk_cfg_entry.is_ok() && disk_cfg_entry.value().size == k_disk_cfg_static_size) {
+        __builtin_memcpy(&bi.boot_device, disk_cfg_entry.value().data, k_disk_cfg_static_size);
+    }
+
+    // M12(ADR-147) — disk.cfg가 유효하면 그 BDF의 BAR0을 지금 실제로
+    // 배정한다(pci_bringup.hpp 상단 주석 — PVH 직접 부팅이라 아무
+    // 펌웨어도 이걸 대신해 주지 않는다). 성공하면 배정한 포트
+    // 범위를 이 스레드(initrun, trusted)에게 TSS IOPB로 열어 준다 —
+    // 그래야 ring3에서 실제로 inb/outb를 쓸 수 있다.
+    if (bi.boot_device.valid != 0) {
+        auto bar =
+            arch_x86_64::assign_virtio_blk_bar(g_mcfg.ecam_base_phys, bi.boot_device.pci_bus,
+                                                bi.boot_device.pci_device,
+                                                bi.boot_device.pci_function);
+        klog::printf("[pci] assign_virtio_blk_bar ok=%u vendor=0x%x device=0x%x io_base=0x%x\n",
+                     bar.ok, bar.vendor_id, bar.device_id, bar.io_port_base);
+        if (bar.ok) {
+            bi.boot_device.io_port_ok = 1;
+            bi.boot_device.io_port_base = bar.io_port_base;
+            arch_x86_64::grant_io_port_range(bar.io_port_base, 0x20);
+        }
+    }
+
     void* bi_virt = mm::phys_to_virt(bi_page.value());
     __builtin_memset(bi_virt, 0, mm::k_page_size);
     __builtin_memcpy(bi_virt, &bi, sizeof(bi));
