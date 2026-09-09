@@ -149,6 +149,18 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
 
 ## M14. devmgr + PCIe 버스 열거 + 입력 장치(PS/2·USB)
 
+- **선행 작업(먼저 구현)**: **ADR-154**(boot-and-drivers.md, OPEN-58
+  해소) — TSS IOPB를 코어당 전역 1회성에서 스레드별 활성 I/O 포트
+  범위(`sys_io_activate`/`sys_io_deactivate` + 컨텍스트 스위치 시
+  diff 재프로그래밍)로 재설계한 것을 실제로 구현한다. M14가 devmgr
+  하나가 아니라 PS/2·USB 등 **여러** 드라이버가 각자 다른 I/O 포트
+  범위를 동시에 필요로 하는 첫 마일스톤이라, ADR-147의 "전역 1회성
+  IOPB" 단순화가 여기서부터 실제로 부족해진다 — 드라이버를 만들기
+  전에 먼저 고쳐야 한다. **ADR-155**(kernel-ipc-objects.md, OPEN-59
+  해소) §1(커널/커널스레드 수신자용 `pages[]` cross-address-space
+  번역)도 구현 비용이 작아 이 시점에 함께 넣는다(§2의 유저 프로세스
+  대상 공유 매핑 경로는 OPEN-61이 먼저 정해져야 해서 M16 전후로
+  미룬다).
 - **구현**: [pcie.md](../spec/pcie.md), boot-and-drivers.md
   ADR-038~041(ECAM 설정공간 접근, devmgr 버스 열거, 핫플러그, 동적
   드라이버 등록) — PCIe 열거 자체는 아직 스토리지/NIC/GPU 드라이버를
@@ -181,6 +193,14 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
   정의했다 — FAT32는 첫 클러스터 번호로, ext4는 네이티브 inode
   번호를 그대로 써서 합성한다. 새로 결정할 것 없이 그대로 구현만
   하면 된다.
+- **선행 작업(먼저 구현)**: **ADR-155**(kernel-ipc-objects.md,
+  OPEN-59 해소) §2 — IPC `pages[]`를 유저 프로세스 수신자의
+  주소공간에 참조 카운트+공유 매핑으로 전달하는 경로. M13의
+  fs-protocol.md는 이 경로가 없어 경로/데이터를 전부 `regs[]`(최대
+  32/16바이트)로 눌러 담는 임시 인코딩을 썼다 — 실제 FAT32/ext4
+  파일은 그 한도를 훌쩍 넘으므로, 이 마일스톤 착수 시점에 먼저 이
+  경로를 구현하고 fs-protocol.md를 `pages[]` 기반으로 교체해야 한다
+  (OPEN-61의 매핑 해제 시점·배치 위치를 이때 확정한다).
 - **구현**:
   - `fs/fat32`(ADR-057, FAT32를 virtio-blk 검증 직후 착수하기로
     이미 확정) — M15의 블록 드라이버 위에 올리고 M13의 VFS에 마운트

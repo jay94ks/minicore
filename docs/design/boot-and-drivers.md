@@ -1104,3 +1104,72 @@
   ("systemd류 초기 프로세스") 미구현(procsrv 스폰 후 initrun은 그냥
   종료), config_blob 전달 미구현(스폰되는 서비스에게 원본 key=value
   나머지를 넘기는 경로 없음 — 지금은 procsrv가 그걸 쓸 일이 없다).
+
+## ADR-154. TSS IOPB를 스레드별 활성 I/O 포트 범위로 전환 — `sys_io_activate`/`sys_io_deactivate` + 컨텍스트 스위치 시 diff 기반 재프로그래밍 (해결: OPEN-58)
+
+- **상태**: 확정 (2026-09-09) — **설계만 확정, 구현은 착수 전**(아래
+  §실행 계획 참고).
+- **결정**:
+  1. `object::thread`에 `io_port_base`/`io_port_count`(둘 다 0이면
+     "활성 I/O 범위 없음") 필드를 추가한다 — ADR-147의 "코어당 TSS
+     하나에 전역으로 열어 둔 IOPB"를 "지금 스케줄된 스레드가 실제로
+     활성화해 둔 범위만 열리는 IOPB"로 바꾼다.
+  2. 새 syscall 두 개(가칭 `sys_io_activate(io_base, count)`/
+     `sys_io_deactivate()`) — **활성화/비활성화 call**. `trusted`
+     (ADR-074/147이 이미 확립한 "이 프로세스가 실제로 하드웨어를
+     직접 다뤄야 한다는 사실이 검증된 신원") 스레드만 호출할 수
+     있다 — 별도의 새 권한 비트를 만들지 않고 기존 판정을 그대로
+     재사용한다. 호출한 스레드 자신의 `io_port_base`/`count`를
+     설정/해제하고, 지금 그 스레드가 실행 중이면 즉시 TSS IOPB에도
+     반영한다.
+  3. 컨텍스트 스위치(`kernel/core/sched/scheduler.cpp`)마다, 새로
+     스케줄되는 스레드의 `io_port_base`/`count`가 "지금 IOPB에
+     프로그램된 범위"와 다르면 **차이만** 재프로그래밍한다 — 이전
+     범위를 다시 차단(비트를 1로)하고 새 범위를 개방(비트를 0으로)
+     한다. 매 전환마다 8KiB 전체를 만지지 않는다(범위가 대개 32바이트
+     안팍이라 실제 비용은 무시할 수 있다).
+  4. **"활성화를 허가할 권한" 자체**는 새 커널 객체가 아니라
+     지금처럼 `sys_process_spawn`의 `grant_trusted`(ADR-147, 스폰하는
+     쪽 — 지금은 initrun — 이 하드코딩으로 결정)로 충분하다 —
+     "누가 트러스트를 받는가"와 "누가 I/O를 활성화할 수 있는가"를
+     같은 판정으로 묶는다. 부팅 완료 이후 cfgsrv 레지스트리를 읽어
+     **다른** 특수 프로세스에게도 이 권한을 동적으로 부여/회수하는
+     것은 cfgsrv가 실제로 존재하는 M19 이후 재검토 대상으로
+     남긴다 → 신규 **미결정 (OPEN-60)**.
+  5. `sys_fork`(ADR-142)는 자식에게 부모의 `io_port_base`/`count`를
+     기본적으로 그대로 물려준다(부모가 trusted면 자식도 trusted를
+     물려받는 것과 같은 정신, `fork_current()`가 이미 그렇게 한다).
+     이를 제한하는 fork 특수 변형(예: `sys_fork_no_io`)은 **이
+     ADR에서 만들지 않는다** — 지금 이걸 실제로 쓸 서비스가 없다
+     (YAGNI, ADR-131 §근거와 같은 절제). 실제로 필요해지는 시점(예:
+     신뢰하는 프로세스가 신뢰하지 않는 자식을 fork로 만드는 특정
+     서비스가 생길 때)에 별도로 추가한다.
+  6. `kernel_main.cpp::setup_initrun_process()`가 지금 무조건 호출하는
+     `grant_io_port_range()`(전역 1회성)는 제거하고, initrun의
+     virtio-blk 클라이언트가 실제로 I/O가 필요해지는 시점
+     (`virtio_blk::init()` 호출 직전)에 `sys_io_activate()`를 직접
+     호출하도록 바꾼다.
+- **근거**: docs-dashboard "답변 입력"으로 받은 방향 제안(2026-09-09,
+  이후 docs/reply.md에서 삭제·open-items.md에 흡수)을 그대로
+  구체화했다 — 활성화/비활성화 call로 나누고 컨텍스트 스위치 시
+  IOPB가 교체돼야 한다는 지적, 그리고 그 권한을 처음엔 initrun이
+  갖고 하드코딩된 서버에게만 부여한다는 지적을 그대로 받아들였다.
+  기존 설계(ADR-147)는 "지금 유일한 트러스트 프로세스가 initrun뿐"
+  이라는 전제로 단순화를 정당화했지만, M12~M13에서 이미 procsrv/vfs/
+  memfs 등 여러 프로세스가 스폰되기 시작해 그 전제가 곧 깨진다 —
+  지금 고쳐 두는 편이 나중에 실제 드라이버(M14 devmgr)가 여러 개
+  생겨 서로 다른 포트 범위를 필요로 할 때 재작업을 피한다.
+- **실행 계획**: 이 ADR은 설계만 확정한다. 실제 구현은
+  [system-servers-bringup.md](../plan/system-servers-bringup.md)
+  §M14(devmgr) 착수 시점에 함께 진행한다 — M14가 PCIe 버스를 열거해
+  **여러** 드라이버가 각자 다른 I/O 포트 범위를 필요로 하는 첫
+  시나리오라, ADR-147의 "전역 1회성 IOPB" 단순화가 그 시점부터
+  실제로 부족해진다(드라이버 A가 활성화해 둔 범위가 드라이버 B에게도
+  그대로 노출됨). M14의 목표에 "ADR-154 구현"을 선행 작업으로 추가
+  했다.
+- **영향**: `kernel/arch/x86_64/tss.hpp/.cpp`의 `grant_io_port_range()`
+  API가 "전역 1회성"에서 "현재 스레드에 대해 diff 기반으로 프로그램"
+  으로 바뀐다. `kernel/core/object/kernel_objects.hpp::thread`에 필드
+  추가. `kernel/core/sched/scheduler.cpp`의 스위치 경로에 새 훅.
+  `uapi.hpp`에 새 syscall 2개. `init/initrun/main.cpp`에서
+  `virtio_blk::init()` 호출 직전에 `sys_io_activate()` 삽입.
