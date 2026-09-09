@@ -88,16 +88,20 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   (M9~M11b) 전체가 완료됨 — 결과는 [docs/done/](docs/done/) 참고.
   [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
   (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸) 중
-  M12~M18이 완료됨 — 결과는
+  M12~M19가 완료됨 — 결과는
   [docs/done/system-servers-bringup-m12-full.md](docs/done/system-servers-bringup-m12-full.md),
   [docs/done/system-servers-bringup-m13.md](docs/done/system-servers-bringup-m13.md),
   [docs/done/system-servers-bringup-m14.md](docs/done/system-servers-bringup-m14.md),
   [docs/done/system-servers-bringup-m15.md](docs/done/system-servers-bringup-m15.md),
   [docs/done/system-servers-bringup-m16.md](docs/done/system-servers-bringup-m16.md),
   [docs/done/system-servers-bringup-m17.md](docs/done/system-servers-bringup-m17.md),
-  [docs/done/system-servers-bringup-m18.md](docs/done/system-servers-bringup-m18.md)
+  [docs/done/system-servers-bringup-m18.md](docs/done/system-servers-bringup-m18.md),
+  [docs/done/system-servers-bringup-m19.md](docs/done/system-servers-bringup-m19.md)
   참고(M14의 실제 USB 장치 열거/HID, M16의 FAT32/ext4 쓰기·하위
   디렉터리, M17의 멀티 TTY·세션 프로그램 스폰, M18의 jail 실제
-  오버레이·cfgsrv 위임 저장·임의 명령 su/sudo는 범위 밖으로 명시).
-  다음 실행 대상은 M19(cfgsrv 설정 리포지터리), 아직 미착수.
+  오버레이·cfgsrv 위임 저장·임의 명령 su/sudo, M19의 group 권한
+  검증·재부팅을 넘어서는 실제 영속화·진짜 커널 reg_table 객체는
+  범위 밖으로 명시).
+  다음 실행 대상은 M20(libc/POSIX 포팅 + 로그인 후 셸, 이 계획의
+  마지막 마일스톤), 아직 미착수.
   OPEN-29·OPEN-50·OPEN-53·OPEN-55~59·OPEN-61은 이미 해소돼 있다.

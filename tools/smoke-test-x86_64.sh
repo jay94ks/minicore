@@ -107,6 +107,21 @@
 #     login이 OP_SU로 요청한 신원 전환(root로, procsrv 하드코딩
 #     위임 테이블 덕에 비밀번호 없이 승인)으로. 위임이 없고 잘못된
 #     비밀번호를 쓰는 두 번째 OP_SU 요청은 거부돼야 한다.
+#   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
+#     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
+#     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
+#     테이블을 만들고 값을 쓰고 다시 읽는 왕복을 확인한 뒤("[procsrv]
+#     cfgsrv roundtrip ok=1"), 소유자가 아닌 uid는 기본 비공개
+#     테이블을 열 수 없고("permission denied before grant=1")
+#     소유자가 set_permissions로 열어 주면 그 뒤엔 읽을 수
+#     있음("permission granted after chmod=1")을 확인해 권한 모델
+#     (owner/other RWX, group은 이번 라운드 범위 밖)이 실제로 동작함을
+#     보인다. 나머지 프로토콜(list_values/list_children/delete_value/
+#     delete_table)도 한 번씩 행사해 9종 전부를 확인한다
+#     ("full protocol ok=1"). cfgsrv는 자신의 상태를 VFS 경로
+#     (/sys/etc/registry.dat, memfs로 기본 라우팅)에 실제로 쓴다
+#     ("[cfgsrv] persist write ok=1" — procsrv 왕복 도중 여러 번
+#     나온다).
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -131,7 +146,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=100  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담는다. M18은 서비스 수는 그대로지만 su-target 스폰 2회+로더 IPC 왕복이 추가돼 여유를 더 둔다.
+TIMEOUT_SEC=110  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담는다. M18은 서비스 수는 그대로지만 su-target 스폰 2회+로더 IPC 왕복이 추가돼 여유를 더 둔다. M19는 12번째 서비스(cfgsrv)와 procsrv↔cfgsrv IPC 왕복(9종 오퍼레이션+VFS 영속화 쓰기 여러 번)이 늘어 여유를 더 둔다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
   DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M16부터 memfs+devmgr+ps2+usb+virtio-blk+fat32+ext4+vfs+procsrv(servers/CMakeLists.txt).
@@ -239,6 +254,11 @@ declare -a EXPECTED=(
   "[su-target] guest open inside ok=1"
   "[login] su delegated ok=1"
   "[login] su denied ok=1"
+  "[cfgsrv] persist load found=0"
+  "[procsrv] cfgsrv roundtrip ok=1"
+  "[procsrv] cfgsrv permission denied before grant=1"
+  "[procsrv] cfgsrv permission granted after chmod=1"
+  "[procsrv] cfgsrv full protocol ok=1"
 )
 
 LOG_FILE="$(mktemp)"

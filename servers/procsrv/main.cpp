@@ -587,6 +587,284 @@ void run_mounted_fs_read_test(const char* mount_path, const char* expected,
     }
 }
 
+// ---------- M19 — cfgsrv 클라이언트(registry.md, registry-decisions.md ADR-169) ----------
+// handle 3 = initrun이 스폰 시점에 넣어 준 cfgsrv endpoint 프록시
+// (lib/*.ini의 depends=vfs,cfgsrv — 나열 순서대로 handle 2, 3).
+constexpr uint32_t k_cfgsrv_handle = 3;
+
+constexpr uint32_t k_reg_op_open_table = 1;
+constexpr uint32_t k_reg_op_create_table = 2;
+constexpr uint32_t k_reg_op_delete_table = 3;
+constexpr uint32_t k_reg_op_list_children = 4;
+constexpr uint32_t k_reg_op_get_value = 5;
+constexpr uint32_t k_reg_op_set_value = 6;
+constexpr uint32_t k_reg_op_delete_value = 7;
+constexpr uint32_t k_reg_op_list_values = 8;
+constexpr uint32_t k_reg_op_set_permissions = 9;
+
+constexpr uint64_t k_reg_err_ok = 0;
+constexpr uint64_t k_reg_err_not_found = 1;
+constexpr uint64_t k_reg_err_permission_denied = 2;
+
+constexpr uint8_t k_reg_type_string = 0;
+
+alignas(k_page_size) uint8_t g_cfg_path_buf[k_page_size] = {};
+alignas(k_page_size) uint8_t g_cfg_key_buf[k_page_size] = {};
+alignas(k_page_size) uint8_t g_cfg_value_buf[k_page_size] = {};
+
+void fill_page_buf(uint8_t* buf, const char* text) {
+    uint64_t len = cstr_len(text);
+    for (uint64_t i = 0; i < k_page_size; ++i) {
+        buf[i] = (i < len) ? static_cast<uint8_t>(text[i]) : 0;
+    }
+}
+
+uint64_t reg_open_or_create(uint32_t op, uint32_t caller_uid, const char* caller_username,
+                             const char* path, uint64_t& out_table_id) {
+    fill_page_buf(g_cfg_path_buf, path);
+    uapi::message req{};
+    req.label = op;
+    req.regs[0] = caller_uid;
+    pack_bytes(&req.regs[1], sizeof(uint64_t), caller_username, cstr_len(caller_username));
+    req.page_count = 1;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    out_table_id = reply.regs[1];
+    return reply.regs[0];
+}
+
+uint64_t reg_get_string(uint32_t caller_uid, uint64_t table_id, const char* key, char* out_buf,
+                         uint64_t out_cap, uint64_t& out_len) {
+    fill_page_buf(g_cfg_key_buf, key);
+    uapi::message req{};
+    req.label = k_reg_op_get_value;
+    req.regs[0] = caller_uid;
+    req.regs[1] = table_id;
+    req.page_count = 1;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_key_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    if (reply.regs[0] != k_reg_err_ok) {
+        return reply.regs[0];
+    }
+    out_len = reply.regs[2];
+    if (out_len > out_cap) {
+        out_len = out_cap;
+    }
+    const auto* src = reinterpret_cast<const uint8_t*>(reply.pages[0].vaddr);
+    for (uint64_t i = 0; i < out_len; ++i) {
+        out_buf[i] = static_cast<char>(src[i]);
+    }
+    return k_reg_err_ok;
+}
+
+uint64_t reg_set_string(uint32_t caller_uid, uint64_t table_id, const char* key,
+                         const char* value) {
+    fill_page_buf(g_cfg_key_buf, key);
+    fill_page_buf(g_cfg_value_buf, value);
+    uapi::message req{};
+    req.label = k_reg_op_set_value;
+    req.regs[0] = caller_uid;
+    req.regs[1] = table_id;
+    req.regs[2] = k_reg_type_string;
+    req.regs[3] = cstr_len(value);
+    req.page_count = 2;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_key_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    req.pages[1].vaddr = reinterpret_cast<uint64_t>(g_cfg_value_buf);
+    req.pages[1].length = k_page_size;
+    req.pages[1].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    return reply.regs[0];
+}
+
+uint64_t reg_delete_value(uint32_t caller_uid, uint64_t table_id, const char* key) {
+    fill_page_buf(g_cfg_key_buf, key);
+    uapi::message req{};
+    req.label = k_reg_op_delete_value;
+    req.regs[0] = caller_uid;
+    req.regs[1] = table_id;
+    req.page_count = 1;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_key_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    return reply.regs[0];
+}
+
+uint64_t reg_list_values(uint32_t caller_uid, uint64_t table_id, uint64_t& out_count) {
+    uapi::message req{};
+    req.label = k_reg_op_list_values;
+    req.regs[0] = caller_uid;
+    req.regs[1] = table_id;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    out_count = reply.regs[1];
+    return reply.regs[0];
+}
+
+uint64_t reg_list_children(uint32_t caller_uid, const char* caller_username, const char* path,
+                            uint64_t& out_count) {
+    fill_page_buf(g_cfg_path_buf, path);
+    uapi::message req{};
+    req.label = k_reg_op_list_children;
+    req.regs[0] = caller_uid;
+    pack_bytes(&req.regs[1], sizeof(uint64_t), caller_username, cstr_len(caller_username));
+    req.page_count = 1;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    out_count = reply.regs[1];
+    return reply.regs[0];
+}
+
+uint64_t reg_delete_table(uint32_t caller_uid, const char* caller_username, const char* path) {
+    fill_page_buf(g_cfg_path_buf, path);
+    uapi::message req{};
+    req.label = k_reg_op_delete_table;
+    req.regs[0] = caller_uid;
+    pack_bytes(&req.regs[1], sizeof(uint64_t), caller_username, cstr_len(caller_username));
+    req.page_count = 1;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    return reply.regs[0];
+}
+
+uint64_t reg_set_permissions(uint32_t caller_uid, uint64_t table_id, uint32_t owner_uid,
+                              uint8_t owner_rwx, uint8_t other_rwx) {
+    uint8_t* p = g_cfg_path_buf;  // 재사용(경로 페이지 필요 없는 오퍼레이션).
+    for (int i = 0; i < 4; ++i) {
+        p[i] = static_cast<uint8_t>((owner_uid >> (8 * i)) & 0xFF);
+    }
+    p[4] = 0;
+    p[5] = 0;
+    p[6] = 0;
+    p[7] = 0;  // group_gid — ADR-169 §결정1, 항상 0.
+    p[8] = owner_rwx;
+    p[9] = 0;  // group_rwx — 항상 무시.
+    p[10] = other_rwx;
+    p[11] = 0;  // special_bits.
+    for (uint64_t i = 12; i < k_page_size; ++i) {
+        p[i] = 0;
+    }
+    uapi::message req{};
+    req.label = k_reg_op_set_permissions;
+    req.regs[0] = caller_uid;
+    req.regs[1] = table_id;
+    req.page_count = 1;
+    req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
+    req.pages[0].length = k_page_size;
+    req.pages[0].mode = uapi::transfer_mode::copy;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    return reply.regs[0];
+}
+
+// M19 검증 목표(system-servers-bringup.md §M19) — "procsrv가 cfgsrv에
+// 설정값을 쓰고 다시 읽는 왕복이 권한 모델대로 동작함을 확인". procsrv
+// 자신은 root와 동등한 uid 0으로 cfgsrv를 부른다(registry.md §7의
+// "procsrv가 이미 보유한 전체 권한 reg_table 핸들"과 같은 정신).
+void run_cfgsrv_roundtrip_test() {
+    const char* path = "@global/test/settings";
+    uint64_t table_id = 0;
+    uint64_t status = reg_open_or_create(k_reg_op_create_table, 0, "root", path, table_id);
+    bool create_ok = (status == k_reg_err_ok) && (table_id != 0);
+
+    bool set_ok = create_ok && (reg_set_string(0, table_id, "greeting", "hello cfgsrv") == k_reg_err_ok);
+
+    char got[64];
+    uint64_t got_len = 0;
+    bool get_ok =
+        set_ok &&
+        (reg_get_string(0, table_id, "greeting", got, sizeof(got), got_len) == k_reg_err_ok) &&
+        bytes_equal(got, "hello cfgsrv", cstr_len("hello cfgsrv")) && got_len == cstr_len("hello cfgsrv");
+
+    const char* msg1 = (create_ok && set_ok && get_ok) ? "[procsrv] cfgsrv roundtrip ok=1\n"
+                                                          : "[procsrv] cfgsrv roundtrip ok=0\n";
+    debug_log(msg1, cstr_len(msg1));
+
+    // 권한 모델 확인(1/2) — 소유자가 아닌 uid(test=1000)는 기본
+    // 비공개(other_rwx=0) 테이블을 열 수 없어야 한다.
+    uint64_t other_table_id = 0;
+    uint64_t denied_status = reg_open_or_create(k_reg_op_open_table, 1000, "test", path, other_table_id);
+    const char* msg2 = (denied_status == k_reg_err_permission_denied)
+                           ? "[procsrv] cfgsrv permission denied before grant=1\n"
+                           : "[procsrv] cfgsrv permission denied before grant=0\n";
+    debug_log(msg2, cstr_len(msg2));
+
+    // 권한 모델 확인(2/2) — 소유자(uid 0)가 set_permissions로 other에
+    // 읽기 권한을 열어 주면, 그다음부터는 같은 비소유자가 읽을 수
+    // 있어야 한다.
+    bool chmod_ok = set_ok && (reg_set_permissions(0, table_id, 0, 0b111, 0b100) == k_reg_err_ok);
+    uint64_t granted_table_id = 0;
+    uint64_t granted_status =
+        chmod_ok ? reg_open_or_create(k_reg_op_open_table, 1000, "test", path, granted_table_id)
+                 : k_reg_err_permission_denied;
+    char got2[64];
+    uint64_t got2_len = 0;
+    bool granted_get_ok =
+        (granted_status == k_reg_err_ok) &&
+        (reg_get_string(1000, granted_table_id, "greeting", got2, sizeof(got2), got2_len) ==
+         k_reg_err_ok) &&
+        bytes_equal(got2, "hello cfgsrv", cstr_len("hello cfgsrv"));
+    const char* msg3 = granted_get_ok ? "[procsrv] cfgsrv permission granted after chmod=1\n"
+                                        : "[procsrv] cfgsrv permission granted after chmod=0\n";
+    debug_log(msg3, cstr_len(msg3));
+
+    // registry.md §5의 나머지 오퍼레이션(list_values/list_children/
+    // delete_value/delete_table)도 한 번씩 실제로 행사해 9종 전부가
+    // 동작함을 확인한다.
+    uint64_t value_count = 0;
+    bool list_values_ok = set_ok && (reg_list_values(0, table_id, value_count) == k_reg_err_ok) &&
+                           value_count == 1;
+
+    uint64_t child_count = 0;
+    bool list_children_ok =
+        create_ok && (reg_list_children(0, "root", "@global/test", child_count) == k_reg_err_ok) &&
+        child_count == 1;
+
+    bool delete_value_ok = set_ok && (reg_delete_value(0, table_id, "greeting") == k_reg_err_ok);
+    char got3[64];
+    uint64_t got3_len = 0;
+    bool delete_value_confirmed =
+        delete_value_ok &&
+        (reg_get_string(0, table_id, "greeting", got3, sizeof(got3), got3_len) == k_reg_err_not_found);
+
+    bool delete_table_ok = create_ok && (reg_delete_table(0, "root", path) == k_reg_err_ok);
+    uint64_t reopen_table_id = 0;
+    bool delete_table_confirmed =
+        delete_table_ok &&
+        (reg_open_or_create(k_reg_op_open_table, 0, "root", path, reopen_table_id) ==
+         k_reg_err_not_found);
+
+    bool full_protocol_ok = list_values_ok && list_children_ok && delete_value_confirmed &&
+                             delete_table_confirmed;
+    const char* msg4 = full_protocol_ok ? "[procsrv] cfgsrv full protocol ok=1\n"
+                                          : "[procsrv] cfgsrv full protocol ok=0\n";
+    debug_log(msg4, cstr_len(msg4));
+}
+
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void* argv_or_null) {
@@ -635,6 +913,12 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // OP_SU를 부르기 전에 로더가 준비돼 있어야 한다.
     run_loader_test(*self_info);
     run_guest_confinement_test();
+
+    // M19(system-servers-bringup.md §M19, registry-decisions.md
+    // ADR-169) — cfgsrv에 설정값을 쓰고 다시 읽는 왕복과 권한 모델
+    // (owner/other RWX)이 실제로 동작하는지 확인한다. handle 3(cfgsrv)
+    // 는 initrun이 이미 넣어 줬다(lib/*.ini의 depends=vfs,cfgsrv).
+    run_cfgsrv_roundtrip_test();
 
     // M17(security-model.md ADR-165) — 여기서부터 procsrv가 처음으로
     // 진짜 서버가 된다. servers/login이 OP_LOGIN/OP_SU로 이 계정

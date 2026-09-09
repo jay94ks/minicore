@@ -113,11 +113,49 @@ enum class reg_op : uint32_t {
 
 - 경로 문자열, 문자열/바이너리 값처럼 레지스터 4개(`k_message_registers`,
   ipc.md §4)로 부족한 데이터는 `page_descriptor`(copy 모드)로 전달한다.
-- `open_table`은 성공 시 `message.handles[0]`(objects.md §4)에 새
-  `reg_table` 핸들을 실어 반환한다. 이후 `get_value`/`set_value` 등은
-  이 핸들을 통해 이뤄진다.
 - 각 오퍼레이션은 §3의 권한 검사를 통과해야 한다 — 실패 시 ADR-010
   관례에 따라 `result<T, reg_error>`로 반환한다.
+
+### 5.1 M19 구현의 실제 wire 매핑 (registry-decisions.md ADR-169)
+
+`open_table`/`create_table`은 성공 시 **`message.handles[0]`가 아니라
+`message.regs[1]`에 cfgsrv 자신이 관리하는 프로토콜-레벨 정수**를
+반환한다 — ADR-169 §결정4가 정한 대로, 진짜 커널 `reg_table` 객체 +
+런타임 객체 생성 syscall이 아직 없어(`servers/vfs`/`servers/fs/memfs`의
+`open_file_id`와 같은 선례) 이 정수를 그대로 재사용한다. 이후
+`get_value`/`set_value`/`delete_value`/`list_values`/`set_permissions`은
+이 정수를 `message.regs[]`로 실어 보낸다.
+
+경로 기반 오퍼레이션(`open_table`/`create_table`/`delete_table`/
+`list_children`)의 요청: `regs[0]`=호출자 uid, `regs[1]`=호출자
+사용자명(8바이트, NUL 패딩 — `@스키마` 생략 시 이 이름이 스키마가
+된다), `pages[0]`=경로 문자열(`@스키마/A/B/table` 또는 `A/B/table`).
+응답: `regs[0]`=`reg_error`, `regs[1]`=테이블 정수(성공 시에만 유효).
+
+핸들 기반 오퍼레이션의 요청/응답:
+
+| 오퍼레이션 | 요청 | 응답 |
+|---|---|---|
+| `get_value` | `regs[0]`=uid, `regs[1]`=테이블 정수, `pages[0]`=key | `regs[0]`=`reg_error`, `regs[1]`=`reg_value_type`, `regs[2]`=값 길이, `pages[0]`=값 바이트(int64=8바이트 LE, boolean=1바이트) |
+| `set_value` | `regs[0]`=uid, `regs[1]`=테이블 정수, `regs[2]`=`reg_value_type`, `regs[3]`=값 길이, `pages[0]`=key, `pages[1]`=값 바이트 | `regs[0]`=`reg_error` |
+| `delete_value` | `regs[0]`=uid, `regs[1]`=테이블 정수, `pages[0]`=key | `regs[0]`=`reg_error` |
+| `list_values` | `regs[0]`=uid, `regs[1]`=테이블 정수 | `regs[0]`=`reg_error`, `regs[1]`=개수, `pages[0]`=NUL로 구분된 key 이름 목록 |
+| `set_permissions` | `regs[0]`=uid, `regs[1]`=테이블 정수, `pages[0]`=`reg_permissions` 원시 바이트 | `regs[0]`=`reg_error` |
+
+`list_children` 응답: `regs[0]`=`reg_error`, `regs[1]`=개수,
+`pages[0]`=NUL로 구분된 하위 이름 목록.
+
+권한 판정(ADR-169 §결정1 — group 미검증)은 호출자 uid가 테이블의
+`owner_uid`와 같으면 `owner_rwx`, 아니면 `other_rwx`만 본다(`group_rwx`는
+항상 대상에서 제외). uid 0(procsrv/root 관례, security-model.md
+ADR-075의 "ROOT 전권"과 일관)은 모든 검사를 통과한다. `create_table`은
+스키마가 호출자 자신의 사용자명과 같을 때(자기 스키마에 자유롭게
+생성) 또는 uid 0일 때만 허용한다 — 그 외엔 `permission_denied`.
+`list_children`은 이번 라운드엔 중간 경로에 별도 권한 메타데이터를
+두지 않아(§3 "아직 정하지 않은 것"과 동일한 유예) 항상 허용한다.
+신원(uid/사용자명)은 VFS의 guest/jail 신원(fs-protocol.md v3)과 같은
+정신으로 **호출자가 스스로 선언**하며 커널이 강제하지 않는다(OPEN-38과
+같은 제약).
 
 ```cpp
 enum class reg_error : uint32_t {
@@ -167,8 +205,20 @@ struct address_space_trust_fields {
 자신의 데이터를 영속화할 저장소가 필요하다 — 이는 일반 VFS
 경로(예: `/sys/etc` 밑의 전용 바이너리 파일)를 cfgsrv가 일반
 프로세스로서 열어 쓰는 것으로 충분하며, 이 저장 방식은 레지스트리
-프로토콜 사용자에게 전혀 노출되지 않는다. 구체적 직렬화 포맷과
-저장 위치는 cfgsrv 구현 시 정한다.
+프로토콜 사용자에게 전혀 노출되지 않는다.
+
+### M19 구현의 실제 저장 위치/형식 (registry-decisions.md ADR-169)
+
+경로는 `/sys/etc/registry.dat`다(VFS 마운트 테이블에 `/sys/` 전용
+프리픽스가 없어 기본 라우팅으로 memfs의 평평한 이름공간에
+`sys/etc/registry.dat`로 떨어진다 — VFS/memfs 변경 불필요). cfgsrv는
+부팅 시 이 경로를 읽어 전체 테이블 상태를 복원하고, 쓰기 오퍼레이션
+(`create_table`/`delete_table`/`set_value`/`delete_value`/
+`set_permissions`)마다 전체 상태를 다시 직렬화해 덮어 쓴다. memfs가
+seek/truncate를 지원하지 않으므로(fs-protocol.md v3), 직렬화 포맷
+맨 앞에 4바이트 매직 + 4바이트 버전 + 8바이트 `payload_len`을 둬
+로드 시 이전 라운드의 더 길었던 내용이 파일 뒤쪽에 남아 있어도
+`payload_len`만큼만 유효하다고 취급한다.
 
 ## 아직 정하지 않은 것
 

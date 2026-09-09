@@ -100,3 +100,60 @@ cfgsrv 서브시스템(스키마·테이블 주소 체계, 권한 모델, 비밀
   높이고 현재 범위에서 필수는 아니다.
 - **영향**: 향후 필요해지면 개별 항목에 "연산 전용" 플래그를 추가하는
   확장은 배제하지 않는다 — 이 ADR은 v1 기본값이다.
+
+## ADR-169. M19 범위 좁힘: cfgsrv 최초 구현 — group 검증 제외 + 실제 VFS 영속화 + 프로토콜 9종 전부 + 프로토콜-레벨 정수 핸들
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: `system-servers-bringup.md` §M19를 구현하며, 사용자에게
+  `AskUserQuestion`으로 확인한 세 가지 범위 결정과, 구현 중 발견한
+  네 번째 기술적 단순화를 기록한다.
+  1. **group 권한 비트는 이번 라운드에서 검증하지 않는다.** procsrv의
+     `account` 구조체는 M18에서 `uid`까지만 얻었고 `gid` 개념이 아예
+     없다 — `registry.md` 자신도 `group_account` 테이블 스키마를
+     "아직 정하지 않은 것"으로 남겨 뒀다. `reg_permissions.group_gid`/
+     `group_rwx` 필드는 스펙 그대로 구조체에 유지하지만, 이번 라운드는
+     owner(소유자)/other(기타) 두 경우만 실제로 행사한다 — 모든 테이블의
+     `group_gid`는 0, `group_rwx`는 항상 0으로 두고 절대 매치시키지
+     않는다.
+  2. **cfgsrv는 실제로 VFS 파일에 영속화한다.** `registry.md` §7이
+     이미 정한 대로 cfgsrv가 일반 프로세스로서 VFS 경로
+     (`/sys/etc/registry.dat`, 기본 라우팅으로 memfs에 떨어진다)를 열어
+     자신의 전체 테이블 상태를 저장/복원한다 — 부팅 시 로드, 쓰기
+     오퍼레이션(`create_table`/`delete_table`/`set_value`/
+     `delete_value`/`set_permissions`)마다 전체를 다시 직렬화해 저장한다.
+     memfs가 seek/truncate를 지원하지 않으므로(M18 fs-protocol v3),
+     저장 형식 맨 앞에 `payload_len`을 둬 로드 시 이전 라운드의 더 긴
+     내용이 남아 있어도 정확히 그만큼만 읽는다.
+  3. **`reg_op` 9종(open/create/delete_table, list_children, get/set/
+     delete_value, list_values, set_permissions)을 전부 구현한다** —
+     검증 목표 자체(왕복 확인)엔 `open_table`+`get_value`+`set_value`만
+     있으면 충분하지만, 나머지도 이번에 갖춰 이후 마일스톤에서 다시
+     손댈 필요를 없앤다.
+  4. **`open_table`이 반환하는 "핸들"은 진짜 커널 `object_kind::reg_table`
+     객체가 아니라 cfgsrv 자신이 관리하는 프로토콜-레벨 정수다** —
+     `registry.md` §4/§5는 `message.handles[0]`에 진짜 커널 핸들을
+     실어 반환한다고 적었지만, 실제로 확인해 보니 현재 커널의
+     `handle_table::create_owner()`는 `sys_process_spawn`의 스폰
+     시점(`create_endpoint`)에만 호출되고, 살아있는 유저 프로세스가
+     런타임에 새 커널 객체를 직접 만드는 syscall이 아직 없다 —
+     `servers/vfs`/`servers/fs/memfs`의 `open_file_id`도 실은 이 캡을
+     피해 단순 정수로 설계된 선례다. 이번 라운드는 그 선례를 그대로
+     재사용한다(`get_value`/`set_value`/`delete_value`/`list_values`/
+     `set_permissions`은 이 정수를 `message.regs[]`로 받는다) — 진짜
+     커널 `reg_table` 객체 + 런타임 객체 생성 syscall은 이후로 미룬다.
+- **근거**: 결정 1~3은 사용자가 `AskUserQuestion`으로 직접 고른
+  범위다(1은 권장 단순화를 선택, 2·3은 더 충실한 쪽을 선택 — M18의
+  ELF 로더 선택과 같은 패턴). 결정 4는 사용자가 "진짜 커널 핸들로
+  구현" 대신 명시적으로 "프로토콜-레벨 정수 핸들로 단순화(권장)"를
+  선택했다 — VFS/memfs가 이미 같은 이유로 같은 선택을 한 선례가 있어
+  일관성도 있다.
+- **영향**:
+  - [registry.md](../spec/registry.md)를 이 네 결정에 맞춰 갱신한다
+    (§5에 구체적 wire 매핑 추가, §7에 실제 경로 명시, `open_table`
+    반환값이 정수임을 명시).
+  - `owner_uid`/`group_gid`가 실제로 필요한 group 검증, 진짜 커널
+    `reg_table` 객체·런타임 객체 생성 syscall은 이후 마일스톤(또는
+    필요해지는 시점)으로 미룬다 — [open-items.md](open-items.md)에
+    새 OPEN 항목을 추가하지 않는다(둘 다 registry.md/procsrv.md가
+    이미 "아직 정하지 않은 것"으로 표시해 둔 항목의 연장이라 새
+    항목이 아니다).
