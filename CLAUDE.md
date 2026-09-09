@@ -117,4 +117,8 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   [docs/done/real-hardware-boot-verification.md](docs/done/real-hardware-boot-verification.md)
   참고. aarch64 부팅 경로는 아직 커널 코드 자체가 없어(ADR-009,
   x86_64 완주 후 이식 예정) 이번 확인 대상이 아니다 — 사용자가
-  "일단 생략"으로 명시적으로 보류함.
+  "일단 생략, aarch64보다 먼저 범용 OS로서 미비된 부분을 보완하자"
+  로 방향을 정했다.
+- 그 방향에 따라 [docs/plan/general-purpose-completion.md](docs/plan/general-purpose-completion.md)
+  (M21 선점형 스케줄링 ~ M26 실제 libc 포팅 재도전)를 새로 계획했다
+  — 아직 미착수. 다음 실행 대상은 M21.

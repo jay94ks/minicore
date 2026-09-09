@@ -26,6 +26,7 @@
 | [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M8 전부 완료 — 결과는 done 참고) |
 | [smp-fpu-bringup.md](plan/smp-fpu-bringup.md) | M9(FPU/SIMD 컨텍스트 스위칭)~M11b(lazy XSAVE/AVX 전환) — AP 기동·IPI·TLB shootdown(M10), 다중 코어/NUMA 검증+락 순서 문서화(M11) 포함, kernel-bootstrap.md 이후 계획 |
 | [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순. libmc(네이티브 C API 라이브러리)가 전 구간 교차 트랙. **M12~M20 전부 완료** — 결과는 done 참고 |
+| [general-purpose-completion.md](plan/general-purpose-completion.md) | M21(선점형 스케줄링)~M26(실제 libc 포팅 재도전) — 프로세스 생명주기(wait/시그널), 진짜 fork/exec의 fd 상속, 유저랜드 동적 메모리, 최소 네트워킹까지. aarch64 이식보다 먼저 하기로 결정된 계획, 아직 미착수 |
 
 ## done — 완료 보고
 | 문서 | 설명 |
