@@ -49,6 +49,7 @@
 | [system-servers-bringup-m13.md](done/system-servers-bringup-m13.md) | M13(완료): IPC의 cross-process 확장+sys_reply handles[](ADR-151), sys_process_spawn 캐패빌리티 주입(ADR-152), fs-protocol.md 최소 버전+vfs/memfs 서버+procsrv VFS 클라이언트(ADR-153) — procsrv가 vfs 경유로 memfs에 쓰고 다시 읽어 내용 일치까지 QEMU 확인 — system-servers-bringup.md §M13 완료 |
 | [system-servers-bringup-m14.md](done/system-servers-bringup-m14.md) | M14(완료): 스레드별 IOPB(ADR-154)+sys_map_phys MMIO 캐패빌리티(ADR-156)+devmgr 유저랜드 ACPI/PCIe ECAM 열거+PS/2 컨트롤러 자체테스트+USB xHCI 리셋·포트 스캔(ADR-157) — 실제 USB 장치 열거/HID는 범위 밖으로 명시 — system-servers-bringup.md §M14 완료 |
 | [system-servers-bringup-m15.md](done/system-servers-bringup-m15.md) | M15(완료): `servers/drivers/virtio-blk`(첫 실제 유저 드라이버)+devmgr BAR 재사용 일반화+부트 디바이스 배제(ADR-158), 그 과정에서 발견한 디스크 손상 버그(테스트 드라이버가 부트 디바이스에 그대로 쓰기 테스트해 cpio 아카이브 손상)와 avail_idx 리셋 버그 진단·수정 — system-servers-bringup.md §M15 완료 |
+| [system-servers-bringup-m16.md](done/system-servers-bringup-m16.md) | M16(완료): IPC pages[]의 유저 프로세스 매핑 경로 구현(ADR-159/161)+캐패빌리티 슬롯 경계 검증(ADR-160)+FAT32/ext4 읽기전용 FS 서버+VFS 정적 마운트 테이블+fs-protocol v2(ADR-162), 그 과정에서 발견한 devmgr I/O BAR 동시 배정 충돌 버그 진단·수정(ADR-163) — system-servers-bringup.md §M16 완료 |
 
 ## design — 설계/상세
 

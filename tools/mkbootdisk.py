@@ -19,9 +19,11 @@ cpio_reader.cpp)가 읽는 포맷을 그대로 따라야 한다.
 그보다 먼저 나열해야 한다.)
 
 --depends는 M13(ADR-152)의 스폰 시점 캐패빌리티 주입과 맞물린다 —
-initrun이 이 키를 보면 그 의존 서비스의 endpoint 프록시 핸들을
-inherited_handles로 넘겨 스폰한다(init/initrun/main.cpp 참고). 서비스
-하나가 가질 수 있는 depends는 M13 한정 최대 1개다.
+initrun이 이 키를 보면 그 의존 서비스(들)의 endpoint 프록시 핸들을
+inherited_handles로 넘겨 스폰한다(init/initrun/main.cpp 참고). M16부터
+콤마로 여러 이름을 나열할 수 있다(예: --depends=vfs:memfs,fat32,ext4)
+— 최대 k_max_spawn_inherited_handles(4)개, 나열 순서가 그대로
+handle 2, 3, 4, ...가 된다.
 
 --trusted=<이름>(반복 가능)은 M14(ADR-147/154/156)의 trusted 프로세스
 지정과 맞물린다 — 해당 서비스의 ini에 trusted=1을 써 넣고, initrun의

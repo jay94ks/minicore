@@ -27,7 +27,17 @@ constexpr uint64_t k_status_no_space = 3;
 constexpr uint32_t k_max_files = 8;
 constexpr uint32_t k_max_file_bytes = 4096;
 constexpr uint32_t k_max_open_files = 16;
-constexpr uint32_t k_max_io_bytes = 16;  // fs-protocol.md §1 — regs[2..3]에 담을 수 있는 상한.
+constexpr uint32_t k_max_io_bytes = 16;  // OP_WRITE(fs-protocol.md §2.2) — regs[2..3] 상한, 그대로.
+constexpr uint64_t k_page_size = 4096;
+
+// M16(fs-protocol.md v2 §2.3, ADR-155 §2/ADR-159/ADR-161) — OP_READ
+// 응답이 이제 pages[]로 내용을 옮긴다. 커널이 이 정확한 물리 프레임을
+// 그대로 클라이언트에게 매핑하므로, file_slot::data처럼 다른 필드와
+// 한 페이지를 공유하는 버퍼를 그대로 노출하면 클라이언트가 그 이웃
+// 필드(다른 파일의 내용 등)까지 함께 보게 된다 — 그래서 읽기 응답
+// 전용의 독립된 페이지 정렬 버퍼를 하나 둔다(요청마다 이 버퍼에
+// 복사해 담은 뒤 그 프레임을 넘긴다).
+alignas(k_page_size) uint8_t g_read_scratch[k_page_size] = {};
 
 struct file_slot {
     bool used = false;
@@ -142,6 +152,10 @@ void handle_write(const uapi::message& in, uapi::message& out) {
     out.regs[1] = k_status_ok;
 }
 
+// fs-protocol.md v2 §2.3 — 응답이 pages[]로 바뀌었다(M13 시절엔
+// regs[2..3] 16바이트 상한). 요청 길이는 이제 4096(한 페이지)으로
+// 클램프될 뿐 TOO_LARGE로 거부하지 않는다 — 그보다 큰 파일의 나머지는
+// 이 프로토콜 범위 밖(fs-protocol.md §4).
 void handle_read(const uapi::message& in, uapi::message& out) {
     uint32_t open_id = static_cast<uint32_t>(in.regs[0]);
     uint64_t requested = in.regs[1];
@@ -150,18 +164,19 @@ void handle_read(const uapi::message& in, uapi::message& out) {
         out.regs[1] = k_status_not_found;
         return;
     }
-    if (requested > k_max_io_bytes) {
-        out.regs[0] = 0;
-        out.regs[1] = k_status_too_large;
-        return;
+    if (requested > k_page_size) {
+        requested = k_page_size;
     }
     file_slot& f = g_files[g_opens[open_id - 1].file_index];
     uint64_t to_read = (requested < f.size) ? requested : f.size;
-    uint8_t buf[k_max_io_bytes];
-    for (uint64_t i = 0; i < k_max_io_bytes; ++i) {
-        buf[i] = (i < to_read) ? f.data[i] : 0;
+
+    for (uint64_t i = 0; i < k_page_size; ++i) {
+        g_read_scratch[i] = (i < to_read) ? f.data[i] : 0;
     }
-    __builtin_memcpy(&out.regs[2], buf, k_max_io_bytes);
+    out.page_count = 1;
+    out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
+    out.pages[0].length = k_page_size;
+    out.pages[0].mode = uapi::transfer_mode::copy;
     out.regs[0] = to_read;
     out.regs[1] = k_status_ok;
 }

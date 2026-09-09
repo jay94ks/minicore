@@ -287,6 +287,24 @@ extern "C" bool arch_translate_user_page(uint64_t page_table_root, uint64_t vadd
     return true;
 }
 
+// ADR-159/161(kernel-ipc-objects.md, OPEN-61 해소) — IPC pages[]를
+// 유저 프로세스 수신자의 고정 슬롯(k_ipc_mapped_pages_user_vaddr)에
+// 매핑/해제하는 훅. arch_translate_user_page와 같은 이유(ADR-002)로
+// core(kernel/core/ipc/endpoint.cpp)가 시그니처만 알고 정의는 여기가
+// 담당한다. map_page/unmap_page를 그대로 감쌀 뿐이다 — 프레임
+// 참조 카운트(frame_add_ref/frame_release)는 core/mm 쪽이라 core가
+// 직접 다룬다(여긴 페이지테이블 조작만).
+extern "C" bool arch_map_ipc_page_readonly(uint64_t page_table_root, uint64_t vaddr,
+                                            uint64_t phys) {
+    auto mapped = arch_x86_64::map_page(page_table_root, vaddr, phys, arch_x86_64::page_perm::user);
+    return mapped.is_ok();
+}
+
+extern "C" bool arch_unmap_ipc_page(uint64_t page_table_root, uint64_t vaddr) {
+    auto unmapped = arch_x86_64::unmap_page(page_table_root, vaddr);
+    return unmapped.is_ok();
+}
+
 namespace arch_x86_64 {
 
 result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {

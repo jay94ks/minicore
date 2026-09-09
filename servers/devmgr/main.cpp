@@ -30,6 +30,11 @@
 //      다시 내주면 그 cpio 아카이브 내용을 실제로 덮어써 손상시킨다
 //      (2026-09-09 직접 겪음). virtio-blk 드라이버는 별도의 테스트
 //      전용 장치(tools/run-qemu.sh MINICORE_QEMU_TESTDISK)를 받는다.
+//   6. M16 — fs/fat32·fs/ext4가 각자 자신의 virtio-blk-pci 장치에
+//      등록하면서, 여러 드라이버가 **같은** vendor:device로 등록하는
+//      첫 시나리오가 됐다 — 매칭에 성공해 BAR를 내준 장치는
+//      `pci_device_entry::claimed`로 표시해 이후 매칭 후보에서
+//      제외한다(부트 디바이스 제외와 같은 정신).
 #include <uapi.hpp>
 
 namespace {
@@ -316,6 +321,17 @@ struct pci_device_entry {
     uint16_t vendor_id = 0;
     uint16_t device_id = 0;
     uint32_t class_code = 0;  // (base_class<<16)|(subclass<<8)|prog_if.
+
+    // M16(system-servers-bringup.md, servers/fs/fat32·fs/ext4) —
+    // 여러 드라이버가 **같은** vendor:device(예: virtio-blk 전부
+    // 0x1af4:0x1001)로 등록할 수 있게 되면서 필요해졌다 — M14/M15
+    // 시절에는 매칭 대상이 항상 하나뿐이라 "첫 매치를 그냥 돌려준다"
+    // 로 충분했지만, 이제 두 번째 등록이 첫 번째 드라이버가 이미 받은
+    // 그 장치를 다시 받으면 두 드라이버가 같은 물리 디스크를 두고
+    // 충돌한다(M15가 부트 디바이스로 겪은 것과 같은 종류의 문제,
+    // ADR-158). g_boot_bdf 제외와 같은 정신 — 이미 내준 장치는 다음
+    // 매칭 후보에서 제외한다.
+    bool claimed = false;
 };
 
 constexpr uint32_t k_max_pci_devices = 32;
@@ -368,15 +384,22 @@ void enumerate_pci_bus0(uint64_t ecam_base) {
     }
 }
 
-// devmgr가 배정하는 장치는 최대 몇 개뿐이라(M14: xHCI, M15: virtio-blk
-// 중 부트 디바이스와 다른 인스턴스가 있다면) 고정 주소 하나로
-// 충분하다 — QEMU q35의 PCI MMIO 홀(전형적으로 0xC0000000 부근) 안의
-// 임의 정렬 주소, I/O는 레거시 예약 범위(0x000~0x3FF)보다 훨씬 위지만
-// 커널이 부트 디바이스에 이미 쓴 0xC000(ADR-147)과는 겹치지 않는
-// 자리. 여러 장치를 배정해야 하는 시점에는 실제 공간 할당기가
-// 필요해진다(알려진 단순화 — ADR-147의 "고정 베이스"와 같은 정신).
+// M14~M15는 "새로 배정해야 하는 장치가 최대 하나뿐"이라 고정 주소
+// 하나로 충분했다(M14의 xHCI는 MMIO, M15의 virtio-blk 테스트 장치가
+// I/O 쪽의 유일한 소비자였다). M16이 그 전제를 깼다 — fat32/ext4가
+// **동시에 둘 다** 새 I/O BAR를 요구하면서, 고정 주소를 그대로
+// 쓰면 서로 다른 물리 장치의 BAR0에 **똑같은 포트 번호**가 적혀
+// 실제로 같은 I/O 포트를 두 장치가 동시에 점유해 버린다(fat32가
+// mount에 실패하는 것으로 실제 QEMU에서 재현됨, 2026-09-09) —
+// ADR-147 시절부터 예견된 "여러 장치를 배정해야 하는 시점"이 왔으므로
+// 이제 실제로 그때마다 전진하는 커서로 바꾼다. QEMU q35의 PCI MMIO
+// 홀(전형적으로 0xC0000000 부근) 안의 임의 정렬 주소, I/O는 레거시
+// 예약 범위(0x000~0x3FF)보다 훨씬 위지만 커널이 부트 디바이스에
+// 이미 쓴 0xC000(ADR-147)과는 겹치지 않는 자리에서 시작한다.
 constexpr uint64_t k_assigned_mmio_base = 0xE0000000ull;
 constexpr uint32_t k_assigned_io_base = 0xC100;
+uint64_t g_next_mmio_base = k_assigned_mmio_base;
+uint32_t g_next_io_base = k_assigned_io_base;
 
 // ADR-147의 I/O BAR 배정 절차를 메모리 BAR까지 다루도록 일반화한
 // 것 — pci_bringup.cpp 상단 주석과 같은 이유(PVH 직접 부팅이라 아무
@@ -437,8 +460,19 @@ bool assign_or_get_bar0(uint64_t ecam_base, uint32_t bus, uint32_t device, uint3
         return true;
     }
 
-    uint64_t assign_base = is_io ? k_assigned_io_base : k_assigned_mmio_base;
-    uint64_t assigned = (assign_base + size - 1) & ~(static_cast<uint64_t>(size) - 1);
+    // 매번 같은 고정 주소에서 다시 정렬하는 게 아니라, 이 함수가
+    // 실제로 배정한 만큼 커서를 전진시킨다(위 g_next_io_base/
+    // g_next_mmio_base 주석 참고) — 그래야 두 번째, 세 번째 장치가
+    // 첫 번째 장치와 같은 포트/주소를 받지 않는다.
+    uint64_t assigned;
+    if (is_io) {
+        assigned = (static_cast<uint64_t>(g_next_io_base) + size - 1) &
+                   ~(static_cast<uint64_t>(size) - 1);
+        g_next_io_base = static_cast<uint32_t>(assigned + size);
+    } else {
+        assigned = (g_next_mmio_base + size - 1) & ~(static_cast<uint64_t>(size) - 1);
+        g_next_mmio_base = assigned + size;
+    }
     *cfg_ptr32(k_pci_offset_bar0) =
         static_cast<uint32_t>(assigned) | (is_io ? 0x1u : 0u);
 
@@ -463,10 +497,12 @@ void handle_register_driver(const uapi::message& in, uapi::message& out) {
     uint64_t match_mask = in.regs[2];
 
     for (uint32_t i = 0; i < g_device_count; ++i) {
-        const pci_device_entry& d = g_devices[i];
+        pci_device_entry& d = g_devices[i];
         uint32_t bdf = (d.bus << 16) | (d.device << 8) | d.function;
-        if (bdf == g_boot_bdf) {
-            continue;  // 부트 디바이스는 드라이버 매칭에서 제외(위 g_boot_bdf 주석).
+        if (bdf == g_boot_bdf || d.claimed) {
+            // 부트 디바이스(g_boot_bdf 주석)와 이미 다른 드라이버가
+            // 받아 간 장치(위 claimed 필드 주석)는 매칭에서 제외한다.
+            continue;
         }
         bool matched = false;
         if (mode == k_match_mode_vendor_device) {
@@ -486,6 +522,7 @@ void handle_register_driver(const uapi::message& in, uapi::message& out) {
                                  bar_size)) {
             continue;
         }
+        d.claimed = true;
         out.regs[0] = k_status_ok;
         out.regs[1] = bar_value;  // is_io=1이면 I/O 포트 베이스, 아니면 MMIO 물리주소.
         out.regs[2] = bar_size;

@@ -125,6 +125,11 @@ void run_vfs_roundtrip_test() {
                reinterpret_cast<uint64_t>(&write_reply));
     bool write_ok = (write_reply.regs[1] == 0) && (write_reply.regs[0] == payload_len);
 
+    // fs-protocol.md v2 §2.3(ADR-155 §2/ADR-159/ADR-161) — OP_READ의
+    // 응답은 이제 pages[]로 온다. 커널이 sys_call이 돌아오기 전에
+    // 이미 이 프로세스의 고정 슬롯에 매핑을 마쳐 뒀으므로,
+    // read_reply.pages[0].vaddr을 그냥 읽으면 된다(별도 매핑/해제
+    // 호출 불필요).
     uapi::message read_req{};
     read_req.label = k_op_read;
     read_req.regs[0] = open_file_id;
@@ -133,13 +138,65 @@ void run_vfs_roundtrip_test() {
     do_syscall(uapi::k_syscall_ipc_call, memfs_handle, reinterpret_cast<uint64_t>(&read_req),
                reinterpret_cast<uint64_t>(&read_reply));
     bool read_ok = (read_reply.regs[1] == 0) && (read_reply.regs[0] == payload_len) &&
-                    bytes_equal(&read_reply.regs[2], payload, payload_len);
+                    read_reply.page_count == 1 &&
+                    bytes_equal(reinterpret_cast<const void*>(read_reply.pages[0].vaddr), payload,
+                                payload_len);
 
     if (write_ok && read_ok) {
         const char* msg = "[procsrv] vfs write/read roundtrip ok=1\n";
         debug_log(msg, cstr_len(msg));
     } else {
         const char* msg = "[procsrv] vfs write/read roundtrip ok=0\n";
+        debug_log(msg, cstr_len(msg));
+    }
+}
+
+// M16(fs-protocol.md v2, ADR-057/129) — vfs의 마운트 테이블을 거쳐
+// fat32/ext4 서버가 실제로 마운트한 이미지에서 파일을 열어 읽는다.
+// tools/make-fs-test-images.sh가 각 이미지의 루트에 hello.txt를
+// 미리 심어 두므로(내용은 fat32/ext4가 서로 다름), 그 내용이 그대로
+// 읽히는지 확인한다 — memfs 경로와 달리 여기는 **호스트가 이미
+// 써 둔 내용을 게스트가 처음 읽는** 시나리오다(FAT32/ext4 v1은
+// 읽기전용이라 OP_WRITE가 없다).
+void run_mounted_fs_read_test(const char* mount_path, const char* expected,
+                               const char* log_prefix) {
+    uapi::message open_req{};
+    open_req.label = k_op_open;
+    pack_bytes(open_req.regs, sizeof(open_req.regs), mount_path, cstr_len(mount_path));
+    uapi::message open_reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&open_req),
+               reinterpret_cast<uint64_t>(&open_reply));
+
+    bool open_ok = (open_reply.regs[1] == 0) && (open_reply.handle_count == 1);
+    if (!open_ok) {
+        debug_log(log_prefix, cstr_len(log_prefix));
+        const char* msg = " open failed\n";
+        debug_log(msg, cstr_len(msg));
+        return;
+    }
+    uint64_t open_file_id = open_reply.regs[0];
+    uint32_t fs_handle = open_reply.handles[0].src_handle;
+
+    uapi::message read_req{};
+    read_req.label = k_op_read;
+    read_req.regs[0] = open_file_id;
+    read_req.regs[1] = 4096;
+    uapi::message read_reply{};
+    do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&read_req),
+               reinterpret_cast<uint64_t>(&read_reply));
+
+    uint64_t expected_len = cstr_len(expected);
+    bool read_ok = (read_reply.regs[1] == 0) && (read_reply.page_count == 1) &&
+                    (read_reply.regs[0] == expected_len) &&
+                    bytes_equal(reinterpret_cast<const void*>(read_reply.pages[0].vaddr), expected,
+                                expected_len);
+
+    debug_log(log_prefix, cstr_len(log_prefix));
+    if (read_ok) {
+        const char* msg = " read ok=1\n";
+        debug_log(msg, cstr_len(msg));
+    } else {
+        const char* msg = " read ok=0\n";
         debug_log(msg, cstr_len(msg));
     }
 }
@@ -173,6 +230,11 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // 가능하다). M13의 검증 목표(VFS 경유 memfs 왕복)는 여기서 이어서
     // 확인한다.
     run_vfs_roundtrip_test();
+
+    // M16 — tools/make-fs-test-images.sh가 심어 둔 내용과 정확히
+    // 일치해야 한다(그 스크립트의 FAT32_CONTENT/EXT4_CONTENT).
+    run_mounted_fs_read_test("/mnt/fat32/hello.txt", "hello fat32 world\n", "[procsrv] fat32");
+    run_mounted_fs_read_test("/mnt/ext4/hello.txt", "hello ext4 world\n", "[procsrv] ext4");
 
     quiet_exit();
 }

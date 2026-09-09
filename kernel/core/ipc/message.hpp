@@ -18,6 +18,13 @@ inline constexpr size_t k_message_registers = 4;
 inline constexpr size_t k_max_page_descriptors = 4;
 inline constexpr size_t k_max_handle_transfers = 2;
 
+// ADR-159/161(kernel-ipc-objects.md, kernel-memory.md ADR-160 슬롯 4) —
+// 유저 프로세스 수신자에게 pages[]를 매핑으로 전달할 때 쓰는 고정
+// 슬롯. k_max_page_descriptors(4)페이지 예산 — 슬롯당 정확히 1페이지
+// (endpoint.cpp의 deliver_message가 강제)라 인덱스 i의 페이지는 항상
+// 여기서 i*4096만큼 떨어진 자리에 매핑된다.
+inline constexpr uint64_t k_ipc_mapped_pages_user_vaddr = 0x0000700000400000ull;
+
 enum class transfer_mode : uint8_t {
     copy = 0,  // 기본값(ADR-015) — M7이 구현하는 유일한 모드.
     move = 1,  // 대상 엔드포인트에 CAN_MOVE 필요(ADR-029) — 미구현(이후 계획).

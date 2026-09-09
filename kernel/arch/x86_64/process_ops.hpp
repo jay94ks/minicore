@@ -20,6 +20,11 @@ enum class process_spawn_error : uint32_t {
     elf_load_failed,
     out_of_memory,
     invalid_argument,  // argv_size가 한 페이지보다 큼(M12는 이 이상을 다루지 않음).
+    // ADR-160(kernel-memory.md) — 가변 크기 페이로드가 캐패빌리티
+    // 슬롯 예산(k_capability_slot_size=1MiB)을 넘으려 함(지금은
+    // self_elf 슬롯뿐). 이웃 슬롯과 충돌해 already_mapped로 우회
+    // 발견되던 것을 명시적 오류로 바꾼다.
+    capability_slot_overflow,
 };
 
 // sys_process_spawn — elf_data[0..elf_size)를 완전히 새 주소공간에

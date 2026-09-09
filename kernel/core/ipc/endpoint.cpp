@@ -16,6 +16,14 @@
 extern "C" bool arch_translate_user_page(uint64_t page_table_root, uint64_t vaddr,
                                           uint64_t* out_phys);
 
+// ADR-159/161(OPEN-61 해소) — IPC pages[]를 유저 프로세스 수신자의
+// 고정 슬롯에 매핑/해제한다. 정의는 kernel/arch/x86_64/page_table.cpp
+// (map_page/unmap_page를 감싼다) — 위 arch_translate_user_page와 같은
+// 이유(ADR-002)로 core는 시그니처만 안다.
+extern "C" bool arch_map_ipc_page_readonly(uint64_t page_table_root, uint64_t vaddr,
+                                            uint64_t phys);
+extern "C" bool arch_unmap_ipc_page(uint64_t page_table_root, uint64_t vaddr);
+
 namespace ipc {
 
 namespace {
@@ -108,24 +116,53 @@ result<resolved_endpoint, ipc_error> resolve_endpoint(object::handle_table& tabl
         resolved_endpoint{static_cast<object::endpoint*>(e->object), e->badge});
 }
 
+// t가 이전에 §2 경로(아래)로 받은 IPC 매핑이 남아 있으면 지금
+// 해제한다(ADR-159/161, OPEN-61 해소) — "이 스레드가 deliver_message의
+// 목적지로 다시 선택됐다"는 사실 자체가 "이전 메시지 처리가 끝났다"는
+// 뜻이다. ADR-159는 이 트리거를 "다음 sys_recv 직전"이라고 좁게
+// 표현했었지만, 실제로는 sys_call의 응답(reply)으로 매핑을 받는
+// 호출자(다음 sys_recv가 영원히 안 올 수 있는 순수 클라이언트)도
+// 있어서 ADR-161이 "이 스레드가 다시 배달 목적지가 되는 시점"으로
+// 일반화했다 — sys_call/sys_recv/sys_reply 세 진입점 모두가 여기로
+// 온다.
+void release_previous_ipc_mapping(object::thread* t) {
+    if (t->ipc_mapped_page_count == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < t->ipc_mapped_page_count; ++i) {
+        uint64_t vaddr = k_ipc_mapped_pages_user_vaddr + i * mm::k_page_size;
+        (void)arch_unmap_ipc_page(t->owner_space->page_table_root, vaddr);
+        mm::frame_release(t->ipc_mapped_frames[i]);
+    }
+    t->ipc_mapped_page_count = 0;
+}
+
 // src_vaddr(송신자 주소공간에 있는 메시지)를 dst_vaddr(수신자 주소공간에
 // 있는 메시지)로 옮긴다. 둘 다 "그 메시지가 있는 스레드의 owner_space"
 // (커널 스레드면 nullptr)로 번역해 읽고 쓴다(ADR-151) — 이래야 서로
 // 다른 유저 프로세스 사이의 IPC(M13부터 실제로 등장)에서도 label/regs/
-// page_count/handle_count가 올바르게 전달된다. dst의 pages[]는 호출
-// 시점에 "수신자가 미리 지정한 목적지 버퍼"를 담고 있어야 한다
-// (message.hpp 방향 규약)라, 먼저 dst의 기존 내용을 읽어 온 뒤 그
-// 위에 덮어써야 한다.
+// page_count/handle_count가 올바르게 전달된다.
 //
-// **남은 단순화**(endpoint.hpp 상단 주석 참고): page_descriptor가
-// 가리키는 실제 데이터 버퍼(in_pd.vaddr/dst.pages[i].vaddr)는 여전히
-// "그 vaddr을 쓰는 스레드와 이 함수를 실행하는 스레드가 같은
-// 주소공간"이라는 전제로 직접 역참조한다 — M13은 이 경로를 아예
-// 쓰지 않으므로(전부 regs[]만 사용) 지금 고치지 않는다.
+// pages[]의 실제 데이터 버퍼는 ADR-155가 나눈 두 경로로 처리한다
+// (kernel-ipc-objects.md ADR-155/159/161):
+//   §1(dst_thread->owner_space == nullptr, 커널/커널스레드 수신자):
+//     기존 그대로 — dst.pages[i]에 수신자가 미리 채워 둔 목적지
+//     버퍼로 원시 포인터 그대로 복사한다(M6~M9 데모의 전제 보존).
+//   §2(dst_thread->owner_space != nullptr, 실제 유저 프로세스 수신자):
+//     수신자는 목적지를 준비하지 않는다 — 커널이 발신자 프레임의
+//     참조 카운트를 올리고 고정 슬롯(k_ipc_mapped_pages_user_vaddr)에
+//     읽기전용으로 매핑한 뒤 그 위치를 dst.pages[i].vaddr에 출력으로
+//     써 준다. 지금은 발신자도 실제 유저 프로세스인 조합만
+//     지원한다(M16이 요구하는 조합 전부가 이것이다 — 커널 스레드가
+//     보낸 raw 포인터를 유저 프로세스에게 매핑하는 조합은 아직 쓸
+//     곳이 없어 범위 밖) — 슬롯 예산(4페이지)에 맞춰 디스크립터당
+//     정확히 1페이지만 허용한다.
 result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_space* src_space,
-                                         uint64_t dst_vaddr, object::address_space* dst_space,
+                                         uint64_t dst_vaddr, object::thread* dst_thread,
                                          object::handle_table& src_table,
                                          object::handle_table& dst_table) {
+    object::address_space* dst_space = dst_thread->owner_space;
+
     message src{};
     if (!copy_from_user(src_space, src_vaddr, &src, sizeof(message))) {
         return result<void, ipc_error>::err(ipc_error::page_not_mapped);
@@ -143,6 +180,13 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_spac
     if (src.page_count > k_max_page_descriptors) {
         return result<void, ipc_error>::err(ipc_error::message_too_large);
     }
+
+    if (dst_space != nullptr) {
+        // §2 경로를 타는 스레드다 — 새 매핑을 쓰기 전에(page_count==0
+        // 이라도) 이전 매핑을 먼저 정리한다.
+        release_previous_ipc_mapping(dst_thread);
+    }
+
     for (uint32_t i = 0; i < src.page_count; ++i) {
         const page_descriptor& in_pd = src.pages[i];
         if (in_pd.mode != transfer_mode::copy) {
@@ -155,12 +199,36 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_spac
             // 조용히 틀린 값을 받아들이지 않는다.
             LIBK_PANIC("ipc: page_descriptor not page-aligned");
         }
-        if (i >= dst.page_count || dst.pages[i].length < in_pd.length) {
-            // 수신자가 이 인덱스에 충분한 목적지 버퍼를 준비해 두지 않았다.
+
+        if (dst_space == nullptr) {
+            // §1 — 기존 그대로.
+            if (i >= dst.page_count || dst.pages[i].length < in_pd.length) {
+                // 수신자가 이 인덱스에 충분한 목적지 버퍼를 준비해 두지 않았다.
+                return result<void, ipc_error>::err(ipc_error::page_not_mapped);
+            }
+            __builtin_memcpy(reinterpret_cast<void*>(dst.pages[i].vaddr),
+                             reinterpret_cast<const void*>(in_pd.vaddr), in_pd.length);
+            continue;
+        }
+
+        // §2 — 신설(ADR-155 §2/ADR-159/ADR-161).
+        if (src_space == nullptr || in_pd.length != mm::k_page_size) {
+            return result<void, ipc_error>::err(ipc_error::permission_denied);
+        }
+        uint64_t phys = 0;
+        if (!arch_translate_user_page(src_space->page_table_root, in_pd.vaddr, &phys)) {
             return result<void, ipc_error>::err(ipc_error::page_not_mapped);
         }
-        __builtin_memcpy(reinterpret_cast<void*>(dst.pages[i].vaddr),
-                         reinterpret_cast<const void*>(in_pd.vaddr), in_pd.length);
+        mm::frame_add_ref(phys);
+        uint64_t slot_vaddr = k_ipc_mapped_pages_user_vaddr + i * mm::k_page_size;
+        if (!arch_map_ipc_page_readonly(dst_space->page_table_root, slot_vaddr, phys)) {
+            mm::frame_release(phys);
+            return result<void, ipc_error>::err(ipc_error::page_not_mapped);
+        }
+        dst_thread->ipc_mapped_frames[i] = phys;
+        dst_thread->ipc_mapped_page_count = i + 1;
+        dst.pages[i].vaddr = slot_vaddr;  // 출력: 수신자가 실제로 읽을 위치.
+        dst.pages[i].length = in_pd.length;
     }
     dst.page_count = src.page_count;
 
@@ -223,7 +291,7 @@ result<void, ipc_error> sys_call(object::handle_table& table, object::handle h,
         // 이미 sys_recv로 대기 중인 서버가 있었다 — 즉시 핸드오프.
         auto xfer = deliver_message(reinterpret_cast<uint64_t>(&msg_in), caller->owner_space,
                                      reinterpret_cast<uint64_t>(server->ipc.recv_dest),
-                                     server->owner_space, table, table_for_thread(server, table));
+                                     server, table, table_for_thread(server, table));
         if (!xfer.is_ok()) {
             // 아무 일도 없었던 것처럼 서버를 다시 대기열에 넣고, 호출자에게는
             // 즉시(블록 없이) 에러를 반환한다.
@@ -273,7 +341,7 @@ result<uint64_t, ipc_error> sys_recv(object::handle_table& table, object::handle
         // 이미 sys_call로 대기 중인 호출자가 있었다 — 즉시 페어링.
         auto xfer = deliver_message(reinterpret_cast<uint64_t>(caller->ipc.pending_call_msg),
                                      caller->owner_space, reinterpret_cast<uint64_t>(&msg_out),
-                                     self->owner_space, table_for_thread(caller, table), table);
+                                     self, table_for_thread(caller, table), table);
         if (!xfer.is_ok()) {
             scoped_lock<spinlock> guard(ep.lock);
             ep.waiting_callers.push_back(*caller);
@@ -311,7 +379,7 @@ result<void, ipc_error> sys_reply(object::handle_table& table, const message& ms
     // 주소공간이라도 안전하다.
     auto xfer = deliver_message(reinterpret_cast<uint64_t>(&msg_in), self->owner_space,
                                  reinterpret_cast<uint64_t>(caller->ipc.reply_dest),
-                                 caller->owner_space, table_for_thread(self, table),
+                                 caller, table_for_thread(self, table),
                                  table_for_thread(caller, table));
 
     // 도네이션 복원(ipc.md §5 3단계, ADR-028) — 전달 성공/실패와

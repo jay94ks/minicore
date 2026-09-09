@@ -79,6 +79,15 @@
 #     갱신) 임의 섹터에 알려진 패턴을 쓰고 다시 읽어 내용이
 #     일치하는지 확인한다 — initrun의 부트 목적은 이미 끝나 있어
 #     안전하다.
+#   M16 (system-servers-bringup.md, ADR-057/ADR-129): 부트 디스크에
+#     fat32/ext4 서버가 추가된다(둘 다 의존 devmgr, 각자 자신의
+#     virtio-blk-pci 장치를 등록해 마운트). vfs가 이제 마운트
+#     테이블(fs-protocol.md v2 §2.1)로 `/mnt/fat32/`, `/mnt/ext4/`
+#     접두사를 각 FS 서버에게 라우팅한다. IPC pages[]의 유저 프로세스
+#     매핑 경로(ADR-159/161)가 처음으로 실전에서 쓰인다 — OP_READ
+#     응답이 이제 이 경로로 온다(memfs도 이 라운드에서 함께
+#     갱신했다). 호스트에서 미리 만든 각 이미지의 hello.txt를 열어
+#     읽어낸 내용이 호스트가 심어 둔 내용과 일치하는지 확인한다.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -103,10 +112,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=60  # M14~M15부터 부트 디스크가 7개 서비스(memfs/vfs/procsrv/devmgr/ps2/usb/virtio-blk)를 담아 훨씬 오래 걸린다.
+TIMEOUT_SEC=75  # M16부터 부트 디스크가 9개 서비스(memfs/devmgr/ps2/usb/virtio-blk/fat32/ext4/vfs/procsrv)를 담아 훨씬 오래 걸린다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
-  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M13부터 memfs+vfs+procsrv+devmgr+ps2+usb(servers/CMakeLists.txt).
+  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M16부터 memfs+devmgr+ps2+usb+virtio-blk+fat32+ext4+vfs+procsrv(servers/CMakeLists.txt).
   if [[ -f "$DEFAULT_BOOTDISK" ]]; then
     export MINICORE_QEMU_BOOTDISK="$DEFAULT_BOOTDISK"
   fi
@@ -123,6 +132,20 @@ fi
 # 디스크를 재사용하면 그 cpio 아카이브 내용을 실제로 덮어써 손상시킨다).
 if [[ -z "${MINICORE_QEMU_TESTDISK:-}" ]]; then
   export MINICORE_QEMU_TESTDISK="${BUILD_DIR}/testdisk.img"
+fi
+
+# M16 — fat32/ext4 서버가 마운트할, 미리 내용을 심어 둔 이미지 두
+# 개도 기본으로 붙인다(run-qemu.sh 상단 주석 참고). 없으면
+# make-fs-test-images.sh로 만든다 — M15의 TESTDISK처럼 빈 파일로
+# 대신할 수 없다(내용이 있어야 검증이 성립한다).
+if [[ -z "${MINICORE_QEMU_FAT32DISK:-}" ]]; then
+  export MINICORE_QEMU_FAT32DISK="${BUILD_DIR}/fat32-test.img"
+fi
+if [[ -z "${MINICORE_QEMU_EXT4DISK:-}" ]]; then
+  export MINICORE_QEMU_EXT4DISK="${BUILD_DIR}/ext4-test.img"
+fi
+if [[ ! -f "$MINICORE_QEMU_FAT32DISK" || ! -f "$MINICORE_QEMU_EXT4DISK" ]]; then
+  bash "$SCRIPT_DIR/make-fs-test-images.sh" "$MINICORE_QEMU_FAT32DISK" "$MINICORE_QEMU_EXT4DISK"
 fi
 
 declare -a EXPECTED=(
@@ -185,6 +208,10 @@ declare -a EXPECTED=(
   "[usb] xhci controller_ready=0x1"
   "[usb] xhci reset+port scan done"
   "[virtio-blk] write/read roundtrip ok=1"
+  "[fat32] mount ok=0x1"
+  "[ext4] mount ok=0x1"
+  "[procsrv] fat32 read ok=1"
+  "[procsrv] ext4 read ok=1"
 )
 
 LOG_FILE="$(mktemp)"

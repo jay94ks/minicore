@@ -120,6 +120,17 @@ struct thread {
     // ADR-154 §결정5).
     uint32_t io_port_base = 0;
     uint32_t io_port_count = 0;
+
+    // ADR-159/161(kernel-ipc-objects.md, OPEN-61 해소) — 이 스레드가
+    // IPC pages[]로 마지막으로 받은 매핑의 프레임 물리주소들. 고정
+    // 슬롯(kernel/core/ipc/message.hpp::k_ipc_mapped_pages_user_vaddr)
+    // 에 매핑돼 있다 — 배열 크기는 ipc::k_max_page_descriptors(=4)와
+    // 같아야 하지만 object는 ipc를 몰라야 하므로(위 전방 선언 주석과
+    // 같은 정신) 리터럴로 둔다. 이 스레드가 deliver_message의
+    // 목적지로 다시 선택되는 시점 직전에 endpoint.cpp가 이 기록을
+    // 읽어 이전 매핑을 frame_release한다.
+    uint32_t ipc_mapped_page_count = 0;
+    uint64_t ipc_mapped_frames[4] = {};
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/

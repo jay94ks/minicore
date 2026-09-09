@@ -63,6 +63,17 @@
 #                         아카이브 내용을 실제로 덮어써 손상시킨다.
 #                         파일이 없으면 1MiB 빈 파일을 새로 만든다.
 #                         기본은 미설정(장치 없음).
+#   MINICORE_QEMU_FAT32DISK=<경로>  docs/plan/system-servers-bringup.md
+#                         M16(ADR-057): servers/fs/fat32가 마운트할
+#                         FAT32 이미지(bus0/device7 고정). 이 이미지는
+#                         내용(테스트 파일)이 있어야 하므로 없으면
+#                         빈 파일로 대신하지 않고 그냥 붙이지 않는다
+#                         (tools/make-fs-test-images.sh로 미리 준비).
+#                         기본은 미설정.
+#   MINICORE_QEMU_EXT4DISK=<경로>   docs/plan/system-servers-bringup.md
+#                         M16(ADR-129): servers/fs/ext4가 마운트할,
+#                         저널 없이 정리된 ext4 이미지(bus0/device8
+#                         고정). FAT32DISK와 같은 전제. 기본은 미설정.
 
 set -euo pipefail
 
@@ -145,6 +156,25 @@ case "$ARCH" in
       fi
       EXTRA_ARGS+=(-drive "if=none,id=testdisk,format=raw,file=${MINICORE_QEMU_TESTDISK}")
       EXTRA_ARGS+=(-device "virtio-blk-pci,drive=testdisk,addr=06.0")
+    fi
+
+    if [[ -n "${MINICORE_QEMU_FAT32DISK:-}" ]]; then
+      # M16(system-servers-bringup.md, ADR-057) — servers/fs/fat32가
+      # 마운트할 FAT32 이미지. bus0/device7 고정(기존 장치들과 겹치지
+      # 않는 다음 자리) — 호스트에서 tools/make-fs-test-images.sh로
+      # 미리 만들어야 한다(이 스크립트는 파일이 없으면 그냥 실패한다,
+      # M15의 TESTDISK와 달리 내용이 있어야 하는 이미지라 빈 파일로
+      # 대신할 수 없다).
+      EXTRA_ARGS+=(-drive "if=none,id=fat32disk,format=raw,file=${MINICORE_QEMU_FAT32DISK}")
+      EXTRA_ARGS+=(-device "virtio-blk-pci,drive=fat32disk,addr=07.0")
+    fi
+
+    if [[ -n "${MINICORE_QEMU_EXT4DISK:-}" ]]; then
+      # M16(system-servers-bringup.md, ADR-129) — servers/fs/ext4가
+      # 마운트할, 저널 없이 정리된(clean) ext4 이미지. bus0/device8
+      # 고정. FAT32DISK와 같은 이유로 미리 준비돼 있어야 한다.
+      EXTRA_ARGS+=(-drive "if=none,id=ext4disk,format=raw,file=${MINICORE_QEMU_EXT4DISK}")
+      EXTRA_ARGS+=(-device "virtio-blk-pci,drive=ext4disk,addr=08.0")
     fi
 
     if [[ "${MINICORE_QEMU_XHCI:-0}" == "1" ]]; then

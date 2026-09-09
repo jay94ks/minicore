@@ -336,16 +336,43 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
         req.argv_size = sizeof(ctx->devmgr_info);
     }
 
+    // M16(fs-protocol.md v2) — vfs가 이제 memfs/fat32/ext4 셋 다에
+    // 의존해야(마운트 테이블) 해서 `depends=`가 콤마로 여러 이름을
+    // 담을 수 있게 확장했다(M13 시절엔 "최대 1개"였다 —
+    // tools/mkbootdisk.py 상단 주석도 함께 갱신). mkbootdisk.py의
+    // `--depends=<이름>:<의존1>,<의존2>,...`가 그대로
+    // `depends=<의존1>,<의존2>,...`를 ini에 쓰므로 여기서 콤마로
+    // 나누기만 하면 된다 — 최대 k_max_spawn_inherited_handles(4)개.
     auto depends_val = ini::find_value(data, size, "depends");
     if (depends_val.is_ok()) {
-        char dep_name[32];
-        if (copy_span_to_cstr(depends_val.value(), dep_name, sizeof(dep_name))) {
-            uint32_t dep_handle = find_registered_handle(*ctx, dep_name);
-            if (dep_handle != 0) {
-                req.inherited_handle_count = 1;
-                req.inherited_handles[0].src_handle = dep_handle;
-                req.inherited_handles[0].rights_mask = uapi::k_right_can_send;
+        char deps_buf[96];
+        if (copy_span_to_cstr(depends_val.value(), deps_buf, sizeof(deps_buf))) {
+            uint64_t len = 0;
+            while (deps_buf[len] != '\0') {
+                ++len;
             }
+            uint32_t count = 0;
+            uint64_t seg_start = 0;
+            for (uint64_t i = 0; i <= len && count < uapi::k_max_spawn_inherited_handles; ++i) {
+                if (i == len || deps_buf[i] == ',') {
+                    uint64_t seg_len = i - seg_start;
+                    if (seg_len > 0 && seg_len < 32) {
+                        char dep_name[32];
+                        for (uint64_t j = 0; j < seg_len; ++j) {
+                            dep_name[j] = deps_buf[seg_start + j];
+                        }
+                        dep_name[seg_len] = '\0';
+                        uint32_t dep_handle = find_registered_handle(*ctx, dep_name);
+                        if (dep_handle != 0) {
+                            req.inherited_handles[count].src_handle = dep_handle;
+                            req.inherited_handles[count].rights_mask = uapi::k_right_can_send;
+                            ++count;
+                        }
+                    }
+                    seg_start = i + 1;
+                }
+            }
+            req.inherited_handle_count = count;
         }
     }
 

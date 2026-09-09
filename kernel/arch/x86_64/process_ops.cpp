@@ -125,6 +125,15 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
     // initrun과 똑같은 방식(uapi::k_m12_self_info_user_vaddr을 읽어
     // sys_fork+sys_exec)으로 "자기 자신을 fork/exec"할 수 있다 — M12
     // QEMU 목표(procsrv 자기 자신 fork/exec)가 요구하는 조건이 이것뿐.
+    // ADR-160(kernel-memory.md, 슬롯 0의 예산 검증) — self_elf 복사가
+    // 이웃 슬롯(self_info, uapi::k_m12_self_info_user_vaddr)을 침범하기
+    // 전에 명시적으로 거부한다. ADR-149가 겪은 버그(간격을 넘은 ELF가
+    // already_mapped로만 우회 발견됨)를 재발 방지한다.
+    if (elf_size > uapi::k_m12_self_info_user_vaddr - uapi::k_m12_self_elf_user_vaddr) {
+        mm::slab_free(space, sizeof(object::address_space));
+        return process_spawn_error::capability_slot_overflow;
+    }
+
     uint64_t self_elf_pages = (elf_size + mm::k_page_size - 1) / mm::k_page_size;
     for (uint64_t i = 0; i < self_elf_pages; ++i) {
         auto page = mm::alloc_pages(0, 0);
