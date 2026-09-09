@@ -357,3 +357,88 @@
   - `docs/plan/system-servers-bringup.md` §M20의 "구현" 문구(서드파티
     libc+셸 서브모듈)는 이번 라운드에 실행하지 않은 계획으로 남는다
     — 계획 문서 자체는 수정하지 않는다(문서 체계 원칙).
+
+## ADR-182. M26 범위 좁힘: musl 문자열 함수 부분집합만 실제로 포팅(전체 syscall 계층은 범위 밖)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [general-purpose-completion.md §M26](../plan/general-purpose-completion.md)
+  ("M20/ADR-170이 미뤄 둔 실제 서드파티 libc 포팅을 M21~M24가 갖춘
+  전제 위에서 다시 시도")을 시작하며, "어디까지 포팅할지는 착수
+  시점에 다시 범위를 좁힌다"는 계획 자신의 문구를 그대로 행사한다.
+  1. **musl을 `third_party/musl`(v1.2.6 고정, git submodule, ADR-022)
+     로 채택한다.** repo-layout.md §"아직 정하지 않은 것"이 미뤄 둔
+     결정이다.
+  2. **musl 소스 중 문자열 함수(`src/string/*.c`)만 무수정으로
+     빌드한다** — `memcpy`/`memmove`/`memset`/`memcmp`/`memchr`/
+     `memrchr`/`strcmp`/`strncmp`/`strcpy`/`stpcpy`/`strncpy`/
+     `strcat`/`strncat`/`strchr`/`strchrnul`/`strrchr`/`strspn`/
+     `strcspn`/`strlen`/`strdup`(그리고 이들이 내부적으로 요구하는
+     지원 함수) — 이 전부가 syscall/스레드/락 없이 완결된다(YAGNI —
+     이 부분집합만으로도 "재구현이 아닌 실제 서드파티 소스"라는
+     계획의 취지를 충족한다). musl 자신의 빌드 시스템(Makefile,
+     `./configure`)은 통째로 쓰지 않는다 — 이 커널의 타깃 트리플
+     (freestanding `x86_64-unknown-none-elf`)에 맞지 않고, 이
+     부분집합에는 필요하지도 않다. 대신 musl의 `bits/alltypes.h`
+     생성 규칙(`tools/mkalltypes.sed`)만 파이썬으로 재현한다
+     (`tools/gen-musl-alltypes.py` — sed 출력과 개행 차이만 있고
+     내용은 동일함을 확인했다, 이 프로젝트의 다른 생성 스텝들과
+     셸 의존성을 통일하는 김에).
+  3. **`strdup`이 요구하는 `malloc`/`free`/`calloc`/`realloc`은
+     M24(ADR-180)의 `mc_malloc`/`mc_free`로 연결한다**
+     ([libc/sysdeps/minicore/mem_shim.c](../../libc/sysdeps/minicore/mem_shim.c)
+     — repo-layout.md가 이미 예약해 둔 "libc 내부 훅을 libmc의
+     mc_* 호출로 연결하는 얇은 어댑터" 자리를 처음으로 채운다).
+  4. **진짜 syscall 계층(open/read/write/mmap/fork/exec을 musl
+     자신의 경로로), 동적 링커, 스레드(pthread), locale, stdio
+     (FILE/printf 계열)는 이번 라운드에 포함하지 않는다** — 이건
+     M20이 원래 "M12부터 점진적으로 채워졌어야 했다"고 지적한
+     `libmc`의 2b/3단(ADR-132)에 해당하는 훨씬 큰 작업이고, 이
+     커널의 14개 syscall을 musl이 기대하는 syscall(2) 형태로 감싸는
+     새 레이어가 필요하다(사실상 M22~M24가 이미 하고 있는 procsrv
+     매개 POSIX 호환 작업의 훨씬 큰 확장). **M26의 실제 검증
+     목표("M20의 완료 기준을 포팅된 libc+포팅된 셸/coreutils로
+     다시 달성")는 이 범위 좁힘으로 문자 그대로는 충족되지
+     않는다** — 셸/coreutils 자체는 여전히 minicore 네이티브
+     구현(ADR-170)이고, 다만 그 안에서 문자열 처리 일부가 이제
+     **진짜 musl 소스**로 이루어진다는 것만 증명한다.
+- **근거**: ADR-170(M20)과 같은 이유(규모상 이 마일스톤은 검증
+  가능한 결과물 없이 끝날 위험이 크다)에, 이 커널의 근본적
+  아키텍처(모든 I/O가 procsrv/VFS/FS IPC로 구현되고 syscall이
+  12개 — 이제 M22~M24로 14개 — 뿐)가 musl이 기대하는 전제(POSIX
+  syscall ABI, 진짜 fd, 진짜 mmap)와 아직도 근본적으로 다르다는
+  ADR-170의 진단이 그대로 유효하다. 다른 점은, 이번엔 "libmc를
+  먼저 만든다" 대신 "musl의 **syscall과 무관한 부분**부터 실제
+  소스로 증명한다"는 더 구체적인 다음 단계를 골랐다는 것이다 —
+  전체 포팅으로 가는 길에서 실제로 가장 먼저, 가장 안전하게 뗄 수
+  있는 조각이기 때문이다(문자열 함수는 이 커널의 어떤 IPC/syscall
+  모델과도 마찰이 없다).
+- **실제로 겪은 문제(빌드 시스템)**: `target_include_directories`로
+  musl의 `arch/x86_64`·`arch/generic`·생성된 `bits/alltypes.h`를
+  `minicore_libc` 자신에게만(PRIVATE) 노출했다가, `string.h`를
+  쓰는 소비자(`userland/shell`)가 그 헤더들이 내부적으로 요구하는
+  `bits/alltypes.h`/`bits/stdint.h`를 못 찾아 두 번 연달아 빌드가
+  깨졌다 — musl의 공개 헤더(`string.h` 등)를 쓰는 모든 소비자는
+  그 헤더가 참조하는 arch별 `bits/*.h`와 생성 헤더까지 함께 봐야
+  하므로, 이 셋을 전부 **PUBLIC**으로 승격해 해결했다(반면
+  `src/include`/`src/internal`의 `weak_alias` 등은 musl 자신의
+  `.c` 파일만 필요로 해 PRIVATE로 남긴다).
+- **검증 결과(QEMU 실측)**: [general-purpose-completion-m26.md](../done/general-purpose-completion-m26.md)
+  참고 — `userland/shell`이 musl의 `strcpy`+`strcat`으로 문자열을
+  조립하고 `strdup`+`strlen`+`memcmp`로 왕복 검증한다
+  (`"[shell] libc strcpy/strcat/strdup ok=1"`, `tools/smoke-test-x86_64.sh`
+  에 추가). QEMU 첫 실행에 바로 통과했다(빌드 시스템 문제 두 건은
+  전부 컴파일 단계에서 잡혔고, 런타임 동작 자체는 처음부터
+  올바랐다). smoke/net/SMP/NUMA/AVX 5개 스위트 전부 회귀 없음.
+- **영향**:
+  - `docs/plan/general-purpose-completion.md` §M26의 "구현" 문구
+    (전체 libc 포팅+포팅된 셸/coreutils)는 이번 라운드에 실행하지
+    않은 계획으로 남는다 — 계획 문서 자체는 수정하지 않는다(문서
+    체계 원칙, ADR-170과 동일).
+  - `third_party/musl`은 이제 이 저장소의 첫 실제 git submodule이다
+    (`.gitmodules`, ADR-022가 예상해 둔 그대로) — `third_party/patches/musl/`
+    는 비어 있다(이번 라운드는 musl 소스를 무수정으로 쓴다, 패치가
+    필요 없었다). `tools/apply-patches.sh`는 여전히 TODO 스텁이다
+    (이번 라운드는 패치가 필요 없어 구현하지 않았다 — 실제 패치가
+    필요해지는 다음 기회로 미룬다).
+  - **OPEN-66**: 전체 syscall 계층/동적 링커/스레드/stdio 포팅은
+    여전히 없다 — [open-items.md](open-items.md) 참고.

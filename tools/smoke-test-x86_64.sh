@@ -153,6 +153,17 @@
 #     buffer ok=1")와 그 버퍼로 읽은 파일 내용이 여전히 정확함
 #     ("[shell] cat ok=1", 기존 M20 검증과 동일 기준)을 함께 확인해
 #     유저랜드 동적 메모리 왕복을 증명한다.
+#   M26 (general-purpose-completion.md §M26, foundations.md
+#     ADR-182): third_party/musl(v1.2.6 고정, git submodule)의
+#     문자열 함수 부분집합(memcpy/strlen/strcpy/strcat/strdup 등,
+#     재구현이 아니라 원본 소스를 그대로 빌드)을 셸이 실제로 링크해
+#     쓴다. musl 자신의 malloc 참조는 libc/sysdeps/minicore/mem_shim.c
+#     가 M24의 mc_malloc(sys_brk)으로 연결한다. strcpy+strcat으로
+#     문자열을 조립하고 musl의 strlen/memcmp/strdup으로 왕복 검증한다
+#     ("[shell] libc strcpy/strcat/strdup ok=1"). 실제 syscall 계층
+#     (open/read/write 등)·동적 링커·스레드까지의 완전한 포팅은 범위
+#     밖이다(ADR-182 "알려진 단순화" — M20/ADR-170이 미뤄 둔 것의
+#     연장, 이번에도 전체가 아니라 검증 가능한 부분집합만).
 #   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
 #     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
 #     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
@@ -315,6 +326,7 @@ declare -a EXPECTED=(
   "[shell] ls ok=1"
   "[shell] malloc buffer ok=1"
   "[shell] cat ok=1"
+  "[shell] libc strcpy/strcat/strdup ok=1"
   "[shell] self-test done"
 )
 

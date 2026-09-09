@@ -25,6 +25,12 @@
 #include <mc/util.h>
 #include <mc/vfs_client.h>
 
+// M26(general-purpose-completion.md §M26, foundations.md ADR-182) —
+// third_party/musl(원본 소스 그대로, 재구현 아님)의 문자열 함수
+// 부분집합. libc/CMakeLists.txt가 이 헤더가 선언하는 함수들의 실제
+// 구현을 minicore_libc로 빌드해 이 실행파일에 링크한다.
+#include <string.h>
+
 // sys_process_spawn(create_endpoint=true)이 handle 1을 채운다
 // (ADR-152). handle 2/3/4는 depends=vfs,console,ps2 나열 순서 그대로.
 #define OWN_ENDPOINT_HANDLE 1u
@@ -179,6 +185,22 @@ static void run_self_test(void) {
     int cat_ok = cat_opened && mc_bytes_equal(content, "hello vfs", mc_cstr_len("hello vfs")) &&
                  len == mc_cstr_len("hello vfs");
     debug(cat_ok ? "[shell] cat ok=1\n" : "[shell] cat ok=0\n");
+
+    // M26(general-purpose-completion.md §M26, foundations.md ADR-182) —
+    // third_party/musl(원본 소스 그대로 빌드, minicore가 재구현한
+    // mc_cstr_len/mc_bytes_equal이 아니다)의 strcpy/strcat/strlen/
+    // memcmp/strdup이 서로 협력해 정확히 동작하는지 확인한다. strdup
+    // 이 libc/sysdeps/minicore/mem_shim.c를 거쳐 mc_malloc(ADR-180)
+    // 까지 왕복해야 성공한다.
+    char libc_buf[32];
+    strcpy(libc_buf, "hello");
+    strcat(libc_buf, " ");
+    strcat(libc_buf, "vfs");
+    char* libc_dup = strdup(libc_buf);
+    int libc_ok =
+        libc_dup != 0 && strlen(libc_dup) == 9 && memcmp(libc_dup, "hello vfs", 9) == 0;
+    debug(libc_ok ? "[shell] libc strcpy/strcat/strdup ok=1\n"
+                   : "[shell] libc strcpy/strcat/strdup ok=0\n");
 
     debug("[shell] self-test done\n");
 }

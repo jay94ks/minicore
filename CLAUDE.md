@@ -120,27 +120,26 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   "일단 생략, aarch64보다 먼저 범용 OS로서 미비된 부분을 보완하자"
   로 방향을 정했다.
 - 그 방향에 따라 [docs/plan/general-purpose-completion.md](docs/plan/general-purpose-completion.md)
-  (M21 선점형 스케줄링 ~ M26 실제 libc 포팅 재도전)를 새로 계획했다.
-  **M21~M24 완료**. M21: LAPIC 타이머 기반 선점(BSP·ring3 한정,
-  ADR-176)과 그 과정에서 발견한 TSS.RSP0 전역 공유 버그 수정
-  (ADR-177), 결과는
-  [docs/done/general-purpose-completion-m21.md](docs/done/general-purpose-completion-m21.md).
-  M22: `sys_process_kill`(ADR-178)+procsrv의 wait/kill 자기테스트,
-  결과는
-  [docs/done/general-purpose-completion-m22.md](docs/done/general-purpose-completion-m22.md).
-  M23: `sys_fork`가 handle_table 전체를 복제(ADR-179)+procsrv의
-  fork+exec fd 상속 자기테스트, 결과는
-  [docs/done/general-purpose-completion-m23.md](docs/done/general-purpose-completion-m23.md).
-  M24: `sys_brk`+libmc 최소 malloc(ADR-180)+셸의 malloc 버퍼 왕복,
-  결과는
-  [docs/done/general-purpose-completion-m24.md](docs/done/general-purpose-completion-m24.md).
-  M25: virtio-net 드라이버+netsrv DHCP 왕복 자기테스트(ADR-181,
-  ARP 없이), 결과는
-  [docs/done/general-purpose-completion-m25.md](docs/done/general-purpose-completion-m25.md)
-  (`tools/smoke-test-net-x86_64.sh` 신설). 다음 실행 대상은
-  M26(실제 libc 포팅 재도전, 이 계획의 마지막 마일스톤). **주의**: `servers/*`/`userland/*` 코드를
-  고친 뒤에는 일반 `cmake --build`만으로는 `bootdisk.img`가
-  갱신되지 않는다(add_custom_target이라 기본 빌드에 안 걸림) —
+  (M21 선점형 스케줄링 ~ M26 실제 libc 포팅 재도전)를 계획했고
+  **전체(M21~M26)가 완료됐다** — 이 계획에는 더 이상 다음
+  마일스톤이 없다. 각 라운드 결과(전부 "이번엔 범위를 좁힌다"는
+  M17~M20의 패턴을 반복함):
+  M21([done](docs/done/general-purpose-completion-m21.md)) LAPIC
+  타이머 기반 선점(BSP·ring3 한정, ADR-176)+TSS.RSP0 스레드별
+  분리(ADR-177) · M22([done](docs/done/general-purpose-completion-m22.md))
+  `sys_process_kill`(ADR-178)+procsrv의 wait/kill 자기테스트 ·
+  M23([done](docs/done/general-purpose-completion-m23.md))
+  `sys_fork`의 handle_table 복제(ADR-179)+fork+exec fd 상속
+  자기테스트 · M24([done](docs/done/general-purpose-completion-m24.md))
+  `sys_brk`+libmc 범프 할당자(ADR-180) · M25([done](docs/done/general-purpose-completion-m25.md))
+  virtio-net 드라이버+netsrv DHCP 왕복(ADR-181, ARP 없이,
+  `tools/smoke-test-net-x86_64.sh` 신설) · M26([done](docs/done/general-purpose-completion-m26.md))
+  third_party/musl(첫 실제 git submodule) 문자열 함수 부분집합
+  실제 포팅(ADR-182, 전체 syscall 계층은 범위 밖 — OPEN-66).
+  다음 방향은 aarch64 이식이다(사용자가 이 계획 완료 후로 미뤄 둔
+  것). **주의**: `servers/*`/`userland/*` 코드를 고친 뒤에는 일반
+  `cmake --build`만으로는 `bootdisk.img`가 갱신되지 않는다
+  (add_custom_target이라 기본 빌드에 안 걸림) —
   `--target minicore_bootdisk_image`를 반드시 추가로 돌려야 한다
   (M22에서 실제로 겪음, docs/done/general-purpose-completion-m22.md
   참고).
