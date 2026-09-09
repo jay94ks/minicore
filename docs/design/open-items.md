@@ -17,12 +17,12 @@
 | OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
 | OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 | (미정) | [procsrv.md](../spec/procsrv.md) |
 | OPEN-60 | ADR-154가 "I/O 활성화 권한 부여"를 지금은 initrun의 하드코딩(스폰 시 grant_trusted)으로만 결정하도록 확정했다 — 부팅 완료 이후 cfgsrv 레지스트리를 읽어 **다른** 특수 프로세스에게도 이 권한을 동적으로 부여/회수하는 절차는 cfgsrv가 실제로 존재하는 M19 이후 재검토 대상 | ADR-154 | [boot-and-drivers.md](boot-and-drivers.md) |
-| OPEN-61 | ADR-155 §2(유저 프로세스 수신자에게 IPC pages[] 내용을 매핑으로 전달)에서 그 매핑을 **언제 해제하는지**(다음 IPC 수신 시? 명시적 unmap 호출? 프로세스 종료 시 일괄?)와 매핑을 배치할 정확한 유저 가상주소 위치 — 실제 구현 시점(M16 전후로 예상)에 확정 | ADR-155 | [kernel-ipc-objects.md](kernel-ipc-objects.md) |
 
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-61~~ | ADR-155 §2의 매핑 해제 시점(다음 sys_recv 직전 자동 해제, 스레드별)과 배치 위치(`k_user_stack_top` 위쪽 고정 슬롯 사다리의 다음 자리) 확정 | ADR-159 |
 | ~~OPEN-58~~ | TSS IOPB가 코어당 전역 공유 — 스레드별 활성 I/O 범위(`io_port_base`/`count`) + `sys_io_activate`/`sys_io_deactivate` + 컨텍스트 스위치 시 diff 기반 재프로그래밍으로 설계 확정(구현은 M14 착수 시점) | ADR-154 |
 | ~~OPEN-59~~ | IPC `pages[]` 페이로드의 cross-address-space 전달 — 수신자가 커널(스레드)이면 ADR-151과 같은 방식의 페이지 단위 번역, 수신자가 유저 프로세스면 참조 카운트+공유 매핑(유저에게 번역 API를 노출하지 않음)으로 설계 확정(구현은 §1은 M14, §2는 M16 전후) | ADR-155 |
 | ~~OPEN-55~~ | 서비스 준비완료 신호의 M12 임시방편 — 아무 신호도 두지 않는다(M12는 서비스가 procsrv 하나뿐이라 순서 대기 자체가 불필요, 게다가 sys_yield가 없어 initrun이 "기다렸다 계속"할 수단이 없다) | ADR-150 |
