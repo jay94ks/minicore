@@ -134,7 +134,11 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   M24: `sys_brk`+libmc 최소 malloc(ADR-180)+셸의 malloc 버퍼 왕복,
   결과는
   [docs/done/general-purpose-completion-m24.md](docs/done/general-purpose-completion-m24.md).
-  다음 실행 대상은 M25(최소 네트워킹). **주의**: `servers/*`/`userland/*` 코드를
+  M25: virtio-net 드라이버+netsrv DHCP 왕복 자기테스트(ADR-181,
+  ARP 없이), 결과는
+  [docs/done/general-purpose-completion-m25.md](docs/done/general-purpose-completion-m25.md)
+  (`tools/smoke-test-net-x86_64.sh` 신설). 다음 실행 대상은
+  M26(실제 libc 포팅 재도전, 이 계획의 마지막 마일스톤). **주의**: `servers/*`/`userland/*` 코드를
   고친 뒤에는 일반 `cmake --build`만으로는 `bootdisk.img`가
   갱신되지 않는다(add_custom_target이라 기본 빌드에 안 걸림) —
   `--target minicore_bootdisk_image`를 반드시 추가로 돌려야 한다

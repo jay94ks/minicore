@@ -1675,3 +1675,74 @@
     표현식을 평가하지 않는다는 것(구성 단계 vs 생성 단계의 시점
     차이) — 구현 중 실제로 겪은 실수라 여기 기록해 둔다. 커널 ELF의
     출력 경로를 문자열로 직접 구성해 피했다.
+
+## ADR-181. 최소 네트워킹 — virtio-net 드라이버 + netsrv의 DHCP 왕복 자기테스트(ARP 없이)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [general-purpose-completion.md §M25](../plan/general-purpose-completion.md)
+  를 구현한다. [servers/drivers/virtio-net](../../servers/drivers/virtio-net/main.cpp)
+  가 [servers/drivers/virtio-blk](../../servers/drivers/virtio-blk/main.cpp)
+  (ADR-043 1순위, M15)와 **완전히 같은 legacy virtio I/O 포트
+  레지스터 레이아웃**(VirtIO 1.0 §4.1.4.8 — host/guest_features,
+  queue_address/size/select/notify, device_status)을 재사용해
+  devmgr에 vendor:device=0x1AF4:0x1000으로 등록하고, RX(큐 0)/TX
+  (큐 1) 두 virtqueue로 이더넷 프레임을 그대로 송수신한다(ARP/IP/UDP
+  는 전혀 모른다 — 순수 하드웨어 계층). [servers/netsrv](../../servers/netsrv/main.cpp)
+  가 이 드라이버에 IPC로 의존해(`depends=virtio-net`) 그 위에
+  이더넷/IP/UDP 프레이밍을 직접 구현한다 — 실제 소켓 API
+  (bind/connect/send/recv)는 만들지 않고, 부팅 시 자기테스트로
+  "UDP 패킷 하나의 왕복"을 증명한다(다른 서버들의 self-test 관례와
+  동일, procsrv.md §3.6류의 완전한 프로토콜은 M22/M23이 이미 좁혀
+  온 것과 같은 정신으로 범위 밖). 왕복 대상은 DHCP(UDP 67/68,
+  DHCPDISCOVER→DHCPOFFER)다 — ARP는 구현하지 않는다: DHCPDISCOVER는
+  이더넷(`ff:ff:ff:ff:ff:ff`)과 IP(`255.255.255.255`) 둘 다
+  브로드캐스트라 목적지 MAC을 ARP로 미리 구할 필요가 원천적으로
+  없고, QEMU의 usermode 네트워킹(SLIRP, `MINICORE_QEMU_NET=1`,
+  `tools/run-qemu.sh`)이 내장 DHCP 서버를 항상 갖고 있어 외부
+  네트워크/인터넷 접근 없이도 결정적으로 응답이 온다.
+- **근거**: 계획이 스스로 "UDP 정도로 시작, TCP는 후속"이라고
+  좁혀 뒀고, "QEMU의 usermode 네트워킹(또는 loopback)으로 UDP
+  패킷 하나를 왕복"만을 목표로 명시했다 — ARP까지 구현하는 것은
+  이 목표에 꼭 필요하지 않은 범위 확장이었다(DHCP를 고른 것 자체가
+  ARP 없이도 성립하는 왕복을 찾은 결과). virtio-blk와 코드를
+  공유하지 않는 이유도 그 드라이버 자신의 주석과 같다 — 서로 다른
+  신뢰 경계, 실제로 공유할 방법도 없다(별도 프로세스, 별도
+  주소공간).
+- **실제로 겪은 버그**: `compute_layout()`(virtio-blk와 동일)이
+  반환하는 `desc_off`/`avail_off`/`used_off`는 **그 큐 자신의 vring
+  시작을 기준으로 한 상대 오프셋**인데, 드라이버 초기 구현이 이
+  값을 DMA 버퍼 전체의 시작(`g_dma_virt`)에 곧바로 더했다 — RX는
+  `k_rx_vring_off==0`이라 이 실수가 우연히 값이 맞아 드러나지
+  않았지만, TX는 `k_tx_vring_off!=0`이라 즉시 드러났다(디바이스는
+  `queue_address` 레지스터로 정확히 안내받은 물리주소만 보는데,
+  드라이버는 avail 링 갱신을 그 주소가 아니라 DMA 버퍼 맨 앞(RX의
+  자리)에 써 버려 디바이스 쪽에서는 새 버퍼가 전혀 안 보였다 —
+  `used_idx`가 영원히 그대로였다). 모든 vring 접근에 그 큐의 vring
+  베이스 오프셋을 명시적으로 더하도록 고쳤다. 별도로, RX 버퍼
+  영역의 총 크기(개수×버퍼크기)가 4096의 배수가 아니어서 그 다음에
+  오는 TX vring이 페이지 정렬되지 않는 문제도 함께 발견해 버퍼
+  크기를 1536→2048로 늘려 해결했다(`queue_address` 레지스터는
+  페이지 프레임 번호, 즉 물리주소/4096을 저장하므로 정렬이 깨지면
+  잘린 값이 완전히 다른 위치를 가리킨다) — `static_assert`로 이
+  두 vring 오프셋이 실수로 다시 깨지는 것을 컴파일 타임에 막아
+  뒀다.
+- **검증 결과(QEMU 실측)**: [general-purpose-completion-m25.md](../done/general-purpose-completion-m25.md)
+  참고 — `tools/smoke-test-net-x86_64.sh`(신설, `MINICORE_QEMU_NET=1`
+  opt-in — ADR-125의 "기본값 유지" 패턴) 신설, DHCPDISCOVER 전송과
+  DHCPOFFER 수신을 모두 확인(`"[netsrv] dhcp discover sent=1"`/
+  `"[netsrv] udp roundtrip ok=1"`). 기본 스모크(네트워킹 미활성)와
+  SMP/NUMA/AVX 4개 스위트 전부 회귀 없음 — virtio-net/netsrv가
+  부트 디스크 서비스 목록에 새로 끼어들어도(virtio-blk와 fat32
+  사이, servers/CMakeLists.txt) 나머지 순서를 깨지 않았다.
+- **알려진 단순화**:
+  - ARP를 구현하지 않는다 — DHCPDISCOVER의 브로드캐스트 특성에
+    의존한 선택이라, 유니캐스트 목적지로 보내야 하는 임의의 UDP
+    송신(예: 실제 DHCP 서버가 유니캐스트로 응답하거나, 이후
+    유니캐스트 목적지로 patch를 보낼 때)은 아직 안 된다.
+  - `netsrv`의 DHCP 응답 파싱은 BOOTP 옵션을 전혀 해석하지 않는다
+    (op/xid만 확인) — 실제 임대(lease) 관리, IP 주소 확정은
+    범위 밖이다. 이 커널의 어떤 프로세스도 아직 "내 IP"를 갖지
+    않는다(전부 여전히 정적 부재 상태로 통신한다).
+  - TCP는 계획이 스스로 "후속"으로 미뤄 둔 대로 전혀 없다.
+  - 실제 소켓 API(bind/connect/send/recv, 여러 동시 연결)는 없다 —
+    이 라운드는 왕복 메커니즘 자체의 증명이다.

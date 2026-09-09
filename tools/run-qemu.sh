@@ -81,6 +81,16 @@
 #                         사람이 직접 보려면 켠다. 스모크 테스트는
 #                         디버그 시리얼 로그만 보므로 이 값이 필요
 #                         없다(기본 off).
+#   MINICORE_QEMU_NET=1   docs/plan/general-purpose-completion.md
+#                         M25: virtio-net-pci 장치(bus0/device9 고정,
+#                         기존 장치들과 겹치지 않는 다음 자리)를
+#                         QEMU의 usermode 네트워킹(SLIRP, -netdev
+#                         user)에 붙인다. 외부 네트워크/인터넷 접근이
+#                         전혀 필요 없다 — SLIRP가 내장 DHCP 서버를
+#                         자체적으로 갖고 있어(게이트웨이 10.0.2.2)
+#                         servers/netsrv의 DHCP 왕복 자기테스트가
+#                         이 안에서 완결된다. 기본은 미설정(장치
+#                         없음, M1~M24와 동일).
 
 set -euo pipefail
 
@@ -182,6 +192,14 @@ case "$ARCH" in
       # 고정. FAT32DISK와 같은 이유로 미리 준비돼 있어야 한다.
       EXTRA_ARGS+=(-drive "if=none,id=ext4disk,format=raw,file=${MINICORE_QEMU_EXT4DISK}")
       EXTRA_ARGS+=(-device "virtio-blk-pci,drive=ext4disk,addr=08.0")
+    fi
+
+    if [[ "${MINICORE_QEMU_NET:-0}" == "1" ]]; then
+      # M25(general-purpose-completion.md §M25) — bus0/device9 고정
+      # (ext4disk의 device8과 겹치지 않는 다음 자리). id=net0은
+      # QEMU 내부 식별자일 뿐 게스트에는 보이지 않는다.
+      EXTRA_ARGS+=(-netdev "user,id=net0")
+      EXTRA_ARGS+=(-device "virtio-net-pci,netdev=net0,addr=09.0")
     fi
 
     if [[ "${MINICORE_QEMU_XHCI:-0}" == "1" ]]; then

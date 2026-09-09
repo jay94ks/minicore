@@ -13,21 +13,23 @@ add_subdirectory(login)
 # servers/procsrv/CMakeLists.txt에 있었다 — 이제 여기서만 셋 다 참조
 # 가능해서 옮겼다). M14부터 devmgr/ps2/usb, M15부터 virtio-blk,
 # M16부터 fat32/ext4, M17부터 console/login, M19부터 cfgsrv, M20부터
-# userland/shell을 더 담는다. --depends는 ADR-152의 스폰 시점
-# 캐패빌리티 주입과 맞물린다 — initrun이 lib/*.ini의 depends= 키를
-# 보고 그 의존 서비스(들)의 endpoint 프록시를 물려준다(M16부터
-# 콤마로 여러 개 가능, init/initrun/main.cpp 참고). --trusted는
-# ADR-147/154/156/164/169의 trusted 판정과 맞물린다(devmgr/ps2/usb/
-# virtio-blk/fat32/ext4/console은 실제 하드웨어를 직접 다뤄야 하고,
-# cfgsrv는 ADR-063/074의 신뢰 프로세스 보호 대상이다). 나열 순서
-# (=cpio 기록 순서=파일명순=실행순, ADR-131 §결정5)가 곧 의존성
-# 해결 순서다 — shell은 vfs/console/ps2에 의존해 부팅 시 바로
-# 스폰되지만 자기 handle 1에서 procsrv의 OP_START(security-model.md
-# ADR-171)를 기다리며 블록한다. procsrv는 vfs/cfgsrv/shell 셋 다에
-# 의존해(로그인 성공 시 셸에 OP_START를 보내려면 그 핸들이 필요)
-# login은 console/ps2/procsrv 전부에 의존하므로 전체 순서는
-# memfs→devmgr→ps2→console→usb→virtio-blk→fat32→ext4→vfs→cfgsrv→
-# shell→procsrv→login.
+# userland/shell, M25부터 virtio-net/netsrv을 더 담는다. --depends는
+# ADR-152의 스폰 시점 캐패빌리티 주입과 맞물린다 — initrun이
+# lib/*.ini의 depends= 키를 보고 그 의존 서비스(들)의 endpoint
+# 프록시를 물려준다(M16부터 콤마로 여러 개 가능, init/initrun/main.cpp
+# 참고). --trusted는 ADR-147/154/156/164/169의 trusted 판정과
+# 맞물린다(devmgr/ps2/usb/virtio-blk/virtio-net/fat32/ext4/console은
+# 실제 하드웨어를 직접 다뤄야 하고, cfgsrv는 ADR-063/074의 신뢰
+# 프로세스 보호 대상이다) — netsrv는 하드웨어를 직접 만지지 않고
+# virtio-net에게 IPC로만 위임하므로 trusted가 아니다(vfs와 같은
+# 정신). 나열 순서(=cpio 기록 순서=파일명순=실행순, ADR-131 §결정5)
+# 가 곧 의존성 해결 순서다 — shell은 vfs/console/ps2에 의존해 부팅
+# 시 바로 스폰되지만 자기 handle 1에서 procsrv의 OP_START
+# (security-model.md ADR-171)를 기다리며 블록한다. procsrv는
+# vfs/cfgsrv/shell 셋 다에 의존해(로그인 성공 시 셸에 OP_START를
+# 보내려면 그 핸들이 필요) login은 console/ps2/procsrv 전부에
+# 의존하므로 전체 순서는 memfs→devmgr→ps2→console→usb→virtio-blk→
+# virtio-net→fat32→ext4→vfs→cfgsrv→netsrv→shell→procsrv→login.
 if(MINICORE_ARCH STREQUAL "x86_64")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -42,19 +44,23 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=console=$<TARGET_FILE:minicore_drv_console_elf>
               --service=usb=$<TARGET_FILE:minicore_drv_usb_elf>
               --service=virtio-blk=$<TARGET_FILE:minicore_drv_virtio_blk_elf>
+              --service=virtio-net=$<TARGET_FILE:minicore_drv_virtio_net_elf>
               --service=fat32=$<TARGET_FILE:minicore_fat32_elf>
               --service=ext4=$<TARGET_FILE:minicore_ext4_elf>
               --service=vfs=$<TARGET_FILE:minicore_vfs_elf>
               --service=cfgsrv=$<TARGET_FILE:minicore_cfgsrv_elf>
+              --service=netsrv=$<TARGET_FILE:minicore_netsrv_elf>
               --service=shell=$<TARGET_FILE:minicore_shell_elf>
               --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
               --service=login=$<TARGET_FILE:minicore_login_elf>
               --depends=vfs:memfs,fat32,ext4
               --depends=cfgsrv:vfs
+              --depends=netsrv:virtio-net
               --depends=shell:vfs,console,ps2
               --depends=procsrv:vfs,cfgsrv,shell
               --depends=usb:devmgr
               --depends=virtio-blk:devmgr
+              --depends=virtio-net:devmgr
               --depends=fat32:devmgr
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
@@ -62,17 +68,19 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --trusted=ps2
               --trusted=usb
               --trusted=virtio-blk
+              --trusted=virtio-net
               --trusted=fat32
               --trusted=ext4
               --trusted=console
               --trusted=cfgsrv
       DEPENDS minicore_memfs_elf minicore_vfs_elf minicore_cfgsrv_elf
-              minicore_shell_elf minicore_procsrv_elf
+              minicore_netsrv_elf minicore_shell_elf minicore_procsrv_elf
               minicore_devmgr_elf minicore_drv_ps2_elf minicore_drv_usb_elf
-              minicore_drv_virtio_blk_elf minicore_fat32_elf minicore_ext4_elf
+              minicore_drv_virtio_blk_elf minicore_drv_virtio_net_elf
+              minicore_fat32_elf minicore_ext4_elf
               minicore_drv_console_elf minicore_login_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+fat32+ext4+vfs+cfgsrv+shell+procsrv+login"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})
