@@ -1012,3 +1012,95 @@
     장치**에만 통한다 — devmgr(M14~M16)이 실제로 여러 PCI 장치를
     다뤄야 할 때는 이 코드를 재사용하지 않고 ADR-039의 일반
     열거+배정 알고리즘을 새로 구현해야 한다.
+
+## ADR-150. M12 완성: initrun의 legacy virtio-blk 클라이언트 + 실제 부트 디스크 마운트 + procsrv 골격 (OPEN-55/56/57 해소)
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: system-servers-bringup.md §M12 전체를 실제로 구현했다.
+  1. `init/initrun/virtio_blk.{hpp,cpp}` — legacy virtio-blk 레지스터
+     프로토콜(리셋→ACKNOWLEDGE|DRIVER→feature 협상(0, 옵션 기능 없음)
+     →큐 0 선택/크기 확인→vring을 DMA 버퍼 앞 16KiB에 구성→
+     QueueAddress=PFN→DRIVER_OK)과, 3-디스크립터(요청 헤더→데이터→
+     상태 바이트) 블로킹 읽기 요청 1회(`read_all`, 순수 폴링, 유한
+     반복 상한). 디바이스 config space(오프셋 0x14)에서 읽은 용량과
+     호출자가 준 상한 중 작은 쪽까지만 읽는다.
+  2. `init/initrun/main.cpp` — RDI로 받는 실제 `boot::boot_info`를
+     이제 읽는다(M8~M11은 안 읽었다). `boot_device.valid &&
+     io_port_ok`면 `sys_alloc_dma_buffer(order=10, 4MiB)`로 DMA
+     버퍼를 받아 virtio-blk를 초기화하고 부트 디스크 전체(≤3MiB)를
+     읽어, 그 cpio 아카이브를 순회해 `lib/*.ini`(아카이브 기록
+     순서=파일명순=실행순, ADR-131 §결정5)를 찾아 각각의 `exec=`가
+     가리키는 `bin/*` ELF를 `sys_process_spawn`한다. **M8~M11이
+     검증에 쓰던 "initrun 자신을 fork/exec/spawn하는 self-test
+     데모"는 이 자리에서 완전히 제거했다** — `uapi.hpp::m12_self_info`
+     의 주석이 이미 "procsrv/cpio가 실제로 생기면 통째로 사라진다"고
+     예고해 둔 그대로다.
+  3. `servers/procsrv/main.cpp` — M12 골격(procsrv.md §2~9는 구현하지
+     않는다, 핸들러 자리조차 만들지 않는다 — 아래 OPEN-56 해소 참고).
+     `sys_fork`+`sys_exec`로 자기 자신을 다시 실행하는 것이 이
+     마일스톤의 유일한 책무다. initrun의 boot_info-vs-null 구분과
+     같은 비대칭을 얻기 위해, **initrun이 procsrv를 처음 스폰할 때만
+     비어있지 않은 1바이트 argv를 주고(procsrv 자신의 self-exec
+     호출은 항상 argv 없이)** "원본이냐 사본이냐"를 구분한다
+     (ADR-149의 self_info 일반화가 procsrv에도 self_elf/self_info를
+     자동으로 채워 주므로 가능해졌다).
+  4. `tools/mkbootdisk.py` — `bin/<이름>` + `lib/NNN-<이름>.ini`
+     (`[<이름>]\nexec=bin/<이름>\n`)를 cpio(newc)로 담는 최소 자체
+     구현(ADR-006, 서드파티 cpio/tar 없음) — `tools/mkinitrd.py`의
+     MCPACK(커널이 자신에 심는 initrd)와는 완전히 다른, virtio-blk로
+     붙는 진짜 디스크 이미지를 만든다.
+  5. `servers/procsrv/CMakeLists.txt` — `minicore_procsrv_elf`를
+     `init/initrun/CMakeLists.txt`와 같은 ET_EXEC/ld.lld 직접 호출
+     패턴으로 빌드하고, `minicore_bootdisk_image` 타겟으로
+     `tools/mkbootdisk.py`를 호출한다.
+  6. `tools/smoke-test-x86_64.sh` — `MINICORE_QEMU_BOOTDISK`가
+     비어 있으면 `<빌드 디렉토리>/servers/procsrv/bootdisk.img`를
+     기본값으로 자동 첨부하도록 바꿔, **기본 스모크 테스트가 이제
+     항상 실제 부트 디스크 경로를 검증**한다 — `"[process] fork/exec/
+     spawn ok"` 어써션은 문자열이 그대로지만(process_ops.cpp가
+     호출자를 구분하지 않고 남기는 로그) 이제는 procsrv가 실제
+     디스크 I/O로 만들어진 뒤 자기 자신을 fork/exec한 결과다. 새
+     어써션 `"[pci] assign_virtio_blk_bar ok=1 vendor=0x1af4
+     device=0x1001"`을 추가했다.
+- **OPEN-55 해소**: "서비스 준비완료 신호"의 M12 임시방편으로 **아무
+  신호도 두지 않는다** — M12의 부트 디스크에는 서비스가 procsrv
+  하나뿐이라 "다음 서비스로 넘어가기 전에 기다린다"는 상황 자체가
+  없다(순서 의존성이 없으면 기다릴 이유가 없다). 게다가 이 협조적
+  스케줄러에는 `sys_yield`가 없어(uapi.hpp 참고) initrun이 스폰 후
+  "잠깐 기다렸다가 계속"할 수단 자체가 없다 — 스폰 후 곧바로
+  `sys_thread_exit()`해 스케줄러가 procsrv에게 기회를 주는 것만이
+  유일한 선택이었다. 여러 서비스가 실제로 순서 의존성을 갖게 되는
+  시점에 OPEN-52(정식 신호 프로토콜)가 필요해진다 — 그때까지 이
+  결정을 다시 열 필요는 없다.
+- **OPEN-56 해소**: procsrv.md §5(계정 생성)/§7(로그인)/§8(su/sudo)의
+  "프로토콜 골격"을 **코드상 자리조차 만들지 않는 것**으로 정한다 —
+  핸들러 스텁도, 라우팅도, 항상-실패 응답도 없다. `servers/procsrv/
+  main.cpp`는 fork/exec 자기증명 외에 아무 IPC도 받지 않는다(참고:
+  procsrv는 아직 어떤 endpoint도 갖지 않는다 — `sys_process_spawn`이
+  만드는 handle_table은 비어 있다). 근거: 아직 존재하지 않는
+  프로토콜(OPEN-54가 미정)의 빈 자리를 미리 만들어 두는 것은 그
+  프로토콜이 실제로 확정될 때 오히려 잘못된 모양의 스텁을 뜯어내는
+  비용을 더할 뿐이다 — "골격"은 procsrv라는 **프로세스**가 존재하고
+  뜬다는 사실 자체로 충분하다.
+- **OPEN-57 해소**: 구현 순서는 virtio_blk(레지스터 프로토콜) →
+  cpio/ini(이미 구현돼 있던 것을 그대로 재사용) → mkbootdisk.py →
+  initrun 통합 → procsrv 골격 순으로 진행했다 — virtio_blk을 가장
+  먼저 둔 이유는 그 성패가 나머지 전부(부트 디스크에서 실제로 무엇을
+  읽는지)를 좌우해 가장 위험도가 높았기 때문이다. 범위는 큐 협상을
+  최대한 단순화(feature 0개, 큐 1개, 요청 1개, 인터럽트 없이 순수
+  폴링)했다 — virtio_blk.hpp 상단 주석이 이미 이렇게 M14~M16의
+  "진짜" 구현과 의도적으로 분리해 뒀다.
+- **검증 결과(QEMU 실측)**: 기본 `tools/smoke-test-x86_64.sh`(부트
+  디스크 자동 첨부, 51개 어써션 — ADR-147 검증 때의 50개에 새 PCI
+  어써션 1개 추가) 전체 통과. 로그로 `[pci] assign_virtio_blk_bar
+  ok=1 vendor=0x1af4 device=0x1001 io_base=0xc000` →
+  `[process] spawn ok entry=0x10000000 trusted=0`(procsrv, 실제
+  디스크에서 읽은 ELF) → `[process] fork ok child_pml4=...` →
+  `[process] exec ok entry=0x10000000`(procsrv 자기 자신) 순서를
+  실제로 확인했다 — M12의 QEMU 검증 목표("실제 디스크 I/O를 거친
+  프로세스 생성은 이번이 처음")를 그대로 만족한다.
+- **알려진 단순화(M12 범위 밖으로 명시적으로 남긴 것)**: ADR-131
+  §결정3의 PCIe 폴백 스캔 미구현(disk.cfg 없으면 그냥 실패), OPEN-51
+  ("systemd류 초기 프로세스") 미구현(procsrv 스폰 후 initrun은 그냥
+  종료), config_blob 전달 미구현(스폰되는 서비스에게 원본 key=value
+  나머지를 넘기는 경로 없음 — 지금은 procsrv가 그걸 쓸 일이 없다).

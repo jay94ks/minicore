@@ -1,16 +1,28 @@
-// init/initrun/main.cpp — 커널이 유저모드로 띄우는 최초 프로세스의 최소
-// 데모 바이너리 (docs/plan/kernel-bootstrap.md M8, docs/spec/boot.md §4/§6).
+// init/initrun/main.cpp — 커널이 유저모드로 띄우는 최초 프로세스
+// (docs/plan/kernel-bootstrap.md M8, docs/plan/system-servers-bringup.md
+// §M12, docs/spec/boot.md §4/§6, ADR-131).
 //
-// 이 마일스톤에는 콘솔·파일시스템 등 유저모드 I/O 경로가 전혀 없다 —
-// initrun의 유일한 "출력"은 커널에 보내는 IPC Call 그 자체다. 커널
-// 쪽 수신 스레드(kernel_main.cpp의 thread_initrun_boot_server_entry)가
-// 이 호출을 받으면 klog로 "부팅 성공"을 기록한다 — 관찰은 커널 시리얼
-// 로그를 통해서만 가능하다. RDI로 boot_info 포인터를 규약대로(ADR-030/
-// boot.md §6) 받지만, 이 데모는 아직 그 내용을 읽지 않는다(procsrv 등
-// 실제로 부팅 정보가 필요한 이후 서버가 등장할 때 의미가 생긴다).
+// M8~M11 동안은 콘솔·파일시스템이 전혀 없어 커널에 보내는 IPC Call
+// 하나가 유일한 "출력"이었다(관찰은 kernel_main.cpp의
+// thread_initrun_boot_server_entry가 klog로 남기는 로그를 통해서만
+// 가능 — 지금도 그 경로를 그대로 쓴다). M12부터는 그 위에 실제 역할이
+// 추가된다: RDI로 받는 boot_info(ADR-030/boot.md §6)의
+// boot_device_descriptor로 부트 디바이스(virtio-blk)를 직접 마운트해
+// (임베디드 최소 virtio-blk 클라이언트, virtio_blk.hpp) cpio(newc)
+// 아카이브를 읽고, 그 안 `lib/*.ini`가 가리키는 서비스(M12는 procsrv
+// 하나)를 `sys_process_spawn`으로 띄운다. M8~M11이 검증에 쓰던
+// "initrun 자신을 fork/exec/spawn하는 self-test 데모"는 이제
+// procsrv가 실제 디스크에서 읽혀 스폰된 뒤 자기 자신을 fork/exec하는
+// 것으로 대체됐다(kernel/arch/x86_64/process_ops.cpp가 호출자를
+// 구분하지 않고 남기는 같은 "[process] fork/exec/spawn ok" 로그이므로
+// 같은 스모크 테스트 어써션이 이제는 이 실제 경로로 충족된다) —
+// uapi.hpp::m12_self_info 주석이 예고한 대로 이 자리에서 그 임시
+// 다리를 걷어냈다.
 #include "cpio_reader.hpp"
 #include "ini_parser.hpp"
+#include "virtio_blk.hpp"
 
+#include <boot_info.hpp>
 #include <uapi.hpp>
 
 namespace {
@@ -134,24 +146,6 @@ uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     return ret;
 }
 
-// M12(system-servers-bringup.md §M12, ADR-142) — 실제 procsrv/cpio가
-// 아직 없어(OPEN-53~57), sys_fork/sys_process_spawn/sys_exec 커널
-// 프리미티브를 검증할 유일한 방법은 initrun 자신이 "자기 자신을
-// 다시 spawn/exec"해 보는 것이다. kernel_main.cpp::setup_initrun_process가
-// 이 목적으로 initrun 자신의 원본 ELF 바이트를 uapi::k_m12_self_elf_user_vaddr
-// 에 미리 복사해 두고, 그 주소/크기를 uapi::k_m12_self_info_user_vaddr의
-// uapi::m12_self_info로 알려 준다 — 이 배선은 procsrv/cpio가 실제로
-// 생기면 통째로 사라질 임시 다리다.
-//
-// 흐름(RDI로 받는 값이 진짜 boot_info인지 아닌지로 "나는 원본인가
-// 사본인가"를 구분한다 — process_spawn/exec으로 만들어진 사본은
-// argv를 안 줬으므로 항상 nullptr을 받는다):
-//   원본: sys_fork() → 자식은 sys_exec()으로 자기 자신을 다시 실행
-//         (fork+exec 둘 다 실제로 동작했다는 증거가 커널 로그에 남는다) →
-//         부모는 기존 M8 boot IPC call을 그대로 보낸 뒤 sys_process_spawn()
-//         으로 또 다른 사본을 새 프로세스로 띄우고 → sys_thread_exit()으로
-//         물러나 협조적 스케줄러가 자식/사본에게 기회를 준다.
-//   사본: 조용히 sys_thread_exit().
 [[noreturn]] void quiet_exit() {
     do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
     // sys_thread_exit은 절대 반환하지 않는다 — 도달하면 커널 쪽 버그.
@@ -160,32 +154,143 @@ uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     }
 }
 
+bool starts_with(const char* name, const char* prefix) {
+    while (*prefix != '\0') {
+        if (*name != *prefix) {
+            return false;
+        }
+        ++name;
+        ++prefix;
+    }
+    return true;
+}
+
+bool ends_with_ini(const char* name) {
+    uint64_t len = 0;
+    while (name[len] != '\0') {
+        ++len;
+    }
+    return len >= 4 && name[len - 4] == '.' && name[len - 3] == 'i' && name[len - 2] == 'n' &&
+           name[len - 1] == 'i';
+}
+
+// ini::find_value()가 돌려주는 span은 원본 아카이브 버퍼를 그대로
+// 가리킬 뿐 NUL로 끝나지 않는다 — cpio::find_entry()는 NUL 종료
+// 문자열을 요구하므로 고정 버퍼에 복사해 NUL을 붙인다.
+bool copy_span_to_cstr(span<const char> s, char* buf, uint64_t buf_size) {
+    if (s.size() + 1 > buf_size) {
+        return false;
+    }
+    for (uint64_t i = 0; i < s.size(); ++i) {
+        buf[i] = s.data()[i];
+    }
+    buf[s.size()] = '\0';
+    return true;
+}
+
+// procsrv(M12 QEMU 검증 대상)가 "나는 initrun이 방금 스폰한 원본인가,
+// 아니면 sys_fork+sys_exec으로 만들어진 사본인가"를 구분하는 데
+// 쓴다(servers/procsrv/main.cpp 상단 주석의 규약) — initrun의
+// boot_info(항상 비어있지 않은 포인터) vs null 구분과 같은 비대칭을
+// argv 유무로 재현한 것이라, 내용 자체는 의미가 없고 그냥 비어있지만
+// 않으면 된다.
+constexpr uint8_t k_service_argv_marker[] = {'x'};
+
+struct spawn_ctx {
+    const uint8_t* archive;
+    uint64_t archive_size;
+    uint32_t spawned_count = 0;
+};
+
+// cpio::for_each_entry()가 아카이브에 기록된 순서(=lib/*.ini 파일명
+// 순서, tools/mkbootdisk.py가 그렇게 써 둔다, ADR-131 §결정5)대로
+// 각 엔트리에 대해 호출한다 — lib/*.ini가 아닌 엔트리(bin/* 자체,
+// disk.cfg 등)는 건너뛴다.
+void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t size) {
+    if (!starts_with(name, "lib/") || !ends_with_ini(name)) {
+        return;
+    }
+    auto exec_val = ini::find_value(data, size, "exec");
+    if (!exec_val.is_ok()) {
+        return;
+    }
+    char exec_path[64];
+    if (!copy_span_to_cstr(exec_val.value(), exec_path, sizeof(exec_path))) {
+        return;
+    }
+
+    auto* ctx = static_cast<spawn_ctx*>(ctx_raw);
+    auto elf_entry = cpio::find_entry(ctx->archive, ctx->archive_size, exec_path);
+    if (!elf_entry.is_ok()) {
+        return;
+    }
+
+    uapi::process_spawn_request req{};
+    req.elf_data = reinterpret_cast<uint64_t>(elf_entry.value().data);
+    req.elf_size = elf_entry.value().size;
+    req.argv_blob = reinterpret_cast<uint64_t>(k_service_argv_marker);
+    req.argv_size = sizeof(k_service_argv_marker);
+    req.grant_trusted = false;  // M12의 서비스(procsrv)는 하드웨어를 직접 다루지 않는다.
+    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&req), 0, 0);
+    ++ctx->spawned_count;
+}
+
+// ADR-131 §결정1~5/§근거, ADR-147 — boot_info.boot_device로 알려진
+// virtio-blk 부트 디바이스를 임베디드 클라이언트로 마운트해 그 안의
+// cpio(newc) 아카이브를 읽고, lib/*.ini가 가리키는 서비스들을
+// sys_process_spawn한다. 디바이스가 없거나(io_port_ok==0) 어느
+// 단계에서든 실패하면 그냥 false — M12는 ADR-131 §결정3의 PCIe
+// 폴백 스캔을 구현하지 않으므로 이 경우 그대로 부팅을 포기한다.
+bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
+    if (bi.boot_device.valid == 0 || bi.boot_device.io_port_ok == 0) {
+        return false;
+    }
+
+    // order=10 → 4MiB. vring(최대 16KiB 예약, virtio_blk.cpp) + 부트
+    // 디스크 내용(M12는 procsrv 하나뿐이라 수십 KiB) 전부를 넉넉히
+    // 담는다 — 앞으로 서비스가 늘어도 3MiB 상한(k_max_boot_disk_bytes)
+    // 안에서는 그대로 재사용 가능하다.
+    constexpr uint32_t k_dma_buffer_order = 10;
+    uapi::dma_buffer_result dma{};
+    uint64_t alloc_err = do_syscall(uapi::k_syscall_alloc_dma_buffer,
+                                     reinterpret_cast<uint64_t>(&dma), k_dma_buffer_order, 0);
+    if (alloc_err != 0) {
+        return false;
+    }
+
+    auto* dma_virt = reinterpret_cast<uint8_t*>(dma.virt_addr);
+    auto io_base = static_cast<uint16_t>(bi.boot_device.io_port_base);
+    if (!virtio_blk::init(io_base, dma_virt, dma.phys_addr)) {
+        return false;
+    }
+
+    const uint8_t* archive = nullptr;
+    uint64_t archive_len = 0;
+    constexpr uint64_t k_max_boot_disk_bytes = 3ull * 1024 * 1024;
+    if (!virtio_blk::read_all(io_base, dma_virt, dma.phys_addr, k_max_boot_disk_bytes, &archive,
+                               &archive_len)) {
+        return false;
+    }
+
+    spawn_ctx ctx{archive, archive_len};
+    auto walked = cpio::for_each_entry(archive, archive_len, &spawn_visit, &ctx);
+    return walked.is_ok() && ctx.spawned_count > 0;
+}
+
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void* boot_info_or_null) {
     if (boot_info_or_null == nullptr) {
-        quiet_exit();  // fork/process_spawn/exec으로 만들어진 사본.
+        quiet_exit();  // sys_process_spawn/sys_exec으로 만들어진 사본(이 프로세스는 원래 initrun 자신을 다시 만들 일이 없다 — 방어적으로만 남겨 둔다).
     }
 
-    const auto* self_info =
-        reinterpret_cast<const uapi::m12_self_info*>(uapi::k_m12_self_info_user_vaddr);
+    const auto& bi = *reinterpret_cast<const boot::boot_info*>(boot_info_or_null);
 
-    uint64_t fork_ret = do_syscall(uapi::k_syscall_fork, 0, 0, 0);
-    if (fork_ret == 0) {
-        // 자식 — sys_exec()으로 자기 자신을 다시 실행한다. 성공하면
-        // 이 호출은 반환하지 않는다(새 이미지가 arg0=nullptr로
-        // _start부터 다시 시작 — quiet_exit 분기를 탄다).
-        uapi::exec_request exec_req{};
-        exec_req.elf_data = self_info->elf_addr;
-        exec_req.elf_size = self_info->elf_size;
-        do_syscall(uapi::k_syscall_exec, reinterpret_cast<uint64_t>(&exec_req), 0, 0);
-        quiet_exit();  // exec 실패 시에만 도달.
-    }
-
-    // 부모 — 기존 M8 boot IPC call. regs[0]에 cpio/INI 파서 자체
-    // 검증 결과(1=통과)를 실어 커널 로그로 확인한다(호스트 단위
-    // 테스트가 없는 이 종류의 파서에 대한 이 프로젝트의 관례 —
-    // mcpack/elf_loader와 마찬가지로 QEMU 왕복으로 검증).
+    // 기존 M8 boot IPC call. regs[0]에 cpio/INI 파서 자체 검증 결과
+    // (1=통과)를 실어 커널 로그로 확인한다(호스트 단위 테스트가 없는
+    // 이 종류의 파서에 대한 이 프로젝트의 관례 — mcpack/elf_loader와
+    // 마찬가지로 QEMU 왕복으로 검증). 이 자체 테스트는 실제 부트
+    // 디바이스와 무관하게 항상 돈다.
     uapi::message out{};
     out.label = k_boot_label;
     out.regs[0] = test_cpio_and_ini() ? 1 : 0;
@@ -193,11 +298,13 @@ extern "C" [[noreturn]] void _start(const void* boot_info_or_null) {
     do_syscall(uapi::k_syscall_ipc_call, k_boot_endpoint_handle,
                reinterpret_cast<uint64_t>(&out), reinterpret_cast<uint64_t>(&in));
 
-    // sys_process_spawn() — 자기 자신의 또 다른 사본을 새 프로세스로.
-    uapi::process_spawn_request spawn_req{};
-    spawn_req.elf_data = self_info->elf_addr;
-    spawn_req.elf_size = self_info->elf_size;
-    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&spawn_req), 0, 0);
+    // M12(ADR-131) — 실제 부트 디바이스 마운트 + 서비스 스폰. 이후
+    // 하나 이상의 서비스가 스케줄될 기회를 얻으려면(협조적 스케줄러라
+    // sys_yield가 없다, uapi.hpp 참고) initrun 자신이 물러나야 한다 —
+    // 그래서 성공/실패와 무관하게 곧바로 quiet_exit()한다. OPEN-51
+    // ("systemd류 초기 프로세스"의 정체성)은 아직 미해결이라 M12는
+    // 스폰된 서비스가 곧 initrun 이후의 유일한 프로세스다.
+    mount_boot_device_and_spawn_services(bi);
 
     quiet_exit();
 }

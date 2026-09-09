@@ -82,9 +82,9 @@ minicore/
 │   ├── apply-patches.*            # submodule 체크아웃 위에 patches/ 적용
 │   ├── mkinitrd.*                 # initrun 자신 + disk.cfg(부트 디바이스 서술자,
 │   │                                # ADR-131)를 커널 임베딩용 initrd로 패키징
-│   ├── mkbootdisk.*(가칭)          # procsrv 등 서비스 바이너리 + NNN-이름.ini 시동
+│   ├── mkbootdisk.py               # procsrv 등 서비스 바이너리 + NNN-이름.ini 시동
 │   │                                # 파일을 담는 cpio(newc) 부트 디스크 이미지 생성
-│   │                                # (ADR-131, mkinitrd와 별개 산출물)
+│   │                                # (ADR-131/150, mkinitrd와 별개 산출물)
 │   └── run-qemu.*                 # 아키텍처별 QEMU 실행 스크립트 (ADR-131 이후 부트
 │                                    # 디스크를 virtio-blk로 붙이는 옵션 포함)
 │

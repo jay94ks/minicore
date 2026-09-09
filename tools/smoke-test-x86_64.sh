@@ -43,6 +43,15 @@
 #     없음)을 보인다. AVX 유/무 두 QEMU 구성 검증은 opt-in
 #     MINICORE_QEMU_CPU로 별도 확인한다(기본 QEMU CPU는 XSAVE/AVX가
 #     없어 FXSAVE 폴백 경로를 그대로 검증한다).
+#   M12 (system-servers-bringup.md, ADR-131/147/149): initrun이 실제
+#     virtio-blk 부트 디스크(tools/mkbootdisk.py로 만든 procsrv 이미지,
+#     기본으로 자동 첨부 — 아래 MINICORE_QEMU_BOOTDISK 참고)의 PCI BAR를
+#     스스로 배정하고, 그 디스크의 cpio 아카이브를 읽어 procsrv를
+#     sys_process_spawn한 뒤, procsrv가 자기 자신을 sys_fork+sys_exec —
+#     "[process] fork/exec/spawn ok" 로그는 이제 initrun의 self-test
+#     데모가 아니라 **procsrv가 실제 디스크 I/O로 만들어진 뒤** 남기는
+#     로그다(kernel/arch/x86_64/process_ops.cpp가 호출자를 구분하지
+#     않고 남기는 로그라 문자열은 그대로 재사용된다).
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -50,13 +59,27 @@
 # 사용법: tools/smoke-test-x86_64.sh [빌드 디렉토리(기본: build/x86_64-clang)]
 #
 # 환경 변수:
-#   MINICORE_QEMU_BIN   qemu-system-x86_64 실행파일 경로(run-qemu.sh로 그대로 전달)
+#   MINICORE_QEMU_BIN        qemu-system-x86_64 실행파일 경로(run-qemu.sh로 그대로 전달)
+#   MINICORE_QEMU_BOOTDISK   기본값은 <빌드 디렉토리>/servers/procsrv/bootdisk.img
+#                            (servers/procsrv/CMakeLists.txt가 만든다) — M12부터
+#                            항상 실제 부트 디스크를 붙여야 procsrv 경로가 검증되므로
+#                            비워 두면 이 스크립트가 그 경로를 채워 넣는다. 그 파일이
+#                            없으면(아직 빌드 안 함) 디스크 없이 부팅하고 그만큼의
+#                            어써션은 실패한다 — 먼저
+#                            `cmake --build <빌드 디렉토리> --target minicore_bootdisk_image`.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
 TIMEOUT_SEC=25  # M12부터 initrun.elf가 커지는 추세라 여유를 좀 더 둔다.
+
+if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
+  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/procsrv/bootdisk.img"
+  if [[ -f "$DEFAULT_BOOTDISK" ]]; then
+    export MINICORE_QEMU_BOOTDISK="$DEFAULT_BOOTDISK"
+  fi
+fi
 
 declare -a EXPECTED=(
   "hello from kernel"
@@ -90,6 +113,7 @@ declare -a EXPECTED=(
   "[ipc2] receiver sys_wait ok=1 bits=0x2 (expect 0x2)"
   "[initrun] mcpack find_entry ok=1"
   "[initrun] load_elf ok=1"
+  "[pci] assign_virtio_blk_bar ok=1 vendor=0x1af4 device=0x1001"
   "[initrun] setup_initrun_process ok=1"
   "[initrun] kernel received boot call ok=1 label=0xb007 (expect 0xb007) - 부팅 성공"
   "[initrun] cpio/ini self-test ok=1"

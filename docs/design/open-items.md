@@ -16,15 +16,15 @@
 | OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스" — procsrv 등 코어 서버가 아닌 **별도의 유저랜드 서비스 관리자 데몬**(정체성 확정, Linux systemd에 대응)의 실제 이름·책임 범위와, 프로세스 트리의 새 루트가 되는 구체적 절차 — **별도 design 문서 대상**(OPEN-52와 같은 성격) | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
 | OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 | (미정) | [procsrv.md](../spec/procsrv.md) |
-| OPEN-55 | OPEN-52(서비스 준비완료 신호 프로토콜)가 아직 별도 설계로 미착수인 상태에서, M12가 지금 당장 써야 할 **임시 방편**(정해진 타임아웃 vs 단순 notification 1회 등, 계획 §M12 §구현1이 이미 이렇게 임시로 진행하라고 명시)의 구체적 선택 | ADR-131 | [system-servers-bringup.md](../plan/system-servers-bringup.md) |
-| OPEN-56 | procsrv.md §5(계정 생성)/§7(로그인)/§8(su/sudo)를 M12에서 완전히 스킵하고 "프로토콜 골격만"(계획 §M12 §구현2가 이미 이렇게 scope했다) 남기는 정확한 경계 — 골격만 만든다는 게 정확히 어디까지인지(예: 코드상 handler 자리는 만들되 항상 실패 반환? 아예 라우팅도 안 함?) | (미정) | [procsrv.md](../spec/procsrv.md) |
-| OPEN-57 | virtio-blk 클라이언트·cpio(newc) 파서·INI 파서·`tools/mkbootdisk.py`의 구현 순서와 각각의 최소 범위(예: virtio-blk 큐 협상을 얼마나 단순화할지) — system-servers-bringup.md §M12가 뭘 만들지는 정했지만 어느 순서로 쌓을지는 구현자 재량으로 남겨 뒀다 | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-58 | ADR-147의 TSS IOPB(I/O 포트 허가 비트맵)가 코어당 TSS 하나에 전역으로 공유된다 — 신뢰하지 않는 유저 프로세스가 생기는 시점(M12 이후, procsrv의 진짜 다중 프로세스)에는 initrun을 위해 열어 둔 포트 범위가 그 프로세스에게도 그대로 노출된다. 스레드별 TSS(코어당 컨텍스트 스위치 시 TSS 재적재)나 그 외 격리 방안 재검토 필요 | ADR-147 | [boot-and-drivers.md](boot-and-drivers.md) |
 
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-55~~ | 서비스 준비완료 신호의 M12 임시방편 — 아무 신호도 두지 않는다(M12는 서비스가 procsrv 하나뿐이라 순서 대기 자체가 불필요, 게다가 sys_yield가 없어 initrun이 "기다렸다 계속"할 수단이 없다) | ADR-150 |
+| ~~OPEN-56~~ | procsrv.md §5/7/8의 M12 "프로토콜 골격" 경계 — 코드상 자리조차 만들지 않는다(핸들러 스텁도, 라우팅도, 항상-실패 응답도 없음) | ADR-150 |
+| ~~OPEN-57~~ | virtio-blk 클라이언트·cpio/INI 파서·mkbootdisk.py의 구현 순서와 범위 — virtio_blk(레지스터 프로토콜)을 가장 먼저, 이후 cpio/ini 재사용→mkbootdisk.py→initrun 통합→procsrv 골격 순으로 진행, 큐 협상은 feature 0개/큐 1개/요청 1개/순수 폴링까지만 단순화 | ADR-150 |
 | ~~OPEN-53~~ | `sys_process_spawn`/`sys_fork`/`sys_exec`/`sys_thread_exit`의 정확한 시그니처·에러 코드·syscall 번호 — QEMU에서 initrun 자신을 fork/exec/spawn하는 전체 왕복까지 실제 검증 완료 | ADR-142 |
 | ~~OPEN-49~~ | initrun이 각 서비스의 초기화 완료를 기다린 뒤 다음으로 넘어간다는 방향은 확정(ADR-131 §결정6) — 정확한 준비완료 신호 프로토콜은 범위가 커서 별도 설계로 분리 | OPEN-52로 이관 |
 | ~~OPEN-50~~ | initrun이 부트 파티션에서 서비스 바이너리를 찾는 정확한 탐색 규칙 | ADR-131 |
