@@ -295,13 +295,34 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
     child_space->confinement = self->owner_space->confinement;
     child_space->page_table_root = child_root.value();
 
-    // procsrv.md §3.6 — fd 테이블 복제는 procsrv 자신의 몫이다(각
-    // 소유 서버에 IPC로 "복제해 달라"고 요청). 커널은 빈 테이블로
-    // 시작만 시켜 준다.
+    // M23(general-purpose-completion.md §M23, ADR-179) — procsrv.md
+    // §3.6/§4.1이 그리는 "procsrv가 각 소유 서버에 IPC로 fd 복제를
+    // 요청"하는 완전한 fd 진실 공급원 프로토콜은 이번 라운드에도
+    // 구현하지 않는다(범위 좁힘, ADR-179 참고). 대신 커널이
+    // handle_table 전체를 그대로 프록시로 복제한다 — 이전에는(M12
+    // ~M22) 자식이 완전히 빈 테이블로 시작했다. VFS/FS 서버들의
+    // "열린 파일" 상태(예: memfs의 read_cursor/write_cursor)는
+    // open_file_id로만 식별되고 커널 핸들·발신자 신원과 무관하게
+    // 서버 쪽에 남아 있으므로(servers/fs/memfs/main.cpp), 부모·자식이
+    // 같은 open_file_id를 계속 쓰기만 하면 파일 오프셋 공유까지
+    // 별도 프로토콜 없이 저절로 성립한다.
     object::handle_table* child_handles = object::create_handle_table();
     if (child_handles == nullptr) {
         mm::slab_free(child_space, sizeof(object::address_space));
         return static_cast<uint64_t>(process_spawn_error::out_of_memory);
+    }
+    for (uint32_t h = 1; h < object::k_max_handles; ++h) {
+        const object::handle_entry* e = self->handles->debug_entry(static_cast<object::handle>(h));
+        if (e == nullptr || !e->valid) {
+            continue;
+        }
+        // rights_mask=e->rights(축소 없음)+has_badge_override=false(부모
+        // 것을 그대로 상속, handle_table.cpp::create_proxy 주석 참고) —
+        // "완전히 같은 fd 테이블의 복사본"이라는 POSIX fork() 의미론
+        // 그대로다. 실패(테이블 가득 참 등)는 objects.md §4 3단계와
+        // 같은 정신으로 이 항목만 건너뛴다.
+        self->handles->create_proxy(static_cast<object::handle>(h), e->rights, *child_handles, 0,
+                                     false);
     }
 
     object::thread* child =

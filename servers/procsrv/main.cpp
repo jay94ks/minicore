@@ -288,6 +288,29 @@ bool is_kill_target_argv(const void* argv) {
     return magic == k_kill_target_magic;
 }
 
+// M23(general-purpose-completion.md §M23, ADR-179) — fork+exec 뒤에도
+// 상속받은 fd(open_file_id+memfs_handle)로 이어 읽을 수 있는지
+// 검증하는 타깃. open_file_id/memfs_handle을 argv로 그대로 넘긴다 —
+// exec가 handle_table을 건드리지 않으므로(process_ops.cpp::exec_current
+// 참고) memfs_handle 값 자체는 fork 시점 그대로 유효해야 한다(이
+// argv 전달은 "그 값이 여전히 유효한가"를 확인하는 수단일 뿐,
+// 핸들을 새로 만들어 주는 것이 아니다).
+constexpr uint32_t k_fd_continue_magic = 0x46444331;  // "FDC1"
+struct fd_continue_argv {
+    uint32_t magic = 0;
+    uint64_t open_file_id = 0;
+    uint32_t memfs_handle = 0;
+};
+
+bool is_fd_continue_argv(const void* argv) {
+    if (argv == nullptr) {
+        return false;
+    }
+    uint32_t magic;
+    __builtin_memcpy(&magic, argv, sizeof(magic));
+    return magic == k_fd_continue_magic;
+}
+
 // vfs에 path를 열어 open_file_id/fs_handle을 얻는다(identity=0 —
 // 로더 자신은 guest/jail이 아니다). 실패하면 fs_handle=0.
 void vfs_open(const char* path, uint64_t& out_open_file_id, uint32_t& out_fs_handle) {
@@ -468,6 +491,97 @@ void handle_su(const uapi::message& in, uapi::message& out) {
 // 로그로 남긴다(run_as_su_target 참고).
 void run_guest_confinement_test() {
     spawn_su_target(2000, /*is_super=*/false, /*is_guest=*/true, /*is_jail=*/false);
+}
+
+// M23(general-purpose-completion.md §M23, ADR-179) — fd_continue_argv로
+// exec된 procsrv 사본의 역할. argv로 넘겨받은 memfs_handle/open_file_id
+// 로 OP_READ를 계속한다 — fork() 직전에 부모가 이미 앞부분("hello")을
+// 읽어 서버 쪽 read_cursor를 옮겨 뒀으므로, 이 자식이 요청하는 나머지
+// 4바이트(" vfs")가 정확히 오면(그리고 fork가 handle_table을 복제해
+// 이 handle 번호가 실제로 같은 memfs endpoint를 가리키면) fd 상속이
+// 실제로 동작한다는 뜻이다.
+[[noreturn]] void run_as_fd_continue_target(const void* argv) {
+    fd_continue_argv a{};
+    __builtin_memcpy(&a, argv, sizeof(a));
+
+    uapi::message read_req{};
+    read_req.label = k_op_read;
+    read_req.regs[0] = a.open_file_id;
+    read_req.regs[1] = 4;
+    uapi::message read_reply{};
+    do_syscall(uapi::k_syscall_ipc_call, a.memfs_handle, reinterpret_cast<uint64_t>(&read_req),
+               reinterpret_cast<uint64_t>(&read_reply));
+    bool ok = (read_reply.regs[1] == 0) && (read_reply.regs[0] == 4) &&
+              read_reply.page_count == 1 &&
+              bytes_equal(reinterpret_cast<const void*>(read_reply.pages[0].vaddr), " vfs", 4);
+    const char* m = ok ? "[procsrv] fd inherited continue read ok=1\n"
+                         : "[procsrv] fd inherited continue read ok=0\n";
+    debug_log(m, cstr_len(m));
+    quiet_exit();
+}
+
+// M23 — 위 타깃을 실제로 fork+exec해 fd 상속을 검증한다.
+// run_vfs_roundtrip_test()가 이미 만들어 둔 "test.txt"("hello vfs",
+// 9바이트)를 **새로운 open_file_id로 다시 연다**(run_vfs_roundtrip_test
+// 자신의 open_file_id는 이미 그 전체를 다 읽어 커서가 파일 끝에
+// 있다 — open_file_id별로 독립된 커서이므로 서로 간섭하지 않는다,
+// servers/fs/memfs/main.cpp의 g_opens[] 참고). g_loader_ok가
+// 필요하므로 반드시 run_loader_test() 이후에 불러야 한다.
+void run_fd_inheritance_test() {
+    if (!g_loader_ok) {
+        return;
+    }
+
+    uint64_t open_file_id = 0;
+    uint32_t memfs_handle = 0;
+    vfs_open("test.txt", open_file_id, memfs_handle);
+    if (memfs_handle == 0) {
+        const char* m = "[procsrv] fd inheritance open failed\n";
+        debug_log(m, cstr_len(m));
+        return;
+    }
+
+    // 앞부분 5바이트("hello")만 읽어 서버 쪽 read_cursor를 5로
+    // 옮겨 둔다 — 나머지(" vfs")를 자식이 이어 읽는 것이 검증
+    // 대상이다.
+    uapi::message read_req{};
+    read_req.label = k_op_read;
+    read_req.regs[0] = open_file_id;
+    read_req.regs[1] = 5;
+    uapi::message read_reply{};
+    do_syscall(uapi::k_syscall_ipc_call, memfs_handle, reinterpret_cast<uint64_t>(&read_req),
+               reinterpret_cast<uint64_t>(&read_reply));
+    bool first_ok = (read_reply.regs[1] == 0) && (read_reply.regs[0] == 5) &&
+                     read_reply.page_count == 1 &&
+                     bytes_equal(reinterpret_cast<const void*>(read_reply.pages[0].vaddr), "hello",
+                                 5);
+    if (!first_ok) {
+        const char* m = "[procsrv] fd inheritance first read failed\n";
+        debug_log(m, cstr_len(m));
+        return;
+    }
+
+    uint64_t fork_ret = do_syscall(uapi::k_syscall_fork, 0, 0, 0);
+    if (fork_ret == 0) {
+        // 자식 — M23(ADR-179)의 fork() 수정으로 이 시점에 이미
+        // memfs_handle이 그대로 유효하다. exec로 완전히 새 이미지로
+        // 뛰어들어(handle_table은 exec가 건드리지 않는다) "그래도 그
+        // 값이 유효한가"까지 함께 확인한다.
+        fd_continue_argv fargv{};
+        fargv.magic = k_fd_continue_magic;
+        fargv.open_file_id = open_file_id;
+        fargv.memfs_handle = memfs_handle;
+
+        uapi::exec_request exec_req{};
+        exec_req.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+        exec_req.elf_size = g_reassembled_size;
+        exec_req.argv_blob = reinterpret_cast<uint64_t>(&fargv);
+        exec_req.argv_size = sizeof(fargv);
+        do_syscall(uapi::k_syscall_exec, reinterpret_cast<uint64_t>(&exec_req), 0, 0);
+        quiet_exit();  // exec 실패 시에만 도달.
+    }
+    // 부모는 그대로 다음 자기테스트로 진행한다 — fork 성공 자체는
+    // 커널이 이미 "[process] fork ok"로 로그를 남긴다.
 }
 
 // su_target_argv로 다시 스폰된 procsrv 사본의 역할. 신원을 로그로
@@ -1039,6 +1153,11 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     if (is_kill_target_argv(argv_or_null)) {
         run_as_kill_target(argv_or_null);
     }
+    // M23(general-purpose-completion.md §M23) — 위와 같은 자리, 같은
+    // 이유.
+    if (is_fd_continue_argv(argv_or_null)) {
+        run_as_fd_continue_target(argv_or_null);
+    }
     if (argv_or_null == nullptr) {
         quiet_exit();  // sys_fork+sys_exec으로 만들어진 사본.
     }
@@ -1077,6 +1196,12 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // OP_SU를 부르기 전에 로더가 준비돼 있어야 한다.
     run_loader_test(*self_info);
     run_guest_confinement_test();
+
+    // M23(general-purpose-completion.md §M23, ADR-179) — fork()가
+    // handle_table을 실제로 복제하는지, exec() 이후에도 그 fd가
+    // 계속 유효한지 검증한다. run_vfs_roundtrip_test()가 만들어 둔
+    // test.txt가 필요하다(이미 위에서 실행됨).
+    run_fd_inheritance_test();
 
     // M19(system-servers-bringup.md §M19, registry-decisions.md
     // ADR-169) — cfgsrv에 설정값을 쓰고 다시 읽는 왕복과 권한 모델

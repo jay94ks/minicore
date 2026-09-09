@@ -121,15 +121,17 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   로 방향을 정했다.
 - 그 방향에 따라 [docs/plan/general-purpose-completion.md](docs/plan/general-purpose-completion.md)
   (M21 선점형 스케줄링 ~ M26 실제 libc 포팅 재도전)를 새로 계획했다.
-  **M21~M22 완료**. M21: LAPIC 타이머 기반 선점(BSP·ring3 한정,
+  **M21~M23 완료**. M21: LAPIC 타이머 기반 선점(BSP·ring3 한정,
   ADR-176)과 그 과정에서 발견한 TSS.RSP0 전역 공유 버그 수정
   (ADR-177), 결과는
   [docs/done/general-purpose-completion-m21.md](docs/done/general-purpose-completion-m21.md).
   M22: `sys_process_kill`(ADR-178)+procsrv의 wait/kill 자기테스트,
   결과는
   [docs/done/general-purpose-completion-m22.md](docs/done/general-purpose-completion-m22.md).
-  다음 실행 대상은 M23(진짜 fork/exec — procsrv가 fd 진실 공급원
-  역할을 실제로 수행). **주의**: `servers/*`/`userland/*` 코드를
+  M23: `sys_fork`가 handle_table 전체를 복제(ADR-179)+procsrv의
+  fork+exec fd 상속 자기테스트, 결과는
+  [docs/done/general-purpose-completion-m23.md](docs/done/general-purpose-completion-m23.md).
+  다음 실행 대상은 M24(유저랜드 동적 메모리). **주의**: `servers/*`/`userland/*` 코드를
   고친 뒤에는 일반 `cmake --build`만으로는 `bootdisk.img`가
   갱신되지 않는다(add_custom_target이라 기본 빌드에 안 걸림) —
   `--target minicore_bootdisk_image`를 반드시 추가로 돌려야 한다

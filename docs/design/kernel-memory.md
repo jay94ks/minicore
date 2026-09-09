@@ -1102,3 +1102,54 @@
   전부 컴파일 타임에 이미 예산 이내임이 자명해(`static_assert` 수준
   자명함) 별도 런타임 검사를 추가하지 않았다 — 실제로 검사가 필요한
   건 self_elf(가변 크기 ELF 복사) 하나뿐이었다.
+
+## ADR-179. `sys_fork`가 handle_table 전체를 프록시로 복제한다(procsrv 매개 fd 프로토콜 없이)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [process_ops.cpp::fork_current()](../../kernel/arch/x86_64/process_ops.cpp)
+  가 자식의 `handle_table`을 빈 채로 두던 것을, 부모의 handle_table
+  1~63번 슬롯을 순회해(`handle_table::debug_entry()`로 valid한 항목만)
+  각각 `create_proxy(h, e->rights, *child_handles, 0, false)`로
+  자식에게 그대로 복제하도록 바꾼다 — rights는 그대로(마스크 축소
+  없음), badge도 `has_badge_override=false`로 부모 값을 그대로
+  상속한다(`handle_table.cpp::create_proxy` 자체가 이미 이 동작을
+  지원한다). 실패(테이블 가득 참 등)는 그 항목 하나만 건너뛴다
+  (objects.md §4 3단계와 같은 정신).
+- **근거**: [general-purpose-completion.md](../plan/general-purpose-completion.md)
+  §M23("ADR-008이 지적한 가장 어려운 문제")이 요구한 것은 procsrv.md
+  §3.6/§4.1의 **완전한** fd 진실 공급원 프로토콜(procsrv가 각 fd의
+  소유 서버에 IPC로 "복제해 달라"고 요청, `dup_for_new_client`) —
+  이 라운드는 그걸 구현하지 않는다(범위 좁힘, M17~M20이 반복해 온
+  패턴). 대신 **커널 레벨에서 handle_table을 통째로 복제**하는
+  훨씬 단순한 방법으로 M23이 실제로 요구하는 검증 목표("셸이 파일을
+  열어 둔 채 fork해, 자식이 상속받은 fd로 다른 exec 이미지에서 계속
+  읽을 수 있다")를 충족한다. 이게 가능한 이유는 이 커널의 FS
+  서버들이 "열린 파일" 상태(예: [memfs](../../servers/fs/memfs/main.cpp)
+  의 `read_cursor`/`write_cursor`)를 **커널 핸들이나 발신자 신원과
+  무관하게 `open_file_id`로만** 키를 잡아 서버 쪽에 갖고 있기
+  때문이다 — 커널 핸들이 그 서버에 도달하는 IPC "통로"만 복제해
+  주면, 서버 쪽 파일 오프셋 공유는 별도 프로토콜 없이 **저절로**
+  성립한다. procsrv.md가 그리는 `dup_for_new_client`(서버가 "다른
+  프로세스에게도 같은 open_file_id를 유효하게 만들어 달라"는 요청에
+  응답하는 것)가 필요해지는 경우는, 서버가 발신자 신원별로 접근을
+  제한하는 시나리오뿐인데 이 구현에는 아직 그런 검사가 없다.
+- **검증 결과(QEMU 실측)**: [general-purpose-completion-m23.md](../done/general-purpose-completion-m23.md)
+  참고 — procsrv가 test.txt를 열어 앞 5바이트("hello")를 읽고
+  fork+exec한 자식이 나머지 4바이트(" vfs")를 정확히 이어 읽음을
+  확인했다(`"[procsrv] fd inherited continue read ok=1"`,
+  `tools/smoke-test-x86_64.sh`에 추가). smoke/SMP/NUMA/AVX 4개
+  스위트 전부 회귀 없음.
+- **알려진 단순화**:
+  - `close-on-exec` 표시가 없다(procsrv.md §10이 이미 미결로 남겨 둔
+    것과 같은 항목) — exec는 여전히 handle_table을 전혀 건드리지
+    않으므로(기존 동작 그대로) fork로 상속된 모든 핸들이 exec 이후에도
+    무조건 남는다.
+  - 발신자 신원에 따라 접근을 제한하는 FS 서버 프로토콜이 생기면
+    (예: `open_file_id`를 특정 badge에만 허용) 이 단순 복제로는
+    부족해진다 — 그 시점에 procsrv.md §4.1의 `dup_for_new_client`류
+    프로토콜을 다시 검토해야 한다. **OPEN-64**(ADR-178)가 이미 지적한
+    "완전한 fd 진실 공급원 프로토콜 부재"와 같은 갭이다.
+  - 이 복제는 `object_kind::thread`(M22, ADR-178) 핸들도 예외 없이
+    복제한다 — 부모가 다른 스레드에 대한 kill 권한을 쥐고 있었다면
+    자식도 그 권한을 그대로 물려받는다(실제 POSIX fork()의 fd 상속
+    의미론과 일치, 의도된 동작이다).

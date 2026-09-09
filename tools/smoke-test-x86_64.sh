@@ -134,6 +134,17 @@
 #     남긴다("[procsrv] kill requested ok=1"/"[sched] thread killed
 #     (discarded before scheduling)" — 스케줄러가 다음에 그 스레드를
 #     뽑으려는 시점에 실제로 폐기한다).
+#   M23 (general-purpose-completion.md §M23, kernel-scheduler.md
+#     ADR-179): sys_fork가 이제 부모의 handle_table 전체를 자식에게
+#     프록시로 복제한다(이전에는 자식이 빈 테이블로 시작했다).
+#     procsrv가 test.txt를 열어 앞 5바이트("hello")만 읽어 서버 쪽
+#     read_cursor를 옮겨 두고 fork한 뒤, 자식이 상속받은 그 handle+
+#     open_file_id로 exec까지 마친(exec는 handle_table을 건드리지
+#     않는다) 완전히 새 이미지에서 나머지 4바이트(" vfs")를 이어
+#     읽어 정확히 일치함을 확인한다("[procsrv] fd inherited continue
+#     read ok=1") — open_file_id가 커널 핸들/발신자 신원과 무관하게
+#     서버 쪽(memfs)에 상태를 두므로, 별도의 procsrv 매개 fd 복제
+#     프로토콜(procsrv.md §3.6/§4.1) 없이도 오프셋 공유가 성립한다.
 #   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
 #     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
 #     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
@@ -277,6 +288,7 @@ declare -a EXPECTED=(
   "[login] no keyboard input, using self-test account"
   "[login] auth ok=1"
   "[procsrv] loader roundtrip ok=1"
+  "[procsrv] fd inherited continue read ok=1"
   "[su-target] guest open outside denied=1"
   "[su-target] guest open inside ok=1"
   "[login] su delegated ok=1"
