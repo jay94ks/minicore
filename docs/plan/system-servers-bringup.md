@@ -203,7 +203,11 @@ cfgsrv/drivers)과, `docs/design/`에 이미 방대하게 확정된 ADR들
   매핑의 배치 위치(스레드별 고정 슬롯, `k_user_stack_top` 위쪽
   사다리)와 해제 시점(다음 `sys_recv` 직전 자동 해제)은 **ADR-159**
   (OPEN-61 해소)로 이미 설계 확정됨 — 이 마일스톤에서는 그 설계를
-  그대로 구현만 하면 된다.
+  그대로 구현만 하면 된다. 같은 시점에 **ADR-160**(kernel-memory.md,
+  유저 가상주소공간 전체 메모리맵 표 확정)의 경계 검증 코드
+  (`process_spawn_error::capability_slot_overflow`, self_elf 슬롯
+  크기 검사)도 `build_process()`를 다시 만지는 김에 함께 넣는다 —
+  별도 마일스톤으로 분리할 이유가 없다.
 - **구현**:
   - `fs/fat32`(ADR-057, FAT32를 virtio-blk 검증 직후 착수하기로
     이미 확정) — M15의 블록 드라이버 위에 올리고 M13의 VFS에 마운트
