@@ -30,6 +30,7 @@
 #include "page_fault.hpp"
 #include "pci_bringup.hpp"
 #include "page_table.hpp"
+#include "process_ops.hpp"
 #include "smp.hpp"
 #include "syscall.hpp"
 #include "tss.hpp"
@@ -139,6 +140,15 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
     arch_x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
     klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
+
+    // M21(general-purpose-completion.md §M21, ADR-176) — BSP에서만
+    // 선점 타이머를 켠다(lapic.hpp::lapic_start_periodic_timer 주석 —
+    // AP는 아직 스케줄러에 참여하지 않는다). k_timer_initial_count는
+    // 보정 없는 값이다 — QEMU 실측(docs/done/general-purpose-completion-m21.md)
+    // 으로 "데모가 합리적인 시간 안에 여러 번 선점됨"을 확인한 값일 뿐,
+    // 실제 마이크로초 단위를 보장하지 않는다.
+    constexpr uint32_t k_timer_initial_count = 0x200000;
+    arch_x86_64::lapic_start_periodic_timer(arch_x86_64::k_vector_timer, k_timer_initial_count);
 
     // M12(ADR-147) — initrun의 임베디드 virtio-blk 클라이언트가 필요로
     // 하는 ECAM 베이스를 여기서 미리 확인해 둔다(부팅 초기 진단 —
@@ -1031,6 +1041,40 @@ object::thread* setup_initrun_process() {
                                       k_boot_info_user_vaddr, space, initrun_handles);
 }
 
+// M21(선점형 스케줄링, docs/plan/general-purpose-completion.md §M21) —
+// initrd에 initrun과 함께 심어 둔 두 데모 유저 프로세스를 그냥 평범한
+// process_spawn으로 띄운다(init/preempt_demo/CMakeLists.txt 상단
+// 주석). busy는 절대 스스로 yield류 syscall을 부르지 않는 무한
+// busy-loop, counter는 그 옆에서 자기 카운터를 늘리며 주기적으로
+// sys_debug_log로 보고한다 — 타이머 선점이 없으면 counter의 로그가
+// 전혀 늘어나지 않는다는 것이 이 데모의 검증 방법이다. 둘 다 handle이
+// 전혀 없는(create_endpoint=false, inherited_handle_count=0) 완전히
+// 독립된 프로세스라 sched::current()(지금은 아직 스케줄러 시작 전이라
+// nullptr)를 건드리지 않는 process_spawn() 경로만 탄다.
+void spawn_preempt_demo_processes() {
+    uint64_t initrd_size = static_cast<uint64_t>(g_embedded_initrd_end - g_embedded_initrd_start);
+    uint32_t unused_endpoint_handle = 0;
+
+    auto busy = initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_busy");
+    klog::printf("[preempt-demo] find preempt_busy ok=%u\n", busy.is_ok());
+    if (busy.is_ok()) {
+        auto err = arch_x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
+                                               /*grant_trusted=*/false, /*create_endpoint=*/false,
+                                               nullptr, 0, unused_endpoint_handle);
+        klog::printf("[preempt-demo] spawn busy err=%u\n", static_cast<uint32_t>(err));
+    }
+
+    auto counter = initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_counter");
+    klog::printf("[preempt-demo] find preempt_counter ok=%u\n", counter.is_ok());
+    if (counter.is_ok()) {
+        auto err = arch_x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
+                                               0, /*grant_trusted=*/false,
+                                               /*create_endpoint=*/false, nullptr, 0,
+                                               unused_endpoint_handle);
+        klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
+    }
+}
+
 [[noreturn]] void demo_sched() {
     sched::init();
     arch_x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
@@ -1096,6 +1140,8 @@ object::thread* setup_initrun_process() {
         initrun = setup_initrun_process();
     }
     klog::printf("[initrun] setup_initrun_process ok=%u\n", initrun != nullptr);
+
+    spawn_preempt_demo_processes();
 
     if (a != nullptr) {
         sched::enqueue(*a);

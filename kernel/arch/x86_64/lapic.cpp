@@ -18,6 +18,17 @@ constexpr uint32_t k_reg_spurious = 0xF0;
 constexpr uint32_t k_reg_icr_low = 0x300;
 constexpr uint32_t k_reg_icr_high = 0x310;
 
+// M21(ADR-176) — LVT Timer/Initial Count/Divide Configuration
+// (Intel SDM Vol.3 §11.5.4, 표 11-2/11-11).
+constexpr uint32_t k_reg_lvt_timer = 0x320;
+constexpr uint32_t k_reg_timer_initial_count = 0x380;
+constexpr uint32_t k_reg_timer_divide_config = 0x3E0;
+
+constexpr uint32_t k_lvt_timer_mode_periodic = 1u << 17;  // 0=one-shot, 1=periodic.
+// Divide Configuration Register 인코딩(표 11-11) — bit0,1,3이 실제
+// 값이고 bit2는 항상 0이다. 0b0011 = divide by 16.
+constexpr uint32_t k_timer_divide_by_16 = 0b0011;
+
 constexpr uint32_t k_icr_delivery_init = 0b101u << 8;
 constexpr uint32_t k_icr_delivery_startup = 0b110u << 8;
 constexpr uint32_t k_icr_delivery_fixed = 0b000u << 8;
@@ -122,6 +133,15 @@ void lapic_send_init_sipi_sipi(uint32_t target_apic_id, uint64_t trampoline_phys
 
 void lapic_send_fixed_ipi(uint32_t target_apic_id, uint8_t vector) {
     send_icr(target_apic_id, k_icr_delivery_fixed | vector);
+}
+
+void lapic_start_periodic_timer(uint8_t vector, uint32_t initial_count) {
+    reg(k_reg_timer_divide_config) = k_timer_divide_by_16;
+    reg(k_reg_lvt_timer) = k_lvt_timer_mode_periodic | vector;
+    // Initial Count에 쓰는 순간부터 카운트다운이 시작한다(SDM Vol.3
+    // §11.5.4) — LVT_Timer를 먼저 걸어 둬야 이 첫 카운트다운이 끝나는
+    // 순간부터 곧바로 vector가 걸린다.
+    reg(k_reg_timer_initial_count) = initial_count;
 }
 
 }  // namespace arch_x86_64

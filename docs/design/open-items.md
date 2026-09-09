@@ -17,6 +17,8 @@
 | OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
 | OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 | (미정) | [procsrv.md](../spec/procsrv.md) |
 | OPEN-60 | ADR-154가 "I/O 활성화 권한 부여"를 지금은 initrun의 하드코딩(스폰 시 grant_trusted)으로만 결정하도록 확정했다 — 부팅 완료 이후 cfgsrv 레지스트리를 읽어 **다른** 특수 프로세스에게도 이 권한을 동적으로 부여/회수하는 절차는 cfgsrv가 실제로 존재하는 M19 이후 재검토 대상 | ADR-154 | [boot-and-drivers.md](boot-and-drivers.md) |
+| OPEN-62 | ADR-176이 LAPIC 타이머의 initial_count/divide를 **보정 없이**(PIT/HPET 실측 없이) 고정 상수로 정했다 — `base_time_slice_us` 필드는 이름과 달리 지금 실제 마이크로초를 보장하지 않고 "타이머 틱 수"로만 쓰인다. 실제 마이크로초 단위 타임슬라이스가 필요해지면 PIT/HPET 기반 보정을 추가해야 한다(어느 시점에, 어떤 기준 클록으로 보정할지는 아직 미정) | ADR-176 | [kernel-scheduler.md](kernel-scheduler.md) |
+| OPEN-63 | ADR-176은 AP가 여전히 협조적 스케줄러/run_queue에 전혀 참여하지 않는 것을 그대로 유지한 채(M10/M11 결정) BSP 한 코어에만 선점을 추가했다 — 진짜 멀티코어 선점형 스케줄러(코어별 `g_current`/타이머, AP도 유저 스레드 실행)는 이 ADR의 범위 밖으로 남겨 뒀다. general-purpose-completion.md의 M22~M26 어디에도 아직 이 작업이 배정돼 있지 않다 | ADR-176 | [kernel-scheduler.md](kernel-scheduler.md) |
 
 ## 해결된 항목 (이력)
 

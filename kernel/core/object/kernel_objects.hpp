@@ -65,6 +65,18 @@ struct thread {
     thread_sched_fields sched;
     address_space* owner_space = nullptr;
     list_hook run_queue_hook;  // scheduler.md의 run_queue(intrusive_list)가 M5부터 이 훅을 쓴다.
+
+    // M21(general-purpose-completion.md §M21, ADR-176) — 이 스레드가
+    // 현재 타임슬라이스에서 남은 타이머 틱 수. sched::reset_preempt_budget()
+    // 이 이 스레드가 (다시) 현재 스레드가 될 때마다
+    // base_time_slice_us*multiplier(boost_level)로 채우고,
+    // sched::on_timer_tick()이 매 틱 하나씩 깎다가 0이 되면 yield()를
+    // 강제한다. thread_sched_fields(스펙이 그대로 정의한 필드)가 아니라
+    // 여기 두는 이유: 이 필드는 "현재 슬라이스에서 얼마나 남았는가"라는
+    // 순수 구현 세부(런타임 카운터)이고, thread_sched_fields는 스펙
+    // §2가 정의한 필드 그대로만 담는다는 그 struct 상단 주석의 불변식을
+    // 지킨다.
+    uint64_t preempt_ticks_remaining = 0;
     list_hook ipc_wait_hook;   // endpoint의 대기열(M6, kernel/core/ipc)이 이 훅을 쓴다.
     ipc_state ipc;
 

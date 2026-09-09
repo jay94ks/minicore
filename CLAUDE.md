@@ -120,5 +120,9 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   "일단 생략, aarch64보다 먼저 범용 OS로서 미비된 부분을 보완하자"
   로 방향을 정했다.
 - 그 방향에 따라 [docs/plan/general-purpose-completion.md](docs/plan/general-purpose-completion.md)
-  (M21 선점형 스케줄링 ~ M26 실제 libc 포팅 재도전)를 새로 계획했다
-  — 아직 미착수. 다음 실행 대상은 M21.
+  (M21 선점형 스케줄링 ~ M26 실제 libc 포팅 재도전)를 새로 계획했다.
+  **M21 완료** — LAPIC 타이머 기반 선점(BSP·ring3 한정, ADR-176)과
+  그 과정에서 발견한 TSS.RSP0 전역 공유 버그 수정(ADR-177), 결과는
+  [docs/done/general-purpose-completion-m21.md](docs/done/general-purpose-completion-m21.md)
+  참고. 다음 실행 대상은 M22(프로세스 생명주기: wait/exit
+  status/최소 시그널).

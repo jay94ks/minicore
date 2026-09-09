@@ -1,6 +1,6 @@
 // x86_64 IDT — 최소 기반 (docs/plan/smp-fpu-bringup.md §M10/M11b,
-// ADR-055/133). 이 계획에서 IDT에 실제로 거는 벡터는 세 종류로
-// 제한한다:
+// ADR-055/133). M10 계획에서 IDT에 실제로 거는 벡터는 세 종류로
+// 제한했다:
 //   (a) IPI(TLB shootdown 전용, k_vector_ipi_tlb_shootdown)
 //   (b) 부팅 중 원인 불명 정지를 진단하기 위한 catch-all 예외 핸들러
 //       (0~31의 나머지 예외 + 아직 안 쓰는 벡터, 기본값)
@@ -9,6 +9,11 @@
 //       하고 (b)로 라우팅했었다.
 // 그 외(LAPIC spurious 벡터)는 이 계획이 LAPIC을 켜는 부산물로 필요해
 // 최소한으로 함께 걷다.
+//
+// M21(general-purpose-completion.md §M21, ADR-176)이 네 번째 벡터를
+// 추가한다: k_vector_timer — LAPIC 타이머의 주기적 인터럽트로,
+// idt.cpp가 EOI 후 sched::on_timer_tick()을 부른다(선점형 스케줄링의
+// 유일한 강제 전환 지점).
 #pragma once
 
 #include <cstdint>
@@ -44,6 +49,11 @@ inline constexpr uint8_t k_vector_nm = 7;
 // 실제로 쓴다. 그 함수가 false를 반환하면(COW 대상이 아닌 진짜 폴트)
 // M10의 catch-all(diagnose_and_halt)로 그대로 떨어진다.
 inline constexpr uint8_t k_vector_page_fault = 14;
+
+// M21(ADR-176) — LAPIC 타이머(선점형 스케줄링). 0~31(CPU 예외) +
+// k_vector_ipi_tlb_shootdown(0xFC) + k_vector_spurious(0xFF)와 겹치지
+// 않는 임의의 자리 — SDM이 정한 의미가 없는 순수 소프트웨어 벡터다.
+inline constexpr uint8_t k_vector_timer = 0x40;
 
 // IDT를 구성하고 lidt로 적재한다. kernel_main 극초기, 첫 IPI/예외보다
 // 반드시 먼저 호출해야 한다. LAPIC/AP는 아직 필요 없다 — 순수 CPU

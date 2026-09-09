@@ -22,6 +22,14 @@ endif()
 # 않은 프로퍼티를 읽게 된다.
 add_subdirectory(libk)
 add_subdirectory(init/initrun)
+
+# M21(선점형 스케줄링, docs/plan/general-purpose-completion.md) 검증용
+# 데모 유저 프로세스 두 개 — init/initrun과 같은 이유로 kernel보다
+# 먼저 추가한다(init/preempt_demo/CMakeLists.txt가 만드는 결과물이
+# init/initrun/CMakeLists.txt의 mkinitrd 호출에 initrun과 함께
+# 패키징된다).
+add_subdirectory(init/preempt_demo)
+
 add_subdirectory(kernel)
 
 # 1차 타겟(x86_64)만 전체 스택(시스템 서버·libc·유저랜드)을 빌드 대상으로 삼는다.

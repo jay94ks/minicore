@@ -40,4 +40,25 @@ void init_tss();
 // 범위만" 열린다.
 void sync_io_permission(const object::thread& t);
 
+// M21(general-purpose-completion.md §M21, ADR-177) — t가 (다시)
+// g_current가 될 때마다 TSS.RSP0를 t 전용 커널 스택(t.syscall_kernel_rsp,
+// create_user_thread/create_forked_thread가 이미 만들어 둔 것)으로
+// 맞춘다. **왜 필요해졌는가**: init_tss()가 RSP0를 딱 하나의 전역
+// 스택으로 고정했던 이유(tss.cpp 주석 — "예외 처리는 항상 순차적,
+// 처리 끝나면 곧바로 IRETQ")가 M21부터 깨진다 — 타이머 ISR이
+// sched::on_timer_tick() → yield()로 다른 스레드에게 전환할 수 있어,
+// 이 인터럽트의 IRETQ가 "곧바로"가 아니라 "이 스레드가 나중에 다시
+// 스케줄될 때"에야 일어난다. 그 사이에 다른 유저 스레드가 ring3에서
+// 또 선점되면(전역 RSP0가 그대로였다면) **같은 물리 스택**의 같은
+// 자리를 다시 밀어써 앞선 스레드의 보류 중인 인터럽트 프레임을
+// 깨끗이 뭉갠다 — 실제로 QEMU에서 세 유저 스레드(busy/counter/initrun)
+// 가 서로 선점하면서 스택이 오염돼 임의 위치에서 #PF로 죽는 것을
+// 재현·확인했다. g_syscall_kernel_rsp를 전역 → 스레드별로 바꾼
+// M12(ADR-141)의 같은 문제, 같은 해법이다 — 다만 이번엔 SYSCALL이
+// 아니라 CPU 인터럽트 게이트(TSS.RSP0)가 대상이다. 커널 스레드
+// (owner_space==nullptr)는 절대 ring3에서 실행되지 않으므로 RSP0가
+// 읽힐 일이 없다(같은 특권 수준 인터럽트는 스택을 바꾸지 않는다) —
+// sync_syscall_kernel_rsp()와 똑같이 그 경우는 그냥 건드리지 않는다.
+void sync_exception_stack(const object::thread& t);
+
 }  // namespace arch_x86_64

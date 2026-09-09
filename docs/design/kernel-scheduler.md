@@ -611,3 +611,101 @@
   - 이 함수를 부르는 `map_page`/`unmap_page`/`protect_page`(전부
     M4~M12) 자체는 코드 변경이 없다 — 결함이 `broadcast_tlb_shootdown()`
     내부에만 있었다.
+
+## ADR-176. LAPIC 타이머 기반 선점형 스케줄링 (BSP·ring3 한정)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [general-purpose-completion.md §M21](../plan/general-purpose-completion.md)
+  을 구현한다. [lapic.hpp/.cpp](../../kernel/arch/x86_64/lapic.hpp)에
+  LVT Timer/Initial Count/Divide Config 레지스터를 추가하고
+  `lapic_start_periodic_timer(vector, initial_count)`로 주기 모드
+  타이머를 켠다. 새 IDT 벡터 `k_vector_timer`(0x40,
+  [idt.hpp](../../kernel/arch/x86_64/idt.hpp))를
+  [idt.cpp](../../kernel/arch/x86_64/idt.cpp)의 `interrupt_dispatch()`가
+  받아 **EOI를 먼저 보낸 뒤** `sched::on_timer_tick()`을 부른다.
+  `on_timer_tick()`은 현재 스레드의 새 필드
+  `object::thread::preempt_ticks_remaining`을 하나 깎고 0이 되면
+  `sched::yield()`로 강제 전환한다(§3 라운드로빈과 동일한 정책 —
+  새치기 없음). 이 예산은 scheduler.md §4의
+  `base_time_slice_us * multiplier(boost_level)`을 그대로 소비해
+  계산한다(`multiplier(b) = b+1`, 선형). `run_queue::lock`을
+  `spinlock` → `irq_safe<spinlock>`(libk/irq_safe.hpp, ADR-076)로
+  승격한다.
+  **범위**: 이 커널은 유저모드(ring3)에서만 RFLAGS.IF=1이다(커널
+  스레드·syscall 처리 구간은 어디서도 `sti`를 부르지 않아 항상
+  IF=0) — 그래서 이 타이머가 실제로 강제 전환하는 대상은 **ring3
+  에서 실행 중인 유저 스레드뿐**이다. 커널 스레드는 여전히 100%
+  협조적이다. 타이머는 **BSP에서만** 켠다 — AP는 M10/M11 결정대로
+  여전히 run_queue에 전혀 참여하지 않는다(참여시키면 코어별
+  `g_current`가 필요해지는, 이 마일스톤 범위를 넘는 SMP 스케줄러
+  재설계다).
+- **근거**: M1~M20의 스케줄러는 전부 협조적이었다(scheduler.hpp
+  옛 주석 — "타이머 인터럽트로 강제 선점하려면 IDT/APIC가 필요한데
+  아직 없다"). 그 전제(IDT/APIC)가 M10부터 이미 갖춰져 있었는데도
+  실제로 걸지 않은 채 M20까지 왔다 — `general-purpose-completion.md`
+  가 지적한 "범용 OS의 첫 공통분모 결여"다. `base_time_slice_us`/
+  `boost_level`(kernel_objects.hpp)은 M4부터 필드만 있고 한 번도
+  실제로 읽힌 적이 없었다(`grep`으로 확인) — 이 ADR이 최초로 소비한다.
+- **알려진 단순화(YAGNI)**:
+  - LAPIC 타이머 주파수를 PIT/HPET로 실측 보정하지 않는다 —
+    `lapic.cpp::busy_delay()`(ADR-055)가 AP 기동 지연을 보정 없이
+    흉내내는 것과 같은 정신. `base_time_slice_us`(필드 이름은
+    "마이크로초"이지만) 값을 그대로 "타이머 틱 수"로 소비한다
+    (`scheduler.cpp::ticks_for()`). 실제 보정은 필요해지면 그
+    함수 하나만 고치면 된다 — [open-items.md](open-items.md)에
+    `OPEN-`으로 남겨 둔다.
+  - `sys_thread_boost`(scheduler.md §5, 승격 syscall)는 여전히
+    미구현이다 — `boost_level`은 모든 스레드가 0으로 태어난 그대로
+    고정이라 `multiplier`는 사실상 항상 1이다. 배선만 미리 해 둔다.
+  - AP가 선점형 스케줄러에 참여하지 않으므로 "SMP에서도 코어별로
+    독립적으로 동작함"의 실제 검증 범위는 "이 타이머가
+    `smoke-test-smp-x86_64.sh`(AP 기동/TLB shootdown)를 깨지 않음"
+    으로 좁아진다 — 진짜 멀티코어 선점형 스케줄러는 이 ADR의 범위
+    밖이다.
+- **검증 결과(QEMU 실측)**: [general-purpose-completion-m21.md](../done/general-purpose-completion-m21.md)
+  참고 — busy-loop 유저 스레드 하나가 절대 스스로 양보하지 않는
+  옆에서, counter 유저 스레드가 `sys_debug_log`로 20회(2,000,000
+  증가) 보고를 전부 완료함을 확인했다(타이머 선점 없이는 불가능).
+  `tools/smoke-test-x86_64.sh`/`smoke-test-smp-x86_64.sh`/
+  `smoke-test-numa-x86_64.sh`/`smoke-test-avx-x86_64.sh` 전부 회귀
+  없음.
+- **영향**: ADR-177(같은 문서 다음 항목)이 이 ADR이 드러낸 별도
+  결함(TSS.RSP0 전역 공유)을 고친다.
+
+## ADR-177. TSS.RSP0를 스레드별로 분리 (M12 ADR-141과 같은 문제, 같은 해법)
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [tss.hpp/.cpp::sync_exception_stack()](../../kernel/arch/x86_64/tss.cpp)
+  을 추가해, `object::thread`가 (다시) `g_current`가 될 때마다
+  `TSS.RSP0`를 그 스레드 전용 커널 스택(`syscall_kernel_rsp`,
+  `create_user_thread`/`create_forked_thread`가 이미 만들어 둔 것)
+  으로 맞춘다. `scheduler.cpp`가 `arch_sync_io_permission`(ADR-154)
+  과 같은 4곳(start/yield/block/exit)에서 함께 부른다.
+- **근거**: `init_tss()`(M12, ADR-143)는 RSP0를 **전역 스택 하나**로
+  고정했다 — 그 근거("예외 처리는 항상 순차적, 처리 끝나면 곧바로
+  IRETQ로 돌아간다")가 ADR-176의 타이머 선점으로 깨진다. 타이머
+  ISR이 `sched::on_timer_tick()` → `yield()`로 **다른 스레드의
+  콜스택**으로 전환할 수 있어, 원래 인터럽트의 IRETQ는 "곧바로"가
+  아니라 "이 스레드가 나중에 다시 스케줄될 때"에야 일어난다. 그
+  사이(임의로 길 수 있는 구간) 동안 **다른** 유저 스레드가 ring3에서
+  또 선점되면, 전역 RSP0가 그대로였다면 **똑같은 물리 스택의 같은
+  꼭대기 주소**를 다시 밀어써 앞선 스레드의 보류 중인 인터럽트
+  프레임을 뭉갠다. 이건 `g_syscall_kernel_rsp`를 전역 → 스레드별로
+  바꾼 M12(ADR-141)와 정확히 같은 문제 형태다 — 다만 대상이
+  SYSCALL이 아니라 CPU 인터럽트 게이트(ring3→ring0 특권 전환)다.
+- **검증 결과(QEMU 실측, 재현→수정 확인)**: 수정 전에는
+  busy/counter/initrun 세 유저 스레드가 서로 선점하면서 스택이
+  오염돼, `tools/run-qemu.sh`로는 `arch_x86_64::eoi()`(무관한
+  함수) 안에서 `#PF`(vector=14, error_code=0x2, 쓰기+불존재)로
+  죽었고 — `tools/smoke-test-x86_64.sh`(virtio-blk 부트 디바이스
+  경로)로는 "no keyboard input, running self-test commands" 이후
+  전체가 멈췄다(120초 타임아웃, 크래시 로그조차 없음 — 셀렉터
+  프레임이 통째로 깨져 진단 경로도 못 탐). 이 수정 후에는 두 QEMU
+  경로 모두 정상 완료(전자는 counter가 2,000,000까지 정확히 보고,
+  후자는 M12~M20 46개 스모크 문자열 전부 확인) — 별도로
+  smp/numa/avx 스위트도 회귀 없음.
+- **영향**: 커널 스레드(`owner_space==nullptr`)는 절대 ring3에서
+  실행되지 않으므로 RSP0가 읽힐 일이 없다(같은 특권 수준 인터럽트는
+  스택을 바꾸지 않는다) — `sync_syscall_kernel_rsp()`와 똑같이
+  그 경우는 그냥 건드리지 않는다. AP는 ADR-176대로 이 타이머 자체를
+  켜지 않으므로 이 수정의 대상도 아니다(TSS 자체가 BSP 전용).

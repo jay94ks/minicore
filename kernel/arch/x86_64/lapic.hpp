@@ -39,6 +39,18 @@ void lapic_send_init_sipi_sipi(uint32_t target_apic_id, uint64_t trampoline_phys
 // smp.cpp가 호출).
 void lapic_send_fixed_ipi(uint32_t target_apic_id, uint8_t vector);
 
+// M21(general-purpose-completion.md §M21, ADR-176) — 이 코어의 LAPIC
+// 타이머를 주기(periodic) 모드로 재프로그램해 vector로 반복 인터럽트를
+// 건다. **BSP에서만 호출한다** — AP는 아직(M10/M11 결정 그대로)
+// 협조적 스케줄러의 run_queue에 전혀 참여하지 않는다(sched::current()가
+// 코어별이 아니라 전역 하나뿐이다, scheduler.cpp). AP에서 이 함수를
+// 부르면 그 코어의 타이머 틱이 BSP의 g_current를 잘못 건드리게 되므로
+// (smp.cpp의 AP 진입부가 이 함수를 호출하지 않는 이유) 호출하지 않는다.
+// initial_count/divide는 **보정 없는 값**이다(lapic.cpp busy_delay()와
+// 같은 정신, YAGNI) — 실제 마이크로초 단위 보정(PIT/HPET)은 이
+// 마일스톤 범위 밖(docs/design/open-items.md 참고).
+void lapic_start_periodic_timer(uint8_t vector, uint32_t initial_count);
+
 }  // namespace arch_x86_64
 
 // idt.cpp(interrupt_dispatch)가 부르는 EOI — extern "C"로 벡터 라우팅과

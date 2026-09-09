@@ -61,6 +61,11 @@ extern "C" [[noreturn]] void arch_fork_child_resume();
 // 기반 재프로그래밍은 arch 계층(x86_64: tss.cpp)이 담당한다.
 extern "C" void arch_sync_io_permission(const object::thread& next);
 
+// M21(ADR-177, tss.hpp::sync_exception_stack) — next가 g_current가 될
+// 때마다 TSS.RSP0를 next 전용 커널 스택으로 맞춘다. arch_sync_io_permission
+// 과 같은 4곳(start/yield/block/exit)에서 함께 부른다.
+extern "C" void arch_sync_exception_stack(const object::thread& next);
+
 namespace sched {
 
 namespace {
@@ -94,6 +99,40 @@ void sync_syscall_kernel_rsp(const object::thread& next) {
     }
 }
 
+// M21(ADR-176) — scheduler.md §4의 multiplier(boost_level). "선형
+// 매핑으로 시작"(§4 상단 주석)을 그대로 따른다 — boost_level=0이면
+// 배율 1(기본), 승격될수록(값이 커질수록) 배율도 커진다. §5(승격
+// syscall)가 아직 없어(sys_thread_boost 미구현) 지금은 모든 스레드가
+// boost_level=0로 태어난 그대로 고정이라 이 배율은 사실상 항상 1이다
+// — 그래도 §4가 요구하는 형태는 지금부터 실제로 소비한다(다음에
+// 승격 syscall이 생기면 별도 배선 없이 바로 작동한다).
+uint64_t slice_multiplier(uint32_t boost_level) { return static_cast<uint64_t>(boost_level) + 1; }
+
+// M21(ADR-176) — LAPIC 타이머를 실제 마이크로초 단위로 보정하지
+// 않았다(PIT/HPET 기반 보정은 이 마일스톤 범위 밖, YAGNI — lapic.cpp의
+// busy_delay()가 AP 기동 지연을 보정 없이 흉내내는 것과 같은 정신).
+// 그래서 base_time_slice_us(단위는 필드 이름 그대로 "마이크로초"이지만
+// 실제로는)의 값을 그대로 "타이머 틱 수"로 소비한다 — 실제 보정이
+// 필요해지면(PIT/HPET로 LAPIC 타이머 주파수를 재보고) 이 함수 하나만
+// 고치면 된다.
+uint64_t ticks_for(const object::thread_sched_fields& sched) {
+    uint64_t budget = sched.base_time_slice_us * slice_multiplier(sched.boost_level);
+    return budget == 0 ? 1 : budget;  // 0이면 매 틱마다 선점(최소 보장, 굶지 않음).
+}
+
+// M21(ADR-176) — t가 (다시) g_current가 될 때마다 호출해 새 슬라이스
+// 예산을 채운다. start()/yield()/block()/exit() 전부가 g_current를
+// 바꾸는 모든 지점에서 이걸 불러야 한다 — 그래야 on_timer_tick()이
+// "이번 슬라이스에서 남은 틱"을 정확히 추적한다.
+void reset_preempt_budget(object::thread& t) { t.preempt_ticks_remaining = ticks_for(t.sched); }
+
+// M21(ADR-176) — 새로 만든 스레드의 기본 타임슬라이스(틱 수, 위
+// ticks_for() 주석 참고). 특별한 근거로 고른 값은 아니다 — 고전적인
+// 라운드로빈 스케줄러의 "적당한 퀀텀" 감각을 재현하는 잠정치일 뿐이라
+// (관찰 기반으로 조정 가능, docs/design/open-items.md 참고),
+// scheduler.md §4가 요구하는 "실제로 소비"만 충족하면 된다.
+constexpr uint64_t k_default_time_slice_ticks = 20;
+
 // kernel_band이 true면 kernel_band에서만, false면 user_band에서만 꺼낸다
 // — pick_next_with_stealing()이 "커널 밴드는 노드 경계를 넘어서도
 // 유저 밴드보다 항상 우선"(ADR-014)이라는 전역 순서를 만들 때 두
@@ -104,7 +143,7 @@ void sync_syscall_kernel_rsp(const object::thread& next) {
 // preferred_node=1 데모 스레드가 이 이유로 전혀 스케줄되지 않는
 // 문제를 발견해 이렇게 고쳤다).
 object::thread* try_pick_band(run_queue& rq, bool kernel_band) {
-    scoped_lock<spinlock> guard(rq.lock);
+    scoped_lock<irq_safe<spinlock>> guard(rq.lock);
     if (kernel_band) {
         if (rq.kernel_band.empty()) {
             return nullptr;
@@ -215,6 +254,7 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     auto* t = new (mem) object::thread();
     t->sched.band = band;
     t->sched.preferred_node = preferred_node;
+    t->sched.base_time_slice_us = k_default_time_slice_ticks;
 
     // enqueue()는 이미 preferred_node를 g_node_count로 감싼다(존재하지
     // 않는 노드를 요청해도 항상 유효한 큐에 들어가도록) — 여기서도
@@ -271,6 +311,7 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     auto* t = new (mem) object::thread();
     t->sched.band = object::priority_band::user;
     t->sched.preferred_node = 0;
+    t->sched.base_time_slice_us = k_default_time_slice_ticks;
     if (!alloc_fpu_save_area(t, 0)) {
         mm::slab_free(t, sizeof(object::thread));
         return nullptr;
@@ -333,6 +374,7 @@ object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_use
     auto* t = new (mem) object::thread();
     t->sched.band = object::priority_band::user;
     t->sched.preferred_node = 0;
+    t->sched.base_time_slice_us = k_default_time_slice_ticks;
     if (!alloc_fpu_save_area(t, 0)) {
         mm::slab_free(t, sizeof(object::thread));
         return nullptr;
@@ -382,7 +424,7 @@ object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_use
 
 void enqueue(object::thread& t) {
     run_queue& rq = g_run_queues[t.sched.preferred_node % g_node_count];
-    scoped_lock<spinlock> guard(rq.lock);
+    scoped_lock<irq_safe<spinlock>> guard(rq.lock);
     if (t.sched.band == object::priority_band::kernel) {
         rq.kernel_band.push_back(t);
     } else {
@@ -401,8 +443,10 @@ void start() {
     }
 
     g_current = next;
+    reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
+    arch_sync_exception_stack(*next);
     arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
@@ -432,12 +476,20 @@ void yield() {
         // 필요가 없다). 실제로 스위치할 필요도 없다 — 스위치해도
         // 결과는 같지만 arch_context_switch가 매번 CR0.TS를 다시
         // 세워 불필요한 `#NM`을 유발한다(M11b, ADR-133).
+        //
+        // M21(ADR-176) — 그래도 예산은 다시 채운다: on_timer_tick()이
+        // 이 스레드 하나만 남았을 때도 매 틱 yield()를 부르는데, 예산을
+        // 안 채우면 이 no-op 경로를 매 틱마다 타서 pick_next_with_stealing()
+        // 을 불필요하게 반복 스캔한다(정확성 문제는 아니지만 낭비).
+        reset_preempt_budget(*prev);
         return;
     }
 
     g_current = next;
+    reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
+    arch_sync_exception_stack(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
     // arch_context_switch에서 돌아왔다는 것은 prev가 다시 스케줄되어
     // 이 지점부터 재개됐다는 뜻이다.
@@ -456,8 +508,10 @@ void block() {
     // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
     // sched::enqueue()할 책임을 진다.
     g_current = next;
+    reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
+    arch_sync_exception_stack(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
 }
 
@@ -480,16 +534,36 @@ void block() {
     }
 
     g_current = next;
+    reset_preempt_budget(*next);
     // prev를 다시 enqueue하지 않는다 — block()과 같은 메커니즘이지만,
     // block()과 달리 그 무엇도 나중에 prev를 깨우지 않는다(어떤 대기열
     // 에도 prev를 넣어 두지 않았다) — 이 스레드는 여기서 영구히 끝난다.
     uint64_t discard_rsp;
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
+    arch_sync_exception_stack(*next);
     arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
 
 object::thread* current() { return g_current; }
+
+// M21(ADR-176) — idt.cpp가 EOI를 먼저 보낸 뒤 부른다(scheduler.hpp의
+// on_timer_tick() 선언 주석 참고). g_current가 nullptr일 수 있는
+// 유일한 시점은 sched::start()가 아직 호출되기 전인데, 그때는 IDT가
+// 걸려 있어도 LAPIC 타이머 자체를 아직 켜지 않았으므로(kernel_main.cpp
+// 호출 순서) 실제로는 일어나지 않는다 — 그래도 방어적으로 확인한다.
+void on_timer_tick() {
+    object::thread* cur = g_current;
+    if (cur == nullptr) {
+        return;
+    }
+    if (cur->preempt_ticks_remaining > 0) {
+        --cur->preempt_ticks_remaining;
+    }
+    if (cur->preempt_ticks_remaining == 0) {
+        yield();
+    }
+}
 
 }  // namespace sched

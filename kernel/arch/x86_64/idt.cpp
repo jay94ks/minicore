@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include <klog.hpp>
+#include <sched/scheduler.hpp>
 
 // isr_stubs.S가 채운 256개 진입점 주소 테이블.
 extern "C" void* isr_stub_table[256];
@@ -162,6 +163,21 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
         // Intel SDM Vol.3 §11.9 — 스퓨리어스 벡터는 EOI를 보내지 않는다
         // (진짜 인터럽트가 아니었다는 신호이므로 큐에 남길 것이 없다).
         klog::printf("[idt] spurious interrupt (vector 0xFF) — ignored\n");
+        return;
+    }
+    if (frame->vector == arch_x86_64::k_vector_timer) {
+        // M21(ADR-176) — EOI를 **먼저** 보낸다. sched::on_timer_tick()이
+        // 내부적으로 sched::yield()를 호출하면 arch_context_switch가 이
+        // 인터럽트의 스택 프레임을 통째로 "다른 스레드의 콜스택 아래"에
+        // 묻어 버린다 — 이 스레드가 다시 스케줄돼 이 함수까지 되돌아올
+        // 때에야 비로소 (isr_common의 에필로그가) iretq를 실행한다. 그
+        // 사이(다른 스레드가 얼마든지 오래 실행될 수 있는 구간) 동안
+        // EOI가 안 나가 있으면, 이 코어의 LAPIC은 이 벡터의 ISR 비트를
+        // 계속 세운 채로 남아 있어 이후 인터럽트를 받지 못한다. 그래서
+        // "일 다 하고 마지막에 EOI"(smp_handle_tlb_shootdown_ipi의
+        // 관례)가 아니라 여기서는 반드시 순서를 뒤집는다.
+        lapic_eoi();
+        sched::on_timer_tick();
         return;
     }
     if (frame->vector == arch_x86_64::k_vector_nm) {

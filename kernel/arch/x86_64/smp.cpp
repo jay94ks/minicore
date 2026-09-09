@@ -195,6 +195,10 @@ extern "C" void ap_main(uint32_t cpu_index) {
     arch_x86_64::init_fpu();
 
     arch_x86_64::lapic_enable_this_core();
+    // M21(ADR-176) — 일부러 lapic_start_periodic_timer()를 여기서
+    // 부르지 않는다(lapic.hpp 그 함수 주석 참고) — AP는 run_queue에
+    // 참여하지 않아, 이 코어에서 타이머가 울려도 sched::on_timer_tick()
+    // 이 건드릴 g_current는 BSP의 것뿐이다.
     uint32_t apic_id = arch_x86_64::lapic_id();
     klog::printf("[smp] AP apic_id=%u online cpu_index=%u\n", apic_id, cpu_index);
     arch_x86_64::g_online_count.fetch_add_relaxed(1);

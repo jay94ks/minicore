@@ -96,10 +96,14 @@ struct __attribute__((packed)) gdt_pointer {
 };
 
 // 예외/인터럽트가 ring3에서 발생했을 때 CPU가 전환할 커널 스택
-// (RSP0). 이 스택 위에서 isr_common(isr_stubs.S)이 돈다 — 스레드별로
-// 나눌 필요가 없다(협조적 단일 코어 스케줄러에서 예외 처리 자체는
-// 항상 순차적이다, syscall_kernel_rsp와 달리 "블로킹된 채 남겨 둘"
-// 상태가 없다 — 처리 끝나면 IRETQ로 곧바로 돌아간다).
+// (RSP0). init_tss()가 부팅 시점에 이 "기본" 스택 하나를 만들어
+// g_tss.tss.rsp0의 최초값으로 쓴다 — M21(ADR-177) 전에는 이 스택
+// 하나로 충분했다("예외 처리는 항상 순차적, 처리 끝나면 IRETQ로
+// 곧바로 돌아간다"). M21부터는 sync_exception_stack()이 컨텍스트
+// 스위치마다 이 값을 실제로 실행 중인 유저 스레드의 스택
+// (syscall_kernel_rsp)으로 덮어쓴다 — 이 초기값은 첫 스레드가
+// 스케줄되기 전 극초기 구간(이론상 인터럽트가 ring3에서 발생할 수
+// 없는 구간)에만 의미가 있다.
 constexpr uint32_t k_exception_stack_order = 2;  // 16KiB
 
 }  // namespace
@@ -153,6 +157,12 @@ void sync_io_permission(const object::thread& t) {
     g_current_io_count = new_count;
 }
 
+void sync_exception_stack(const object::thread& t) {
+    if (t.owner_space != nullptr) {
+        g_tss.tss.rsp0 = t.syscall_kernel_rsp;
+    }
+}
+
 }  // namespace arch_x86_64
 
 // kernel/core/sched/scheduler.cpp가 컨텍스트 스위치마다 부르는 훅
@@ -160,4 +170,11 @@ void sync_io_permission(const object::thread& t) {
 // extern "C"로 안다).
 extern "C" void arch_sync_io_permission(const object::thread& next) {
     arch_x86_64::sync_io_permission(next);
+}
+
+// M21(ADR-177) — tss.hpp::sync_exception_stack() 참고. scheduler.cpp가
+// arch_sync_io_permission과 같은 자리(컨텍스트 스위치 4곳)에서 함께
+// 부른다.
+extern "C" void arch_sync_exception_stack(const object::thread& next) {
+    arch_x86_64::sync_exception_stack(next);
 }

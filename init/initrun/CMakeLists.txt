@@ -70,8 +70,11 @@ add_custom_command(
             ${MINICORE_INITRD_IMAGE}
             --disk-cfg=0,4,0,0
             initrun=$<TARGET_FILE:minicore_initrun_elf>
-    DEPENDS minicore_initrun_elf ${CMAKE_SOURCE_DIR}/tools/mkinitrd.py
-    COMMENT "Packaging initrd.img (MCPACK v1) from initrun.elf"
+            preempt_busy=$<TARGET_FILE:minicore_preempt_busy_elf>
+            preempt_counter=$<TARGET_FILE:minicore_preempt_counter_elf>
+    DEPENDS minicore_initrun_elf minicore_preempt_busy_elf minicore_preempt_counter_elf
+            ${CMAKE_SOURCE_DIR}/tools/mkinitrd.py
+    COMMENT "Packaging initrd.img (MCPACK v1) from initrun.elf + M21 preempt demo binaries"
     VERBATIM
 )
 add_custom_target(minicore_initrd_image DEPENDS ${MINICORE_INITRD_IMAGE})

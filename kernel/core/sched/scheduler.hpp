@@ -1,19 +1,28 @@
 // 스케줄러 골격 (docs/spec/scheduler.md §1~3, docs/plan/kernel-bootstrap.md
 // M5). 노드별 run_queue + 커널/유저 2단 밴드 + 기본 라운드로빈까지만
-// 다룬다 — §4(승격 비례 타임슬라이스)·§5(승격 syscall)·§6(도네이션)은
-// M6 이후로 미룬다(scheduler.md §7). M1~M8 실행 환경은 노드가 1개뿐이라
-// (ADR-035) run_queue 배열은 사실상 원소 1개로 동작한다.
+// 다룬다 — M1~M8 실행 환경은 노드가 1개뿐이라(ADR-035) run_queue 배열은
+// 사실상 원소 1개로 동작한다.
 //
-// 이 마일스톤은 **협조적(cooperative)** 전환만 구현한다 — 타이머
-// 인터럽트로 강제 선점하려면 IDT/APIC가 필요한데 아직 없다(M1~M8
-// 어디에도 IDT 구축이 명시적으로 없음). 스레드가 yield()를 직접
-// 호출해야 다음 스레드로 넘어간다. 실제 선점형 스케줄링은 인터럽트
-// 인프라가 생기는 이후 마일스톤의 몫이다.
+// M1~M20은 **협조적(cooperative)** 전환만 구현했다 — 스레드가 yield()를
+// 직접 호출해야 다음 스레드로 넘어갔다(§4 승격 비례 타임슬라이스·§6
+// 도네이션은 실제로 소비되지 않았다). M21(general-purpose-completion.md
+// §M21, ADR-176)이 여기 실제 선점을 추가한다 — LAPIC 타이머가 주기적으로
+// k_vector_timer(idt.hpp)를 걸면 idt.cpp가 on_timer_tick()을 부른다.
+// **범위**: 이 커널은 유저모드(ring3) 실행 중에만 RFLAGS.IF=1이다 —
+// 커널 스레드/스레드의 syscall 처리 구간은 항상 IF=0(어디서도 sti를
+// 부르지 않는다, usermode.S의 IRETQ와 syscall SYSRET만 예외)이라
+// 타이머가 원천적으로 끼어들 수 없다. 그래서 이 M21 구현이 실제로
+// 선점하는 대상은 **유저 스레드가 ring3에서 실행 중인 순간뿐**이다 —
+// 커널 스레드(owner_space==nullptr)는 여전히 100% 협조적이다(그리고
+// 그래서 안전하다 — arch_context_switch가 RFLAGS를 저장/복원하지
+// 않으므로, 만약 커널 코드가 IF=1로 실행되는 경로가 생기면 이 가정을
+// 다시 검토해야 한다, ADR-176 참고).
 #pragma once
 
 #include <cstdint>
 
 #include <libk/intrusive_list.hpp>
+#include <libk/irq_safe.hpp>
 #include <libk/spinlock.hpp>
 
 #include "object/kernel_objects.hpp"
@@ -21,7 +30,14 @@
 namespace sched {
 
 struct run_queue {
-    spinlock lock;  // 노드당 1개(ADR-033)
+    // M21(ADR-176) — 이 락을 쥔 코드가 이제 (BSP 한정) 타이머 인터럽트
+    // 핸들러에서도 호출된다(on_timer_tick() -> yield() -> enqueue()/
+    // try_pick_band()). 위 헤더 주석의 "커널 코드는 항상 IF=0" 불변식이
+    // 지금은 재진입 데드락을 실제로 막아 주지만, 그 불변식에만 의존하는
+    // 것은 취약하다 — irq_safe로 승격해 그 가정이 깨지더라도 안전하게
+    // 만든다(libk/irq_safe.hpp, ADR-076이 이미 klog.cpp에 쓴 것과 같은
+    // 방어적 승격).
+    irq_safe<spinlock> lock;  // 노드당 1개(ADR-033)
     intrusive_list<object::thread, &object::thread::run_queue_hook> kernel_band;
     intrusive_list<object::thread, &object::thread::run_queue_hook> user_band;
 };
@@ -117,5 +133,16 @@ void block();
 [[noreturn]] void exit();
 
 object::thread* current();
+
+// M21(general-purpose-completion.md §M21, ADR-176) — LAPIC 타이머
+// ISR(idt.cpp, k_vector_timer)이 매 틱 부른다. 반드시 EOI를 먼저 보낸
+// 뒤 호출해야 한다(idt.cpp 호출부 주석 참고 — 이 함수가 내부적으로
+// yield()를 호출하면 이 스레드의 콜스택 자체가 다른 스레드로 넘어가,
+// 이 인터럽트의 iretq는 그 스레드가 나중에 다시 여기로 돌아올 때만
+// 실행되므로 그 전에 EOI가 없으면 이 코어가 그때까지 다른 인터럽트를
+// 못 받는다). 현재 스레드의 preempt_ticks_remaining을 하나 깎고, 0이
+// 되면 yield()로 강제 전환한다(§3 라운드로빈과 동일한 정책 — 새치기
+// 없음).
+void on_timer_tick();
 
 }  // namespace sched
