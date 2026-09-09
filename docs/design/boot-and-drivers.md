@@ -1405,3 +1405,96 @@
   드라이버에서 "해제"되는 경로가 아직 없으므로, ADR-040의 핫플러그와
   마찬가지로 아직 필요 없다) — 프로세스 재시작 없이 동적으로
   드라이버를 껐다 켰다 하는 시나리오가 생기면 재검토 대상.
+
+## ADR-164. M17 콘솔/TTY 범위 좁힘 — cfgsrv 의존 없는 단일 고정 TTY + VGA 텍스트 모드(0xB8000)
+
+- **상태**: 확정 (2026-09-09)
+- **문제**: ADR-097이 TTY 개수/메인 TTY를 `@global/system/tty`
+  레지스트리(cfgsrv)에서 읽도록 설계했지만, cfgsrv는 system-servers-bringup.md
+  §M19(M17보다 **뒤**)에야 생긴다 — M17 착수 시점에 그 레지스트리
+  테이블 자체가 존재하지 않는다. ADR-097은 이 순서 문제를 예상하지
+  못했다(둘 다 2026-09-08에 같은 자리에서 확정됐지만, 마일스톤 순서
+  자체는 계획 문서가 별도로 정한 것이라 그때는 드러나지 않았다).
+- **결정**:
+  1. **TTY는 M17 한정 1개만, 하드코딩한다** — 멀티 TTY·TTY 전환
+     UX·`@global/system/tty` 레지스트리 연동은 전부 M19(cfgsrv 등장)
+     이후로 미룬다. `servers/drivers/console`은 지금 단일 TTY(장치
+     노드 개념도 아직 없다 — `/sys/dev/tty0` 노출은 ADR-097 §영향이
+     이미 "devmgr 담당, 스펙 갱신 대상"이라고 미뤄 둔 부분과 같이
+     후속 라운드) 하나만 구동한다. cfgsrv가 실제로 생기면 이
+     하드코딩을 레지스트리 조회로 교체하는 후속 ADR이 필요하다 —
+     지금 새 OPEN 항목으로 등록하지 않는다(이미 이 ADR에 명시돼
+     있어 "미정" 상태가 아니다, ADR-129 §영향과 같은 근거).
+  2. **렌더링 백엔드는 VGA 텍스트 모드(물리주소 `0xB8000`, 80x25,
+     셀당 2바이트: 문자+속성) 하나만 구현한다** — ADR-097 §결정3이
+     이미 "그래픽 드라이버가 없으면 텍스트 모드"라고 정해 뒀고,
+     지금 그래픽 드라이버(virtio-gpu 등)가 전혀 없으므로 이 ADR은
+     그 첫 번째 분기만 구현하는 것이지 새 결정을 더하는 게 아니다.
+     `sys_map_phys`(ADR-156)로 매핑한다 — devmgr가 ACPI/ECAM을 읽는
+     것과 같은 패턴, PCI 장치가 아니라 QEMU q35의 레거시 VGA
+     호환 영역에 직접 접근하므로 devmgr 등록이 필요 없다. 프레임
+     버퍼 위에 글리프를 그리는 두 번째 분기(fbcon류)는 그래픽
+     드라이버가 실제로 생기는 시점까지 범위 밖.
+  3. **콘솔 드라이버의 상세 프로토콜은 ADR-111이 이미 "새로 고안하지
+     않는다"고만 정했을 뿐 구체 오퍼레이션을 정하지 않았다** — M17은
+     `OP_PRINT`(문자열 출력, 개행 시 다음 줄, 25번째 줄을 넘으면
+     스크롤, `0x08`을 만나면 커서를 한 칸 물리고 그 자리를 공백으로
+     지우는 backspace 처리) 하나만 정의한다. ANSI/VT100 이스케이프
+     시퀀스, TTY 전환 키 조합 등은 여전히 범위 밖(ADR-111 §영향이
+     이미 "구현 시점에 정한다"고 미뤄 둔 것 — M17은 그 구현 시점의
+     첫 조각일 뿐, 최소한만 정한다).
+- **근거**: 사용자가 이 세 가지 모두 "권장(최소)" 선택을 확인했다 —
+  TTY 1개 하드코딩, VGA 텍스트 모드, (아래 security-model.md ADR-165의)
+  최소 실제 계정 저장소. cfgsrv를 먼저 만들지 않고 M17을 진행하는
+  것은 계획 문서의 마일스톤 순서(M17이 M19보다 먼저) 자체를 지키는
+  선택이다 — 순서를 바꾸는 것(M19를 앞당김)은 훨씬 큰 범위 변경이라
+  이 ADR의 대상이 아니다.
+- **영향**: `servers/drivers/console`(신설) — `sys_map_phys`로
+  `0xB8000`을 매핑, `trusted=1` 필요. `docs/spec/vfs-layout.md`의
+  `/sys/dev/tty{N}` 반영과 `registry.md`의 `@global/system/tty` 스키마
+  반영은 여전히 미뤄진다(ADR-097 §영향이 이미 그렇게 정해 둔 대로).
+
+## ADR-166. M17 완성: 콘솔/ps2/procsrv/login 배선 중 발견한 버그 둘 — initrun 서비스 레지스트리 크기 초과, ps2 폴링 예산 과다
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: system-servers-bringup.md §M17을 ADR-164(콘솔)/ADR-165
+  (로그인 인증)가 좁힌 범위로 구현했다 — `servers/drivers/console`
+  (VGA 텍스트), `servers/drivers/ps2`(self-test 후 종료하던 것을
+  `OP_READ_KEY`를 받는 진짜 서버로 전환), `servers/procsrv`(처음으로
+  자기 자신의 endpoint에 `sys_recv` 루프를 돌며 `OP_LOGIN`에
+  응답), `servers/login`(신설, console/ps2/procsrv 세 서버 모두에
+  의존). 실행 중 서로 무관한 두 버그를 발견해 고쳤다.
+- **근거(실행 중 발견한 버그 1) — initrun 서비스 레지스트리 크기
+  초과**: `init/initrun/main.cpp::k_max_registered_services`가
+  M13부터 `8`로 고정돼 있었는데, M17까지 오며 부트 디스크 서비스가
+  11개(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/
+  procsrv/login)로 늘어 그 상한을 넘었다 — 9번째로 스폰되는 `vfs`
+  부터는 `spawn_visit()`의 `ctx->registry_count < k_max_registered_services`
+  검사가 막혀 이름-핸들 레지스트리에 **등록조차 되지 않았다**.
+  그 결과 `vfs`에 의존하는 `procsrv`의 `depends=vfs`가
+  `find_registered_handle()`에서 못 찾아 `dep_handle=0`으로 조용히
+  실패했고, `procsrv`가 애초에 유효한 vfs 핸들을 받지 못해 자신의
+  하드코딩된 `k_vfs_handle=2`가 존재하지 않는 핸들을 가리키게 됐다
+  (QEMU 실측에서 `[procsrv] vfs open failed`/`fat32 open failed`/
+  `ext4 open failed`로 재현 — M16까지는 8개 이하라 드러나지 않았던
+  버그다). `k_max_registered_services`를 `16`으로 늘려 고쳤다 —
+  등록/조회 로직 자체는 바꿀 필요가 없었다(순전히 배열 크기 문제).
+- **근거(실행 중 발견한 버그 2) — ps2 `OP_READ_KEY` 폴링 예산 과다**:
+  `servers/drivers/ps2`의 `OP_READ_KEY` 한 번은 출력 버퍼가 찰 때까지
+  `2,000,000`회를 폴링(포트 I/O 트랩 하나하나가 QEMU 에뮬레이션에서
+  실제로 비싸다)하고, `servers/login`은 사용자명 한 필드를 읽는 데
+  이 호출을 최대 `50`번 재시도했다 — 실제 키 입력이 QEMU 자동화
+  환경에 없으므로(ADR-165 §결정4가 이미 전제한 상황) 이 예산이
+  전부 소진되며, 합쳐서 **최대 1억 회**의 포트 I/O 트랩이 발생했다.
+  스모크 테스트(`TIMEOUT_SEC=90`)에서 한 번은 66개 중 4개(콘솔/로그인
+  관련 전부)가 그 시간 안에 도달하지 못해 실패했다 — 다른 실행에서는
+  통과해 처음엔 "가끔 나는" 문제처럼 보였지만, 원인은 결정적이다
+  (호스트 부하에 따라 포트 트랩 처리 속도가 달라질 뿐). ps2의 예산을
+  `50,000`, login의 재시도 횟수를 `10`으로 줄여(합계 `500,000`,
+  약 200배 절감) 고쳤다 — 이후 66/66을 2회 연속 안정적으로 통과했다.
+- **영향**: `init/initrun/main.cpp`(레지스트리 크기), `servers/drivers/
+  ps2/main.cpp`/`servers/login/main.cpp`(폴링 예산). 두 버그 모두
+  코드 로직 자체는 정확했고 **크기 상수만** 잘못됐다는 점에서
+  ADR-149(self_elf/self_info 간격)·ADR-163(devmgr I/O BAR 고정
+  주소)와 같은 종류다 — 이 프로젝트에서 반복적으로 나타나는 "고정
+  상수를 실제 사용 규모가 넘어설 때"라는 버그 패턴.

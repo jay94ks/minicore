@@ -5,3 +5,4 @@
 add_subdirectory(ps2)
 add_subdirectory(usb)
 add_subdirectory(virtio-blk)
+add_subdirectory(console)

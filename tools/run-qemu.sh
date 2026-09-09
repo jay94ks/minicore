@@ -74,6 +74,13 @@
 #                         M16(ADR-129): servers/fs/ext4가 마운트할,
 #                         저널 없이 정리된 ext4 이미지(bus0/device8
 #                         고정). FAT32DISK와 같은 전제. 기본은 미설정.
+#   MINICORE_QEMU_DISPLAY=1  docs/plan/system-servers-bringup.md
+#                         M17(ADR-164): -display none 대신 실제 QEMU
+#                         창(gtk)을 띄운다 — servers/drivers/console이
+#                         그리는 VGA 텍스트 화면(로그인 프롬프트)을
+#                         사람이 직접 보려면 켠다. 스모크 테스트는
+#                         디버그 시리얼 로그만 보므로 이 값이 필요
+#                         없다(기본 off).
 
 set -euo pipefail
 
@@ -186,9 +193,20 @@ case "$ARCH" in
       EXTRA_ARGS+=(-device "qemu-xhci,addr=05.0")
     fi
 
+    # M17(system-servers-bringup.md, ADR-164) — 콘솔 드라이버가 처음
+    # 으로 실제 화면(VGA 텍스트 버퍼)에 뭔가를 그린다. ADR-125가 세운
+    # "기본값 유지 + opt-in" 패턴 그대로 — 기본은 여전히
+    # `-display none`(스모크 테스트는 디버그 시리얼 로그만 본다,
+    # 실제 화면이 필요 없다). 사람이 QEMU 창으로 로그인 프롬프트를
+    # 직접 보려면 MINICORE_QEMU_DISPLAY=1로 켠다.
+    DISPLAY_ARG="none"
+    if [[ "${MINICORE_QEMU_DISPLAY:-0}" == "1" ]]; then
+      DISPLAY_ARG="gtk"
+    fi
+
     exec "$QEMU_BIN" \
       -M q35 -m "$MEM_ARG" \
-      -no-reboot -no-shutdown -display none \
+      -no-reboot -no-shutdown -display "$DISPLAY_ARG" \
       -bios qboot.rom \
       -kernel "$KERNEL" \
       -chardev stdio,id=char0,mux=off -serial chardev:char0 \

@@ -239,8 +239,13 @@ constexpr uint8_t k_service_argv_marker[] = {'x'};
 // 프록시 핸들 레지스트리. 등록/탐색 서비스가 없어(OPEN-59) initrun이
 // 스폰 순서대로 직접 기록해 뒀다가, 그 뒤에 스폰하는 다른 서비스의
 // `depends=`가 이 이름을 가리키면 그 핸들을 inherited_handles로
-// 넘긴다.
-constexpr uint32_t k_max_registered_services = 8;
+// 넘긴다. M17 — 부트 디스크 서비스가 11개(memfs/devmgr/ps2/console/
+// usb/virtio-blk/fat32/ext4/vfs/procsrv/login)로 늘어 8을 넘었다 —
+// 이 배열이 다 차면 그 뒤에 스폰되는 서비스는 이름이 등록되지
+// 않아(vfs/procsrv가 딱 8번째를 넘긴 자리라 실제로 겪은 버그,
+// 2026-09-09) 그걸 가리키는 `depends=`가 전부 조용히 핸들 0(없음)
+// 으로 실패한다 — 여유를 넉넉히 둔다.
+constexpr uint32_t k_max_registered_services = 16;
 
 struct service_registry_entry {
     char name[32] = {};

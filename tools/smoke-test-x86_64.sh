@@ -88,6 +88,15 @@
 #     응답이 이제 이 경로로 온다(memfs도 이 라운드에서 함께
 #     갱신했다). 호스트에서 미리 만든 각 이미지의 hello.txt를 열어
 #     읽어낸 내용이 호스트가 심어 둔 내용과 일치하는지 확인한다.
+#   M17 (system-servers-bringup.md, ADR-097/111/164, security-model.md
+#     ADR-165): 부트 디스크에 console(VGA 텍스트 콘솔, 0xB8000)과
+#     login이 추가된다(login은 console/ps2/procsrv 모두에 의존).
+#     ps2가 이제 self-test 후 종료하지 않고 OP_READ_KEY를 받는 진짜
+#     서버가 된다. procsrv도 이 라운드에서 처음으로 서버가 되어
+#     OP_LOGIN(최소 계정 저장소, 평문 비교)에 응답한다. 실제 키 입력이
+#     QEMU 자동화 환경에 주입되지 않으므로(ps2가 M14부터 겪은 것과
+#     같은 제약), login은 폴링해도 키가 없으면 내장 자체 테스트
+#     계정으로 같은 OP_LOGIN 경로를 그대로 검증한다.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -112,7 +121,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=75  # M16부터 부트 디스크가 9개 서비스(memfs/devmgr/ps2/usb/virtio-blk/fat32/ext4/vfs/procsrv)를 담아 훨씬 오래 걸린다.
+TIMEOUT_SEC=90  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담아 훨씬 오래 걸린다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
   DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M16부터 memfs+devmgr+ps2+usb+virtio-blk+fat32+ext4+vfs+procsrv(servers/CMakeLists.txt).
@@ -212,6 +221,9 @@ declare -a EXPECTED=(
   "[ext4] mount ok=0x1"
   "[procsrv] fat32 read ok=1"
   "[procsrv] ext4 read ok=1"
+  "[console] vga init ok=1"
+  "[login] no keyboard input, using self-test account"
+  "[login] auth ok=1"
 )
 
 LOG_FILE="$(mktemp)"

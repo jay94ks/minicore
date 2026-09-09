@@ -31,14 +31,25 @@
 namespace {
 
 // sys_process_spawn(create_endpoint=true)이 handle 1을 이 프로세스의
-// endpoint로 채운다(ADR-152) — procsrv는 아직 아무도 이 endpoint에
-// 걸지 않으므로 미사용. handle 2는 initrun이 스폰 시점에 넣어 준
-// vfs endpoint 프록시(lib/*.ini의 `depends=vfs`).
+// endpoint로 채운다(ADR-152) — M17부터 servers/login이 OP_LOGIN으로
+// 이 handle에 건다(security-model.md ADR-165). handle 2는 initrun이
+// 스폰 시점에 넣어 준 vfs endpoint 프록시(lib/*.ini의 `depends=vfs`).
+constexpr uint32_t k_own_endpoint_handle = 1;
 constexpr uint32_t k_vfs_handle = 2;
 
 constexpr uint32_t k_op_open = 1;
 constexpr uint32_t k_op_write = 2;
 constexpr uint32_t k_op_read = 3;
+
+// M17(security-model.md ADR-165) — procsrv가 이번 라운드에서 처음
+// 서버가 되어 받는 오퍼레이션. OP_LOGIN: regs[0]=사용자명(최대
+// 8바이트, NUL 패딩), regs[1..2]=비밀번호(최대 16바이트, NUL 패딩),
+// 응답 regs[0]=상태(0=성공, 1=실패). ADR-079의 uid/gid/S/G/J 비트는
+// 아직 채우지 않는다 — "계정이 존재하고 평문 비밀번호가 일치하면
+// 성공"만 증명하는 최소 저장소다.
+constexpr uint32_t k_op_login = 4;
+constexpr uint64_t k_login_status_ok = 0;
+constexpr uint64_t k_login_status_denied = 1;
 
 uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     uint64_t ret;
@@ -89,6 +100,39 @@ bool bytes_equal(const void* a, const void* b, uint64_t len) {
         }
     }
     return true;
+}
+
+struct account {
+    char username[8];
+    char password[16];
+};
+
+// 실제 다중 사용자 계정 관리(해싱, uid/gid 발급)는 security-model.md
+// ADR-165 §결정2가 M18 이후로 미룬 것과 같은 이유로 여기서는
+// 하드코딩한다 — "계정이 존재하고 평문 비밀번호가 일치하면 성공"만
+// 증명하면 되는 M17 범위.
+account g_accounts[2];
+
+void init_accounts() {
+    const char* names[2] = {"test", "root"};
+    const char* passwords[2] = {"test1234", "root1234"};
+    for (int a = 0; a < 2; ++a) {
+        pack_bytes(g_accounts[a].username, sizeof(g_accounts[a].username), names[a],
+                   cstr_len(names[a]));
+        pack_bytes(g_accounts[a].password, sizeof(g_accounts[a].password), passwords[a],
+                   cstr_len(passwords[a]));
+    }
+}
+
+void handle_login(const uapi::message& in, uapi::message& out) {
+    for (const account& acc : g_accounts) {
+        if (bytes_equal(&in.regs[0], acc.username, sizeof(acc.username)) &&
+            bytes_equal(&in.regs[1], acc.password, sizeof(acc.password))) {
+            out.regs[0] = k_login_status_ok;
+            return;
+        }
+    }
+    out.regs[0] = k_login_status_denied;
 }
 
 // vfs→memfs로 파일을 열고, 그 응답으로 위임받은 memfs 핸들에 직접
@@ -236,5 +280,21 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     run_mounted_fs_read_test("/mnt/fat32/hello.txt", "hello fat32 world\n", "[procsrv] fat32");
     run_mounted_fs_read_test("/mnt/ext4/hello.txt", "hello ext4 world\n", "[procsrv] ext4");
 
-    quiet_exit();
+    // M17(security-model.md ADR-165) — 여기서부터 procsrv가 처음으로
+    // 진짜 서버가 된다. servers/login이 OP_LOGIN으로 이 계정 저장소에
+    // 묻는다.
+    init_accounts();
+    for (;;) {
+        uapi::message in{};
+        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+                                        reinterpret_cast<uint64_t>(&in), 0);
+        uapi::message out{};
+        if (recv_err == 0) {
+            out.label = in.label;
+            if (in.label == k_op_login) {
+                handle_login(in, out);
+            }
+        }
+        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+    }
 }
