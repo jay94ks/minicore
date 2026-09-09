@@ -1,2 +1,5 @@
-# 포팅된 셸·coreutils 등 (ADR-005). 아직 채택할 소프트웨어가 확정되지 않아 비어 있다.
+# 포팅된 셸·coreutils 등 (ADR-005). 실제 서드파티 포팅 대상은 아직
+# 확정되지 않았다 — M20(docs/design/foundations.md ADR-170)이 그 자리에
+# minicore 전용 최소 셸(ADR-049 대체 구현)을 먼저 채운다.
 # TODO: third_party/<도구>(ADR-022) 확정 시 add_subdirectory(<도구>) 추가.
+add_subdirectory(shell)

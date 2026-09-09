@@ -107,6 +107,19 @@
 #     login이 OP_SU로 요청한 신원 전환(root로, procsrv 하드코딩
 #     위임 테이블 덕에 비밀번호 없이 승인)으로. 위임이 없고 잘못된
 #     비밀번호를 쓰는 두 번째 OP_SU 요청은 거부돼야 한다.
+#   M20 (system-servers-bringup.md, docs/design/foundations.md ADR-170,
+#     security-model.md ADR-171, filesystem.md ADR-172): 부트 디스크에
+#     userland/shell이 추가된다(의존 vfs/console/ps2, procsrv보다
+#     먼저 떠 있어야 한다). 셸은 부팅 즉시 자기 handle 1에서 블록하며
+#     기다리다가, 로그인 성공 시 procsrv가 보내는 OP_START를 받아야만
+#     프롬프트를 낸다("[shell] session started"/"[procsrv] shell
+#     session start ok=1"). 실제 키 입력이 없는 자동화 환경에서는
+#     ls/cat을 빌트인으로 한 번씩 결정적으로 실행해 검증한다(ls는
+#     새 fs-protocol v4 OP_LIST로 memfs 파일 목록을, cat은 procsrv의
+#     M13 자체 테스트가 만들어 둔 test.txt의 내용 "hello vfs"를
+#     확인한다). 실제 서드파티 libc/셸 포팅은 이번 라운드에 하지
+#     않는다(ADR-170 §결정1/2 — libmc 최소 부분집합 + minicore 전용
+#     대체 셸).
 #   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
 #     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
 #     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
@@ -146,7 +159,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=110  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담는다. M18은 서비스 수는 그대로지만 su-target 스폰 2회+로더 IPC 왕복이 추가돼 여유를 더 둔다. M19는 12번째 서비스(cfgsrv)와 procsrv↔cfgsrv IPC 왕복(9종 오퍼레이션+VFS 영속화 쓰기 여러 번)이 늘어 여유를 더 둔다.
+TIMEOUT_SEC=120  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담는다. M18은 서비스 수는 그대로지만 su-target 스폰 2회+로더 IPC 왕복이 추가돼 여유를 더 둔다. M19는 12번째 서비스(cfgsrv)와 procsrv↔cfgsrv IPC 왕복(9종 오퍼레이션+VFS 영속화 쓰기 여러 번)이 늘어 여유를 더 둔다. M20은 13번째 서비스(shell)+procsrv→셸 OP_START IPC+셸의 ls/cat 자체 테스트가 늘어 여유를 더 둔다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
   DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M16부터 memfs+devmgr+ps2+usb+virtio-blk+fat32+ext4+vfs+procsrv(servers/CMakeLists.txt).
@@ -259,6 +272,12 @@ declare -a EXPECTED=(
   "[procsrv] cfgsrv permission denied before grant=1"
   "[procsrv] cfgsrv permission granted after chmod=1"
   "[procsrv] cfgsrv full protocol ok=1"
+  "[shell] session started"
+  "[procsrv] shell session start ok=1"
+  "[shell] no keyboard input, running self-test commands"
+  "[shell] ls ok=1"
+  "[shell] cat ok=1"
+  "[shell] self-test done"
 )
 
 LOG_FILE="$(mktemp)"

@@ -1289,6 +1289,50 @@ ADR-011/023)만으로 표현한다.
   이 ADR은 그 스펙을 채우는 게 아니라 M18 검증에 필요한 최소
   프로토타입이다.
 
+## ADR-171. M20: 로그인 후 셸 시작을 procsrv→셸 OP_START 신호로 단순화 (ADR-089 보강, 대체 아님)
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: ADR-089가 정한 "로그인 성공 시 procsrv가 `session_program`을
+  `exec()`한다"를 이번 라운드는 다음으로 단순화해 구현한다.
+  1. 셸(`userland/shell/`, foundations.md ADR-170)은 **부팅 시
+     initrun이 다른 서비스와 똑같이 직접 스폰**한다(`depends=vfs,
+     console,ps2`) — procsrv가 fork/exec으로 만드는 게 아니다.
+     스폰 직후 셸은 자기 자신의 IPC 엔드포인트(handle 1)에서
+     `sys_ipc_recv`로 블록하며 대기한다.
+  2. procsrv는 셸에 대한 캐패빌리티도 스폰 시점에 미리 받는다
+     (`depends=vfs,cfgsrv,shell` — handle 2/3/4). `OP_LOGIN`이
+     성공(자기 자신에게 딱 한 번만, 정적 플래그로 중복 방지)하면
+     procsrv가 그 handle로 `OP_START`(신규, label=1) 메시지를 보낸다.
+  3. 셸은 `OP_START`를 받으면 즉시 응답한 뒤(블로킹 해제),
+     **다시는 `sys_ipc_recv`를 부르지 않고** 대화형 루프(프롬프트
+     출력→키 입력→내장 명령 실행)로 넘어간다 — 이후 어떤 프로세스도
+     셸의 handle 1을 다시 호출할 수 없다(이번 라운드는 세션 하나만
+     다루므로 문제되지 않는다).
+  4. `user_account.session_program` 필드, 계정별 재정의, guest/jail의
+     `/run` 제약(ADR-089 §결정 1/4)은 이번 구현에 없다 — 모든 로그인이
+     같은 단일 셸 인스턴스로 이어진다.
+- **근거**: ADR-089의 "procsrv가 exec()한다"를 문자 그대로 구현하려면
+  procsrv(또는 그 자식)가 **셸 바이너리의 원본 ELF 바이트**를 자기
+  주소공간에 가져와야 하는데, 이 바이트를 얻을 방법이 없다 —
+  M18의 su-target 로더는 procsrv 자신의 self_info 브릿지(자기
+  자신의 ELF)를 재사용한 것이라 다른 바이너리로는 일반화되지 않고,
+  일반화하려면 "임의 경로의 ELF를 다른 프로세스에 전달"하는 새
+  메커니즘이 필요하다(M18이 이미 이걸 범위 밖으로 명시해 뒀다).
+  반면 "이미 스폰된 프로세스에 캐패빌리티 주입 시점에 이미 확보한
+  handle로 IPC 신호를 보내는 것"은 M13부터 검증된 기존 메커니즘
+  그대로다 — 새 커널/IPC 기능이 전혀 필요 없다.
+- **영향**:
+  - [foundations.md](foundations.md) ADR-170의 M20 범위 좁힘과
+    직접 연결된다.
+  - `tools/mkbootdisk.py`/`servers/CMakeLists.txt`의 부팅 순서가
+    `...→vfs→cfgsrv→shell→procsrv→login`으로 확정된다(shell이
+    procsrv보다 먼저 떠 있어야 procsrv가 그 핸들을 받을 수 있다).
+  - 계정별 `session_program`을 실제로 구현하려면(ADR-089 완성)
+    "임의 경로의 ELF를 다른 프로세스가 로드해 실행하는 일반
+    메커니즘"이 결국 필요하다 — 이번 라운드는 그 필요성을 다시
+    한번 확인했을 뿐, 새 미결정 항목을 추가하지는 않는다(M18의
+    기존 범위 밖 항목과 같다).
+
 ## 아직 정하지 않은 것
 
 - **OPEN-42**: 위임의 세부 범위(특정 명령만 허용, 특정 시간대만

@@ -53,6 +53,7 @@
 | [system-servers-bringup-m17.md](done/system-servers-bringup-m17.md) | M17(완료): VGA 텍스트 콘솔+ps2 진짜 IPC 서버 전환+procsrv 최초 서버화(OP_LOGIN)+login 서버(ADR-164/165), 그 과정에서 발견한 initrun 서비스 레지스트리 크기 초과·ps2 폴링 예산 과다 버그 진단·수정(ADR-166) — system-servers-bringup.md §M17 완료 |
 | [system-servers-bringup-m18.md](done/system-servers-bringup-m18.md) | M18(완료): fs-protocol v3(OP_WRITE도 pages[] 기반+memfs 커서+OP_OPEN 신원 필드, ADR-168)+procsrv 위임 테이블/OP_SU/실제 경로→ELF 로더+VFS guest/jail 홈 격리(ADR-167) — system-servers-bringup.md §M18 완료 |
 | [system-servers-bringup-m19.md](done/system-servers-bringup-m19.md) | M19(완료): cfgsrv 설정 리포지터리 신설(주소 체계/타입 KV/Unix RWX 권한/reg_op 9종/VFS 실제 영속화, ADR-169)+procsrv 왕복·권한 모델 양방향 검증, 그 과정에서 발견한 elf_loader 세그먼트-페이지 공유 미처리 버그 진단·회피 — system-servers-bringup.md §M19 완료 |
+| [system-servers-bringup-m20.md](done/system-servers-bringup-m20.md) | M20(완료, 계획 최종 마일스톤): libmc 최소 부분집합 신설(ADR-170)+minicore 전용 대체 셸(userland/shell, ls/cat 빌트인)+procsrv→셸 OP_START 세션 시작(ADR-171)+memfs OP_LIST(fs-protocol v4, ADR-172) — 실제 서드파티 libc/셸 포팅은 이번 라운드에 하지 않음(명시적으로 남긴 갭) — system-servers-bringup.md §M20 완료, 계획 전체(M12~M20) 완료 |
 
 ## design — 설계/상세
 

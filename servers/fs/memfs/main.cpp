@@ -18,6 +18,7 @@ constexpr uint32_t k_own_endpoint_handle = 1;
 constexpr uint32_t k_op_open = 1;
 constexpr uint32_t k_op_write = 2;
 constexpr uint32_t k_op_read = 3;
+constexpr uint32_t k_op_list = 4;  // M20(fs-protocol.md v4, filesystem.md ADR-172) — 셸 ls 빌트인.
 
 constexpr uint64_t k_status_ok = 0;
 constexpr uint64_t k_status_not_found = 1;
@@ -200,6 +201,40 @@ void handle_read(const uapi::message& in, uapi::message& out) {
     out.regs[1] = k_status_ok;
 }
 
+// fs-protocol.md v4 §2.4(filesystem.md ADR-172) — OP_WRITE/OP_READ와
+// 같은 정신으로 VFS를 거치지 않고 클라이언트가 직접 부른다. 채워진
+// 파일 슬롯 이름을 NUL로 구분해 한 페이지에 눌러 담는다.
+void handle_list(const uapi::message&, uapi::message& out) {
+    for (uint64_t i = 0; i < k_page_size; ++i) {
+        g_read_scratch[i] = 0;
+    }
+    uint32_t off = 0;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < k_max_files; ++i) {
+        if (!g_files[i].used) {
+            continue;
+        }
+        uint32_t name_len = 0;
+        while (name_len < 32 && g_files[i].name[name_len] != '\0') {
+            ++name_len;
+        }
+        if (off + name_len + 1 >= k_page_size) {
+            break;
+        }
+        for (uint32_t k = 0; k < name_len; ++k) {
+            g_read_scratch[off++] = static_cast<uint8_t>(g_files[i].name[k]);
+        }
+        g_read_scratch[off++] = '\0';
+        ++count;
+    }
+    out.page_count = 1;
+    out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
+    out.pages[0].length = k_page_size;
+    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.regs[0] = k_status_ok;
+    out.regs[1] = count;
+}
+
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
@@ -219,6 +254,9 @@ extern "C" [[noreturn]] void _start(const void*) {
                     break;
                 case k_op_read:
                     handle_read(in, out);
+                    break;
+                case k_op_list:
+                    handle_list(in, out);
                     break;
                 default:
                     out.regs[1] = k_status_not_found;

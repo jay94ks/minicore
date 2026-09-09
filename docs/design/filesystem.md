@@ -676,3 +676,30 @@ fd 라우팅과 VFS 런타임 디렉토리 구성에 관한 결정. [spec/vfs-la
   바꾼 전례를 그대로 따른다). `servers/fs/fat32`/`servers/fs/ext4`
   의 `OP_READ`는 그대로다(읽기전용 호스트 픽스처라 커서가 필요
   없다 — 항상 오프셋 0부터 1페이지만).
+
+## ADR-172. fs-protocol v4: memfs `OP_LIST` 추가 (M20, security-model.md ADR-170/171)
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: `servers/fs/memfs`에 새 오퍼레이션 `OP_LIST`(label=4)를
+  추가한다. 요청은 인자가 없다(`regs`/`pages` 미사용). 응답은
+  `regs[0]`=상태, `regs[1]`=파일 개수, `page_count`=1,
+  `pages[0]`=NUL로 구분된 파일 이름 목록(한 페이지, 최대
+  `k_max_files`개). `OP_WRITE`/`OP_READ`처럼 **VFS를 거치지 않고
+  클라이언트가 memfs 핸들에 직접 건다**(fs-protocol.md v2가 이미
+  정한 "open 이후엔 vfs 우회" 관례 그대로) — 클라이언트는 아무
+  경로나(이미 존재하는 파일이든 아니든) 한 번 `OP_OPEN`해 memfs
+  프록시 핸들을 얻은 뒤 그 핸들로 `OP_LIST`를 부른다.
+- **근거**: M20의 `userland/shell`(foundations.md ADR-170)이 셸
+  빌트인 `ls`를 구현하려는데, fs-protocol에 디렉터리/파일 목록
+  조회 오퍼레이션이 v1~v3 어디에도 없다 — `OP_OPEN`은 이름을
+  아는 파일을 열 뿐, 무엇이 있는지 나열하는 방법이 없었다.
+  memfs는 평평한 이름공간이라 "목록"이 곧 "전체 파일 슬롯 순회"라
+  구현이 단순하다 — FAT32/ext4(읽기전용 호스트 픽스처)까지
+  일반화하는 것은 이번 범위 밖이다(`ls`는 이번 라운드엔 memfs만
+  본다).
+- **영향**:
+  - `docs/spec/fs-protocol.md`에 §2.4로 `OP_LIST` wire 포맷을
+    추가한다(스펙 갱신, 이 ADR과 함께 반영).
+  - FAT32/ext4로 `OP_LIST`를 확장하는 것, 중첩 디렉터리 개념
+    (memfs는 평평한 이름공간이라 없다) 지원은 이번 범위 밖 —
+    필요해지면 별도 ADR.

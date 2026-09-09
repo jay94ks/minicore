@@ -87,8 +87,8 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   [docs/plan/smp-fpu-bringup.md](docs/plan/smp-fpu-bringup.md)
   (M9~M11b) 전체가 완료됨 — 결과는 [docs/done/](docs/done/) 참고.
   [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
-  (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸) 중
-  M12~M19가 완료됨 — 결과는
+  (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸)
+  **전체(M12~M20)가 완료됨** — 결과는
   [docs/done/system-servers-bringup-m12-full.md](docs/done/system-servers-bringup-m12-full.md),
   [docs/done/system-servers-bringup-m13.md](docs/done/system-servers-bringup-m13.md),
   [docs/done/system-servers-bringup-m14.md](docs/done/system-servers-bringup-m14.md),
@@ -96,12 +96,17 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   [docs/done/system-servers-bringup-m16.md](docs/done/system-servers-bringup-m16.md),
   [docs/done/system-servers-bringup-m17.md](docs/done/system-servers-bringup-m17.md),
   [docs/done/system-servers-bringup-m18.md](docs/done/system-servers-bringup-m18.md),
-  [docs/done/system-servers-bringup-m19.md](docs/done/system-servers-bringup-m19.md)
+  [docs/done/system-servers-bringup-m19.md](docs/done/system-servers-bringup-m19.md),
+  [docs/done/system-servers-bringup-m20.md](docs/done/system-servers-bringup-m20.md)
   참고(M14의 실제 USB 장치 열거/HID, M16의 FAT32/ext4 쓰기·하위
   디렉터리, M17의 멀티 TTY·세션 프로그램 스폰, M18의 jail 실제
   오버레이·cfgsrv 위임 저장·임의 명령 su/sudo, M19의 group 권한
-  검증·재부팅을 넘어서는 실제 영속화·진짜 커널 reg_table 객체는
-  범위 밖으로 명시).
-  다음 실행 대상은 M20(libc/POSIX 포팅 + 로그인 후 셸, 이 계획의
-  마지막 마일스톤), 아직 미착수.
+  검증·재부팅을 넘어서는 실제 영속화·진짜 커널 reg_table 객체,
+  M20의 **실제 서드파티 libc/셸 포팅(계획이 원래 요구한 것 —
+  ADR-170에 따라 minicore 전용 대체 셸+libmc 최소 부분집합으로
+  기능적 완료 기준만 충족)**·외부 프로그램 fork/exec·계정별
+  session_program은 범위 밖으로 명시).
+  **이 계획 문서에는 다음 마일스톤이 없다** — 다만 M20이 남긴
+  "실제 libc/셸 포팅"은 프로젝트 자체의 완료를 뜻하지 않으며 별도
+  후속 계획 대상이다.
   OPEN-29·OPEN-50·OPEN-53·OPEN-55~59·OPEN-61은 이미 해소돼 있다.

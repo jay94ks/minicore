@@ -46,6 +46,8 @@ namespace {
 // 스폰 시점에 넣어 준 vfs endpoint 프록시(lib/*.ini의 `depends=vfs`).
 constexpr uint32_t k_own_endpoint_handle = 1;
 constexpr uint32_t k_vfs_handle = 2;
+// M20(security-model.md ADR-171) — handle 4는 initrun이 스폰 시점에
+// 넣어 준 셸 endpoint 프록시(lib/*.ini의 depends=vfs,cfgsrv,shell).
 
 constexpr uint32_t k_op_open = 1;
 constexpr uint32_t k_op_write = 2;
@@ -155,11 +157,36 @@ void init_accounts() {
     }
 }
 
+// M20(security-model.md ADR-171) — 로그인 성공 시 셸(부팅 시 이미
+// 떠서 자기 handle 1에서 sys_ipc_recv로 블록 중)에게 OP_START를
+// 보내 세션을 시작시킨다. 이번 라운드는 세션 하나만 다루므로 두
+// 번째 호출을 막는 정적 플래그를 둔다(셸은 OP_START 이후 다시는
+// sys_ipc_recv를 부르지 않아, 두 번째 호출은 응답 없이 영원히
+// 블록한다 — 이 가드가 그 상황을 원천적으로 막는다).
+constexpr uint32_t k_shell_handle = 4;
+constexpr uint32_t k_op_start = 1;
+bool g_session_started = false;
+
+void start_session_once() {
+    if (g_session_started) {
+        return;
+    }
+    g_session_started = true;
+    uapi::message req{};
+    req.label = k_op_start;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_shell_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    const char* msg = "[procsrv] shell session start ok=1\n";
+    debug_log(msg, cstr_len(msg));
+}
+
 void handle_login(const uapi::message& in, uapi::message& out) {
     for (const account& acc : g_accounts) {
         if (bytes_equal(&in.regs[0], acc.username, sizeof(acc.username)) &&
             bytes_equal(&in.regs[1], acc.password, sizeof(acc.password))) {
             out.regs[0] = k_login_status_ok;
+            start_session_once();
             return;
         }
     }
@@ -588,8 +615,9 @@ void run_mounted_fs_read_test(const char* mount_path, const char* expected,
 }
 
 // ---------- M19 — cfgsrv 클라이언트(registry.md, registry-decisions.md ADR-169) ----------
-// handle 3 = initrun이 스폰 시점에 넣어 준 cfgsrv endpoint 프록시
-// (lib/*.ini의 depends=vfs,cfgsrv — 나열 순서대로 handle 2, 3).
+// handle 3 = initrun이 스폰 시점에 넣어 준 cfgsrv endpoint 프록시,
+// handle 4는 셸 endpoint 프록시(M20, 아래 참고) — 나열 순서
+// (lib/*.ini의 depends=vfs,cfgsrv,shell) 그대로 handle 2/3/4.
 constexpr uint32_t k_cfgsrv_handle = 3;
 
 constexpr uint32_t k_reg_op_open_table = 1;

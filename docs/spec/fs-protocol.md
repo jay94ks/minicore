@@ -1,18 +1,21 @@
-# FS 서버 공통 프로토콜 스펙 (M18 v3)
+# FS 서버 공통 프로토콜 스펙 (M20 v4)
 
 **관련 결정**: [filesystem.md](../design/filesystem.md) ADR-018(fd 라우팅),
 ADR-047(synthetic FS 서버), ADR-101(공유 모드/잠금), ADR-128(`fs_node_id`),
-ADR-162(v2), ADR-168(v3 — 이 문서), [kernel-ipc-objects.md](../design/kernel-ipc-objects.md)
+ADR-162(v2), ADR-168(v3), ADR-172(v4 — 이 문서),
+[kernel-ipc-objects.md](../design/kernel-ipc-objects.md)
 ADR-151(IPC의 cross-address-space 확장), ADR-155/159/161(pages[]의
 유저 프로세스 매핑 경로), [security-model.md](../design/security-model.md)
 ADR-167(M18 범위 좁힘 — 이 문서의 신원 필드가 실제로 쓰이는 곳)
 **관련 스펙**: [ipc.md](ipc.md)(Call/Reply, message 구조), [procsrv.md](procsrv.md)
 §4.1(`open_file_id`)
 
-v2(M16)는 `OP_READ`만 `pages[]` 기반으로 바꿨다. 이 문서(v3, M18)는
-`OP_WRITE`도 대칭으로 `pages[]` 기반으로 바꾸고(su/sudo 로더가 procsrv
-자신의 ELF를 VFS에 실제로 써야 한다), `OP_OPEN`에 호출자 신원 필드를
-추가한다(guest/jail의 홈 밖 접근 거부, ADR-167 §결정2).
+v2(M16)는 `OP_READ`만 `pages[]` 기반으로 바꿨다. v3(M18)는 `OP_WRITE`도
+대칭으로 `pages[]` 기반으로 바꾸고(su/sudo 로더가 procsrv 자신의 ELF를
+VFS에 실제로 써야 한다), `OP_OPEN`에 호출자 신원 필드를 추가했다
+(guest/jail의 홈 밖 접근 거부, ADR-167 §결정2). 이 문서(v4, M20)는
+memfs 전용 `OP_LIST`를 추가한다(`userland/shell`의 `ls` 빌트인이
+필요로 한다, ADR-172).
 
 ## 1. 메시지 인코딩
 
@@ -34,6 +37,7 @@ v2(M16)는 `OP_READ`만 `pages[]` 기반으로 바꿨다. 이 문서(v3, M18)는
 | `1` | `OP_OPEN` | 클라이언트→VFS | 경로를 열거나(마운트 테이블로 대상 FS 서버 결정) 만든다 |
 | `2` | `OP_WRITE` | 클라이언트→FS 서버(직접) | 열린 파일의 쓰기 커서 위치에 최대 1페이지를 쓰고 커서를 전진시킨다(memfs만 지원) |
 | `3` | `OP_READ` | 클라이언트→FS 서버(직접) | 열린 파일의 읽기 커서 위치에서 최대 1페이지를 읽고 커서를 전진시킨다 |
+| `4` | `OP_LIST` | 클라이언트→FS 서버(직접, memfs만) | 현재 존재하는 모든 파일 이름을 나열한다(§2.4) |
 
 ### 2.1. `OP_OPEN` (클라이언트 → VFS)
 
@@ -88,6 +92,20 @@ v2(M16)는 `OP_READ`만 `pages[]` 기반으로 바꿨다. 이 문서(v3, M18)는
   회신한 뒤에야 다음 요청을 받는" 단일 스레드 루프라 실제로 부딫힐
   상황이 아니다.
 
+### 2.4. `OP_LIST` (클라이언트 → FS 서버 직접, memfs만) — v4 신규
+
+- 요청: `label=4`, `regs`/`pages` 모두 미사용. `OP_WRITE`/`OP_READ`와
+  같은 관례로 **VFS를 거치지 않고** 클라이언트가 memfs 핸들에 직접
+  건다 — 이 핸들은 아무 경로로든 `OP_OPEN`을 한 번 호출하면
+  `handles[0]`으로 받은 것을 그대로 재사용한다(memfs로 라우팅되는
+  경로면 충분, 그 파일이 실제로 존재하는지는 무관하다).
+- 처리: memfs가 현재 채워진 파일 슬롯(`used=true`)의 이름을 전부
+  순서대로 모은다.
+- 응답: `label=4`, `regs[0]`=상태, `regs[1]`=개수, `page_count=1`,
+  `pages[0]`=NUL로 구분된 이름 목록(한 페이지, 이름 32바이트
+  제한은 memfs 내부 `file_slot::name`과 동일). FAT32/ext4에게
+  보내면 `NOT_FOUND`(지원 안 함)로 응답한다.
+
 ## 3. 상태 코드 (`regs[1]`, 모든 응답 공통)
 
 ```
@@ -103,8 +121,10 @@ v2(M16)는 `OP_READ`만 `pages[]` 기반으로 바꿨다. 이 문서(v3, M18)는
 
 - `close`(fd 닫기), 공유 모드/잠금(ADR-101), `fs_node_id`(ADR-128)를
   응답에 싣는 것 — M13부터 동일하게 이후 라운드.
-- 디렉터리 나열, 하위 디렉터리 진입(FAT32/ext4는 v1 그대로 **루트
-  디렉터리 평평한 스캔만**, memfs는 원래부터 평평한 이름공간).
+- FAT32/ext4의 디렉터리 나열(`OP_LIST`는 memfs 전용, v4). 하위
+  디렉터리 진입(FAT32/ext4는 v1 그대로 **루트 디렉터리 평평한
+  스캔만**, memfs는 원래부터 평평한 이름공간이라 "나열"이 곧
+  "전체 슬롯 순회"다).
 - 임의 위치로 이동하는 명시적 `seek` — memfs의 커서는 항상
   0에서 시작해 순차적으로만 전진한다(§2.2/§2.3). 필요해지면 별도
   seek 오퍼레이션을 그때 추가한다(YAGNI, ADR-168 §근거).
