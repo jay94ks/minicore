@@ -54,4 +54,18 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
 process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
                                   const uint8_t* argv_blob, uint64_t argv_size);
 
+// sys_alloc_dma_buffer(ADR-147) — 물리적으로 연속인 4KiB<<order 바이트를
+// 확보해 호출자의 주소공간에 매핑하고, 그 가상주소와 물리주소를 모두
+// out_virt_addr/out_phys_addr에 채운다. **trusted 프로세스만** 쓸 수
+// 있다 — 물리주소를 유저에게 그대로 알려주는 것 자체가 격리를
+// 우회하는 능력이라, "이 프로세스가 실제로 하드웨어(virtio-blk)를
+// 직접 다뤄야 한다"는 사실이 이미 확인된 신원(ADR-074)에게만
+// 내준다. 이 프로세스 안에서 딱 하나만 있으면 충분하므로(부트
+// 디바이스 클라이언트 하나가 vring+I/O 버퍼를 전부 여기 담는다)
+// 고정 가상주소(k_dma_buffer_user_vaddr, process_ops.cpp)에 매핑한다
+// — 두 번째 호출은 그 매핑을 그대로 덮어써 버리므로 호출자가
+// 한 번만 쓴다고 가정한다.
+process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
+                                      uint64_t& out_phys_addr);
+
 }  // namespace arch_x86_64

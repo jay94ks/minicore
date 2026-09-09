@@ -877,3 +877,33 @@
     한다는 결정)은 그대로 유지된다 — 이 ADR은 "공유의 정확한
     범위"만 좁혔을 뿐, "공유해야 한다"는 결론 자체는 바꾸지
     않았다.
+
+## ADR-148. `sys_alloc_dma_buffer` — trusted 프로세스용 물리적으로 연속인 DMA 버퍼 할당 syscall
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: 새 syscall `k_syscall_alloc_dma_buffer(order)`를 추가한다.
+  `mm::alloc_pages(order, 0)`로 물리적으로 연속인 `4KiB<<order`
+  바이트를 확보해 호출자 주소공간의 고정 가상주소
+  (`k_dma_buffer_user_vaddr = 0x0000700000200000`, `process_ops.cpp`)에
+  매핑하고, 그 가상주소와 물리주소를 **둘 다** 유저에게 돌려준다
+  (`uapi::dma_buffer_result{virt_addr, phys_addr}`). 호출자가
+  `owner_space->trusted`가 아니면 즉시 거부한다. 프로세스당 이
+  버퍼가 하나만 있으면 충분하다고 가정해(부트 디바이스 클라이언트
+  하나가 vring+I/O 데이터를 전부 여기 담는다) 고정 가상주소로
+  단순화했다 — 두 번째 호출은 그 매핑을 그대로 덮어쓴다.
+- **근거**: initrun의 임베디드 virtio-blk 클라이언트(ADR-131/147)가
+  디바이스에 DMA로 넘길 vring(디스크립터 테이블+avail/used 링)과
+  요청 버퍼를 만들려면, 유저 프로세스가 그 버퍼의 **물리주소**를
+  알아야 한다 — 일반 유저 매핑(`map_page`)은 가상주소만 노출하고
+  물리주소는 절대 드러내지 않는다(격리 전제). 물리주소를 그대로
+  알려주는 것 자체가 프로세스 격리를 우회하는 능력이므로, "이
+  프로세스가 실제로 하드웨어를 직접 다뤄야 한다"는 사실이 이미
+  검증된 신원(ADR-074의 trusted)에게만 내준다 — 커널이 이미
+  `map_page`/`mm::alloc_pages`를 provenance에 무관하게 재사용할 수
+  있음을 사전에 확인했다(`map_page`가 프레임 참조카운트 내부를
+  건드리지 않는다).
+- **영향**: `process_ops.hpp/.cpp`에 `alloc_dma_buffer()` 추가,
+  `syscall.cpp`에 새 case 추가, `uapi.hpp`에
+  `k_syscall_alloc_dma_buffer`/`dma_buffer_result` 추가. 스모크
+  테스트(50개 어써션 전체)로 이 syscall 추가가 기존 경로에 회귀를
+  일으키지 않음을 확인했다(QEMU 재검증, 전부 통과).

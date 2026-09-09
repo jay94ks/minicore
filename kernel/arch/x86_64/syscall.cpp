@@ -124,6 +124,20 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         case uapi::k_syscall_thread_exit: {
             sched::exit();  // noreturn.
         }
+        case uapi::k_syscall_alloc_dma_buffer: {
+            auto* out = reinterpret_cast<uapi::dma_buffer_result*>(a1);
+            if (out == nullptr) {
+                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+            }
+            uint64_t virt = 0;
+            uint64_t phys = 0;
+            auto err = arch_x86_64::alloc_dma_buffer(static_cast<uint32_t>(a2), virt, phys);
+            if (err == arch_x86_64::process_spawn_error::ok) {
+                out->virt_addr = virt;
+                out->phys_addr = phys;
+            }
+            return static_cast<uint64_t>(err);
+        }
         default:
             return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
     }

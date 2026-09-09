@@ -40,6 +40,12 @@ constexpr uint64_t k_user_stack_top = 0x0000700000000000ull;
 constexpr uint32_t k_user_stack_pages = 4;
 constexpr uint64_t k_argv_user_vaddr = 0x0000700000002000ull;
 
+// M12(ADR-147) — sys_alloc_dma_buffer가 매핑하는 고정 가상주소. 다른
+// M12 임시 배선(k_m12_self_elf_user_vaddr=0x...3000,
+// k_argv_user_vaddr=0x...2000, k_m12_self_info_user_vaddr=0x...10000)
+// 과 겹치지 않는, 충분히 위쪽인 자리.
+constexpr uint64_t k_dma_buffer_user_vaddr = 0x0000700000200000ull;
+
 process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size, bool trusted,
                                    built_process& out) {
@@ -216,6 +222,40 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
 
     klog::printf("[process] exec ok entry=0x%lx\n", static_cast<unsigned long>(built.entry_rip));
     enter_usermode(built.entry_rip, built.user_rsp, built.arg0);
+}
+
+process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
+                                      uint64_t& out_phys_addr) {
+    object::thread* self = sched::current();
+    if (self == nullptr || self->owner_space == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+    if (!self->owner_space->trusted) {
+        return process_spawn_error::not_a_user_process;
+    }
+    if (order > mm::k_max_order) {
+        return process_spawn_error::invalid_argument;
+    }
+
+    auto page = mm::alloc_pages(order, 0);
+    if (!page.is_ok()) {
+        return process_spawn_error::out_of_memory;
+    }
+    uint64_t phys = page.value();
+    uint64_t size = static_cast<uint64_t>(mm::k_page_size) << order;
+
+    for (uint64_t off = 0; off < size; off += mm::k_page_size) {
+        auto mapped = map_page(self->owner_space->page_table_root, k_dma_buffer_user_vaddr + off,
+                                phys + off, page_perm::write | page_perm::user);
+        if (!mapped.is_ok()) {
+            mm::free_pages(phys, order);
+            return process_spawn_error::out_of_memory;
+        }
+    }
+
+    out_virt_addr = k_dma_buffer_user_vaddr;
+    out_phys_addr = phys;
+    return process_spawn_error::ok;
 }
 
 }  // namespace arch_x86_64

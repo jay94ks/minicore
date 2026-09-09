@@ -13,6 +13,7 @@ add_executable(minicore_initrun_elf
     cpio_reader.cpp
     ini_parser.cpp
     panic_stub.cpp
+    virtio_blk.cpp
 )
 
 target_include_directories(minicore_initrun_elf PRIVATE

@@ -65,6 +65,20 @@ struct exec_request {
 // 실행될 필요가 없는 경우에만 쓸 수 있다).
 inline constexpr uint64_t k_syscall_thread_exit = 4;
 
+// M12(ADR-147) — initrun의 임베디드 virtio-blk 클라이언트가 vring(디스크립터
+// 테이블+avail/used 링)과 I/O 요청 버퍼에 쓸 물리적으로 연속인 메모리가
+// 필요하다 — 디바이스가 DMA로 직접 읽는 물리주소를 알아야 하므로 보통의
+// map_page류 매핑(가상주소만 노출)으로는 부족하다. trusted 프로세스
+// (initrun)만 쓸 수 있다(process_ops.hpp 참고 — 물리주소 노출 자체가
+// 격리를 우회하는 능력이라 신뢰 여부로 막는다).
+// a1 = 이 구조체의 유저 가상주소(출력), a2 = order(4KiB<<order 바이트).
+inline constexpr uint64_t k_syscall_alloc_dma_buffer = 5;
+
+struct dma_buffer_result {
+    uint64_t virt_addr = 0;
+    uint64_t phys_addr = 0;
+};
+
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process가
 // initrun 자신의 원본 ELF 바이트를(자기 자신을 fork/process_spawn/exec으로
 // 다시 만들어 볼 수 있게) initrun의 주소공간에도 매핑해 두고, 그
