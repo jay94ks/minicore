@@ -191,10 +191,11 @@ table.open-table.resolved td { color: var(--muted); }
   width: 340px;
   flex-shrink: 0;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
+  /* display: flex;
+  flex-direction: column; */
   gap: 8px;
   padding-right: 4px;
+  margin-bottom: 10px;
 }
 .open-pending-detail {
   flex: 1;
@@ -210,6 +211,13 @@ table.open-table.resolved td { color: var(--muted); }
   border-radius: 8px;
   background: var(--panel);
   overflow: hidden;
+  /* .open-pending-list가 flex-direction:column + 고정 height인데, 이
+     flex-shrink:0이 없으면 카드가 여러 개 쌓여 목록 높이를 넘길 때
+     브라우저가 (스크롤 대신) 카드들을 억지로 짜부라뜨려 버린다 —
+     펼쳐진 카드의 textarea/저장 버튼이 그 축소된 높이 밖으로 밀려나
+     overflow:hidden에 그대로 잘려 안 보이는 문제(2026-09-09)가 이래서
+     생겼다. */
+  flex-shrink: 0;
 }
 .pending-head {
   display: flex;
@@ -227,7 +235,16 @@ table.open-table.resolved td { color: var(--muted); }
   white-space: nowrap;
 }
 .pending-content { font-size: 13.5px; }
-.pending-body { display: none; padding: 0 12px 12px; }
+.pending-body {
+  display: none;
+  padding: 0 12px 12px;
+  /* 카드 하나의 내용(관련 ADR·문서 목록 등)이 그 자체로 길어질 수도
+     있으니, 목록 전체 스크롤과 별개로 카드 안에서도 스크롤되게 상한을
+     둔다 — 이래야 항목이 아무리 길어도 저장 버튼까지는 항상 스크롤로
+     도달할 수 있다. */
+  max-height: 320px;
+  overflow-y: auto;
+}
 .pending-card.expanded .pending-body { display: block; }
 .pending-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .pending-meta a { color: var(--accent); }
