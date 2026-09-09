@@ -54,6 +54,13 @@ extern "C" void arch_fpu_thread_exiting(object::thread* t);
 // (syscall_entry.S 상단 주석, create_forked_thread 참고).
 extern "C" [[noreturn]] void arch_fork_child_resume();
 
+// M14(ADR-154, OPEN-58 해소) — next가 sys_io_activate로 활성화해 둔
+// I/O 포트 범위(object::thread::io_port_base/count)를 TSS IOPB에
+// 반영한다. kernel/core/sched는 TSS/IOPB의 존재를 몰라도 된다
+// (ADR-002 HAL 경계, arch_context_switch와 같은 관례) — 실제 diff
+// 기반 재프로그래밍은 arch 계층(x86_64: tss.cpp)이 담당한다.
+extern "C" void arch_sync_io_permission(const object::thread& next);
+
 namespace sched {
 
 namespace {
@@ -395,6 +402,7 @@ void start() {
 
     g_current = next;
     sync_syscall_kernel_rsp(*next);
+    arch_sync_io_permission(*next);
     arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
@@ -429,6 +437,7 @@ void yield() {
 
     g_current = next;
     sync_syscall_kernel_rsp(*next);
+    arch_sync_io_permission(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
     // arch_context_switch에서 돌아왔다는 것은 prev가 다시 스케줄되어
     // 이 지점부터 재개됐다는 뜻이다.
@@ -448,6 +457,7 @@ void block() {
     // sched::enqueue()할 책임을 진다.
     g_current = next;
     sync_syscall_kernel_rsp(*next);
+    arch_sync_io_permission(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
 }
 
@@ -475,6 +485,7 @@ void block() {
     // 에도 prev를 넣어 두지 않았다) — 이 스레드는 여기서 영구히 끝난다.
     uint64_t discard_rsp;
     sync_syscall_kernel_rsp(*next);
+    arch_sync_io_permission(*next);
     arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }

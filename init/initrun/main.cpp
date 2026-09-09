@@ -354,6 +354,13 @@ bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
 
     auto* dma_virt = reinterpret_cast<uint8_t*>(dma.virt_addr);
     auto io_base = static_cast<uint16_t>(bi.boot_device.io_port_base);
+
+    // M14(ADR-154) — 커널이 더 이상 부팅 중에 무조건 열어 주지 않는다
+    // (스레드별 IOPB로 바뀌면서, "필요한 순간에 직접 활성화"가 원칙이
+    // 됐다) — virtio-blk 레지스터에 실제로 접근하기 직전에 이 스레드
+    // 자신이 활성화한다. 0x20(가정한 레지스터 범위, ADR-147과 동일).
+    do_syscall(uapi::k_syscall_io_activate, io_base, 0x20, 0);
+
     if (!virtio_blk::init(io_base, dma_virt, dma.phys_addr)) {
         return false;
     }

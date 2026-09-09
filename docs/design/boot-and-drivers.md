@@ -1173,3 +1173,50 @@
   추가. `kernel/core/sched/scheduler.cpp`의 스위치 경로에 새 훅.
   `uapi.hpp`에 새 syscall 2개. `init/initrun/main.cpp`에서
   `virtio_blk::init()` 호출 직전에 `sys_io_activate()` 삽입.
+- **구현 완료**(2026-09-09): §결정 1~3, 6을 실제로 구현했다 —
+  `object::thread::io_port_base/count`, `sys_io_activate`/
+  `sys_io_deactivate`(`uapi.hpp` syscall 10/11), `tss.cpp::
+  sync_io_permission()`(diff 기반 재프로그래밍) + `arch_sync_io_permission`
+  extern "C" 훅(scheduler.cpp가 컨텍스트 스위치마다 호출),
+  `kernel_main.cpp`의 무조건 `grant_io_port_range()` 호출 제거 →
+  `init/initrun/main.cpp`가 `virtio_blk::init()` 직전에
+  `sys_io_activate(io_base, 0x20)`를 직접 호출. §결정4(cfgsrv
+  레지스트리 기반 동적 부여)는 OPEN-60으로 여전히 미착수. §결정5의
+  fork 특수 변형은 여전히 만들지 않았다(YAGNI). 52/52 스모크 테스트
+  전체 회귀 없음(QEMU 재검증).
+
+## ADR-156. `sys_map_phys` — 임의 물리주소 매핑 syscall (ADR-007/038/039가 예고한 "MMIO 캐패빌리티"의 실제 도입)
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: 새 syscall `sys_map_phys(phys_addr, size) -> virt_addr`
+  (trusted 프로세스만) — 호출자가 이미 알고 있는 임의의 물리주소
+  범위를 그대로 자기 주소공간에 매핑한다. `sys_alloc_dma_buffer`
+  (ADR-147)와 다른 점: 그건 **커널이 새로 할당한** RAM을 매핑하고
+  그 물리주소를 알려주는 것이고, 이건 **호출자가 이미 알고 있는
+  기존 물리주소**(하드웨어가 소유 — 페이지 할당자가 전혀 모르는
+  영역: ACPI 테이블, PCIe ECAM 설정공간, 디바이스 BAR)를 그대로
+  매핑하는 것이다 — `mm::frame_add_ref` 등 프레임 참조 카운트를
+  전혀 건드리지 않는다. `phys_addr`은 페이지 정렬이 필요 없다(커널이
+  내림/올림 처리 후 `out_virt_addr`에 오프셋까지 보정된 값을 돌려
+  준다). `alloc_dma_buffer`와 같은 단순화로 프로세스당 고정
+  가상주소 슬롯 하나를 재사용한다(동시에 두 매핑이 필요 없는 순차
+  사용만 가정 — devmgr가 ACPI 테이블을 다 읽은 뒤에야 ECAM을
+  매핑하는 식).
+- **근거**: ADR-007이 "디바이스 MMIO 영역을 드라이버 주소공간에
+  매핑할 수단(capability)을 제공해야 한다"고 이미 예고했고,
+  ADR-038/039도 devmgr가 "ECAM은 그냥 MMIO 영역이므로 기존 MMIO
+  캐패빌리티 매핑 메커니즘을 재사용한다"고 전제했지만, 이 수단
+  자체가 실제로 구현된 적이 한 번도 없었다(`objects.md`에도 "객체
+  종류가 늘어날 때(메모리 객체, MMIO 캐패빌리티 등)"라는 미래
+  서술로만 남아 있었다) — M14(devmgr의 ACPI/PCIe ECAM 접근, USB
+  드라이버의 xHCI BAR 접근)가 이 수단을 처음으로 실제로 요구하는
+  마일스톤이라 지금 만든다. 새 커널 객체 종류(예: 별도의 "MMIO
+  handle")를 추가하지 않고 `sys_alloc_dma_buffer`와 같은 "trusted
+  판정 + 고정 슬롯" 패턴을 그대로 재사용한 이유는, 두 syscall이
+  근본적으로 같은 일(물리주소를 유저 주소공간에 매핑)을 하고 있어
+  새 객체·핸들 개념을 얹으면 오히려 과설계이기 때문이다.
+- **영향**: `kernel/arch/x86_64/process_ops.hpp/.cpp`에 `map_phys()`
+  추가(`k_mmio_user_vaddr` 고정 슬롯, `k_dma_buffer_user_vaddr` 다음
+  자리). `uapi.hpp`에 `k_syscall_map_phys`(9)/`map_phys_request`/
+  `k_max_mmio_map_bytes`(16MiB 상한) 추가. `syscall.cpp`에 새 case.
+  devmgr/USB 드라이버(M14)가 이 syscall의 첫 실제 소비자다.

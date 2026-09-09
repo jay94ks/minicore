@@ -170,6 +170,34 @@ inline constexpr uint64_t k_syscall_ipc_reply = 7;
 inline constexpr uint64_t k_syscall_debug_log = 8;
 inline constexpr uint32_t k_max_debug_log_bytes = 96;
 
+// M14(system-servers-bringup.md §M14, ADR-007/038/039가 예고해 둔
+// "디바이스 MMIO 영역을 드라이버 주소공간에 매핑할 수단(capability)"을
+// 지금 실제로 만든다) — devmgr가 ACPI 테이블(RSDP가 가리키는 임의의
+// 물리주소)과 PCIe ECAM 설정공간(MCFG가 알려주는 물리주소), USB
+// 드라이버가 xHCI BAR를 각각 매핑하는 데 쓴다. sys_alloc_dma_buffer
+// (ADR-147)와 다른 점: 그건 **커널이 새로 할당한** 메모리를 매핑하고
+// 물리주소를 알려주는 것이고, 이건 **호출자가 이미 알고 있는 임의의
+// 기존 물리주소**(하드웨어가 소유— RAM 페이지 할당자가 전혀 모르는
+// 영역)를 그대로 매핑하는 것이다 — 그래서 frame 참조 카운트를
+// 건드리지 않는다. trusted 프로세스만 쓸 수 있다(물리주소를 직접
+// 다루는 능력 자체가 격리를 우회하므로 ADR-147과 같은 이유).
+// a1 = 이 구조체의 유저 가상주소, a2/a3 미사용.
+inline constexpr uint64_t k_syscall_map_phys = 9;
+inline constexpr uint64_t k_max_mmio_map_bytes = 16ull * 1024 * 1024;  // 16MiB 상한(ECAM 여러 버스 대비).
+
+struct map_phys_request {
+    uint64_t phys_addr = 0;      // 페이지 정렬 불필요 — 커널이 내림/올림 처리.
+    uint64_t size = 0;
+    uint64_t out_virt_addr = 0;  // 출력 — phys_addr의 페이지 내 오프셋까지 보정된 값.
+};
+
+// M14(ADR-154, OPEN-58 해소) — 활성화/비활성화 syscall 쌍. 호출한
+// 스레드 자신의 I/O 포트 범위를 설정/해제한다. trusted 프로세스만
+// 쓸 수 있다. a1=io_base, a2=count(sys_io_activate만, deactivate는
+// 인자 없음). 둘 다 반환값 0=성공.
+inline constexpr uint64_t k_syscall_io_activate = 10;
+inline constexpr uint64_t k_syscall_io_deactivate = 11;
+
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process가
 // initrun 자신의 원본 ELF 바이트를(자기 자신을 fork/process_spawn/exec으로
 // 다시 만들어 볼 수 있게) initrun의 주소공간에도 매핑해 두고, 그

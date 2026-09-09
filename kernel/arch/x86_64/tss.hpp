@@ -13,6 +13,10 @@
 
 #include <cstdint>
 
+namespace object {
+struct thread;  // kernel_objects.hpp(core) — 전방 선언만 필요(ADR-002와 같은 정신, 헤더 의존 최소화).
+}
+
 namespace arch_x86_64 {
 
 // GDT를 TSS 디스크립터(셀렉터 0x38)를 포함한 확장판으로 다시 구성하고
@@ -20,14 +24,20 @@ namespace arch_x86_64 {
 // 한다(install_syscall_entry()와 같은 시점 — kernel_main.cpp 참고).
 void init_tss();
 
-// M12(system-servers-bringup.md §M12, ADR-147) — [io_base, io_base+count)
-// 포트 범위를 ring3에서 inb/outb 등으로 직접 접근 가능하게 IOPB
-// 비트를 0(허용)으로 지운다. init_tss() 이후에만 호출 가능하다.
-// **알려진 단순화**: IOPB는 TSS 하나에 전역으로 공유된다(코어당 TSS
-// 하나, 스레드별로 나누지 않는다) — 지금은 유일한 트러스트 프로세스
-// (initrun)만 존재해 문제가 없지만, 신뢰하지 않는 유저 프로세스가
-// 생기는 시점에는 이 접근이 그 프로세스에게도 그대로 열려 있다는
-// 뜻이다(재검토 필요, docs/design/open-items.md에 등록).
-void grant_io_port_range(uint16_t io_base, uint16_t count);
+// M14(system-servers-bringup.md §M14, ADR-154, OPEN-58 해소) — t가
+// (object::thread::io_port_base/count로) 활성화해 둔 I/O 포트 범위를
+// TSS IOPB에 반영한다 — **diff 기반**: 지금 IOPB에 실제로 프로그램된
+// 범위(이 파일 내부에서 기억)와 다를 때만, 이전 범위를 재차단(1)하고
+// 새 범위를 개방(0)한다. 매 호출마다 8KiB 전체를 만지지 않는다.
+// init_tss() 이후에만 호출 가능. 두 자리에서 쓴다: (1) 컨텍스트
+// 스위치마다(core/sched/scheduler.cpp의 extern "C" 훅
+// arch_sync_io_permission을 통해 — 다음 스레드로 전환하기 직전),
+// (2) sys_io_activate/sys_io_deactivate가 **지금 실행 중인 스레드
+// 자신**에 대해 즉시 반영할 때(process_ops.cpp).
+//
+// ADR-147 시절의 grant_io_port_range()(전역 1회성, 스레드 구분 없음)
+// 를 대체한다 — 이제 IOPB는 "지금 스케줄된 스레드가 활성화해 둔
+// 범위만" 열린다.
+void sync_io_permission(const object::thread& t);
 
 }  // namespace arch_x86_64

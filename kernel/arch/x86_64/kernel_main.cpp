@@ -936,9 +936,10 @@ object::thread* setup_initrun_process() {
 
     // M12(ADR-147) — disk.cfg가 유효하면 그 BDF의 BAR0을 지금 실제로
     // 배정한다(pci_bringup.hpp 상단 주석 — PVH 직접 부팅이라 아무
-    // 펌웨어도 이걸 대신해 주지 않는다). 성공하면 배정한 포트
-    // 범위를 이 스레드(initrun, trusted)에게 TSS IOPB로 열어 준다 —
-    // 그래야 ring3에서 실제로 inb/outb를 쓸 수 있다.
+    // 펌웨어도 이걸 대신해 주지 않는다). M14(ADR-154)부터는 그 포트
+    // 범위를 여기서 곧바로 열어 주지 않는다 — initrun이
+    // virtio_blk::init() 직전에 sys_io_activate()를 직접 호출한다
+    // (스레드별 IOPB, "필요한 순간에만 활성화"라는 ADR-154 §결정 그대로).
     if (bi.boot_device.valid != 0) {
         auto bar =
             arch_x86_64::assign_virtio_blk_bar(g_mcfg.ecam_base_phys, bi.boot_device.pci_bus,
@@ -949,7 +950,6 @@ object::thread* setup_initrun_process() {
         if (bar.ok) {
             bi.boot_device.io_port_ok = 1;
             bi.boot_device.io_port_base = bar.io_port_base;
-            arch_x86_64::grant_io_port_range(bar.io_port_base, 0x20);
         }
     }
 

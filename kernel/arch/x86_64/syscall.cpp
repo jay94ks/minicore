@@ -185,6 +185,26 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             klog::printf("%s", buf);
             return 0;
         }
+        case uapi::k_syscall_map_phys: {
+            auto* req = reinterpret_cast<uapi::map_phys_request*>(a1);
+            if (req == nullptr) {
+                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+            }
+            uint64_t virt = 0;
+            auto err = arch_x86_64::map_phys(req->phys_addr, req->size, virt);
+            if (err == arch_x86_64::process_spawn_error::ok) {
+                req->out_virt_addr = virt;
+            }
+            return static_cast<uint64_t>(err);
+        }
+        case uapi::k_syscall_io_activate: {
+            auto err = arch_x86_64::io_activate(static_cast<uint16_t>(a1), static_cast<uint16_t>(a2));
+            return static_cast<uint64_t>(err);
+        }
+        case uapi::k_syscall_io_deactivate: {
+            auto err = arch_x86_64::io_deactivate();
+            return static_cast<uint64_t>(err);
+        }
         default:
             return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
     }

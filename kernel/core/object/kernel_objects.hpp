@@ -109,6 +109,17 @@ struct thread {
     // 페이지를 0으로 채운 뒤 FCW/MXCSR 기본값을 patch한다. nullptr이면
     // 아직 할당되지 않은 상태(생성 실패 경로에서만 잠깐 존재).
     uint8_t* fpu_save_area = nullptr;
+
+    // M14(ADR-154, OPEN-58 해소) — 이 스레드가 sys_io_activate로
+    // 활성화해 둔 I/O 포트 범위. 둘 다 0이면 "활성 범위 없음"(모든
+    // 포트 접근 거부). ADR-147 시절의 "TSS 하나에 전역으로 공유"를
+    // 대체한다 — 컨텍스트 스위치마다 arch_sync_io_permission이 이
+    // 필드를 읽어 TSS IOPB를 그 스레드 전용으로 재프로그래밍한다.
+    // sys_fork(ADR-142)는 자식에게 이 값을 그대로 물려준다(trusted
+    // 상속과 같은 정신) — 제한하는 fork 변형은 아직 없다(YAGNI,
+    // ADR-154 §결정5).
+    uint32_t io_port_base = 0;
+    uint32_t io_port_count = 0;
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/

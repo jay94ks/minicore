@@ -8,6 +8,7 @@
 #include <libk/panic.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
+#include <object/kernel_objects.hpp>
 
 namespace arch_x86_64 {
 
@@ -50,6 +51,24 @@ struct __attribute__((packed)) tss_with_iopb {
 };
 
 tss_with_iopb g_tss;
+
+// M14(ADR-154) — 지금 IOPB에 실제로 프로그램된 범위(스레드가 아니라
+// "IOPB의 현재 상태"를 기억한다 — sync_io_permission이 diff를 계산할
+// 유일한 기준). 부팅 시점(아직 아무 스레드도 활성화하지 않음)에는
+// 둘 다 0 — init_tss()가 이미 전체를 0xFF(거부)로 채워 두므로 "범위
+// 없음" 상태와 정확히 일치한다.
+uint16_t g_current_io_base = 0;
+uint16_t g_current_io_count = 0;
+
+void set_io_range(uint16_t io_base, uint16_t count, bool allow) {
+    for (uint32_t port = io_base; port < static_cast<uint32_t>(io_base) + count; ++port) {
+        if (allow) {
+            g_tss.iopb[port / 8] &= static_cast<uint8_t>(~(1u << (port % 8)));
+        } else {
+            g_tss.iopb[port / 8] |= static_cast<uint8_t>(1u << (port % 8));
+        }
+    }
+}
 
 // boot.S::gdt64_start(null+code32+data32+code64+data64+user_data64+
 // user_code64, 7개×8바이트=56바이트)를 그대로 복사하고, 시스템
@@ -118,10 +137,27 @@ void init_tss() {
     asm volatile("ltr %w0" : : "r"(k_sel_tss));
 }
 
-void grant_io_port_range(uint16_t io_base, uint16_t count) {
-    for (uint32_t port = io_base; port < static_cast<uint32_t>(io_base) + count; ++port) {
-        g_tss.iopb[port / 8] &= static_cast<uint8_t>(~(1u << (port % 8)));
+void sync_io_permission(const object::thread& t) {
+    uint16_t new_base = static_cast<uint16_t>(t.io_port_base);
+    uint16_t new_count = static_cast<uint16_t>(t.io_port_count);
+    if (new_base == g_current_io_base && new_count == g_current_io_count) {
+        return;  // 이미 이 범위로 프로그램돼 있다 — 아무 것도 하지 않는다.
     }
+    if (g_current_io_count > 0) {
+        set_io_range(g_current_io_base, g_current_io_count, /*allow=*/false);
+    }
+    if (new_count > 0) {
+        set_io_range(new_base, new_count, /*allow=*/true);
+    }
+    g_current_io_base = new_base;
+    g_current_io_count = new_count;
 }
 
 }  // namespace arch_x86_64
+
+// kernel/core/sched/scheduler.cpp가 컨텍스트 스위치마다 부르는 훅
+// (ADR-002 HAL 경계 — core는 이 파일을 include하지 않고 이 시그니처만
+// extern "C"로 안다).
+extern "C" void arch_sync_io_permission(const object::thread& next) {
+    arch_x86_64::sync_io_permission(next);
+}

@@ -4,6 +4,7 @@
 
 #include "elf_loader.hpp"
 #include "page_table.hpp"
+#include "tss.hpp"
 
 #include <new>
 
@@ -47,6 +48,12 @@ constexpr uint64_t k_argv_user_vaddr = 0x0000700000002000ull;
 // k_argv_user_vaddr=0x...2000, k_m12_self_info_user_vaddr=0x...10000)
 // 과 겹치지 않는, 충분히 위쪽인 자리.
 constexpr uint64_t k_dma_buffer_user_vaddr = 0x0000700000200000ull;
+
+// M14(ADR-007/038/039) — sys_map_phys가 매핑하는 고정 가상주소.
+// k_dma_buffer_user_vaddr 다음 슬롯 — 두 syscall이 서로 다른 물리
+// 출처(할당 vs 기존 하드웨어 영역)를 다루므로 동시에 살아 있어도
+// 겹치지 않게 자리를 분리해 둔다.
+constexpr uint64_t k_mmio_user_vaddr = 0x0000700000300000ull;
 
 process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size, bool trusted,
@@ -284,6 +291,12 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
         return static_cast<uint64_t>(process_spawn_error::out_of_memory);
     }
 
+    // ADR-154 §결정5 — 자식은 부모가 활성화해 둔 I/O 포트 범위를
+    // 그대로 물려받는다(trusted 상속과 같은 정신). 제한하는 fork
+    // 변형은 아직 없다(YAGNI).
+    child->io_port_base = self->io_port_base;
+    child->io_port_count = self->io_port_count;
+
     sched::enqueue(*child);
     klog::printf("[process] fork ok child_pml4=0x%lx\n",
                  static_cast<unsigned long>(child_root.value()));
@@ -354,6 +367,66 @@ process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
 
     out_virt_addr = k_dma_buffer_user_vaddr;
     out_phys_addr = phys;
+    return process_spawn_error::ok;
+}
+
+process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_virt_addr) {
+    object::thread* self = sched::current();
+    if (self == nullptr || self->owner_space == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+    if (!self->owner_space->trusted) {
+        return process_spawn_error::not_a_user_process;
+    }
+    if (size == 0 || size > uapi::k_max_mmio_map_bytes) {
+        return process_spawn_error::invalid_argument;
+    }
+
+    uint64_t phys_base = phys_addr & ~(static_cast<uint64_t>(mm::k_page_size) - 1);
+    uint64_t offset_in_page = phys_addr - phys_base;
+    uint64_t map_size = offset_in_page + size;
+    map_size = (map_size + mm::k_page_size - 1) & ~(static_cast<uint64_t>(mm::k_page_size) - 1);
+
+    for (uint64_t off = 0; off < map_size; off += mm::k_page_size) {
+        // 이전 sys_map_phys 호출이 이 슬롯의 일부를 이미 다른 물리주소로
+        // 채워 뒀을 수 있다(고정 슬롯 재사용, 이 파일 상단 주석) —
+        // map_page가 already_mapped로 실패하지 않도록 먼저 지운다.
+        // 애초에 매핑된 적이 없으면 not_mapped로 조용히 실패하는데,
+        // 그 결과는 무시해도 안전하다.
+        (void)unmap_page(self->owner_space->page_table_root, k_mmio_user_vaddr + off);
+        auto mapped = map_page(self->owner_space->page_table_root, k_mmio_user_vaddr + off,
+                                phys_base + off, page_perm::write | page_perm::user);
+        if (!mapped.is_ok()) {
+            return process_spawn_error::out_of_memory;
+        }
+    }
+
+    out_virt_addr = k_mmio_user_vaddr + offset_in_page;
+    return process_spawn_error::ok;
+}
+
+process_spawn_error io_activate(uint16_t io_base, uint16_t count) {
+    object::thread* self = sched::current();
+    if (self == nullptr || self->owner_space == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+    if (!self->owner_space->trusted) {
+        return process_spawn_error::not_a_user_process;
+    }
+    self->io_port_base = io_base;
+    self->io_port_count = count;
+    sync_io_permission(*self);  // 지금 실행 중인 스레드 — 다음 스위치까지 기다리지 않는다.
+    return process_spawn_error::ok;
+}
+
+process_spawn_error io_deactivate() {
+    object::thread* self = sched::current();
+    if (self == nullptr || self->owner_space == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+    self->io_port_base = 0;
+    self->io_port_count = 0;
+    sync_io_permission(*self);
     return process_spawn_error::ok;
 }
 

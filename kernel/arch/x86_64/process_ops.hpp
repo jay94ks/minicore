@@ -79,4 +79,26 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
 process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
                                       uint64_t& out_phys_addr);
 
+// sys_map_phys(M14, ADR-007/038/039가 예고한 "MMIO 캐패빌리티") —
+// 호출자가 알고 있는 임의의 물리주소 범위(하드웨어 소유, 페이지
+// 할당자가 모르는 영역 — ACPI 테이블, PCIe ECAM, 디바이스 BAR 등)를
+// 그대로 자기 주소공간에 매핑한다. alloc_dma_buffer와 달리 새 메모리를
+// 확보하지 않으므로 frame 참조 카운트를 건드리지 않는다. trusted
+// 프로세스만 쓸 수 있다(alloc_dma_buffer와 같은 이유). phys_addr은
+// 페이지 정렬 불필요 — 이 함수가 내림/올림을 처리하고, out_virt_addr에
+// phys_addr의 페이지 내 오프셋까지 보정된 값을 채운다. 고정 가상주소
+// 슬롯 하나를 재사용한다(alloc_dma_buffer와 같은 단순화 — 동시에 두
+// 매핑이 필요 없는 순차적 사용만 가정, process_ops.cpp 참고).
+process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_virt_addr);
+
+// sys_io_activate/sys_io_deactivate(ADR-154, OPEN-58 해소) — 호출한
+// 스레드 자신의 활성 I/O 포트 범위(object::thread::io_port_base/count)
+// 를 설정/해제하고, 지금 실행 중인 스레드이므로 TSS IOPB에도 즉시
+// 반영한다(arch_x86_64::sync_io_permission을 직접 부른다 — 다음
+// 컨텍스트 스위치까지 기다리지 않는다). trusted 프로세스만 쓸 수
+// 있다(alloc_dma_buffer/map_phys와 같은 이유 — I/O 포트 직접 접근도
+// 격리를 우회하는 능력이다).
+process_spawn_error io_activate(uint16_t io_base, uint16_t count);
+process_spawn_error io_deactivate();
+
 }  // namespace arch_x86_64
