@@ -1498,3 +1498,64 @@
   ADR-149(self_elf/self_info 간격)·ADR-163(devmgr I/O BAR 고정
   주소)와 같은 종류다 — 이 프로젝트에서 반복적으로 나타나는 "고정
   상수를 실제 사용 규모가 넘어설 때"라는 버그 패턴.
+
+## ADR-173. 레거시 8259 PIC 마스킹: 실제 GRUB Multiboot2 부팅 경로에서 발견한 IRQ0/#DF 벡터 충돌
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: `kernel/arch/x86_64/idt.cpp::init_idt()`가 IDT를 적재하기
+  전에 레거시 8259 PIC(마스터 포트 0x20/0x21, 슬레이브 0xA0/0xA1)의
+  IRQ 마스크 레지스터(OCW1)에 `0xFF`를 써서 **모든 레거시 IRQ를
+  막는다**(슬레이브 먼저, 그다음 마스터 — 마스터의 캐스케이드 라인
+  IRQ2로 슬레이브 IRQ가 전달될 수 있으므로 이 순서가 안전하다).
+  리맵(벡터 오프셋을 8~15에서 다른 곳으로 옮기는 것)은 하지 않는다
+  — 이 커널은 M10(smp-fpu-bringup.md)부터 LAPIC/MADT 경로만 쓰고
+  8259를 쓸 계획이 전혀 없어서, "쓰되 벡터를 옮긴다"는 리맵 자체가
+  불필요하다.
+- **근거**: ADR-114가 "실제 GRUB(Multiboot2 ISO) 기반 검증은 여전히
+  하지 않은 상태로 남는다"고 명시적으로 남겨 둔 갭을 이번에 실제로
+  검증했다 — MSYS2에 GRUB 패키지가 없어(ADR-114 원문과 같은 사정,
+  여전히 해결되지 않음) Docker(`debian:bookworm-slim` +
+  `grub-pc-bin`/`grub-common`/`xorriso`)로 `grub-mkrescue`를 실행해
+  진짜 Multiboot2 부팅 ISO를 만들고, QEMU를 `-bios qboot.rom
+  -kernel ...`(PVH 개발 경로) 대신 `-cdrom <iso>`(SeaBIOS 기본
+  펌웨어, 진짜 GRUB가 Multiboot2 헤더를 읽어 진입)로 띄웠다. 커널의
+  Multiboot2 헤더/`_start32`(boot.S) 자체는 정확히 동작해 M1~M19의
+  모든 커널 자체 테스트를 그대로 통과했지만, **initrun이 처음으로
+  ring3(유저모드)에 진입하는 순간**(`enter_usermode`, usermode.S —
+  `RFLAGS.IF=1`이 이 커널 전체에서 처음 켜지는 지점) 직후
+  `vector=8`(#DF, 더블폴트) 예외로 죽었다 — PVH/qboot.rom 개발
+  경로(ADR-114)에서는 M1부터 지금까지 단 한 번도 나타나지 않은
+  증상이다. `MINICORE_QEMU_TRACE=1`(ADR-125)이 이미 마련해 둔
+  `-d cpu_reset,guest_errors,int` 트레이스로 실제 원인을 확인했다 —
+  진짜 CPU 더블폴트가 아니라 `Servicing hardware INT=0x08`(CPL=3,
+  IP=0x10000000=initrun 진입점)로, **하드웨어 IRQ0(타이머)가 그대로
+  벡터 8로 들어온 것**이었다. 이 커널은 8259를 한 번도 초기화(마스킹
+  이든 리맵이든)하지 않았는데, 실제 BIOS(SeaBIOS)+GRUB 경로는 8259/
+  PIT를 살려 둔 채 커널에 제어권을 넘긴다 — 리맵하지 않은 8259는
+  기본 벡터 오프셋(마스터=8~15)을 그대로 쓰므로 IRQ0이 정확히
+  `#DF`(8)와 충돌한다. QEMU의 PVH/qboot.rom 경로는 이 레거시 PIT를
+  같은 방식으로 살려 두지 않아(정확한 내부 동작은 qboot.rom 구현
+  세부이지만, 그 결과로 이 문제 자체가 이 경로에서는 전혀 나타나지
+  않는다) 지금까지 드러나지 않았다. (부수적으로, 실제 CPU 예외가
+  아닌 하드웨어 인터럽트가 그 자리를 차지하면서 `idt.hpp::
+  interrupt_frame`이 기대하는 `[error_code, rip, cs, rflags,
+  user_rsp, ss]` 슬롯 배치와 실제 스택 내용이 어긋나 보였다 — 진단
+  로그의 `rip=0x33`/`cs=0x202` 등 뒤섞인 값은 이 IRQ 자체의 증상이며
+  `interrupt_frame`의 버그는 아니다.)
+- **영향**:
+  - 이것으로 **이 프로젝트에서 처음으로 실제 GRUB Multiboot2 부팅
+    경로가 M1~M20 전체 스모크 테스트 기준(공식 82개 어써션)까지
+    끝까지 검증됐다** — 결과는
+    [real-hardware-boot-verification.md](../done/real-hardware-boot-verification.md)
+    참고. ADR-114의 "실기 또는 GRUB를 구할 수 있는 환경에서 별도로
+    검증이 필요하다"는 남겨진 과제 중 "GRUB를 구할 수 있는 환경"
+    부분이 Docker로 해소됐다 — 실제 물리 하드웨어 검증은 여전히
+    범위 밖이다.
+  - 이 변경은 `kernel/arch/x86_64/idt.cpp` 한 곳, 4줄(outb 헬퍼 +
+    마스킹 함수 + 호출 한 줄)뿐이다 — 기존 스모크 테스트(82개)·
+    SMP(11개)·NUMA(24개)·AVX(12개) 회귀 스위트 전부 재확인해 회귀가
+    없음을 확인했다.
+  - 8259를 실제로 리맵해 써야 하는 시나리오(예: LAPIC이 없는 아주
+    오래된 실기, 또는 IOAPIC이 아예 없는 극단적 환경)는 이 커널의
+    현재 로드맵(ADR-009: x86_64 우선, LAPIC/MADT 전제)에 없다 —
+    필요해지면 별도 ADR.

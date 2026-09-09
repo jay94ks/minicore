@@ -50,6 +50,33 @@ constexpr uint8_t k_gate_present_interrupt64 = 0x8E;  // present=1, DPL=0, type=
 
 idt_entry g_idt[256] = {};
 
+void outb(uint16_t port, uint8_t value) {
+    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+// 레거시 8259 PIC(마스터 0x20/0x21, 슬레이브 0xA0/0xA1)를 IRQ 마스크
+// 레지스터(OCW1)에 0xFF를 써서 전부 막는다 — 이 커널은 M10부터
+// LAPIC/IOAPIC 경로(lapic.cpp, MADT 파싱)만 쓰고 8259는 애초에 리맵도
+// 하지 않는다. 리맵을 안 한 8259는 기본 벡터 오프셋(마스터=8~15)을
+// 그대로 쓰므로, IRQ0(타이머)가 **CPU 예외 벡터 8(#DF, 더블폴트)과
+// 그대로 충돌**한다 — QEMU의 PVH/qboot.rom 개발 경로(ADR-114)는
+// 레거시 PIT를 사실상 건드리지 않아 이 문제가 드러나지 않았지만,
+// 실제 BIOS(SeaBIOS)+GRUB(Multiboot2, ADR-017) 경로로 처음 부팅해
+// 보니 SeaBIOS가 남겨 둔 8259/PIT가 여전히 살아 있어, 유저모드
+// 최초 진입(enter_usermode, usermode.S — RFLAGS.IF=1로 인터럽트가
+// 처음 켜지는 지점) 직후 IRQ0이 그대로 벡터 8로 들어와 "가짜
+// 더블폴트"처럼 보였다(실제 인터럽트 프레임에 CPU가 채워 넣는
+// error_code가 없어 idt.hpp::interrupt_frame이 한 칸씩 밀려 읽힌
+// 것도 그 결과다). 리맵 대신 마스킹만 하는 이유는 이 커널이 8259를
+// 쓸 계획이 전혀 없어서다(리맵은 "쓰되 벡터를 옮긴다"는 뜻인데,
+// 그럴 필요조차 없다).
+void disable_legacy_pic() {
+    outb(0xA1, 0xFF);  // 슬레이브부터 — 마스터가 슬레이브의 캐스케이드
+                        // 라인(IRQ2)을 통해 슬레이브 IRQ를 여전히
+                        // 전달할 수 있으므로 순서상 안전한 쪽부터 막는다.
+    outb(0x21, 0xFF);
+}
+
 void set_gate(uint32_t vector, void* handler) {
     auto addr = reinterpret_cast<uint64_t>(handler);
     idt_entry& e = g_idt[vector];
@@ -163,6 +190,8 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
 namespace arch_x86_64 {
 
 void init_idt() {
+    disable_legacy_pic();
+
     for (uint32_t v = 0; v < 256; ++v) {
         set_gate(v, isr_stub_table[v]);
     }
