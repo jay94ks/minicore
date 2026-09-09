@@ -110,3 +110,11 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   "실제 libc/셸 포팅"은 프로젝트 자체의 완료를 뜻하지 않으며 별도
   후속 계획 대상이다.
   OPEN-29·OPEN-50·OPEN-53·OPEN-55~59·OPEN-61은 이미 해소돼 있다.
+- M20 완료 후, 어떤 계획에도 속하지 않는 별도 확인 작업으로 **실제
+  부팅 경로 둘 다(GRUB Multiboot2, UEFI/OVMF) 처음 검증**했다 —
+  결과와 그 과정에서 발견·수정한 버그(레거시 8259 PIC, initrun/devmgr
+  arch_data_addr)는
+  [docs/done/real-hardware-boot-verification.md](docs/done/real-hardware-boot-verification.md)
+  참고. aarch64 부팅 경로는 아직 커널 코드 자체가 없어(ADR-009,
+  x86_64 완주 후 이식 예정) 이번 확인 대상이 아니다 — 사용자가
+  "일단 생략"으로 명시적으로 보류함.

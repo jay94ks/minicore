@@ -17,7 +17,7 @@
 | [registry.md](spec/registry.md) | 설정 리포지터리(cfgsrv): 스키마/테이블 주소 체계, 권한 모델, 전용 IPC 프로토콜, 비밀 데이터 보호 |
 | [virtual-memory-layout.md](spec/virtual-memory-layout.md) | 아키텍처별 커널 가상메모리 레이아웃: physmap/스택/이미지 영역 주소, 부팅 시 페이지테이블 구성 순서 |
 | [procsrv.md](spec/procsrv.md) | 프로세스 서버: 프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원 프로토콜, 계정 생성·로그인·session_program 프로토콜 (에스컬레이션/su·sudo/쿼터/콘솔 연동은 후속) |
-| [fs-protocol.md](spec/fs-protocol.md) | FS 서버 공통 프로토콜(M13 최소 버전): open/write/read 오퍼레이션, regs[]만 쓰는 M13 한정 인코딩, 상태 코드 |
+| [fs-protocol.md](spec/fs-protocol.md) | FS 서버 공통 프로토콜(M20 v4): open/write/read/list 오퍼레이션, OP_OPEN 호출자 신원 필드, pages[] 기반 wire 포맷, 상태 코드 |
 
 ## plan — 실행 계획 (실행 전)
 | 문서 | 설명 |
@@ -25,7 +25,7 @@
 | [scaffold-repo-skeleton.md](plan/scaffold-repo-skeleton.md) | 저장소 디렉토리·CMake 골격 생성 계획 (실행 완료, 결과는 done 참고) |
 | [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M8 전부 완료 — 결과는 done 참고) |
 | [smp-fpu-bringup.md](plan/smp-fpu-bringup.md) | M9(FPU/SIMD 컨텍스트 스위칭)~M11b(lazy XSAVE/AVX 전환) — AP 기동·IPI·TLB shootdown(M10), 다중 코어/NUMA 검증+락 순서 문서화(M11) 포함, kernel-bootstrap.md 이후 계획 |
-| [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순. libmc(네이티브 C API 라이브러리)가 전 구간 교차 트랙 |
+| [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순. libmc(네이티브 C API 라이브러리)가 전 구간 교차 트랙. **M12~M20 전부 완료** — 결과는 done 참고 |
 
 ## done — 완료 보고
 | 문서 | 설명 |
@@ -54,7 +54,7 @@
 | [system-servers-bringup-m18.md](done/system-servers-bringup-m18.md) | M18(완료): fs-protocol v3(OP_WRITE도 pages[] 기반+memfs 커서+OP_OPEN 신원 필드, ADR-168)+procsrv 위임 테이블/OP_SU/실제 경로→ELF 로더+VFS guest/jail 홈 격리(ADR-167) — system-servers-bringup.md §M18 완료 |
 | [system-servers-bringup-m19.md](done/system-servers-bringup-m19.md) | M19(완료): cfgsrv 설정 리포지터리 신설(주소 체계/타입 KV/Unix RWX 권한/reg_op 9종/VFS 실제 영속화, ADR-169)+procsrv 왕복·권한 모델 양방향 검증, 그 과정에서 발견한 elf_loader 세그먼트-페이지 공유 미처리 버그 진단·회피 — system-servers-bringup.md §M19 완료 |
 | [system-servers-bringup-m20.md](done/system-servers-bringup-m20.md) | M20(완료, 계획 최종 마일스톤): libmc 최소 부분집합 신설(ADR-170)+minicore 전용 대체 셸(userland/shell, ls/cat 빌트인)+procsrv→셸 OP_START 세션 시작(ADR-171)+memfs OP_LIST(fs-protocol v4, ADR-172) — 실제 서드파티 libc/셸 포팅은 이번 라운드에 하지 않음(명시적으로 남긴 갭) — system-servers-bringup.md §M20 완료, 계획 전체(M12~M20) 완료 |
-| [real-hardware-boot-verification.md](done/real-hardware-boot-verification.md) | 마일스톤 외 확인 작업(완료): ADR-114가 미검증으로 남겨 뒀던 실제 GRUB Multiboot2 부팅 경로를 Docker 기반 grub-mkrescue ISO로 처음 검증, 그 과정에서 발견한 레거시 8259 PIC 미마스킹으로 인한 IRQ0/#DF(vector 8) 벡터 충돌 버그 진단·수정(ADR-173) — M1~M20 공식 스모크 테스트 82개 문자열 전부 실제 GRUB 경로에서 재확인 |
+| [real-hardware-boot-verification.md](done/real-hardware-boot-verification.md) | 마일스톤 외 확인 작업(완료): ADR-017/114가 미검증으로 남겨 뒀던 실제 부팅 경로 둘 다 처음 검증 — (1) GRUB Multiboot2(Docker grub-mkrescue ISO), 레거시 8259 PIC 미마스킹으로 인한 IRQ0/#DF 벡터 충돌 버그 진단·수정(ADR-173); (2) UEFI(Docker OVMF), 별도 PE32+ EFI 스텁을 처음부터 구현(ADR-175)하며 retf/스택 순서 버그와 initrun/devmgr의 오래된 arch_data_addr=0 버그(ADR-174, 세 경로 전부에 영향) 진단·수정 — 두 경로 모두 M1~M20 공식 스모크 테스트 82개 문자열 기준 동일한 최종 상태 도달 확인(UEFI는 OVMF 고유의 USB xHCI BAR 이슈만 알려진 제약으로 남김) |
 
 ## design — 설계/상세
 
@@ -62,7 +62,7 @@
 
 | 문서 | 설명 |
 |---|---|
-| [design/index.md](design/index.md) | **설계 문서 전체 목록** — 주제별로 분리된 ADR 파일(ADR-001~124)과 미결정 항목, repo-layout.md 안내 |
+| [design/index.md](design/index.md) | **설계 문서 전체 목록** — 주제별로 분리된 ADR 파일(ADR-001~, 항상 최신 번호까지)과 미결정 항목, repo-layout.md 안내 |
 
 ## remind — 기억 사항
 | 문서 | 설명 |
