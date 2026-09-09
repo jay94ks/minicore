@@ -1295,3 +1295,79 @@
   GET_DESCRIPTOR)와 HID 클래스 드라이버**(컨트롤러 리셋+포트 상태
   스캔까지만 — 이것만으로도 별도 마일스톤급 작업이라 명시적으로
   범위 밖으로 남긴다, 사용자 확인 하에 결정).
+
+## ADR-158. M15 완성: `servers/drivers/virtio-blk` — 첫 실제 유저 드라이버, devmgr BAR 재사용 일반화, 부트 디바이스 배제
+
+- **상태**: 확정 (2026-09-09)
+- **결정**:
+  1. `servers/drivers/virtio-blk/main.cpp` — legacy virtio-blk
+     레지스터 프로토콜 클라이언트를 독립적으로 구현한다(`init/
+     initrun/virtio_blk.cpp`와 레지스터 레이아웃은 같지만 코드는
+     공유 라이브러리가 없어 별도로 작성 — libmc 이전 단계의 알려진
+     중복, ADR-132가 예고한 libmc가 나중에 흡수할 대상). 3-디스크립터
+     체인(header→data→status) 하나를 재사용해 `VIRTIO_BLK_T_IN`(읽기)
+     /`VIRTIO_BLK_T_OUT`(쓰기)을 모두 지원한다.
+  2. devmgr의 `assign_memory_bar0`을 `assign_or_get_bar0`으로
+     일반화 — I/O BAR와 메모리 BAR를 모두 다루고, 요청받은 BAR가
+     **이미 배정돼 있으면(0이 아니면) 재배정하지 않고 그대로
+     반환**한다. virtio-blk 드라이버가 등록하는 장치(vendor:device
+     `0x1af4:0x1001`)의 BAR는 initrun이 부팅 중 이미 배정해 둔
+     상태(ADR-147)라 devmgr가 다시 배정하면 그 값이 깨진다 — BAR
+     재사용은 M14에서는 필요 없었지만(그때는 매칭 대상이 항상
+     미배정 상태) M15에서 처음 요구된다.
+  3. devmgr `_start`의 argv를 `devmgr_argv{arch_data_addr, boot_bdf}`
+     로 확장 — initrun이 부트 디바이스의 BDF(`(bus<<16)|(device<<8)|
+     function`)를 함께 넘긴다. `handle_register_driver`가 후보
+     장치의 BDF가 `boot_bdf`와 같으면 매칭에서 제외한다.
+- **근거(실행 중 발견한 버그)**: 최초 구현은 virtio-blk 드라이버가
+  부트 디바이스(`initrun`이 cpio 아카이브를 읽어 procsrv 등을
+  스폰하는 그 디스크, bus0/device4)에 **그대로** 등록해 쓰기
+  테스트를 수행했다 — "부팅 목적은 이미 끝났으니 안전하다"고
+  가정했지만, `tools/run-qemu.sh`의 `-drive format=raw`는 기본이
+  read-write라 그 쓰기가 호스트 파일(`bootdisk.img`)의 실제 바이트를
+  물리적으로 덮어썼다. 하필 그 바이트가 cpio 아카이브 앞부분(첫
+  엔트리의 ELF 내용)과 겹쳐, 이후 모든 QEMU 부팅에서 `procsrv`의
+  코드 일부가 깨진 상태로 로드됐다 — 증상은 `run_vfs_roundtrip_test()`
+  중간 어딘가로 실행이 튀어 `#UD`(vector=6)가 나는 것으로 나타났다.
+  CMake의 `bootdisk.img` 커스텀 커맨드는 ELF **입력**이 바뀔 때만
+  재실행되므로, 손상된 이미지가 재빌드 전까지 그대로 재사용돼
+  **100% 재현되는 크래시**가 "가끔 나는 버그"처럼 보였다(최초
+  1회만 클린 이미지로 성공했고, 이후 재실행은 전부 같은 크래시).
+  디스어셈블(`llvm-objdump -d`)로 크래시 지점이 멀쩡한 명령
+  중간으로 점프한 흔적임을 확인해 "손상된 코드"라는 결론에
+  도달했고, 파일 오프셋(섹터10×512=5120)이 cpio 첫 엔트리와 겹친다는
+  계산으로 원인을 특정했다. **교훈**: 테스트 드라이버가 실제로 쓰기
+  테스트를 하는 장치는 부팅 경로가 의존하는 장치와 반드시 물리적으로
+  분리해야 한다 — "논리적으로 이미 다 썼으니 안전하다"는 가정은
+  호스트 파일 백엔드가 프로세스 종료 시점이 아니라 매 부팅마다
+  재사용된다는 사실과 충돌한다.
+- **수정**: `tools/run-qemu.sh`에 `MINICORE_QEMU_TESTDISK` 추가
+  (bus0/device6, 부트 디바이스와 별도의 파일 — 없으면 1MiB 빈
+  파일을 새로 만든다) + devmgr의 `boot_bdf` 배제(위 §결정3) 이중
+  방어 — 드라이버가 실수로 부트 디바이스를 다시 요청해도 devmgr가
+  넘겨주지 않는다.
+- **영향**: `servers/devmgr/main.cpp`(BAR 재사용+BDF 배제),
+  `init/initrun/main.cpp`(`devmgr_argv` 확장), `servers/drivers/
+  virtio-blk/*`(신설), `servers/drivers/CMakeLists.txt`/`servers/
+  CMakeLists.txt`(빌드/부트디스크 배선, `--depends=virtio-blk:devmgr`,
+  `--trusted=virtio-blk`), `tools/run-qemu.sh`/`tools/
+  smoke-test-x86_64.sh`(`MINICORE_QEMU_TESTDISK`).
+- **검증 결과(QEMU 실측)**: `tools/smoke-test-x86_64.sh`(59개 — M14의
+  58개+신규 1개) 전체 통과를 분리된 테스트 디스크로 **2회 연속**
+  재확인(재사용해도 손상 없음, 수정 전에는 재실행마다 100% 크래시).
+  SMP(11개)/NUMA(24개)/AVX(12개) 전체 회귀 없음. 실측 로그 발췌:
+  ```
+  [pci] assign_virtio_blk_bar ok=1 vendor=0x1af4 device=0x1001   ← 부트 디바이스(initrun 직접 배정)
+  [virtio-blk] write_ok=0x1
+  [virtio-blk] read_ok=0x1
+  [virtio-blk] write/read roundtrip ok=1                         ← 별도 테스트 디바이스(devmgr 매칭+재배정)
+  ```
+- **실행 중 발견한 버그(2번째)**: `avail_idx`를 매 요청마다 1로
+  되돌리는 초기 구현은 두 번째 요청(쓰기 다음 읽기)에서 디바이스가
+  "새 작업 없음"으로 보고 무시했다(읽기가 항상 타임아웃). virtio
+  가용 링의 `avail_idx`는 큐가 살아있는 동안 계속 증가하는
+  카운터([큐 크기]로 모드 연산해 슬롯만 계산)여야 한다는 사실을
+  놓친 것 — 지속되는 `g_avail_idx`/`g_queue_size` 전역으로 고쳤다.
+  **알려진 단순화(M15 범위 밖)**: 큐 협상(feature negotiation)은
+  ADR-150이 이미 정한 대로 여전히 최소(feature 0개/큐 1개/순수
+  폴링), 멀티큐·인터럽트 기반 완료 통지는 다루지 않는다.

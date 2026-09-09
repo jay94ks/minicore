@@ -48,6 +48,7 @@
 | [system-servers-bringup-m12-full.md](done/system-servers-bringup-m12-full.md) | M12(전체 완료): `sys_alloc_dma_buffer`(ADR-148)+legacy virtio-blk 클라이언트+self_info 브릿지 일반화(ADR-149)+initrun의 실제 부트 디스크 마운트·서비스 스폰+procsrv 골격+`tools/mkbootdisk.py`(ADR-150), procsrv가 실제 디스크 I/O로 스폰된 뒤 자기 자신을 fork/exec하는 것까지 QEMU 확인 — system-servers-bringup.md §M12 완료 |
 | [system-servers-bringup-m13.md](done/system-servers-bringup-m13.md) | M13(완료): IPC의 cross-process 확장+sys_reply handles[](ADR-151), sys_process_spawn 캐패빌리티 주입(ADR-152), fs-protocol.md 최소 버전+vfs/memfs 서버+procsrv VFS 클라이언트(ADR-153) — procsrv가 vfs 경유로 memfs에 쓰고 다시 읽어 내용 일치까지 QEMU 확인 — system-servers-bringup.md §M13 완료 |
 | [system-servers-bringup-m14.md](done/system-servers-bringup-m14.md) | M14(완료): 스레드별 IOPB(ADR-154)+sys_map_phys MMIO 캐패빌리티(ADR-156)+devmgr 유저랜드 ACPI/PCIe ECAM 열거+PS/2 컨트롤러 자체테스트+USB xHCI 리셋·포트 스캔(ADR-157) — 실제 USB 장치 열거/HID는 범위 밖으로 명시 — system-servers-bringup.md §M14 완료 |
+| [system-servers-bringup-m15.md](done/system-servers-bringup-m15.md) | M15(완료): `servers/drivers/virtio-blk`(첫 실제 유저 드라이버)+devmgr BAR 재사용 일반화+부트 디바이스 배제(ADR-158), 그 과정에서 발견한 디스크 손상 버그(테스트 드라이버가 부트 디바이스에 그대로 쓰기 테스트해 cpio 아카이브 손상)와 avail_idx 리셋 버그 진단·수정 — system-servers-bringup.md §M15 완료 |
 
 ## design — 설계/상세
 

@@ -17,12 +17,19 @@
 //   4. sys_ipc_recv 루프를 돌며 드라이버의 REGISTER_DRIVER 요청을
 //      받으면 그 기준(vendor:device 정확히 일치, 또는 class code를
 //      마스크로 비교)으로 위 장치 테이블을 찾아, 일치하면 그 자리에서
-//      BAR0을 배정(ADR-147의 I/O BAR 배정과 같은 절차를 메모리 BAR로
-//      일반화, PVH 직접 부팅이라 아무 펌웨어도 이걸 대신해 주지
-//      않는다)하고 그 물리주소/크기를 응답으로 돌려준다(pcie.md §4의
+//      BAR0을 배정하거나 이미 배정돼 있으면 그대로 재사용(ADR-147의
+//      I/O BAR 배정 절차를 메모리 BAR까지 일반화, PVH 직접 부팅이라
+//      아무 펌웨어도 이걸 대신해 주지 않는다)하고 그 물리주소(또는
+//      I/O 포트 베이스)/크기를 응답으로 돌려준다(pcie.md §4의
 //      device_claimed 정보를 register_driver의 **응답**에 바로
 //      싣는다 — 핫플러그(ADR-040)가 아직 없어 devmgr가 나중에
 //      먼저 말을 거는 별도 경로가 필요 없다).
+//   5. M15 — initrun이 argv로 함께 알려 준 **부트 디바이스 BDF**는
+//      드라이버 매칭에서 제외한다 — initrun 자신의 임베디드 클라이언트
+//      (ADR-131)가 부팅 중에 이미 다 쓴 장치라, "진짜" 드라이버에게
+//      다시 내주면 그 cpio 아카이브 내용을 실제로 덮어써 손상시킨다
+//      (2026-09-09 직접 겪음). virtio-blk 드라이버는 별도의 테스트
+//      전용 장치(tools/run-qemu.sh MINICORE_QEMU_TESTDISK)를 받는다.
 #include <uapi.hpp>
 
 namespace {
@@ -293,6 +300,7 @@ constexpr uint32_t k_pci_offset_class = 0x08;   // revision_id(1)+prog_if(1)+sub
 constexpr uint32_t k_pci_offset_header_type = 0x0E;
 constexpr uint32_t k_pci_offset_command = 0x04;
 constexpr uint32_t k_pci_offset_bar0 = 0x10;
+constexpr uint32_t k_pci_command_io_space_enable = 1u << 0;
 constexpr uint32_t k_pci_command_mem_space_enable = 1u << 1;
 
 uint64_t ecam_config_addr(uint64_t ecam_base, uint32_t bus, uint32_t device, uint32_t function) {
@@ -314,6 +322,15 @@ constexpr uint32_t k_max_pci_devices = 32;
 pci_device_entry g_devices[k_max_pci_devices];
 uint32_t g_device_count = 0;
 uint64_t g_ecam_base = 0;
+
+// M15 — initrun이 argv로 알려 준 부트 디바이스 BDF(devmgr_argv::boot_bdf,
+// init/initrun/main.cpp 참고). register_driver 매칭에서 이 BDF는
+// 제외한다 — 부트 디바이스는 initrun 자신의 임베디드 클라이언트가
+// 부팅 중에 이미 다 썼고(ADR-131), 그걸 "진짜" 드라이버에게 다시
+// 내주면 cpio 아카이브 내용을 실제로 덮어써 손상시킨다(2026-09-09
+// 직접 겪음 — tools/run-qemu.sh의 MINICORE_QEMU_TESTDISK가 그
+// 드라이버를 위한 별도 장치다).
+uint32_t g_boot_bdf = 0xFFFFFFFFu;  // 유효한 BDF가 24비트 이하이므로 매치될 수 없는 sentinel.
 
 void enumerate_pci_bus0(uint64_t ecam_base) {
     for (uint32_t device = 0; device < 32 && g_device_count < k_max_pci_devices; ++device) {
@@ -351,21 +368,38 @@ void enumerate_pci_bus0(uint64_t ecam_base) {
     }
 }
 
-// ADR-147의 I/O BAR 배정을 메모리 BAR로 일반화한 것 — pci_bringup.cpp
-// 상단 주석과 같은 이유(PVH 직접 부팅이라 아무 펌웨어도 이걸 대신해
-// 주지 않는다). 이 최소 devmgr는 32비트 메모리 BAR만 다룬다(M14가
-// 실제로 만나는 xHCI가 그렇다 — 64비트 BAR는 M14 범위 밖).
-bool assign_memory_bar0(uint64_t ecam_base, uint32_t bus, uint32_t device, uint32_t function,
-                         uint64_t assign_phys_base, uint64_t& out_bar_phys, uint64_t& out_bar_size) {
+// devmgr가 배정하는 장치는 최대 몇 개뿐이라(M14: xHCI, M15: virtio-blk
+// 중 부트 디바이스와 다른 인스턴스가 있다면) 고정 주소 하나로
+// 충분하다 — QEMU q35의 PCI MMIO 홀(전형적으로 0xC0000000 부근) 안의
+// 임의 정렬 주소, I/O는 레거시 예약 범위(0x000~0x3FF)보다 훨씬 위지만
+// 커널이 부트 디바이스에 이미 쓴 0xC000(ADR-147)과는 겹치지 않는
+// 자리. 여러 장치를 배정해야 하는 시점에는 실제 공간 할당기가
+// 필요해진다(알려진 단순화 — ADR-147의 "고정 베이스"와 같은 정신).
+constexpr uint64_t k_assigned_mmio_base = 0xE0000000ull;
+constexpr uint32_t k_assigned_io_base = 0xC100;
+
+// ADR-147의 I/O BAR 배정 절차를 메모리 BAR까지 다루도록 일반화한
+// 것 — pci_bringup.cpp 상단 주석과 같은 이유(PVH 직접 부팅이라 아무
+// 펌웨어도 이걸 대신해 주지 않는다). **이미 배정돼 있으면 다시
+// 배정하지 않는다** — M15의 virtio-blk 드라이버가 등록하는 장치는
+// initrun의 부트 디바이스(같은 vendor:device, ADR-131/147)와 동일한
+// 물리 장치일 수 있는데, 그 경우 커널이 부팅 중에 이미 BAR0(I/O
+// base=0xC000)을 배정해 둔 상태다 — 그걸 무시하고 새로 쓰면 이미
+// 진행 중인 것과 충돌할 수 있어, 기존 값을 읽어 그대로 재사용한다.
+// 32비트 BAR만 다룬다(M14/M15가 실제로 만나는 xHCI/virtio-blk 전부
+// 32비트 — 64비트 BAR는 범위 밖).
+bool assign_or_get_bar0(uint64_t ecam_base, uint32_t bus, uint32_t device, uint32_t function,
+                         bool& out_is_io, uint64_t& out_bar_value, uint64_t& out_bar_size) {
     uint64_t cfg = ecam_config_addr(ecam_base, bus, device, function);
     const uint8_t* view = map_window(cfg, 64);
     if (view == nullptr) {
         return false;
     }
     uint32_t bar0 = read_u32(view + k_pci_offset_bar0);
-    if ((bar0 & 0x1) != 0) {
-        return false;  // I/O 공간 BAR — 이 함수는 메모리 BAR만 다룬다.
-    }
+    bool is_io = (bar0 & 0x1) != 0;
+    out_is_io = is_io;
+    uint32_t space_mask = is_io ? 0x3u : 0xFu;  // I/O: 하위 2비트 예약. 메모리: 하위 4비트(타입/prefetchable).
+    uint32_t existing = bar0 & ~space_mask;
 
     // map_window의 창이 읽기 전용 관찰용으로 쓰였으니, 쓰기 왕복은
     // 매번 새로 map_window(같은 범위)를 불러 volatile 포인터로 한다 —
@@ -382,31 +416,39 @@ bool assign_memory_bar0(uint64_t ecam_base, uint32_t bus, uint32_t device, uint3
 
     *cfg_ptr32(k_pci_offset_bar0) = 0xFFFFFFFFu;
     uint32_t size_mask_raw = *cfg_ptr32(k_pci_offset_bar0);
-    uint32_t size_mask = size_mask_raw & ~0xFu;  // 하위 4비트(공간/타입/prefetchable) 제외.
+    uint32_t size_mask = size_mask_raw & ~space_mask;
     uint32_t size = (~size_mask) + 1;
+    // 원래 값을 복구한다(방금 0xFFFFFFFF로 덮어썼다) — 이미 배정된
+    // 경우든 아니든 일단 복구해 두고, 아래에서 필요하면 다시 쓴다.
+    *cfg_ptr32(k_pci_offset_bar0) = bar0;
     if (size == 0) {
-        *cfg_ptr32(k_pci_offset_bar0) = bar0;
         return false;
     }
 
-    uint64_t assigned = (assign_phys_base + size - 1) & ~(static_cast<uint64_t>(size) - 1);
-    *cfg_ptr32(k_pci_offset_bar0) = static_cast<uint32_t>(assigned);
+    uint16_t enable_bit = is_io ? k_pci_command_io_space_enable : k_pci_command_mem_space_enable;
+    if (existing != 0) {
+        // 이미 배정돼 있다(예: 부트 디바이스는 커널이 이미 배정함) —
+        // 그 값을 그대로 재사용한다. COMMAND의 space-enable 비트도
+        // 이미 켜져 있을 것으로 기대하지만, 안전하게 다시 한 번 켠다.
+        uint16_t command = *cfg_ptr16(k_pci_offset_command);
+        *cfg_ptr16(k_pci_offset_command) = static_cast<uint16_t>(command | enable_bit);
+        out_bar_value = existing;
+        out_bar_size = size;
+        return true;
+    }
+
+    uint64_t assign_base = is_io ? k_assigned_io_base : k_assigned_mmio_base;
+    uint64_t assigned = (assign_base + size - 1) & ~(static_cast<uint64_t>(size) - 1);
+    *cfg_ptr32(k_pci_offset_bar0) =
+        static_cast<uint32_t>(assigned) | (is_io ? 0x1u : 0u);
 
     uint16_t command = *cfg_ptr16(k_pci_offset_command);
-    *cfg_ptr16(k_pci_offset_command) =
-        static_cast<uint16_t>(command | k_pci_command_mem_space_enable);
+    *cfg_ptr16(k_pci_offset_command) = static_cast<uint16_t>(command | enable_bit);
 
-    out_bar_phys = assigned;
+    out_bar_value = assigned;
     out_bar_size = size;
     return true;
 }
-
-// M14가 실제로 배정하는 장치는 최대 하나(xHCI)뿐이라 고정 주소 하나로
-// 충분하다 — QEMU q35의 PCI MMIO 홀(전형적으로 0xC0000000 부근) 안의
-// 임의 정렬 주소. 여러 장치를 배정해야 하는 시점(devmgr가 진짜
-// 여러 드라이버를 다루게 될 때)에는 실제 공간 할당기가 필요해진다
-// (알려진 단순화 — ADR-147의 "고정 I/O 베이스"와 같은 정신).
-constexpr uint64_t k_assigned_mmio_base = 0xE0000000ull;
 
 // ---------- 드라이버 등록 프로토콜 (pcie.md §4, 이 마일스톤 한정 최소 버전) ----------
 constexpr uint32_t k_op_register_driver = 1;
@@ -422,6 +464,10 @@ void handle_register_driver(const uapi::message& in, uapi::message& out) {
 
     for (uint32_t i = 0; i < g_device_count; ++i) {
         const pci_device_entry& d = g_devices[i];
+        uint32_t bdf = (d.bus << 16) | (d.device << 8) | d.function;
+        if (bdf == g_boot_bdf) {
+            continue;  // 부트 디바이스는 드라이버 매칭에서 제외(위 g_boot_bdf 주석).
+        }
         bool matched = false;
         if (mode == k_match_mode_vendor_device) {
             uint64_t vd = (static_cast<uint64_t>(d.vendor_id) << 16) | d.device_id;
@@ -433,17 +479,18 @@ void handle_register_driver(const uapi::message& in, uapi::message& out) {
             continue;
         }
 
-        uint64_t bar_phys = 0;
+        bool is_io = false;
+        uint64_t bar_value = 0;
         uint64_t bar_size = 0;
-        if (!assign_memory_bar0(g_ecam_base, d.bus, d.device, d.function, k_assigned_mmio_base,
-                                 bar_phys, bar_size)) {
+        if (!assign_or_get_bar0(g_ecam_base, d.bus, d.device, d.function, is_io, bar_value,
+                                 bar_size)) {
             continue;
         }
         out.regs[0] = k_status_ok;
-        out.regs[1] = bar_phys;
+        out.regs[1] = bar_value;  // is_io=1이면 I/O 포트 베이스, 아니면 MMIO 물리주소.
         out.regs[2] = bar_size;
-        out.regs[3] = (static_cast<uint64_t>(d.bus) << 16) | (static_cast<uint64_t>(d.device) << 8) |
-                      d.function;
+        out.regs[3] = (is_io ? (1ull << 32) : 0) | (static_cast<uint64_t>(d.bus) << 16) |
+                      (static_cast<uint64_t>(d.device) << 8) | d.function;
         return;
     }
 
@@ -453,9 +500,17 @@ void handle_register_driver(const uapi::message& in, uapi::message& out) {
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void* argv) {
+    // init/initrun/main.cpp::devmgr_argv와 정확히 같은 레이아웃(M14/M15).
+    struct devmgr_argv {
+        uint64_t arch_data_addr;
+        uint32_t boot_bdf;
+    };
     uint64_t arch_data_addr = 0;
     if (argv != nullptr) {
-        __builtin_memcpy(&arch_data_addr, argv, sizeof(arch_data_addr));
+        devmgr_argv parsed;
+        __builtin_memcpy(&parsed, argv, sizeof(parsed));
+        arch_data_addr = parsed.arch_data_addr;
+        g_boot_bdf = parsed.boot_bdf;
     }
 
     bool have_ecam = find_mcfg_ecam_base(arch_data_addr, g_ecam_base);

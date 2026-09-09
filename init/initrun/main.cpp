@@ -247,13 +247,25 @@ struct service_registry_entry {
     uint32_t endpoint_proxy_handle = 0;
 };
 
+// M14/M15 — devmgr에게 argv로 그대로 넘겨줄 정보 묶음. arch_data_addr는
+// devmgr 자신의 ACPI/ECAM 접근에, boot_bdf는 devmgr가 그 BDF를 드라이버
+// 매칭 대상에서 **제외**하는 데 쓴다(M15 §근거 참고 — 부트 디바이스를
+// virtio-blk 드라이버에게 다시 내주면 그 cpio 아카이브 내용을 실제로
+// 덮어써 손상시킨다, 2026-09-09에 직접 겪음). boot_bdf는
+// (bus<<16)|(device<<8)|function로 packed — devmgr/main.cpp의
+// register_driver 응답 regs[3] 인코딩과 같은 형식.
+struct devmgr_argv {
+    uint64_t arch_data_addr = 0;
+    uint32_t boot_bdf = 0;
+};
+
 struct spawn_ctx {
     const uint8_t* archive;
     uint64_t archive_size;
     uint32_t spawned_count = 0;
     service_registry_entry registry[k_max_registered_services];
     uint32_t registry_count = 0;
-    uint64_t arch_data_addr = 0;  // M14 — devmgr에게 그대로 넘겨줄 ACPI RSDP 물리주소(boot_info).
+    devmgr_argv devmgr_info;
 };
 
 uint32_t find_registered_handle(const spawn_ctx& ctx, const char* name) {
@@ -312,16 +324,16 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
         req.grant_trusted = true;
     }
 
-    // M14 — devmgr는 일반 마커 대신 실제 ACPI RSDP 물리주소(boot_info.
-    // arch_data_addr)를 argv로 받아야 자기 ECAM을 찾을 수 있다
-    // (servers/devmgr/main.cpp 상단 주석). ctx는 spawn_visit이 끝나도
-    // 살아 있는(mount_boot_device_and_spawn_services의 스택 프레임)
-    // spawn_ctx라 그 안의 arch_data_addr 주소를 그대로 argv_blob으로
-    // 써도 안전하다 — process_spawn이 이 syscall 안에서 즉시 그 8바이트를
-    // 새 프로세스의 argv 페이지로 복사하기 때문이다.
+    // M14/M15 — devmgr는 일반 마커 대신 devmgr_argv(ACPI RSDP 물리주소
+    // + 부트 디바이스 BDF)를 argv로 받아야 한다(servers/devmgr/main.cpp
+    // 상단 주석). ctx는 spawn_visit이 끝나도 살아 있는
+    // (mount_boot_device_and_spawn_services의 스택 프레임) spawn_ctx라
+    // 그 안의 주소를 그대로 argv_blob으로 써도 안전하다 —
+    // process_spawn이 이 syscall 안에서 즉시 그 바이트를 새 프로세스의
+    // argv 페이지로 복사하기 때문이다.
     if (cstr_equals(service_name, "devmgr")) {
-        req.argv_blob = reinterpret_cast<uint64_t>(&ctx->arch_data_addr);
-        req.argv_size = sizeof(ctx->arch_data_addr);
+        req.argv_blob = reinterpret_cast<uint64_t>(&ctx->devmgr_info);
+        req.argv_size = sizeof(ctx->devmgr_info);
     }
 
     auto depends_val = ini::find_value(data, size, "depends");
@@ -399,7 +411,9 @@ bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
     spawn_ctx ctx;
     ctx.archive = archive;
     ctx.archive_size = archive_len;
-    ctx.arch_data_addr = bi.arch_data_addr;
+    ctx.devmgr_info.arch_data_addr = bi.arch_data_addr;
+    ctx.devmgr_info.boot_bdf = (bi.boot_device.pci_bus << 16) | (bi.boot_device.pci_device << 8) |
+                                bi.boot_device.pci_function;
     auto walked = cpio::for_each_entry(archive, archive_len, &spawn_visit, &ctx);
     return walked.is_ok() && ctx.spawned_count > 0;
 }

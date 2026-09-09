@@ -71,6 +71,14 @@
 #     실제 USB 장치 열거/HID는 범위 밖(docs/done/
 #     system-servers-bringup-m14.md 참고). QEMU에 `qemu-xhci`
 #     컨트롤러를 기본으로 붙인다(MINICORE_QEMU_XHCI, 아래 참고).
+#   M15 (system-servers-bringup.md, ADR-043 1순위): 부트 디스크에
+#     virtio-blk 드라이버가 추가된다(의존 devmgr, ADR-041 등록/매칭).
+#     devmgr에 vendor:device=0x1af4:0x1001로 등록해 위임받은 I/O
+#     포트로 initrun의 부트 디바이스와 **같은 물리 장치**를 다시
+#     초기화하고(devmgr가 이미 배정된 BAR를 그대로 재사용, ADR-157
+#     갱신) 임의 섹터에 알려진 패턴을 쓰고 다시 읽어 내용이
+#     일치하는지 확인한다 — initrun의 부트 목적은 이미 끝나 있어
+#     안전하다.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -81,7 +89,7 @@
 #   MINICORE_QEMU_BIN        qemu-system-x86_64 실행파일 경로(run-qemu.sh로 그대로 전달)
 #   MINICORE_QEMU_BOOTDISK   기본값은 <빌드 디렉토리>/servers/bootdisk.img
 #                            (servers/CMakeLists.txt가 memfs+vfs+procsrv+devmgr+
-#                            ps2+usb를 담아 만든다, M13~M14) — M12부터 항상 실제
+#                            ps2+usb+virtio-blk를 담아 만든다, M13~M15) — M12부터 항상 실제
 #                            부트 디스크를 붙여야 procsrv 경로가 검증되므로 비워
 #                            두면 이 스크립트가 그 경로를 채워 넣는다. 그 파일이
 #                            없으면(아직 빌드 안 함) 디스크 없이 부팅하고 그만큼의
@@ -95,7 +103,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=60  # M14부터 부트 디스크가 6개 서비스(memfs/vfs/procsrv/devmgr/ps2/usb)를 담아 훨씬 오래 걸린다.
+TIMEOUT_SEC=60  # M14~M15부터 부트 디스크가 7개 서비스(memfs/vfs/procsrv/devmgr/ps2/usb/virtio-blk)를 담아 훨씬 오래 걸린다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
   DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M13부터 memfs+vfs+procsrv+devmgr+ps2+usb(servers/CMakeLists.txt).
@@ -108,6 +116,13 @@ fi
 # (run-qemu.sh 상단 주석 참고).
 if [[ -z "${MINICORE_QEMU_XHCI:-}" ]]; then
   export MINICORE_QEMU_XHCI=1
+fi
+
+# M15 — virtio-blk 드라이버가 쓰고 읽을 부트 디스크와 별도인 테스트
+# 디스크도 기본으로 붙인다(run-qemu.sh 상단 주석 참고 — 부트
+# 디스크를 재사용하면 그 cpio 아카이브 내용을 실제로 덮어써 손상시킨다).
+if [[ -z "${MINICORE_QEMU_TESTDISK:-}" ]]; then
+  export MINICORE_QEMU_TESTDISK="${BUILD_DIR}/testdisk.img"
 fi
 
 declare -a EXPECTED=(
@@ -169,6 +184,7 @@ declare -a EXPECTED=(
   "[usb] xhci hcrst_done=0x1"
   "[usb] xhci controller_ready=0x1"
   "[usb] xhci reset+port scan done"
+  "[virtio-blk] write/read roundtrip ok=1"
 )
 
 LOG_FILE="$(mktemp)"

@@ -54,6 +54,15 @@
 #                         겹치지 않는 자리) — devmgr/usb 드라이버가 실제로
 #                         찾아 리셋/포트 상태 스캔을 시도할 대상. USB
 #                         장치 자체는 붙이지 않는다. 기본은 미설정.
+#   MINICORE_QEMU_TESTDISK=<경로>  docs/plan/system-servers-bringup.md
+#                         M15(ADR-043): virtio-blk 드라이버가 실제로
+#                         쓰고 읽을 **별도의** virtio-blk-pci 장치
+#                         (bus0/device6 고정)로 붙인다. 부트 디바이스
+#                         (MINICORE_QEMU_BOOTDISK)와 반드시 달라야
+#                         한다 — 같은 파일을 재사용하면 그 cpio
+#                         아카이브 내용을 실제로 덮어써 손상시킨다.
+#                         파일이 없으면 1MiB 빈 파일을 새로 만든다.
+#                         기본은 미설정(장치 없음).
 
 set -euo pipefail
 
@@ -121,6 +130,21 @@ case "$ARCH" in
     if [[ -n "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
       EXTRA_ARGS+=(-drive "if=none,id=bootdisk,format=raw,file=${MINICORE_QEMU_BOOTDISK}")
       EXTRA_ARGS+=(-device "virtio-blk-pci,drive=bootdisk,addr=04.0")
+    fi
+
+    if [[ -n "${MINICORE_QEMU_TESTDISK:-}" ]]; then
+      # M15(system-servers-bringup.md, ADR-043 1순위) — virtio-blk
+      # 드라이버가 실제로 쓰고 읽을 **별도의** 디스크. bus0/device6
+      # 고정(virtio-blk 부트 디바이스의 device4, xHCI의 device5와
+      # 겹치지 않는 자리) — 부트 디바이스(MINICORE_QEMU_BOOTDISK)를
+      # 재사용하면 그 cpio 아카이브 내용을 실제로 덮어써 버린다(직접
+      # 겪은 문제, 2026-09-09 — 그 파일은 이후 재빌드 전까지 손상된
+      # 채로 남는다). 파일이 없으면 1MiB짜리 빈 파일을 새로 만든다.
+      if [[ ! -f "${MINICORE_QEMU_TESTDISK}" ]]; then
+        dd if=/dev/zero of="${MINICORE_QEMU_TESTDISK}" bs=1M count=1 status=none
+      fi
+      EXTRA_ARGS+=(-drive "if=none,id=testdisk,format=raw,file=${MINICORE_QEMU_TESTDISK}")
+      EXTRA_ARGS+=(-device "virtio-blk-pci,drive=testdisk,addr=06.0")
     fi
 
     if [[ "${MINICORE_QEMU_XHCI:-0}" == "1" ]]; then
