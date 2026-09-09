@@ -11,6 +11,7 @@
 #include "syscall.hpp"
 
 #include "gdt_selectors.hpp"
+#include "process_ops.hpp"
 
 #include <cstdint>
 
@@ -69,7 +70,12 @@ void install_syscall_entry() {
 
 }  // namespace arch_x86_64
 
-extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
+// saved_regs(M12, ADR-142) — syscall_entry.S가 %r8로 넘긴다. push 역순
+// 배열: [0]=r15,[1]=r14,[2]=r13,[3]=r12,[4]=rbp,[5]=rbx,[6]=rflags,
+// [7]=rip,[8]=user_rsp(syscall_entry.S 상단 주석과 정확히 대응). fork
+// 외의 syscall은 이 값을 쓰지 않는다.
+extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
+                                      const uint64_t* saved_regs) {
     switch (num) {
         case uapi::k_syscall_ipc_call: {
             object::thread* self = sched::current();
@@ -84,6 +90,39 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             auto result =
                 ipc::sys_call(*self->handles, static_cast<object::handle>(a1), *msg_in, *msg_out);
             return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
+        }
+        case uapi::k_syscall_process_spawn: {
+            const auto* req = reinterpret_cast<const uapi::process_spawn_request*>(a1);
+            if (req == nullptr || req->elf_data == 0) {
+                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+            }
+            auto err = arch_x86_64::process_spawn(
+                reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
+                reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
+                req->grant_trusted);
+            return static_cast<uint64_t>(err);
+        }
+        case uapi::k_syscall_fork: {
+            return arch_x86_64::fork_current(/*rip=*/saved_regs[7], /*rflags=*/saved_regs[6],
+                                              /*user_rsp=*/saved_regs[8], /*rbx=*/saved_regs[5],
+                                              /*rbp=*/saved_regs[4], /*r12=*/saved_regs[3],
+                                              /*r13=*/saved_regs[2], /*r14=*/saved_regs[1],
+                                              /*r15=*/saved_regs[0]);
+        }
+        case uapi::k_syscall_exec: {
+            const auto* req = reinterpret_cast<const uapi::exec_request*>(a1);
+            if (req == nullptr || req->elf_data == 0) {
+                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+            }
+            // 성공하면 이 호출은 반환하지 않는다(process_ops.hpp 참고) —
+            // 실패했을 때만 아래로 떨어진다.
+            auto err = arch_x86_64::exec_current(
+                reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
+                reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size);
+            return static_cast<uint64_t>(err);
+        }
+        case uapi::k_syscall_thread_exit: {
+            sched::exit();  // noreturn.
         }
         default:
             return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);

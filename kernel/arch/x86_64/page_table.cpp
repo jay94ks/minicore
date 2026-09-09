@@ -8,7 +8,10 @@
 #include <mm/phys_map.hpp>
 
 extern "C" {
-extern uint64_t pml4[512];  // boot.S가 .boot.bss에 정의한 커널 부트 PML4(물리주소로 직접 접근).
+extern uint64_t pml4[512];      // boot.S가 .boot.bss에 정의한 커널 부트 PML4(물리주소로 직접 접근).
+extern uint64_t low_pdpt[512];  // boot.S — pml4[0]이 가리키는 PDPT(물리주소로 직접 접근).
+extern uint64_t low_pd[512];    // boot.S — low_pdpt[0]이 가리키는 PD. entry 0~3만 실제로
+                                 // 채워져 있다(각 2MiB 거대 페이지, 합쳐서 [0,8MiB) 항등 매핑).
 }
 
 namespace arch_x86_64 {
@@ -128,7 +131,45 @@ result<uint64_t, map_error> create_address_space_root() {
     // 읽으려는 순간 #PF가 난다(실제로 QEMU에서 CR2=GDT 안의 정확한
     // 오프셋으로 재현 확인함) — 모든 주소공간이 이 저지대 매핑도
     // physmap/커널 이미지와 똑같이 공유해야 한다.
-    table[0] = pml4[0];
+    //
+    // M12(ADR-145) — 그렇다고 `table[0] = pml4[0]`처럼 pml4[0] **전체**
+    // (low_pdpt 전체, 곧 [0,512GiB) 전체)를 공유해서는 안 된다.
+    // boot.S는 low_pd의 앞 4개 엔트리(2MiB 거대 페이지 × 4 = 8MiB)만
+    // 채워 뒀을 뿐, low_pdpt/low_pd 나머지 엔트리는 전부 비어 있는
+    // "같은 물리 테이블"이다 — pml4[0]을 그대로 공유하면 그 빈
+    // 엔트리들도 함께 공유되어, load_elf가 서로 다른 주소공간에서
+    // 저지대 가상주소(예: initrun의 링크 주소 0x10000000, 여전히
+    // pml4 index 0에 속한다)에 매핑할 때마다 **같은 물리 테이블**을
+    // 채우게 된다 — 한 프로세스가 먼저 채운 엔트리를 다른 프로세스가
+    // 그대로 보고 `already_mapped`로 충돌한다(sys_process_spawn으로
+    // initrun의 두 번째 사본을 만들 때 실제로 재현 확인함). 그래서
+    // 이 주소공간 전용 low_pdpt/low_pd를 새로 만들고, GDT가 실제로
+    // 필요로 하는 [0,8MiB) 몫(low_pd[0..3])만 그 **내용**(물리
+    // 프레임을 가리키는 거대 페이지 엔트리 값 자체)을 복사해 공유를
+    // 유지한 채, 나머지(low_pd[4..511], low_pdpt[1..511])는 이
+    // 주소공간만의 것으로 비워 둔다 — 그래야 pml4 index 0에 속하는
+    // 나머지 저지대 전체(8MiB~512GiB)가 주소공간마다 독립적이다.
+    constexpr uint32_t k_low_ident_pd_entries = 4;  // boot.S가 실제로 채운 [0,8MiB) 몫.
+
+    auto low_pdpt_page = mm::alloc_pages(0, 0);
+    if (!low_pdpt_page.is_ok()) {
+        return result<uint64_t, map_error>::err(map_error::out_of_memory);
+    }
+    auto low_pd_page = mm::alloc_pages(0, 0);
+    if (!low_pd_page.is_ok()) {
+        return result<uint64_t, map_error>::err(map_error::out_of_memory);
+    }
+    uint64_t new_low_pdpt_phys = low_pdpt_page.value();
+    uint64_t new_low_pd_phys = low_pd_page.value();
+    uint64_t* new_low_pdpt = table_virt(new_low_pdpt_phys);
+    uint64_t* new_low_pd = table_virt(new_low_pd_phys);
+    __builtin_memset(new_low_pdpt, 0, mm::k_page_size);
+    __builtin_memset(new_low_pd, 0, mm::k_page_size);
+    for (uint32_t i = 0; i < k_low_ident_pd_entries; ++i) {
+        new_low_pd[i] = low_pd[i];
+    }
+    new_low_pdpt[0] = new_low_pd_phys | k_pte_present | k_pte_writable | k_pte_user;
+    table[0] = new_low_pdpt_phys | k_pte_present | k_pte_writable | k_pte_user;
 
     return result<uint64_t, map_error>::ok(new_pml4_phys);
 }
@@ -232,12 +273,26 @@ result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
     }
     uint64_t dst_pml4_phys = new_root.value();
 
-    // 유저 영역만(index 1~255) — index 0(저지대 GDT)과 256 이상(커널/
-    // physmap)은 create_address_space_root가 이미 원본과 동일하게
-    // 채워 뒀다(모든 주소공간이 공유). index<256이라 virt의 bit 47은
-    // 항상 0 — 별도 부호 확장이 필요 없다.
+    // 유저 영역(index 0~255) — 256 이상(커널/physmap)은
+    // create_address_space_root가 이미 원본과 동일하게 채워 뒀다(모든
+    // 주소공간이 공유). index<256이라 virt의 bit 47은 항상 0 — 별도
+    // 부호 확장이 필요 없다.
+    //
+    // M12(ADR-145) — index 0도 반드시 순회해야 한다. index 0 전체가
+    // "공유"였던 옛 설계와 달리, 이제 index 0 안에서도 [0,8MiB)(GDT,
+    // low_pd[0..3])만 create_address_space_root가 공유해 두고 나머지
+    // ([8MiB, 512GiB) — initrun 같은 유저 코드의 실제 링크 주소
+    // 0x10000000이 여기 속한다)는 주소공간마다 독립적이다. 그
+    // "나머지"에 있는 부모의 매핑(예: initrun 자신의 코드/데이터)도
+    // COW로 복제해야 자식이 실제로 실행 가능하다 — 이걸 빠뜨리면
+    // 자식이 sysret 직후 코드 페이지 자체가 없어 명령어 페치
+    // 자체가 #PF(not-present)로 죽는다(실제로 이 버그 그대로
+    // 재현했다). [0,8MiB) 몫만 건너뛴다(i4==0 && i3==0 && i2<4).
+    constexpr uint32_t k_low_ident_pdpt_index = 0;
+    constexpr uint32_t k_low_ident_pd_entries = 4;
+
     uint64_t* src_pml4 = table_virt(src_pml4_phys);
-    for (uint32_t i4 = 1; i4 < 256; ++i4) {
+    for (uint32_t i4 = 0; i4 < 256; ++i4) {
         if (!(src_pml4[i4] & k_pte_present)) {
             continue;
         }
@@ -247,7 +302,9 @@ result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
                 continue;
             }
             uint64_t* src_pd = table_virt(src_pdpt[i3] & k_pte_addr_mask);
-            for (uint32_t i2 = 0; i2 < 512; ++i2) {
+            uint32_t i2_start =
+                (i4 == 0 && i3 == k_low_ident_pdpt_index) ? k_low_ident_pd_entries : 0;
+            for (uint32_t i2 = i2_start; i2 < 512; ++i2) {
                 if (!(src_pd[i2] & k_pte_present)) {
                     continue;
                 }

@@ -127,8 +127,23 @@ void set_cpu_node_map(const madt_result& madt, const srat_slit_result& srat) {
 }
 
 void broadcast_tlb_shootdown(uint64_t vaddr) {
+    // M12(ADR-144) — "다른 코어에" 알리는 것과 "이 코어 자신의" TLB를
+    // 지우는 것은 별개다. M10~M11까지는 g_cpu_count<=1이면 이 함수
+    // 전체를 건너뛰었는데, 그 전제("AP가 없으면 관찰 가능한 차이
+    // 없음")가 틀렸다 — map_page/unmap_page/protect_page로 매핑을
+    // 바꾼 뒤 **같은 코어가 그 가상주소를 실제 load/store로 다시
+    // 접근**하면, 이 코어 자신의 TLB에 남아있던 예전 엔트리 때문에
+    // 페이지테이블이 이미 바뀐 것과 무관하게 예전 프레임/권한이
+    // 그대로 보인다 — query_page()(페이지테이블을 직접 다시 읽어
+    // TLB를 거치지 않는다)로만 검증했던 M4~M11의 모든 데모는 이
+    // 결함을 드러낼 방법이 없었다. M12의 COW 쓰기 폴트가 실제
+    // load/store를 재시도하면서 처음으로 겉으로 드러났다 — 자식이
+    // COW 복사로 새 프레임에 재배선된 뒤에도 부모의(또는 이전) 물리
+    // 프레임을 계속 읽고 쓰는 것처럼 보이는 원인이 정확히 이것이었다.
+    asm volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
+
     if (g_cpu_count <= 1) {
-        return;  // AP가 없다 — M1~M9와 동일하게 관찰 가능한 차이 없음.
+        return;  // AP가 없다 — 다른 코어에 알릴 대상 자체가 없다.
     }
 
     g_shootdown_target_vaddr = vaddr;

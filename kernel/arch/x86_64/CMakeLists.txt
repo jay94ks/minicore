@@ -46,9 +46,11 @@ add_executable(minicore_kernel_x86_64
     lapic.cpp
     page_fault.cpp
     page_table.cpp
+    process_ops.cpp
     smp.cpp
     syscall.cpp
     syscall_entry.S
+    tss.cpp
     usermode.S
     user_thread.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/initrd_blob.S

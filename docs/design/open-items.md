@@ -15,7 +15,6 @@
 | OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
 | OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스" — procsrv 등 코어 서버가 아닌 **별도의 유저랜드 서비스 관리자 데몬**(정체성 확정, Linux systemd에 대응)의 실제 이름·책임 범위와, 프로세스 트리의 새 루트가 되는 구체적 절차 — **별도 design 문서 대상**(OPEN-52와 같은 성격) | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
-| OPEN-53 | `sys_process_spawn(elf_data, elf_size, argv, grant_trusted)`(system-servers-bringup.md §M12가 이름만 정해 둔 신설 syscall)의 정확한 시그니처·에러 코드·syscall 번호, 그리고 실제 `fork()`가 쓸 별도 syscall(주소공간 COW 복제+스레드 복제)의 시그니처 — ADR-140/141(kernel-memory.md)이 커널 프리미티브(clone_address_space_cow, 프레임 참조 카운트, per-thread syscall 스택)까지는 준비해 뒀지만 이걸 유저에게 노출하는 syscall ABI 자체는 아직 미정 | ADR-016, ADR-131, ADR-140, ADR-141 | [kernel-memory.md](kernel-memory.md), [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 | (미정) | [procsrv.md](../spec/procsrv.md) |
 | OPEN-55 | OPEN-52(서비스 준비완료 신호 프로토콜)가 아직 별도 설계로 미착수인 상태에서, M12가 지금 당장 써야 할 **임시 방편**(정해진 타임아웃 vs 단순 notification 1회 등, 계획 §M12 §구현1이 이미 이렇게 임시로 진행하라고 명시)의 구체적 선택 | ADR-131 | [system-servers-bringup.md](../plan/system-servers-bringup.md) |
 | OPEN-56 | procsrv.md §5(계정 생성)/§7(로그인)/§8(su/sudo)를 M12에서 완전히 스킵하고 "프로토콜 골격만"(계획 §M12 §구현2가 이미 이렇게 scope했다) 남기는 정확한 경계 — 골격만 만든다는 게 정확히 어디까지인지(예: 코드상 handler 자리는 만들되 항상 실패 반환? 아예 라우팅도 안 함?) | (미정) | [procsrv.md](../spec/procsrv.md) |
@@ -25,6 +24,7 @@
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-53~~ | `sys_process_spawn`/`sys_fork`/`sys_exec`/`sys_thread_exit`의 정확한 시그니처·에러 코드·syscall 번호 — QEMU에서 initrun 자신을 fork/exec/spawn하는 전체 왕복까지 실제 검증 완료 | ADR-142 |
 | ~~OPEN-49~~ | initrun이 각 서비스의 초기화 완료를 기다린 뒤 다음으로 넘어간다는 방향은 확정(ADR-131 §결정6) — 정확한 준비완료 신호 프로토콜은 범위가 커서 별도 설계로 분리 | OPEN-52로 이관 |
 | ~~OPEN-50~~ | initrun이 부트 파티션에서 서비스 바이너리를 찾는 정확한 탐색 규칙 | ADR-131 |
 | ~~OPEN-29~~ | initrun 기동 매니페스트 형식(서버 실행 순서·인자 기술 방법) | ADR-131 |

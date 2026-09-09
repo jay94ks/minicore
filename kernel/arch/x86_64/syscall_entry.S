@@ -24,6 +24,19 @@
  * 실려 함께 보존된다(원래 있던 별도 전역 하나를 스레드 수만큼
  * 안전하게 늘린 것과 같은 효과 — 전역을 늘리는 대신 이미 스레드마다
  * 분리돼 있는 자원인 스택 자체를 썼을 뿐이다).
+ *
+ * M12(ADR-142, sys_fork)부터는 rbx/rbp/r12~r15(콜리세이브 6개)도 함께
+ * push/pop한다 — SYSCALL 자체는 이 레지스터들을 전혀 건드리지 않고,
+ * syscall_dispatch(C++ 함수 호출)도 SysV 호출 규약상 이들을 그대로
+ * 보존하므로 **일반 syscall 경로에서는 push한 값을 그대로 다시
+ * pop할 뿐이라 동작에 아무 변화가 없다** — 오직 fork_child_resume
+ * (아래)만을 위한 준비다: fork()의 자식은 이 9개 값(rsp/rip/rflags +
+ * 콜리세이브 6개)이 **부모가 SYSCALL을 실행한 그 순간의 실제 유저
+ * 레지스터 값 그대로** 채워진 손짜기 스택으로 시작해야 진짜 POSIX
+ * fork()처럼 "같은 자리에서 다시 실행을 시작"할 수 있다(process_ops.cpp::
+ * fork_current가 이 스택에 있는 9워드를 그대로 읽어 자식의 초기
+ * 컨텍스트에 복사한다 — %r8에 그 시작 주소를 실어 syscall_dispatch에
+ * 넘긴다).
  */
 .section .bss
 .balign 8
@@ -39,15 +52,52 @@ syscall_entry:
     movq g_syscall_kernel_rsp(%rip), %rsp
 
     pushq %r9     /* 유저 RSP — 이 스레드 전용 스택 위, block()을 거쳐도 함께 보존됨 */
-    pushq %rcx    /* SYSCALL이 넣어 준 유저 복귀 RIP — SYSRET가 다시 쓸 때까지 보존 */
-    pushq %r11    /* SYSCALL이 넣어 준 유저 RFLAGS — 위와 같은 이유 */
+    pushq %rcx    /* SYSCALL이 넣어 준 유저 복귀 RIP */
+    pushq %r11    /* SYSCALL이 넣어 준 유저 RFLAGS */
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
 
+    movq %rsp, %r8    /* saved-regs 배열 시작 주소(fork 전용, 그 외 syscall은 무시).
+                          push 역순이라 [0]=r15,[1]=r14,[2]=r13,[3]=r12,[4]=rbp,
+                          [5]=rbx,[6]=rflags(r11),[7]=rip(rcx),[8]=user_rsp */
     movq %r10, %rcx   /* 4번째 인자를 syscall 관례(r10)에서 C 호출 관례(rcx)로 옮긴다 */
 
-    call syscall_dispatch   /* rdi,rsi,rdx,rcx = num,a1,a2,a3 — SysV와 그대로 일치. 반환값은 RAX. */
+    call syscall_dispatch   /* rdi,rsi,rdx,rcx,r8 = num,a1,a2,a3,saved_regs. 반환값은 RAX. */
 
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
     popq %r11
     popq %rcx
     popq %r9      /* 유저 RSP 복원(RAX는 손대지 않으므로 syscall_dispatch의 반환값이 그대로 유지됨) */
+    movq %r9, %rsp
+    sysretq
+
+/*
+ * fork_child_resume — sys_fork로 만들어진 자식 스레드가 맨 처음
+ * 실행하는 지점. arch_context_switch(context_switch.S)가 이 스레드로
+ * 처음 전환할 때 이미 자기 몫의 6개(r15,r14,r13,r12,rbx,rbp)를 pop한
+ * 뒤 `ret`으로 여기 뛰어든다 — 그래서 이 지점에서 RSP는 이미
+ * [rflags,rip,user_rsp] 3워드 블록만 남은 상태다(create_forked_thread
+ * 가 정확히 이 순서로 쌓아 뒀다). syscall_entry의 일반 에필로그(9개
+ * 전부 pop)와 혼동하지 않는다 — 6개는 arch_context_switch가 이미
+ * 소비했으므로 여기서는 나머지 3개만 pop한다. RAX만 0으로 미리
+ * 정해 둔다는 차이뿐(그 외엔 syscall_entry의 마지막 3-pop과 동일) —
+ * "이 스레드는 fork()의 자식이다"라는 POSIX 관례.
+ */
+.global arch_fork_child_resume
+.type arch_fork_child_resume, @function
+arch_fork_child_resume:
+    xorl %eax, %eax
+    popq %r11
+    popq %rcx
+    popq %r9
     movq %r9, %rsp
     sysretq

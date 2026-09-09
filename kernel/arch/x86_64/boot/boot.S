@@ -215,8 +215,11 @@ mb2_info_addr:
 .global pml4
 pml4:
     .skip 4096
+.global low_pdpt   /* M12(ADR-145) — page_table.cpp::create_address_space_root()가
+                       [0,8MiB) 항등 매핑 내용만 복사해 가려고 직접 읽는다. */
 low_pdpt:
     .skip 4096
+.global low_pd
 low_pd:
     .skip 4096
 .balign 16

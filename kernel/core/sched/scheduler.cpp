@@ -48,6 +48,12 @@ extern "C" uint32_t arch_current_node_id();
 // 포인터가 자기 내부 표에 남아 있는지만 확인한다.
 extern "C" void arch_fpu_thread_exiting(object::thread* t);
 
+// M12(ADR-142) — sys_fork의 자식이 "처음" 스케줄될 때 진입하는 자리.
+// arch_user_thread_trampoline과 같은 역할이지만, 진입점이 고정된
+// ELF entry가 아니라 "부모가 SYSCALL을 실행한 순간으로 복귀"다
+// (syscall_entry.S 상단 주석, create_forked_thread 참고).
+extern "C" [[noreturn]] void arch_fork_child_resume();
+
 namespace sched {
 
 namespace {
@@ -303,6 +309,65 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     *(--sp) = 0;  // r13
     *(--sp) = 0;  // r14
     *(--sp) = 0;  // r15
+    t->context_rsp = reinterpret_cast<uint64_t>(sp);
+
+    return t;
+}
+
+object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_user_rflags,
+                                      uint64_t saved_user_rsp, uint64_t saved_rbx,
+                                      uint64_t saved_rbp, uint64_t saved_r12, uint64_t saved_r13,
+                                      uint64_t saved_r14, uint64_t saved_r15,
+                                      object::address_space* space, object::handle_table* handles) {
+    void* mem = mm::slab_alloc(sizeof(object::thread));
+    if (mem == nullptr) {
+        return nullptr;
+    }
+    auto* t = new (mem) object::thread();
+    t->sched.band = object::priority_band::user;
+    t->sched.preferred_node = 0;
+    if (!alloc_fpu_save_area(t, 0)) {
+        mm::slab_free(t, sizeof(object::thread));
+        return nullptr;
+    }
+    t->owner_space = space;
+    t->handles = handles;
+
+    // M12(ADR-141) — 이 스레드도 자기 전용 syscall 커널 스택이
+    // 필요하다(create_user_thread와 같은 이유). 자식이 나중에 다시
+    // syscall을 걸 때 이 값이 g_syscall_kernel_rsp로 동기화된다.
+    constexpr uint32_t k_kstack_order = 2;
+    auto stack_page = mm::alloc_pages(k_kstack_order, 0);
+    if (!stack_page.is_ok()) {
+        mm::free_pages(mm::virt_to_phys(t->fpu_save_area), 0);
+        mm::slab_free(t, sizeof(object::thread));
+        return nullptr;
+    }
+    auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
+    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(mm::k_page_size) << k_kstack_order);
+    t->syscall_kernel_rsp = reinterpret_cast<uint64_t>(stack_top);
+
+    // 손짜기 초기 스택 — arch_fork_child_resume 진입 시 RSP가 정확히
+    // [saved_user_rflags, saved_user_rip, saved_user_rsp] 3워드 블록의
+    // 시작을 가리키게 만든다(syscall_entry.S 에필로그와 동일한 pop
+    // 순서: r11,rcx,r9 순 — push는 그 반대 순서로 한다). 그 위(스택
+    // 방향으로는 아래) 6워드는 arch_context_switch가 기대하는
+    // 콜리세이브 레지스터 순서(rbp,rbx,r12,r13,r14,r15 — create_user_thread
+    // 와 동일한 계약)인데, 0이 아니라 **부모가 SYSCALL을 실행한 순간의
+    // 실제 값**을 채운다 — 그래야 자식이 그 레지스터들을 쓰는 코드를
+    // 만나도(예: 호출자가 지역변수를 콜리세이브 레지스터에 두고 있었던
+    // 경우) 부모와 동일하게 동작한다(진짜 POSIX fork() 의미론).
+    uint64_t* sp = reinterpret_cast<uint64_t*>(stack_top);
+    *(--sp) = saved_user_rsp;
+    *(--sp) = saved_user_rip;
+    *(--sp) = saved_user_rflags;
+    *(--sp) = reinterpret_cast<uint64_t>(&arch_fork_child_resume);
+    *(--sp) = saved_rbp;
+    *(--sp) = saved_rbx;
+    *(--sp) = saved_r12;
+    *(--sp) = saved_r13;
+    *(--sp) = saved_r14;
+    *(--sp) = saved_r15;
     t->context_rsp = reinterpret_cast<uint64_t>(sp);
 
     return t;

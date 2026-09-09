@@ -31,6 +31,7 @@
 #include "page_table.hpp"
 #include "smp.hpp"
 #include "syscall.hpp"
+#include "tss.hpp"
 
 #include <cstdint>
 
@@ -43,6 +44,7 @@
 #include <object/handle_table.hpp>
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
+#include <uapi.hpp>
 
 // init/initrun/CMakeLists.txt가 만들고 kernel/arch/x86_64/initrd_blob.S.in이
 // .incbin으로 커널 이미지에 심은 MCPACK 이미지(M8, initrd_blob.S.in
@@ -312,15 +314,9 @@ void demo_cow_clone() {
 // 그 문제 자체가 발생하지 않는다(ADR-010의 "명시적 init 함수로 지연
 // 초기화" 원칙과 일치 — 그리고 스택에 두기엔 너무 크다, 8KiB 부트
 // 스택 예산 대비).
-object::handle_table* create_handle_table() {
-    constexpr uint32_t k_order = 2;  // 16KiB — sizeof(handle_table) 여유 있게 담김
-    auto page = mm::alloc_pages(k_order, 0);
-    if (!page.is_ok()) {
-        return nullptr;
-    }
-    void* mem = mm::phys_to_virt(page.value());
-    return new (mem) object::handle_table();
-}
+// M12에서 object::create_handle_table()(handle_table.cpp)로 공용화했다 —
+// process_ops.cpp도 이제 같은 함수를 쓴다.
+object::handle_table* create_handle_table() { return object::create_handle_table(); }
 
 void demo_object_model() {
     constexpr uint32_t k_all_rights = 0b111;
@@ -912,6 +908,44 @@ object::thread* setup_initrun_process() {
         return nullptr;
     }
 
+    // M12(uapi.hpp::k_m12_self_info_user_vaddr 주석 참고) — initrun 자신의
+    // 원본 ELF 바이트를 자기 주소공간에도 매핑해 둔다. entry.value().data는
+    // 커널 이미지(initrd_blob.S) 안의 커널 가상주소라 지금(아직 initrun의
+    // CR3로 전환하기 전, 커널 컨텍스트) 그대로 읽을 수 있다 — 유저 접근
+    // 가능한 새 페이지에 복사해야 initrun(ring 3)이 읽을 수 있다.
+    uint64_t self_elf_size = entry.value().size;
+    uint64_t self_elf_pages = (self_elf_size + mm::k_page_size - 1) / mm::k_page_size;
+    for (uint64_t i = 0; i < self_elf_pages; ++i) {
+        auto page = mm::alloc_pages(0, 0);
+        if (!page.is_ok()) {
+            return nullptr;
+        }
+        void* virt = mm::phys_to_virt(page.value());
+        uint64_t offset = i * mm::k_page_size;
+        uint64_t remaining = self_elf_size - offset;
+        uint64_t copy_len = remaining < mm::k_page_size ? remaining : mm::k_page_size;
+        __builtin_memset(virt, 0, mm::k_page_size);
+        __builtin_memcpy(virt, entry.value().data + offset, copy_len);
+        auto mapped = arch_x86_64::map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset,
+                                             page.value(), arch_x86_64::page_perm::user);
+        if (!mapped.is_ok()) {
+            return nullptr;
+        }
+    }
+
+    auto info_page = mm::alloc_pages(0, 0);
+    if (!info_page.is_ok()) {
+        return nullptr;
+    }
+    auto* self_info = static_cast<uapi::m12_self_info*>(mm::phys_to_virt(info_page.value()));
+    self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
+    self_info->elf_size = self_elf_size;
+    auto info_mapped = arch_x86_64::map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr,
+                                              info_page.value(), arch_x86_64::page_perm::user);
+    if (!info_mapped.is_ok()) {
+        return nullptr;
+    }
+
     return sched::create_user_thread(load_result.value(), k_user_stack_top,
                                       k_boot_info_user_vaddr, space, initrun_handles);
 }
@@ -919,6 +953,11 @@ object::thread* setup_initrun_process() {
 [[noreturn]] void demo_sched() {
     sched::init();
     arch_x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
+    // M12(ADR-143) — usermode.S가 M8 시점에 이미 "TSS는 ring3→ring0
+    // 방향에만 필요하다"고 정확히 지적해 뒀던 그 방향이, 유저 스레드의
+    // 실제 예외(#PF 등)로 지금 처음 필요해졌다 — 첫 유저 스레드가 뜨기
+    // 전에 반드시 먼저 있어야 한다.
+    arch_x86_64::init_tss();
 
     object::thread* a =
         sched::create_kernel_thread(&thread_a_entry, object::priority_band::kernel, 0);

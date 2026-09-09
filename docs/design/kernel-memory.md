@@ -754,3 +754,126 @@
     fork()가 없어 유저 스레드가 2개 동시에 존재할 방법이 없다.
     fork()가 실제로 구현되면 그 시점에 반드시 실제로 재현·검증해야
     한다.
+
+## ADR-142. sys_fork/sys_process_spawn/sys_exec/sys_thread_exit — 새 syscall 4종 + fork()의 레지스터 수준 POSIX 재현
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: [OPEN-53](open-items.md)을 해소한다. 새 커널 파일
+  [process_ops.hpp](../../kernel/arch/x86_64/process_ops.hpp)/
+  [.cpp](../../kernel/arch/x86_64/process_ops.cpp)에 syscall 번호
+  1~4를 배정한다([uapi.hpp](../../kernel/include/uapi.hpp)).
+  1. **`sys_process_spawn`**(1, ADR-131이 이름만 정해 둠) —
+     `process_spawn_request{elf_data, elf_size, argv_blob, argv_size,
+     grant_trusted}`(a1 = 이 구조체의 유저 가상주소, 호출자 자신의
+     주소공간이라 커널이 그대로 역참조). 완전히 새 주소공간+ELF
+     로드+유저 스택(16KiB)+선택적 argv(한 페이지 이내, 읽기전용
+     매핑)+새 유저 스레드를 만들어 enqueue까지 마친다. `grant_trusted`
+     만이 새 신원의 trusted 여부를 정한다(ADR-074 "부여 권한" —
+     fork와 달리 완전히 새로운 생성이므로).
+  2. **`sys_fork`**(2) — 인자 없음. 호출자의 주소공간을
+     `clone_address_space_cow`(ADR-140)로 복제하고, fd 테이블은
+     **복제하지 않는다**(procsrv.md §3.6 — 소유 서버별 복제 요청은
+     procsrv 자신의 몫, 커널은 자식에게 빈 handle_table만 준다).
+     반환값은 부모 관점: 1=성공, 그 외 process_spawn_error. 자식은
+     이 값을 syscall 반환으로 받지 않는다(§레지스터 재현 참고).
+  3. **`sys_exec`**(3) — `exec_request{elf_data, elf_size, argv_blob,
+     argv_size}`. 호출한 스레드의 `owner_space`를 완전히 새 주소공간
+     +ELF로 교체하고, 그 자리에서 CR3를 직접 전환한 뒤
+     `enter_usermode()`로 곧바로 진입한다(성공하면 반환하지 않음 —
+     procsrv.md §4 6단계와 동일한 관례). **알려진 단순화**: 이전
+     address_space와 그 페이지테이블/프레임은 회수하지 않고
+     버려둔다(누수) — 회수는 이후 마일스톤.
+  4. **`sys_thread_exit`**(4) — 인자 없음, `sched::exit()`을 그대로
+     노출한다. 협조적 스케줄러에서 유저 스레드가 스스로 CPU를
+     물러날 유일한 수단(아직 `sys_yield`는 없다 — 이 스레드가 다시
+     실행될 필요가 없는 경우에만 쓸 수 있다).
+  5. **fork()의 레지스터 수준 재현**(POSIX가 "두 번 반환하는 것처럼
+     보이게" 하는 핵심) — `syscall_entry.S`가 이제 rflags/rip/
+     user_rsp 3개(M12 이전)에 더해 rbx/rbp/r12~r15 콜리세이브
+     6개까지 **총 9개**를 매 syscall마다 push/pop한다(일반
+     syscall에는 아무 동작 변화가 없다 — syscall_dispatch가 SysV
+     호출 규약상 이미 보존하던 값을 그대로 다시 pop할 뿐). 이 9개
+     값의 시작 주소를 `%r8`로 `syscall_dispatch`에 넘겨(5번째
+     인자) fork 케이스만 활용한다.
+     `sched::create_forked_thread()`(scheduler.hpp/cpp)가 자식의
+     손짜기 초기 스택에 이 9개를 **부모가 SYSCALL을 실행한 순간의
+     실제 값 그대로**(0 아님) 채워 넣고, 새 arch 훅
+     `arch_fork_child_resume`(syscall_entry.S)를 자식의 "복귀 주소"
+     자리에 심는다 — `arch_context_switch`가 이 스레드로 처음
+     전환할 때 자신의 6-레지스터 pop(rbp,rbx,r12~r15)을 이미 소비한
+     뒤 `ret`으로 이 라벨에 뛰어들면, 남은 3개(rflags,rip,user_rsp)
+     만 pop하고 RAX를 0으로 설정한 뒤 `sysretq`한다 — 그 결과
+     자식은 부모가 `syscall` 명령을 실행한 바로 그 지점에서, 콜리
+     세이브 레지스터까지 부모와 동일한 값으로 재개된다(RAX=0만
+     다르다).
+- **근거**: ADR-131이 이름만 정해 둔 `sys_process_spawn`을 실제로
+  구현해야 M12가 진행 가능했고, procsrv가 자기 자신을 fork/exec할
+  수 있으려면 fork()가 "그냥 자식이 0을 반환하고 끝"이 아니라
+  실제로 **부모가 호출한 지점으로 되돌아가야** 한다 — 그러지 않으면
+  procsrv의 평범한 C++ 코드(mc_fork() 같은 일반 함수 호출 형태)가
+  자식 쪽에서 전혀 다른 동작을 하게 된다. rbx/rbp/r12~r15까지
+  캡처/복원하는 이유: 이 값들은 SYSCALL 명령 자체가 전혀 건드리지
+  않고 syscall_dispatch(C++ 함수 호출)도 SysV 규약상 보존하므로
+  **캡처 시점에 물리 레지스터에 그대로 남아 있다** — 그래서
+  syscall_entry.S에서 직접 push하는 것만으로 정확한 값을 얻을 수
+  있다(별도로 "읽어내는" 코드가 필요 없다).
+- **검증 결과(QEMU 실측)**: initrun 자신을 fork()한 뒤 자식이
+  exec()으로 자기 자신을 다시 실행하고, 부모는 boot IPC call
+  이후 process_spawn()으로 또 다른 사본을 띄우는 전체 흐름을
+  실제로 확인했다 — `[process] fork ok` → (자식 스케줄) →
+  `[process] exec ok entry=0x10000000` → (부모로 복귀) →
+  `[process] spawn ok entry=0x10000000 trusted=0` 순서로 로그가
+  남는다(`tools/smoke-test-x86_64.sh`에 세 줄 모두 추가, 49개 전부
+  PASS). 이 과정에서 ADR-143/144/145(각각 별도 ADR) 세 가지 실제
+  버그를 추가로 발견·수정해야 했다 — 자세한 진단 경위는 그쪽 참고.
+- **영향**: `kernel/arch/x86_64/CMakeLists.txt`에 `process_ops.cpp`
+  추가. `kernel/core/object/handle_table.hpp/.cpp`에
+  `object::create_handle_table()` 공용 팩토리 추가(M4 시절
+  kernel_main.cpp 전용이던 것을 공용화, process_spawn/fork 양쪽이
+  씀). M12의 나머지(procsrv 자체, virtio-blk, cpio)는 여전히
+  OPEN-54~57로 남아 있다.
+
+## ADR-145. `create_address_space_root()`의 pml4[0] 공유 범위를 [0,8MiB)로 정확히 좁힌다
+
+- **상태**: 확정 (2026-09-10)
+- **결정**: `create_address_space_root()`가 `table[0] = pml4[0]`으로
+  **pml4 index 0 전체**(가상주소 [0, 512GiB) 전부)를 공유하던 것을,
+  이 주소공간 전용 `low_pdpt`/`low_pd`를 새로 만들어 GDT가 실제로
+  필요로 하는 [0, 8MiB)(boot.S가 채운 `low_pd[0..3]`, 2MiB 거대
+  페이지 4개) **내용만** 복사하는 방식으로 바꾼다. 그 외([8MiB,
+  512GiB))는 이 주소공간만의 것으로 비워 둔다.
+  [clone_address_space_cow()](kernel-memory.md#adr-140-adr-016-cow의-실제-커널-구현)
+  (ADR-140)도 유저 영역 순회를 pml4 index **1**부터가 아니라
+  **0**부터 시작하도록 고치고, index 0에서는 [0,8MiB)에 해당하는
+  `i3==0 && i2<4`만 건너뛴다.
+- **근거**: pml4 index 0은 하드웨어상 [0, 512GiB) 전체를 가리키는데,
+  기존 설계(M8, ADR-121)는 "GDT 접근용으로 [0,8MiB)만 공유하면
+  된다"는 **의도**였지만 실제 구현(`table[0] = pml4[0]`)은 그
+  인덱스가 가리키는 PDPT 자체를 통째로 공유해 버려, [8MiB,
+  512GiB) 전체(예: initrun의 링크 주소 `0x10000000` — link.ld가
+  정한 값으로 여전히 pml4 index 0에 속한다)까지 함께 공유됐다.
+  M8~M11은 유저 주소공간이 동시에 하나뿐이라 이 사실이 전혀
+  드러나지 않았다 — M12에서 `sys_process_spawn`으로 **두 번째**
+  독립 주소공간을 만들어 같은 링크 주소(0x10000000)에 매핑을
+  시도하자, 첫 번째 주소공간이 이미 (공유된 테이블에) 채워 둔
+  엔트리를 그대로 보고 `already_mapped`로 충돌하는 것을 실제로
+  QEMU에서 재현했다.
+- **검증 결과(QEMU 실측)**: 이 수정 전에는 `sys_process_spawn`이
+  `load_elf`에서 `map_failed(already_mapped)`로 실패했다. 수정
+  직후 같은 재현 절차가 `load_elf ok=1`로 성공했고, 이어서 발견된
+  `clone_address_space_cow`의 index-0 스킵 버그(자식의 코드 페이지
+  자체가 없어 명령어 페치가 not-present `#PF`로 죽는 문제)까지
+  고치고서야 fork()도 완전히 성공했다 — 두 문제는 같은 근본 원인
+  (index 0 처리 방식)에서 나온 두 개의 다른 증상이었다.
+- **영향**:
+  - `create_address_space_root()`가 이제 주소공간 하나당 2페이지
+    (low_pdpt+low_pd)를 추가로 소비한다 — 무시할 수 있는 비용.
+  - `kernel/arch/x86_64/boot/boot.S`의 `low_pdpt`/`low_pd`에
+    `.global`을 추가해 `page_table.cpp`가 그 **내용**(물리
+    프레임을 가리키는 거대 페이지 엔트리 값)만 읽어 가도록 노출
+    했다 — 그 두 테이블 자체(포인터)는 여전히 boot 전용이며 그
+    누구도 직접 쓰지 않는다.
+  - ADR-121(모든 유저 주소공간이 저지대 항등 매핑을 공유해야
+    한다는 결정)은 그대로 유지된다 — 이 ADR은 "공유의 정확한
+    범위"만 좁혔을 뿐, "공유해야 한다"는 결론 자체는 바꾸지
+    않았다.

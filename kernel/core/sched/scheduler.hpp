@@ -57,6 +57,23 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
 object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
                                     object::address_space* space, object::handle_table* handles);
 
+// M12(system-servers-bringup.md §M12, ADR-142) — sys_fork의 자식
+// 스레드를 만든다. create_user_thread와 달리 "처음부터 새 진입점으로
+// 시작"하지 않고 "부모가 SYSCALL을 실행한 그 순간의 유저 레지스터
+// 상태 그대로 재개"해야 한다(POSIX fork()가 두 번 반환하는 것처럼
+// 보이게 하는 핵심) — 그래서 인자로 그 순간의 값 9개를 그대로
+// 받는다(process_ops.cpp::fork_current가 syscall_entry.S의 저장된
+// 레지스터 블록에서 그대로 읽어 넘겨준다). arch_fork_child_resume
+// (arch 훅, syscall_entry.S)가 create_user_thread의
+// arch_user_thread_trampoline 자리를 대신한다 — 이 스레드가 처음
+// 스케줄되면 그 라벨로 진입해 이 9개 값으로 곧바로 SYSRET한다(RAX는
+// 그 라벨 자신이 0으로 정한다 — "나는 자식이다").
+object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_user_rflags,
+                                      uint64_t saved_user_rsp, uint64_t saved_rbx,
+                                      uint64_t saved_rbp, uint64_t saved_r12, uint64_t saved_r13,
+                                      uint64_t saved_r14, uint64_t saved_r15,
+                                      object::address_space* space, object::handle_table* handles);
+
 void enqueue(object::thread& t);
 
 // run_queue에서 스레드를 하나 뽑아 그리로 실행을 넘긴다. 이 함수

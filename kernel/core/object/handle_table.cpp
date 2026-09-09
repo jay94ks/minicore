@@ -1,7 +1,24 @@
 // 핸들 테이블 + 프록시 트리 구현 (docs/spec/objects.md §3~6).
 #include "object/handle_table.hpp"
 
+#include <new>
+
+#include <mm/page_allocator.hpp>
+#include <mm/phys_map.hpp>
+
 namespace object {
+
+handle_table* create_handle_table() {
+    // handle_table.hpp 상단 주석 참고 — M4(kernel_main.cpp)가 쓰던 것과
+    // 동일한 크기(order 2 = 16KiB, sizeof(handle_table) 여유 있게 담김).
+    constexpr uint32_t k_order = 2;
+    auto page = mm::alloc_pages(k_order, 0);
+    if (!page.is_ok()) {
+        return nullptr;
+    }
+    void* mem = mm::phys_to_virt(page.value());
+    return new (mem) handle_table();
+}
 
 result<handle, handle_error> handle_table::allocate_slot() {
     for (handle i = 1; i < k_max_handles; ++i) {

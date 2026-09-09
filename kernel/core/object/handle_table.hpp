@@ -46,6 +46,17 @@ inline constexpr uint32_t k_max_handles = 64;
 
 class handle_table;
 
+// M12(system-servers-bringup.md §M12) — kernel_main.cpp::create_handle_table()
+// (M4)가 처음 만든, "슬랩이 아니라 별도 페이지에 placement-new로
+// handle_table을 만드는" 패턴을 공용화한다. handle_table은 커다란
+// 고정 크기 배열(k_max_handles개의 handle_entry, 각각 intrusive_list
+// 센티널 포함)이라 스택에 두기엔 너무 크고, 전역으로 두면 ADR-118이
+// 우려한 "동적 초기화 필요" 판정을 컴파일러가 내리기 쉽다 — 이
+// 함수처럼 mm이 이미 초기화된 뒤 명시적으로 호출되는 자리에서
+// placement new로 만들면 그 문제 자체가 생기지 않는다. 실패 시
+// nullptr(페이지 할당 실패).
+handle_table* create_handle_table();
+
 struct handle_entry {
     object_kind kind;
     uint32_t rights;
