@@ -266,6 +266,29 @@ page_query_result query_page(uint64_t pml4_phys, uint64_t virt) {
     return page_query_result{true, entry & k_pte_addr_mask, perm};
 }
 
+}  // namespace arch_x86_64
+
+// M13(system-servers-bringup.md §M13) — kernel/core/ipc가 서로 다른
+// 유저 주소공간에 있는 두 스레드 사이에서 IPC 메시지 구조체 자체를
+// (label/regs/page_count/handle_count) 안전하게 주고받으려면, "이
+// vaddr이 어느 물리 프레임에 매핑돼 있는가"를 arch별로 물어야 한다 —
+// ADR-002(core는 arch 헤더를 include하지 않는다)를 지키면서 이 질문을
+// 던지는 유일한 방법이 이 extern "C" 훅이다(core/sched/scheduler.cpp의
+// arch_context_switch 등 기존 훅들과 같은 패턴, kernel-scheduler.md
+// 참고) — core(kernel/core/ipc/endpoint.cpp)가 이 시그니처만 알고
+// 직접 정의는 여기(arch)가 담당한다. query_page()를 그대로 감쌀 뿐이다.
+extern "C" bool arch_translate_user_page(uint64_t page_table_root, uint64_t vaddr,
+                                          uint64_t* out_phys) {
+    auto q = arch_x86_64::query_page(page_table_root, vaddr);
+    if (!q.present) {
+        return false;
+    }
+    *out_phys = q.phys;
+    return true;
+}
+
+namespace arch_x86_64 {
+
 result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
     auto new_root = create_address_space_root();
     if (!new_root.is_ok()) {

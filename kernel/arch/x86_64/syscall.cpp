@@ -91,15 +91,44 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 ipc::sys_call(*self->handles, static_cast<object::handle>(a1), *msg_in, *msg_out);
             return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
         }
+        case uapi::k_syscall_ipc_recv: {
+            object::thread* self = sched::current();
+            if (self == nullptr || self->handles == nullptr) {
+                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+            }
+            auto* msg_out = reinterpret_cast<ipc::message*>(a2);
+            if (msg_out == nullptr) {
+                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+            }
+            auto result =
+                ipc::sys_recv(*self->handles, static_cast<object::handle>(a1), *msg_out);
+            return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
+        }
+        case uapi::k_syscall_ipc_reply: {
+            object::thread* self = sched::current();
+            if (self == nullptr || self->handles == nullptr) {
+                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+            }
+            const auto* msg_in = reinterpret_cast<const ipc::message*>(a1);
+            if (msg_in == nullptr) {
+                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+            }
+            auto result = ipc::sys_reply(*self->handles, *msg_in);
+            return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
+        }
         case uapi::k_syscall_process_spawn: {
-            const auto* req = reinterpret_cast<const uapi::process_spawn_request*>(a1);
+            auto* req = reinterpret_cast<uapi::process_spawn_request*>(a1);
             if (req == nullptr || req->elf_data == 0) {
+                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+            }
+            if (req->inherited_handle_count > uapi::k_max_spawn_inherited_handles) {
                 return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
             }
             auto err = arch_x86_64::process_spawn(
                 reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
-                req->grant_trusted);
+                req->grant_trusted, req->create_endpoint, req->inherited_handles,
+                req->inherited_handle_count, req->out_endpoint_proxy_handle);
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_fork: {

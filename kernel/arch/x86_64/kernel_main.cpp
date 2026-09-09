@@ -629,7 +629,7 @@ void thread_c_server_entry() {
     ipc::message out{};
     out.label = 0x5EED;
     out.regs[0] = in.regs[0] + 1;
-    ipc::sys_reply(out);
+    ipc::sys_reply(*g_ipc_table, out);
     klog::printf("[ipc] server sys_reply sent\n");
 
     sched::exit();
@@ -762,7 +762,7 @@ void thread_h_receiver_entry() {
 
     ipc::message ack{};
     ack.label = 0xACC0;
-    ipc::sys_reply(ack);
+    ipc::sys_reply(*g_ipc_table, ack);
 
     // 방금 IPC로 받은 새 핸들(원본과 다른 핸들 번호지만 같은 객체를
     // 가리킴)로 직접 기다린다 — 핸들 위임이 "진짜로 쓸 수 있는"
@@ -808,7 +808,7 @@ void thread_initrun_boot_server_entry() {
 
     ipc::message ack{};
     ack.label = 0xB0A0;
-    ipc::sys_reply(ack);
+    ipc::sys_reply(*g_ipc_table, ack);
 
     sched::exit();
 }

@@ -18,6 +18,32 @@ namespace uapi {
 // syscall 번호. RDI(1번 인자)에 싣는다 — syscall.S/syscall.cpp 참고.
 inline constexpr uint64_t k_syscall_ipc_call = 0;  // ipc::sys_call 그대로 노출.
 
+// ipc::message와 바이트 단위로 동일한 레이아웃이어야 하는 보조 타입들
+// (kernel/core/ipc/message.hpp 상단 주석 참고) — process_spawn_request
+// (M13부터 handle_transfer를 스폰 시점 캐패빌리티 주입에도 재사용한다,
+// ADR-151)와 message 양쪽이 이 타입들을 먼저 필요로 하므로 파일
+// 앞부분으로 옮겨 둔다.
+inline constexpr uint32_t k_message_registers = 4;
+inline constexpr uint32_t k_max_page_descriptors = 4;
+inline constexpr uint32_t k_max_handle_transfers = 2;
+
+enum class transfer_mode : uint8_t {
+    copy = 0,
+    move = 1,
+    map = 2,
+};
+
+struct page_descriptor {
+    uint64_t vaddr = 0;
+    uint64_t length = 0;
+    transfer_mode mode = transfer_mode::copy;
+};
+
+struct handle_transfer {
+    uint32_t src_handle = 0;
+    uint32_t rights_mask = 0;
+};
+
 // M12(system-servers-bringup.md §M12, ADR-142) — ADR-131이 이름만
 // 정해 둔 `sys_process_spawn`과, procsrv가 자기 자신을 fork/exec하는
 // 데 필요한 `sys_fork`/`sys_exec`. 셋 다 새 프로세스/실행 이미지
@@ -34,12 +60,38 @@ inline constexpr uint64_t k_syscall_exec = 3;
 // 그대로 역참조 가능 — ipc_call의 msg_in/msg_out과 같은 전제).
 // argv_blob==0이면 인자 없음. 반환값 0=성공, 그 외
 // process_spawn_error(process_ops.hpp)의 값.
+// M13(system-servers-bringup.md §M13, ADR-151) — 새 프로세스가 다른
+// 서버를 IPC로 부르려면 그 서버의 endpoint에 대한 핸들을 스폰
+// 시점에 미리 쥐고 있어야 한다(등록/탐색 서비스가 아직 없다, OPEN-59
+// 참고) — 그래서 스폰 자체가 캐패빌리티 주입 지점이 된다.
+inline constexpr uint32_t k_max_spawn_inherited_handles = 4;
+
 struct process_spawn_request {
     uint64_t elf_data = 0;
     uint64_t elf_size = 0;
     uint64_t argv_blob = 0;  // NUL로 구분된 문자열들이 이어진 블록, 마지막도 NUL.
     uint64_t argv_size = 0;
     bool grant_trusted = false;
+
+    // true면 새 프로세스의 handle_table에 handle 1로 새 IPC endpoint
+    // 소유 핸들을 만들어 준다(sys_ipc_recv로 그 위에서 받을 수 있게) —
+    // handle 1 관례는 kernel_main.cpp::setup_initrun_process(M8)의
+    // boot endpoint 배선과 정확히 같다. 성공하면 그 endpoint에 대한
+    // 프록시 핸들(CAN_SEND만) 하나를 **호출자 자신의** handle_table에도
+    // 만들어 out_endpoint_proxy_handle에 채운다 — 호출자(대개 initrun)가
+    // 이 프록시를 나중에 스폰하는 다른 프로세스에게 inherited_handles로
+    // 넘겨줘야, 그 프로세스가 지금 만든 새 프로세스를 호출할 수 있다.
+    bool create_endpoint = false;
+    uint32_t out_endpoint_proxy_handle = 0;  // 출력.
+
+    // 호출자가 이미 들고 있는 핸들(대개 다른 서비스의 endpoint 프록시)을
+    // 새 프로세스의 handle_table에 순서대로(create_endpoint가 handle 1을
+    // 차지했다면 2부터) 미리 넣어 둔다 — src_handle은 호출자 자신의
+    // handle_table 안 번호, rights_mask는 위임 시 적용할 축소 마스크
+    // (ADR-029). 아직 새 프로세스가 존재하지 않는 시점에 하는 일이라
+    // IPC 메시지가 아니라 이 구조체로 직접 지정한다.
+    uint32_t inherited_handle_count = 0;
+    handle_transfer inherited_handles[k_max_spawn_inherited_handles] = {};
 };
 
 // sys_exec(a1 = 이 구조체의 유저 가상주소, a2/a3 미사용) — 성공하면
@@ -79,6 +131,24 @@ struct dma_buffer_result {
     uint64_t phys_addr = 0;
 };
 
+// M13(system-servers-bringup.md §M13, ADR-151) — vfs/memfs 같은 실제
+// 서버가 유저모드에서 IPC 호출을 **받고 응답**하려면 k_syscall_ipc_call
+// (클라이언트 전용)만으로는 부족하다 — ipc::sys_recv/sys_reply를 그대로
+// syscall로 노출한다.
+//
+// sys_ipc_recv(a1=handle, a2=이 메시지의 유저 가상주소, a3 미사용) —
+// 블록. 반환값 0=ipc_error::ok(그 외는 ipc::ipc_error 값). badge는
+// 이 마일스톤에서 아직 쓰이지 않아 반환하지 않는다(다중 클라이언트
+// 구분이 필요해지면 이후 재검토, kernel/core/ipc/endpoint.hpp의 badge
+// 주석 참고 — 소유 핸들로 받으면 항상 0이라 M13의 단일 클라이언트
+// 시나리오에는 의미가 없다).
+inline constexpr uint64_t k_syscall_ipc_recv = 6;
+
+// sys_ipc_reply(a1=이 메시지의 유저 가상주소, a2/a3 미사용) — 가장
+// 최근 sys_ipc_recv로 받은 호출에 응답한다. 블록하지 않는다. 반환값
+// 0=ipc_error::ok.
+inline constexpr uint64_t k_syscall_ipc_reply = 7;
+
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process가
 // initrun 자신의 원본 ELF 바이트를(자기 자신을 fork/process_spawn/exec으로
 // 다시 만들어 볼 수 있게) initrun의 주소공간에도 매핑해 두고, 그
@@ -97,28 +167,6 @@ inline constexpr uint64_t k_m12_self_info_user_vaddr = 0x0000700000100000ull;
 struct m12_self_info {
     uint64_t elf_addr = 0;
     uint64_t elf_size = 0;
-};
-
-
-inline constexpr uint32_t k_message_registers = 4;
-inline constexpr uint32_t k_max_page_descriptors = 4;
-inline constexpr uint32_t k_max_handle_transfers = 2;
-
-enum class transfer_mode : uint8_t {
-    copy = 0,
-    move = 1,
-    map = 2,
-};
-
-struct page_descriptor {
-    uint64_t vaddr = 0;
-    uint64_t length = 0;
-    transfer_mode mode = transfer_mode::copy;
-};
-
-struct handle_transfer {
-    uint32_t src_handle = 0;
-    uint32_t rights_mask = 0;
 };
 
 // ipc::message와 바이트 단위로 동일한 레이아웃 — kernel/core/ipc/message.hpp

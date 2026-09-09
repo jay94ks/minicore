@@ -10,6 +10,8 @@
 
 #include <cstdint>
 
+#include <uapi.hpp>
+
 namespace arch_x86_64 {
 
 enum class process_spawn_error : uint32_t {
@@ -27,9 +29,18 @@ enum class process_spawn_error : uint32_t {
 // msg_in/msg_out과 같은 전제). argv_blob==nullptr(argv_size==0)이면
 // 인자 없음. grant_trusted: ADR-074의 "부여 권한" — fork()와 달리
 // 완전히 새 신원을 시작하는 연산이므로 여기서 처음 정해진다.
+//
+// M13(ADR-151) — create_endpoint/inherited_handles/inherited_handle_count는
+// uapi::process_spawn_request와 정확히 같은 의미(그 파일 상단 주석
+// 참고) — 스폰 시점 캐패빌리티 주입. 성공하고 create_endpoint가
+// true면 out_endpoint_proxy_handle에 **호출자 자신의** handle_table에
+// 새로 생긴 프록시 핸들을 채운다.
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
-                                   bool grant_trusted);
+                                   bool grant_trusted, bool create_endpoint,
+                                   const uapi::handle_transfer* inherited_handles,
+                                   uint32_t inherited_handle_count,
+                                   uint32_t& out_endpoint_proxy_handle);
 
 // sys_fork — 호출자의 주소공간을 COW로 복제해 새 프로세스를 만든다
 // (ADR-016/140). 반환값은 **부모 관점의 syscall 반환값**이다: 1=성공,

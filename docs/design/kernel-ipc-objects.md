@@ -169,3 +169,62 @@
     기본값은 64.
   - `docs/spec/ipc.md`의 "아직 정하지 않은 것"에 있던 잠정 서술(OPEN-20)을
     이 결정으로 교체한다.
+
+## ADR-151. IPC를 실제 서로 다른 유저 프로세스 사이에서 쓸 수 있게 확장 — 메시지 구조체 cross-address-space 전달 + `sys_reply`의 `handles[]` 지원 + `sys_recv`/`sys_reply` syscall 노출
+
+- **상태**: 확정 (2026-09-09)
+- **결정**:
+  1. `kernel/core/ipc/endpoint.cpp`의 `deliver_message()`가 이제
+     `message` 구조체 자체(label/regs/page_count/handle_count)를
+     "그 메시지가 있는 스레드의 `owner_space`"로 번역해서 읽고
+     쓴다 — 커널 스레드(owner_space==nullptr)면 기존처럼 직접
+     포인터 역참조, 유저 스레드면 그 주소공간의 페이지테이블로
+     vaddr을 물리 프레임으로 번역한 뒤 `mm::phys_to_virt`로 커널이
+     접근 가능한 포인터를 얻는다. 이 번역 자체는
+     `kernel/core`(ADR-002, arch 헤더 미포함)가 직접 하지 않고,
+     `kernel-scheduler.md`의 `arch_context_switch` 등과 같은 패턴
+     (extern "C" 훅, core가 선언만, arch(x86_64)가 정의)인
+     `arch_translate_user_page(page_table_root, vaddr, &out_phys)`를
+     통해서 한다.
+  2. `sys_reply`가 이제 `handles[]`도 옮긴다 — 그래서 시그니처에
+     `handle_table&`가 추가되고, 반환형이 `void`에서
+     `result<void, ipc_error>`로 바뀐다(여전히 블록하지 않는다 —
+     전달이 실패해도 caller를 그대로 깨운다).
+  3. `sys_recv`/`sys_reply`를 유저모드 syscall로 새로 노출한다
+     (`uapi::k_syscall_ipc_recv`=6, `k_syscall_ipc_reply`=7) — M8~M12는
+     `sys_call`(클라이언트 전용)만 유저모드에 노출돼 있었고, 실제로
+     IPC를 **받아 응답하는** 서버 역할은 전부 커널 스레드였다(M6~M8
+     데모). M13부터 vfs/memfs 같은 진짜 유저 프로세스 서버가 생기므로
+     이 노출이 필요해졌다.
+- **근거**: M6~M12는 IPC의 두 상대가 항상 같은 주소공간(커널 컨텍스트,
+  물리메모리 전체가 higher-half로 공유됨)이었거나 한쪽이 커널
+  스레드였다 — 그래서 `message*` 포인터를 그냥 커널이 이미
+  역참조 가능한 값으로 다뤄도 문제가 없었다. M13(system-servers-bringup.md)
+  이 처음으로 진짜 서로 다른 유저 프로세스(procsrv/vfs/memfs) 사이의
+  IPC를 요구하면서, 그 가정이 실제로 깨지는 걸 설계 중에 발견했다 —
+  고치지 않으면 서버 스레드의 `recv_dest`/호출자의 `reply_dest`에
+  전혀 다른 주소공간의 포인터로 직접 쓰기를 시도해 크래시하거나
+  조용히 남의 메모리를 덮어쓴다. `sys_reply`의 `handles[]` 확장은
+  ADR-018(filesystem.md, "VFS가 open() 응답에서 FS 서버 핸들을
+  위임")이 요구하는 방향이 정확히 **reply**(서버→클라이언트)라서
+  불가피했다 — 기존 시그니처(`endpoint.hpp` "알려진 단순화")는 이
+  방향을 원천적으로 막고 있었다.
+- **영향**:
+  - `kernel/core/ipc/endpoint.cpp`에 `copy_from_user`/`copy_to_user`
+    (내부 헬퍼, page 경계를 넘는 범위는 페이지 단위로 나눠 처리)와
+    `table_for_thread`(커널 스레드는 기존 공유 handle_table로
+    폴백, 실제 유저 스레드는 자신의 handle_table) 추가.
+    `kernel/arch/x86_64/page_table.cpp`에 `arch_translate_user_page`
+    정의(기존 `query_page()`를 그대로 감쌈).
+  - **남은 단순화**: `pages[]`가 가리키는 실제 데이터 버퍼(설명 자체가
+    아니라 그 내용)는 여전히 같은 주소공간 전제로만 안전하다 — M13은
+    이 경로를 아예 쓰지 않는다(전부 32바이트 이하 값을 regs[]로만
+    주고받는다, [fs-protocol.md](../spec/fs-protocol.md) 참고). 실제로
+    필요해지면(파일 내용이 32바이트를 넘는 경우 등) 이 부분도 같은
+    방식(주소공간별 페이지 번역)으로 재검토해야 한다 — 신규
+    **미결정 (OPEN-59)**.
+  - `docs/spec/ipc.md` §3/§3.1을 이 결정에 맞춰 갱신했다(`sys_reply`의
+    새 시그니처/반환형, cross-address-space 번역 설명).
+  - `kernel_main.cpp`의 M6~M8 커널 스레드 IPC 데모(`ipc::sys_reply`
+    호출 3곳)는 새 시그니처(`handle_table&` 추가)로만 맞추고 동작은
+    그대로다(50개/51개 스모크 테스트 전체 회귀 없음, QEMU 재검증).

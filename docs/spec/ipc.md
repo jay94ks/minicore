@@ -30,7 +30,7 @@
 |---|---|---|---|
 | `sys_call` | `handle`, `const message* msg_in`, `message* msg_out` | `result<void, ipc_error>` | 송신 + 응답 대기(블록) |
 | `sys_recv` | `handle`, `message* msg_out` | `result<badge, ipc_error>` | 호출 수신 대기(블록) |
-| `sys_reply` | `const message* msg_in` | `void` | 가장 최근 `sys_recv`로 받은 호출에 응답 |
+| `sys_reply` | `const message* msg_in` | `result<void, ipc_error>` | 가장 최근 `sys_recv`로 받은 호출에 응답(M13, ADR-151 — `handles[]` 위임까지 지원하도록 확장, §3.1 참고) |
 | `sys_notify` | `handle`, `u64 bits` | `void` | 대상 비트셋에 OR, 실패 없음 |
 | `sys_wait` | `handle` | `u64` | 비트셋이 0이 아니면 즉시 반환 후 원자적 clear, 0이면 블록 |
 
@@ -42,6 +42,34 @@
 - `sys_reply`는 대응하는 `sys_recv`가 없는 상태에서 호출되면 아무 동작도
   하지 않는다(오류 아님 — 단일 스레드가 반드시 recv→reply 순서로 쓴다는
   전제하의 단순화; 잘못된 사용은 상위 계층의 버그로 취급).
+
+### 3.1. M13 갱신 — `sys_reply`의 `handles[]` 지원과 서로 다른 프로세스 간 전달 (ADR-151)
+
+M8~M12는 IPC의 실제 상대가 항상 커널 스레드(주소공간 없음)이거나
+같은 커널 컨텍스트였다 — `message` 구조체 자체(label/regs/page_count/
+handle_count)를 상대 스레드의 `reply_dest`/`recv_dest` 포인터에 그대로
+써도 문제가 없었던 이유는, 그 포인터가 늘 커널 가상주소(모든
+주소공간이 공유하는 higher-half)였기 때문이다. M13부터 실제 유저
+프로세스 두 개(예: procsrv↔vfs↔memfs)가 IPC로 직접 통신하므로, 이
+가정이 깨진다 — 커널이 이제 "이 메시지가 어느 프로세스의 어느
+주소공간에 있는가"를 알고 그 프로세스의 페이지테이블로 vaddr을
+번역해야 한다(구현: `kernel/core/ipc/endpoint.cpp`의 `copy_to_user`/
+`copy_from_user`, arch 훅 `arch_translate_user_page`).
+
+이 번역은 **메시지 구조체 자체**(label/regs/page_count/handle_count,
+그리고 `handles[]` 위임의 커널 쪽 처리)에만 적용된다. `pages[]`가
+가리키는 실제 데이터 버퍼의 내용 복사는 **아직도 같은 주소공간
+전제**로 남아 있다(§4 참고) — 서로 다른 프로세스 사이에서 `pages[]`로
+큰 데이터를 옮기는 것은 이 갱신의 범위 밖이며, 필요해지는 시점에
+별도로 다룬다.
+
+이 갱신으로 `sys_reply`도 `handles[]`를 옮길 수 있게 됐다 — VFS가
+`open()` 응답으로 FS 서버 엔드포인트에 대한 핸들을 위임하는 것
+([filesystem.md](../design/filesystem.md) ADR-018)이 바로 이 방향
+(서버→클라이언트, 즉 reply 방향)이라 이 확장이 필요했다. 그래서
+`sys_reply`는 이제 호출자 자신의 `handle_table`도 받고(핸들 위임의
+소스 테이블), `result<void, ipc_error>`를 반환한다(전달 실패 시에도
+블록하지 않고 caller를 깨우는 동작은 그대로다).
 
 ## 4. message 구조
 

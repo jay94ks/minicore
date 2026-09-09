@@ -949,3 +949,54 @@
   self_elf_size를 self_info에 실은 뒤 그 크기만큼만 정확히 예약하는
   방식으로 바꾸는 게 더 견고하지만, M12 범위 밖으로 미룬다). 스모크
   테스트 50개 어써션 전체가 이 수정 후 QEMU에서 통과했다.
+
+## ADR-152. `sys_process_spawn`에 스폰 시점 캐패빌리티 주입 추가 — endpoint 자동 생성 + 상속 핸들 배열
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: `uapi::process_spawn_request`에 필드 4개를 추가한다.
+  1. `bool create_endpoint` — true면 커널이 새 프로세스의
+     `handle_table`에 IPC endpoint 소유 핸들 하나를 만들어 **handle
+     1**에 넣어 준다(kernel_main.cpp::setup_initrun_process의 M8 boot
+     endpoint 관례와 동일한 번호). 성공하면 그 endpoint에 대한
+     **CAN_SEND만 있는 프록시** 하나를 호출자(스폰한 프로세스, 대개
+     initrun) 자신의 handle_table에도 만들어
+     `out_endpoint_proxy_handle`(출력 필드)에 채운다.
+  2. `uint32_t inherited_handle_count` + `uapi::handle_transfer
+     inherited_handles[k_max_spawn_inherited_handles]` — 호출자가 이미
+     들고 있는 핸들(대개 다른 서비스의 endpoint 프록시)을 새
+     프로세스의 handle_table에 순서대로(endpoint가 handle 1을
+     차지했다면 2부터) 미리 넣는다.
+  3. 둘 다 IPC 메시지가 아니라 `object::handle_table::create_owner`/
+     `create_proxy`를 **커널이 스폰 syscall 처리 중에 직접** 호출해서
+     한다 — 호출자와 새 프로세스 양쪽의 handle_table이 이 시점에
+     이미 둘 다 커널 컨텍스트에서 보이기 때문에 IPC 왕복이 필요
+     없다.
+- **근거**: M13(vfs/memfs/procsrv 세 개의 독립 프로세스가 서로 IPC로
+  불러야 하는 첫 시나리오)을 설계하며 발견한 근본 문제 — 이 프로젝트에는
+  아직 이름/등록 서비스(레지스트리는 cfgsrv이지만 그건 설정 KV
+  저장소일 뿐 IPC 엔드포인트 탐색 기능이 아니다, M19)가 없어서, 독립적으로
+  스폰된 두 프로세스가 서로의 endpoint를 알아낼 방법이 전혀 없었다.
+  ADR-013/015가 이미 확립한 "IPC 메시지의 handles[]로 캐패빌리티를
+  전달한다"는 메커니즘은 애초에 **이미 통신 중인 두 상대** 사이에서만
+  쓸 수 있어, 아직 아무 채널도 없는 최초 연결을 부트스트랩할 수
+  없다 — kernel_main.cpp가 M8에서 initrun에게 boot endpoint를 손으로
+  심어 준 것과 똑같은 문제를, 이제 "커널이 아니라 initrun이 스폰하는
+  임의의 두 프로세스 사이"로 일반화해야 했다. 스폰하는 쪽(initrun)이
+  이미 두 프로세스의 handle_table에 직접 접근 가능한 유일한 시점을
+  이용하는 것이 새로운 IPC 프로토콜을 발명하는 것보다 훨씬 싸다.
+- **영향**:
+  - `process_ops.hpp/.cpp::process_spawn()` 시그니처 확장,
+    `syscall.cpp`의 `k_syscall_process_spawn` 케이스가 요청 구조체를
+    이제 쓰기 가능한 포인터로 받는다(출력 필드 때문).
+  - `init/initrun/main.cpp`의 서비스 스폰 루프(M12, ADR-150)가 이제
+    각 서비스의 `lib/*.ini`에 `depends=<이름>` 키가 있으면 그 이름의
+    (이미 스폰 시 기록해 둔) endpoint 프록시 핸들을
+    `inherited_handles[0]`으로 넘긴다(구현: system-servers-bringup.md
+    §M13 결과 보고 참고).
+  - 이 메커니즘은 **명시적으로 임시**다 — OPEN-59에 재검토 대상으로
+    등록했다. 실제 이름 서비스(어떤 형태로든, cfgsrv의 확장이든 별도
+    서버든)가 생기면 "스폰하는 쪽이 대신 알아서 심어 준다"는 이
+    설계는 대체될 가능성이 크다 — 그때까지는 정적으로 알려진
+    소수의 부트스트랩 서비스(procsrv/vfs/memfs 정도)에만 쓸 수 있는
+    확장 방식이다(예: 순환 의존성이 있는 서비스는 이 메커니즘으로
+    표현할 수 없다 — 스폰 순서가 곧 의존성 해결 순서이기 때문).

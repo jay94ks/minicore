@@ -165,7 +165,10 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
 
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
-                                   bool grant_trusted) {
+                                   bool grant_trusted, bool create_endpoint,
+                                   const uapi::handle_transfer* inherited_handles,
+                                   uint32_t inherited_handle_count,
+                                   uint32_t& out_endpoint_proxy_handle) {
     built_process built;
     auto err = build_process(elf_data, elf_size, argv_blob, argv_size, grant_trusted, built);
     if (err != process_spawn_error::ok) {
@@ -176,6 +179,55 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
     if (handles == nullptr) {
         mm::slab_free(built.space, sizeof(object::address_space));
         return process_spawn_error::out_of_memory;
+    }
+
+    // M13(ADR-151) — 스폰 시점 캐패빌리티 주입. 등록/탐색 서비스가
+    // 없는 지금(OPEN-59), 서로 다른 서버가 서로를 IPC로 부르려면
+    // 스폰하는 쪽(대개 initrun)이 핸들을 직접 물려주는 것이 유일한
+    // 방법이다 — handle_table::create_owner/create_proxy는 순서대로
+    // 다음 빈 슬롯을 배정하므로(handle_table.cpp::allocate_slot), 아래
+    // 순서(endpoint 먼저, 그다음 inherited_handles)가 그대로 새
+    // 프로세스의 handle 1, 2, 3, ...이 된다 — kernel_main.cpp의 boot
+    // endpoint(handle 1) 관례와 일치.
+    if (create_endpoint) {
+        void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+        if (ep_mem == nullptr) {
+            mm::slab_free(built.space, sizeof(object::address_space));
+            return process_spawn_error::out_of_memory;
+        }
+        auto* ep = new (ep_mem) object::endpoint();
+        auto owner = handles->create_owner(
+            object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+        if (!owner.is_ok()) {
+            mm::slab_free(built.space, sizeof(object::address_space));
+            return process_spawn_error::out_of_memory;
+        }
+
+        object::thread* caller = sched::current();
+        if (caller != nullptr && caller->handles != nullptr) {
+            auto proxy = handles->create_proxy(owner.value(), object::k_right_can_send,
+                                                *caller->handles, 0, false);
+            if (proxy.is_ok()) {
+                out_endpoint_proxy_handle = proxy.value();
+            }
+        }
+    }
+
+    if (inherited_handle_count > uapi::k_max_spawn_inherited_handles) {
+        mm::slab_free(built.space, sizeof(object::address_space));
+        return process_spawn_error::invalid_argument;
+    }
+    object::thread* caller = sched::current();
+    if (inherited_handle_count > 0 && (caller == nullptr || caller->handles == nullptr)) {
+        mm::slab_free(built.space, sizeof(object::address_space));
+        return process_spawn_error::not_a_user_process;
+    }
+    for (uint32_t i = 0; i < inherited_handle_count; ++i) {
+        // 부분 실패(예: 호출자가 이미 닫힌 핸들을 넘김)는 이 항목만
+        // 건너뛴다 — deliver_message의 handles[] 처리와 같은 정신
+        // (objects.md §4 3단계).
+        caller->handles->create_proxy(inherited_handles[i].src_handle,
+                                       inherited_handles[i].rights_mask, *handles, 0, false);
     }
 
     object::thread* t =
