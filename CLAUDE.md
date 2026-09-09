@@ -88,7 +88,9 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   (M9~M11b) 전체가 완료됨 — 결과는 [docs/done/](docs/done/) 참고.
   [docs/plan/system-servers-bringup.md](docs/plan/system-servers-bringup.md)
   (M12: 부트 디바이스 마운트+procsrv ~ M20: libc 포팅+로그인 후 셸) 중
-  M12가 완료됨 — 결과는
-  [docs/done/system-servers-bringup-m12-full.md](docs/done/system-servers-bringup-m12-full.md)
-  참고. 다음 실행 대상은 M13(VFS + memfs), 아직 미착수. OPEN-29·
-  OPEN-50·OPEN-53·OPEN-55~57은 이미 해소돼 있다.
+  M12~M13이 완료됨 — 결과는
+  [docs/done/system-servers-bringup-m12-full.md](docs/done/system-servers-bringup-m12-full.md)와
+  [docs/done/system-servers-bringup-m13.md](docs/done/system-servers-bringup-m13.md)
+  참고. 다음 실행 대상은 M14(devmgr + PCIe 버스 열거 + 입력 장치),
+  아직 미착수. OPEN-29·OPEN-50·OPEN-53·OPEN-55~57은 이미 해소돼
+  있다.

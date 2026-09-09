@@ -17,6 +17,7 @@
 | [registry.md](spec/registry.md) | 설정 리포지터리(cfgsrv): 스키마/테이블 주소 체계, 권한 모델, 전용 IPC 프로토콜, 비밀 데이터 보호 |
 | [virtual-memory-layout.md](spec/virtual-memory-layout.md) | 아키텍처별 커널 가상메모리 레이아웃: physmap/스택/이미지 영역 주소, 부팅 시 페이지테이블 구성 순서 |
 | [procsrv.md](spec/procsrv.md) | 프로세스 서버: 프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원 프로토콜, 계정 생성·로그인·session_program 프로토콜 (에스컬레이션/su·sudo/쿼터/콘솔 연동은 후속) |
+| [fs-protocol.md](spec/fs-protocol.md) | FS 서버 공통 프로토콜(M13 최소 버전): open/write/read 오퍼레이션, regs[]만 쓰는 M13 한정 인코딩, 상태 코드 |
 
 ## plan — 실행 계획 (실행 전)
 | 문서 | 설명 |
@@ -45,6 +46,7 @@
 | [smp-fpu-bringup-m11b.md](done/smp-fpu-bringup-m11b.md) | M11b(smp-fpu-bringup.md 전체 완료): CPUID 기반 XSAVE/AVX 검사+CR0.TS/`#NM` lazy 전환(ADR-133), 그 과정에서 발견한 slab 64바이트 정렬 미보장(ADR-138)·`sched::yield()` enqueue 순서 버그(ADR-139) 진단·수정, `-cpu` 유/무 두 QEMU 구성으로 검증 |
 | [system-servers-bringup-m12-kernel-cow.md](done/system-servers-bringup-m12-kernel-cow.md) | M12 일부(선행): COW(프레임 참조 카운트+`clone_address_space_cow`+`#PF` 분기)+syscall 커널 스택 분리+`sys_fork`/`sys_process_spawn`/`sys_exec`/`sys_thread_exit`(ADR-140~142) 구현, initrun 자신을 fork/exec/spawn하는 종단간 QEMU 검증까지 완료. 그 과정에서 발견한 TSS 부재(ADR-143)·TLB 로컬 invlpg 누락(ADR-144)·pml4[0] 과도 공유(ADR-145) 버그 진단·수정 |
 | [system-servers-bringup-m12-full.md](done/system-servers-bringup-m12-full.md) | M12(전체 완료): `sys_alloc_dma_buffer`(ADR-148)+legacy virtio-blk 클라이언트+self_info 브릿지 일반화(ADR-149)+initrun의 실제 부트 디스크 마운트·서비스 스폰+procsrv 골격+`tools/mkbootdisk.py`(ADR-150), procsrv가 실제 디스크 I/O로 스폰된 뒤 자기 자신을 fork/exec하는 것까지 QEMU 확인 — system-servers-bringup.md §M12 완료 |
+| [system-servers-bringup-m13.md](done/system-servers-bringup-m13.md) | M13(완료): IPC의 cross-process 확장+sys_reply handles[](ADR-151), sys_process_spawn 캐패빌리티 주입(ADR-152), fs-protocol.md 최소 버전+vfs/memfs 서버+procsrv VFS 클라이언트(ADR-153) — procsrv가 vfs 경유로 memfs에 쓰고 다시 읽어 내용 일치까지 QEMU 확인 — system-servers-bringup.md §M13 완료 |
 
 ## design — 설계/상세
 

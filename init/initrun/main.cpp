@@ -174,6 +174,45 @@ bool ends_with_ini(const char* name) {
            name[len - 1] == 'i';
 }
 
+// "lib/NNN-이름.ini"(tools/mkbootdisk.py가 쓰는 형식)에서 "이름"만
+// 뽑아낸다 — ADR-152의 서비스 이름→endpoint 프록시 핸들 레지스트리
+// (spawn_ctx::registry)의 키로 쓴다. ini_name은 이미 starts_with("lib/")
+// && ends_with_ini()를 통과했다고 가정한다.
+bool extract_service_name(const char* ini_name, char* out, uint64_t out_size) {
+    const char* p = ini_name + 4;  // "lib/" 건너뜀.
+    while (*p >= '0' && *p <= '9') {
+        ++p;
+    }
+    if (*p == '-') {
+        ++p;
+    }
+    uint64_t i = 0;
+    while (p[i] != '\0') {
+        if (p[i] == '.' && p[i + 1] == 'i' && p[i + 2] == 'n' && p[i + 3] == 'i' &&
+            p[i + 4] == '\0') {
+            break;
+        }
+        if (i + 1 >= out_size) {
+            return false;
+        }
+        out[i] = p[i];
+        ++i;
+    }
+    out[i] = '\0';
+    return true;
+}
+
+bool cstr_equals(const char* a, const char* b) {
+    while (*a != '\0' && *b != '\0') {
+        if (*a != *b) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
 // ini::find_value()가 돌려주는 span은 원본 아카이브 버퍼를 그대로
 // 가리킬 뿐 NUL로 끝나지 않는다 — cpio::find_entry()는 NUL 종료
 // 문자열을 요구하므로 고정 버퍼에 복사해 NUL을 붙인다.
@@ -196,16 +235,41 @@ bool copy_span_to_cstr(span<const char> s, char* buf, uint64_t buf_size) {
 // 않으면 된다.
 constexpr uint8_t k_service_argv_marker[] = {'x'};
 
+// M13(ADR-152) — 서비스 이름→(initrun 자신의 테이블에 있는) endpoint
+// 프록시 핸들 레지스트리. 등록/탐색 서비스가 없어(OPEN-59) initrun이
+// 스폰 순서대로 직접 기록해 뒀다가, 그 뒤에 스폰하는 다른 서비스의
+// `depends=`가 이 이름을 가리키면 그 핸들을 inherited_handles로
+// 넘긴다.
+constexpr uint32_t k_max_registered_services = 8;
+
+struct service_registry_entry {
+    char name[32] = {};
+    uint32_t endpoint_proxy_handle = 0;
+};
+
 struct spawn_ctx {
     const uint8_t* archive;
     uint64_t archive_size;
     uint32_t spawned_count = 0;
+    service_registry_entry registry[k_max_registered_services];
+    uint32_t registry_count = 0;
 };
+
+uint32_t find_registered_handle(const spawn_ctx& ctx, const char* name) {
+    for (uint32_t i = 0; i < ctx.registry_count; ++i) {
+        if (cstr_equals(ctx.registry[i].name, name)) {
+            return ctx.registry[i].endpoint_proxy_handle;
+        }
+    }
+    return 0;
+}
 
 // cpio::for_each_entry()가 아카이브에 기록된 순서(=lib/*.ini 파일명
 // 순서, tools/mkbootdisk.py가 그렇게 써 둔다, ADR-131 §결정5)대로
 // 각 엔트리에 대해 호출한다 — lib/*.ini가 아닌 엔트리(bin/* 자체,
-// disk.cfg 등)는 건너뛴다.
+// disk.cfg 등)는 건너뛴다. 이 순서가 그대로 의존성 해결 순서이기도
+// 하다(ADR-152) — `depends=`가 가리키는 서비스는 반드시 그보다
+// 먼저 나열돼 있어야 한다.
 void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t size) {
     if (!starts_with(name, "lib/") || !ends_with_ini(name)) {
         return;
@@ -216,6 +280,10 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
     }
     char exec_path[64];
     if (!copy_span_to_cstr(exec_val.value(), exec_path, sizeof(exec_path))) {
+        return;
+    }
+    char service_name[32];
+    if (!extract_service_name(name, service_name, sizeof(service_name))) {
         return;
     }
 
@@ -230,9 +298,35 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
     req.elf_size = elf_entry.value().size;
     req.argv_blob = reinterpret_cast<uint64_t>(k_service_argv_marker);
     req.argv_size = sizeof(k_service_argv_marker);
-    req.grant_trusted = false;  // M12의 서비스(procsrv)는 하드웨어를 직접 다루지 않는다.
+    req.grant_trusted = false;  // M12/M13의 서비스는 하드웨어를 직접 다루지 않는다.
+    req.create_endpoint = true;  // M13(ADR-152) — 모든 서비스가 handle 1로 자기 endpoint를 받는다.
+
+    auto depends_val = ini::find_value(data, size, "depends");
+    if (depends_val.is_ok()) {
+        char dep_name[32];
+        if (copy_span_to_cstr(depends_val.value(), dep_name, sizeof(dep_name))) {
+            uint32_t dep_handle = find_registered_handle(*ctx, dep_name);
+            if (dep_handle != 0) {
+                req.inherited_handle_count = 1;
+                req.inherited_handles[0].src_handle = dep_handle;
+                req.inherited_handles[0].rights_mask = uapi::k_right_can_send;
+            }
+        }
+    }
+
     do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&req), 0, 0);
     ++ctx->spawned_count;
+
+    if (req.out_endpoint_proxy_handle != 0 && ctx->registry_count < k_max_registered_services) {
+        service_registry_entry& entry = ctx->registry[ctx->registry_count];
+        uint64_t i = 0;
+        for (; i + 1 < sizeof(entry.name) && service_name[i] != '\0'; ++i) {
+            entry.name[i] = service_name[i];
+        }
+        entry.name[i] = '\0';
+        entry.endpoint_proxy_handle = req.out_endpoint_proxy_handle;
+        ++ctx->registry_count;
+    }
 }
 
 // ADR-131 §결정1~5/§근거, ADR-147 — boot_info.boot_device로 알려진
@@ -272,7 +366,9 @@ bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
         return false;
     }
 
-    spawn_ctx ctx{archive, archive_len};
+    spawn_ctx ctx;
+    ctx.archive = archive;
+    ctx.archive_size = archive_len;
     auto walked = cpio::for_each_entry(archive, archive_len, &spawn_visit, &ctx);
     return walked.is_ok() && ctx.spawned_count > 0;
 }

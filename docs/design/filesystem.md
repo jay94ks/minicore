@@ -491,4 +491,59 @@ fd 라우팅과 VFS 런타임 디렉토리 구성에 관한 결정. [spec/vfs-la
     서버가 지원 여부를 스스로 보고하는 문제로, 실제 필요해지면
     별도 결정).
 
+## ADR-153. M13 완성: `docs/spec/fs-protocol.md` 최소 버전 + vfs/memfs 서버 + procsrv의 VFS 클라이언트 역할
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: system-servers-bringup.md §M13 전체를 구현했다.
+  1. [fs-protocol.md](../spec/fs-protocol.md) — ADR-018 §영향이 예고해
+     둔 FS 서버 공통 프로토콜의 **최소 버전**. `OP_OPEN`(클라이언트→
+     VFS)/`OP_WRITE`/`OP_READ`(클라이언트→FS 서버 직접) 3개
+     오퍼레이션만 정의한다. M13은 경로·데이터를 전부 `pages[]` 없이
+     `regs[]`(최대 32/16바이트)로만 주고받는다 — ADR-151이 메시지
+     구조체 자체는 서로 다른 프로세스 사이에서도 안전하게 만들었지만
+     `pages[]`가 가리키는 실제 버퍼 내용까지는 아직 아니라서(OPEN-59),
+     이 경로를 아예 피해 M13 검증을 완결하는 쪽을 택했다.
+  2. `servers/fs/memfs/main.cpp` — 고정 8개 파일 슬롯(평평한
+     이름공간, 파일마다 최대 4096바이트) + 열린 인스턴스 배열
+     (`open_file_id`). `OP_OPEN`을 받으면 이름으로 찾거나 새로
+     만든다(M13은 항상 암묵적 O_CREAT). `OP_WRITE`/`OP_READ`는 항상
+     오프셋 0부터(seek/append는 이후 라운드).
+  3. `servers/vfs/main.cpp` — M13은 마운트 테이블이 없다(memfs
+     하나뿐) — `OP_OPEN`을 받으면 그대로 memfs에게 다시 보내고,
+     성공하면 ADR-018이 요구하는 대로 **자신의 memfs 핸들에 대한
+     프록시**를 응답(`handles[0]`)에 실어 클라이언트에게 위임한다
+     (ADR-151의 `sys_reply` handles[] 확장이 있어야 가능했다).
+  4. `servers/procsrv/main.cpp` — "M12의 두 번째 프로세스"(계획 §M13
+     §목표의 표현 그대로)를 그대로 재사용해 VFS 클라이언트 역할을
+     맡긴다: `open("test.txt")` → vfs가 위임한 memfs 핸들로 직접
+     `write("hello vfs")` → `read()` → 내용 일치 확인. procsrv.md의
+     실제 프로토콜(§2~9)은 여전히 구현하지 않는다 — 이 라운드트립은
+     그것과 무관한 fs-protocol.md 클라이언트 검증일 뿐이다.
+  5. `tools/mkbootdisk.py`에 `--depends=<이름>:<의존이름>` 추가 —
+     해당 서비스의 `lib/NNN-이름.ini`에 `depends=` 키를 써 넣는다.
+     `init/initrun/main.cpp`의 서비스 스폰 루프가 이제 스폰한
+     서비스마다 (ADR-152의) endpoint 프록시 핸들을 이름으로
+     기록해 두고, 다음 서비스의 `depends=`가 그 이름을 가리키면
+     `inherited_handles`로 넘긴다. `servers/CMakeLists.txt`가
+     `bootdisk.img`를 memfs→vfs→procsrv 순서(=의존성 해결 순서)로
+     조립한다(이 조립 단계가 M12 때 있던 `servers/procsrv/
+     CMakeLists.txt`에서 여기로 옮겨졌다 — 셋을 동시에 참조할 수
+     있는 유일한 자리라서).
+  6. 새 syscall `sys_debug_log`(uapi.hpp) — klog가 유저에 노출된 적이
+     없어, procsrv가 이 라운드트립 결과를 관찰 가능하게 만드는
+     최소 수단으로 추가했다(순수 진단용, procsrv.md의 실제 로깅
+     서비스가 생기면 대체될 임시 수단).
+- **검증 결과(QEMU 실측)**: 기본 `tools/smoke-test-x86_64.sh`(52개
+  어써션, M12의 51개+새 procsrv 라운드트립 어써션 1개) 전체 통과.
+  실측 로그 순서: `[process] spawn ok`×3(memfs/vfs/procsrv) →
+  `[process] fork/exec ok`(procsrv 자기 자신) →
+  `[procsrv] vfs write/read roundtrip ok=1`. SMP/NUMA/AVX 스위트도
+  회귀 없음(부트 디스크를 안 붙이는 경로라 이 세 서비스와 무관).
+- **알려진 단순화(M13 범위 밖으로 명시적으로 남긴 것)**: VFS의 실제
+  마운트 테이블/경로 탐색(ADR-044 전체 트리, 지금은 모든 경로가
+  memfs 하나로 감), `close`, 공유 모드/잠금(ADR-101), `fs_node_id`를
+  프로토콜에 노출(ADR-128 — memfs 내부에는 슬롯 인덱스가 있지만
+  아직 응답에 안 싣는다), 디렉터리 나열, 파일 크기/쓰기 길이 상한을
+  넘는 요청(각각 4096/16바이트).
+
 ---

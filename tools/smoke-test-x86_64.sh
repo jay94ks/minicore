@@ -44,14 +44,22 @@
 #     MINICORE_QEMU_CPU로 별도 확인한다(기본 QEMU CPU는 XSAVE/AVX가
 #     없어 FXSAVE 폴백 경로를 그대로 검증한다).
 #   M12 (system-servers-bringup.md, ADR-131/147/149): initrun이 실제
-#     virtio-blk 부트 디스크(tools/mkbootdisk.py로 만든 procsrv 이미지,
-#     기본으로 자동 첨부 — 아래 MINICORE_QEMU_BOOTDISK 참고)의 PCI BAR를
-#     스스로 배정하고, 그 디스크의 cpio 아카이브를 읽어 procsrv를
+#     virtio-blk 부트 디스크(tools/mkbootdisk.py로 만든 이미지, 기본으로
+#     자동 첨부 — 아래 MINICORE_QEMU_BOOTDISK 참고)의 PCI BAR를 스스로
+#     배정하고, 그 디스크의 cpio 아카이브를 읽어 procsrv를
 #     sys_process_spawn한 뒤, procsrv가 자기 자신을 sys_fork+sys_exec —
 #     "[process] fork/exec/spawn ok" 로그는 이제 initrun의 self-test
 #     데모가 아니라 **procsrv가 실제 디스크 I/O로 만들어진 뒤** 남기는
 #     로그다(kernel/arch/x86_64/process_ops.cpp가 호출자를 구분하지
 #     않고 남기는 로그라 문자열은 그대로 재사용된다).
+#   M13 (system-servers-bringup.md, ADR-151/152, docs/spec/fs-protocol.md):
+#     같은 부트 디스크가 이제 memfs+vfs+procsrv 세 서비스를 담는다
+#     (의존 순서 memfs→vfs→procsrv, ADR-152의 스폰 시점 캐패빌리티
+#     주입). procsrv가 vfs에 파일을 열고(vfs가 memfs에 위임) 그
+#     응답으로 받은 memfs 핸들에 직접 쓰고 다시 읽어 내용이 일치함을
+#     "[procsrv] vfs write/read roundtrip ok=1"로 확인한다(klog가
+#     유저에 노출된 적이 없어 새 sys_debug_log syscall로만 관찰
+#     가능 — uapi.hpp 참고).
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -60,12 +68,12 @@
 #
 # 환경 변수:
 #   MINICORE_QEMU_BIN        qemu-system-x86_64 실행파일 경로(run-qemu.sh로 그대로 전달)
-#   MINICORE_QEMU_BOOTDISK   기본값은 <빌드 디렉토리>/servers/procsrv/bootdisk.img
-#                            (servers/procsrv/CMakeLists.txt가 만든다) — M12부터
-#                            항상 실제 부트 디스크를 붙여야 procsrv 경로가 검증되므로
-#                            비워 두면 이 스크립트가 그 경로를 채워 넣는다. 그 파일이
-#                            없으면(아직 빌드 안 함) 디스크 없이 부팅하고 그만큼의
-#                            어써션은 실패한다 — 먼저
+#   MINICORE_QEMU_BOOTDISK   기본값은 <빌드 디렉토리>/servers/bootdisk.img
+#                            (servers/CMakeLists.txt가 memfs+vfs+procsrv를 담아
+#                            만든다, M13) — M12부터 항상 실제 부트 디스크를 붙여야
+#                            procsrv 경로가 검증되므로 비워 두면 이 스크립트가 그
+#                            경로를 채워 넣는다. 그 파일이 없으면(아직 빌드 안 함)
+#                            디스크 없이 부팅하고 그만큼의 어써션은 실패한다 — 먼저
 #                            `cmake --build <빌드 디렉토리> --target minicore_bootdisk_image`.
 
 set -uo pipefail
@@ -75,7 +83,7 @@ BUILD_DIR="${1:-build/x86_64-clang}"
 TIMEOUT_SEC=25  # M12부터 initrun.elf가 커지는 추세라 여유를 좀 더 둔다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
-  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/procsrv/bootdisk.img"
+  DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M13부터 memfs+vfs+procsrv 셋 다(servers/CMakeLists.txt).
   if [[ -f "$DEFAULT_BOOTDISK" ]]; then
     export MINICORE_QEMU_BOOTDISK="$DEFAULT_BOOTDISK"
   fi
@@ -133,6 +141,7 @@ declare -a EXPECTED=(
   "[fpu-lazy] thread C done all_preserved=1"
   "[smp] BSP apic_id=0"
   "[smp] online_cpu_count=1"
+  "[procsrv] vfs write/read roundtrip ok=1"
 )
 
 LOG_FILE="$(mktemp)"

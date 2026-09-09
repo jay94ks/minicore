@@ -43,21 +43,6 @@ set_target_properties(minicore_procsrv_elf PROPERTIES
     SUFFIX ".elf"
 )
 
-# tools/mkbootdisk.py가 이 실행파일을 부트 디스크 cpio 이미지에
-# bin/procsrv로 담는다(repo-layout.md, system-servers-bringup.md §M12) —
-# init/initrun의 initrd.img(커널이 .incbin으로 자신에 심는 것)와는
-# 완전히 별개의, virtio-blk로 붙는 진짜 디스크 이미지다.
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-
-set(MINICORE_BOOTDISK_IMAGE ${CMAKE_CURRENT_BINARY_DIR}/bootdisk.img)
-add_custom_command(
-    OUTPUT ${MINICORE_BOOTDISK_IMAGE}
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-            ${MINICORE_BOOTDISK_IMAGE}
-            --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
-    DEPENDS minicore_procsrv_elf ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-    COMMENT "Packaging bootdisk.img (cpio newc) from procsrv.elf"
-    VERBATIM
-)
-add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})
-set_property(GLOBAL PROPERTY MINICORE_BOOTDISK_IMAGE_PATH ${MINICORE_BOOTDISK_IMAGE})
+# 부트 디스크(bootdisk.img) 조립은 M13부터 여러 서비스(procsrv/vfs/
+# memfs)를 함께 담아야 해서 servers/CMakeLists.txt로 옮겼다 —
+# 거기서만 이 셋을 모두 참조할 수 있다.

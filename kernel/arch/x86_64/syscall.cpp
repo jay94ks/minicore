@@ -18,6 +18,7 @@
 #include <ipc/endpoint.hpp>
 #include <sched/scheduler.hpp>
 
+#include <klog.hpp>
 #include <uapi.hpp>
 
 namespace {
@@ -166,6 +167,23 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 out->phys_addr = phys;
             }
             return static_cast<uint64_t>(err);
+        }
+        case uapi::k_syscall_debug_log: {
+            const auto* str = reinterpret_cast<const char*>(a1);
+            if (str == nullptr) {
+                return 1;
+            }
+            uint64_t len = a2;
+            if (len > uapi::k_max_debug_log_bytes) {
+                len = uapi::k_max_debug_log_bytes;
+            }
+            char buf[uapi::k_max_debug_log_bytes + 1];
+            for (uint64_t i = 0; i < len; ++i) {
+                buf[i] = str[i];
+            }
+            buf[len] = '\0';
+            klog::printf("%s", buf);
+            return 0;
         }
         default:
             return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);

@@ -44,6 +44,15 @@ struct handle_transfer {
     uint32_t rights_mask = 0;
 };
 
+// object::k_right_can_*(kernel/core/object/kernel_objects.hpp)와 정확히
+// 같은 비트값 — handle_transfer.rights_mask에 넣을 값을 유저 코드가
+// 매직 넘버 없이 쓸 수 있게 노출한다(M13부터 vfs/procsrv 등이 실제로
+// endpoint 프록시를 만들며 이 마스크를 지정해야 한다).
+inline constexpr uint32_t k_right_can_send = 1u << 0;
+inline constexpr uint32_t k_right_can_recv = 1u << 1;
+inline constexpr uint32_t k_right_can_move = 1u << 2;
+inline constexpr uint32_t k_right_can_map = 1u << 3;
+
 // M12(system-servers-bringup.md §M12, ADR-142) — ADR-131이 이름만
 // 정해 둔 `sys_process_spawn`과, procsrv가 자기 자신을 fork/exec하는
 // 데 필요한 `sys_fork`/`sys_exec`. 셋 다 새 프로세스/실행 이미지
@@ -148,6 +157,18 @@ inline constexpr uint64_t k_syscall_ipc_recv = 6;
 // 최근 sys_ipc_recv로 받은 호출에 응답한다. 블록하지 않는다. 반환값
 // 0=ipc_error::ok.
 inline constexpr uint64_t k_syscall_ipc_reply = 7;
+
+// M13(system-servers-bringup.md §M13) — vfs/memfs/procsrv 여러 유저
+// 프로세스가 협력하는 시나리오를 klog(커널 전용 API, 유저에겐 노출된
+// 적이 없다)로 직접 관찰할 방법이 없다 — M8의 boot IPC call은 그
+// 자체가 관찰 수단이었지만 그건 initrun 전용 1회성 채널(커널 스레드가
+// 받은 뒤 곧바로 종료)이라 재사용할 수 없다. 그래서 최소한의 디버그
+// 로그 syscall을 하나 둔다 — a1=ASCII 바이트 포인터(유저 주소공간,
+// NUL 불필요), a2=길이(k_max_debug_log_bytes로 잘림). 반환값 항상 0.
+// 프로덕션 API가 아니라 순수 진단용이다(procsrv.md의 실제 로깅
+// 서비스가 생기면 대체될 임시 수단).
+inline constexpr uint64_t k_syscall_debug_log = 8;
+inline constexpr uint32_t k_max_debug_log_bytes = 96;
 
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process가
 // initrun 자신의 원본 ELF 바이트를(자기 자신을 fork/process_spawn/exec으로
