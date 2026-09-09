@@ -21,13 +21,14 @@ constexpr uint32_t k_op_read = 3;
 
 constexpr uint64_t k_status_ok = 0;
 constexpr uint64_t k_status_not_found = 1;
-constexpr uint64_t k_status_too_large = 2;
 constexpr uint64_t k_status_no_space = 3;
 
 constexpr uint32_t k_max_files = 8;
-constexpr uint32_t k_max_file_bytes = 4096;
+// M18(fs-protocol.md v3, security-model.md ADR-167) — su/sudo 로더가
+// procsrv 자신의 ELF(수십 KiB)를 여기 써야 해서 4096→131072로
+// 늘렸다.
+constexpr uint32_t k_max_file_bytes = 131072;
 constexpr uint32_t k_max_open_files = 16;
-constexpr uint32_t k_max_io_bytes = 16;  // OP_WRITE(fs-protocol.md §2.2) — regs[2..3] 상한, 그대로.
 constexpr uint64_t k_page_size = 4096;
 
 // M16(fs-protocol.md v2 §2.3, ADR-155 §2/ADR-159/ADR-161) — OP_READ
@@ -46,9 +47,14 @@ struct file_slot {
     uint64_t size = 0;
 };
 
+// M18(fs-protocol.md v3) — 읽기/쓰기 커서. open 시점에 둘 다 0으로
+// 시작해, OP_READ/OP_WRITE가 매번 그 위치부터 이어서 전진시킨다
+// (명시적 seek는 없다 — 순차 접근만).
 struct open_instance {
     bool used = false;
     uint32_t file_index = 0;
+    uint64_t read_cursor = 0;
+    uint64_t write_cursor = 0;
 };
 
 file_slot g_files[k_max_files];
@@ -105,6 +111,8 @@ uint32_t alloc_open_instance(uint32_t file_index) {
         if (!g_opens[i].used) {
             g_opens[i].used = true;
             g_opens[i].file_index = file_index;
+            g_opens[i].read_cursor = 0;
+            g_opens[i].write_cursor = 0;
             return i + 1;
         }
     }
@@ -128,6 +136,9 @@ void handle_open(const uapi::message& in, uapi::message& out) {
     out.regs[1] = (open_id != 0) ? k_status_ok : k_status_no_space;
 }
 
+// fs-protocol.md v3 §2.2 — 요청이 이제 pages[]로 온다(M13 시절엔
+// regs[2..3] 16바이트 상한). write_cursor 위치부터 이어 쓰고 그만큼
+// 전진시킨다 — seek는 없다(§4).
 void handle_write(const uapi::message& in, uapi::message& out) {
     uint32_t open_id = static_cast<uint32_t>(in.regs[0]);
     uint64_t length = in.regs[1];
@@ -136,26 +147,31 @@ void handle_write(const uapi::message& in, uapi::message& out) {
         out.regs[1] = k_status_not_found;
         return;
     }
-    if (length > k_max_io_bytes) {
-        out.regs[0] = 0;
-        out.regs[1] = k_status_too_large;
-        return;
+    if (length > k_page_size) {
+        length = k_page_size;
     }
-    file_slot& f = g_files[g_opens[open_id - 1].file_index];
-    uint8_t buf[k_max_io_bytes];
-    __builtin_memcpy(buf, &in.regs[2], k_max_io_bytes);
-    for (uint64_t i = 0; i < length; ++i) {
-        f.data[i] = buf[i];  // M13: 항상 오프셋 0부터(seek/append는 이후 라운드).
+    open_instance& o = g_opens[open_id - 1];
+    file_slot& f = g_files[o.file_index];
+    if (o.write_cursor + length > k_max_file_bytes) {
+        length = (o.write_cursor < k_max_file_bytes) ? (k_max_file_bytes - o.write_cursor) : 0;
     }
-    f.size = length;
+    if (in.page_count == 1 && length > 0) {
+        const auto* src = reinterpret_cast<const uint8_t*>(in.pages[0].vaddr);
+        for (uint64_t i = 0; i < length; ++i) {
+            f.data[o.write_cursor + i] = src[i];
+        }
+    }
+    o.write_cursor += length;
+    if (o.write_cursor > f.size) {
+        f.size = o.write_cursor;
+    }
     out.regs[0] = length;
     out.regs[1] = k_status_ok;
 }
 
-// fs-protocol.md v2 §2.3 — 응답이 pages[]로 바뀌었다(M13 시절엔
-// regs[2..3] 16바이트 상한). 요청 길이는 이제 4096(한 페이지)으로
-// 클램프될 뿐 TOO_LARGE로 거부하지 않는다 — 그보다 큰 파일의 나머지는
-// 이 프로토콜 범위 밖(fs-protocol.md §4).
+// fs-protocol.md v3 §2.3 — read_cursor 위치부터 이어 읽고 그만큼
+// 전진시킨다(M16에서는 항상 오프셋 0이었다). 요청 길이는 4096(한
+// 페이지)으로 클램프될 뿐 TOO_LARGE로 거부하지 않는다.
 void handle_read(const uapi::message& in, uapi::message& out) {
     uint32_t open_id = static_cast<uint32_t>(in.regs[0]);
     uint64_t requested = in.regs[1];
@@ -167,12 +183,15 @@ void handle_read(const uapi::message& in, uapi::message& out) {
     if (requested > k_page_size) {
         requested = k_page_size;
     }
-    file_slot& f = g_files[g_opens[open_id - 1].file_index];
-    uint64_t to_read = (requested < f.size) ? requested : f.size;
+    open_instance& o = g_opens[open_id - 1];
+    file_slot& f = g_files[o.file_index];
+    uint64_t remaining = (o.read_cursor < f.size) ? (f.size - o.read_cursor) : 0;
+    uint64_t to_read = (requested < remaining) ? requested : remaining;
 
     for (uint64_t i = 0; i < k_page_size; ++i) {
-        g_read_scratch[i] = (i < to_read) ? f.data[i] : 0;
+        g_read_scratch[i] = (i < to_read) ? f.data[o.read_cursor + i] : 0;
     }
+    o.read_cursor += to_read;
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
     out.pages[0].length = k_page_size;

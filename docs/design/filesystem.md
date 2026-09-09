@@ -628,4 +628,51 @@ fd 라우팅과 VFS 런타임 디렉토리 구성에 관한 결정. [spec/vfs-la
   그룹, FAT32 LFN(긴 파일 이름). VFS의 마운트 테이블은 여전히 코드에
   정적으로 박혀 있다(동적 마운트는 cfgsrv 등장 이후로 미룸).
 
----
+## ADR-168. `fs-protocol.md` v3 — `OP_WRITE`도 `pages[]` 기반으로(대칭 마무리), memfs에 읽기/쓰기 커서 도입, `OP_OPEN`에 호출자 신원(guest/jail) 필드 추가
+
+- **상태**: 확정 (2026-09-09)
+- **결정**: system-servers-bringup.md §M18(security-model.md ADR-167)
+  이 요구하는 "procsrv 자신의 ELF를 VFS에 실제로 쓰고 다시 읽어
+  재조립"을 가능하게 하려고 프로토콜을 세 갈래로 확장한다.
+  1. **`OP_WRITE`도 `OP_READ`(M16, ADR-159/161)와 대칭으로 `pages[]`
+     기반이 된다** — `regs[0]`=open_file_id, `regs[1]`=길이(≤4096),
+     `pages[0]`=쓸 내용(발신자의 페이지 정렬 버퍼). 기존 16바이트
+     `regs[2..3]` 상한(M13)은 사라진다 — procsrv 자신의 ELF(수십
+     KiB)를 몇 번의 페이지 단위 호출로 나눠 쓸 수 있어야 하므로.
+  2. **memfs가 오픈 인스턴스마다 읽기/쓰기 커서를 각각 갖는다** —
+     `open_instance`에 `read_cursor`/`write_cursor`(둘 다 open 시
+     0으로 시작) 필드를 추가해, `OP_READ`/`OP_WRITE` 요청 자체의
+     와이어 포맷은 그대로 두고(오프셋 필드를 새로 만들지 않는다)
+     내부적으로 "마지막으로 읽은/쓴 위치 다음부터"로 자동 전진시킨다.
+     이러면 클라이언트가 여러 번 연속으로 `OP_WRITE`(또는 `OP_READ`)
+     를 호출하는 것만으로 큰 파일을 순차적으로 이어 쓰거나(읽거나)
+     할 수 있다 — POSIX 파일 디스크립터의 암묵적 위치와 같은 개념.
+     `k_max_file_bytes`(memfs)를 4096→65536으로 늘린다(procsrv
+     ELF가 이 라운드 기준 약 30KiB대).
+  3. **`OP_OPEN` 요청에 호출자 신원 필드를 추가한다** — 경로 예산을
+     32→24바이트(`regs[0..2]`)로 줄이고, `regs[3]`에 호출자가
+     스스로 밝히는 신원(bit0=guest, bit1=jail, bits[2:33]=uid)을
+     싣는다. VFS는 호출자가 guest 또는 jail이면 경로가 `/home/`으로
+     시작하지 않으면 거부한다(security-model.md ADR-167 §결정2 —
+     jail을 이 라운드에 한해 guest와 같은 규칙으로 취급). **이
+     신원은 자기 선언이며 커널이 강제하지 않는다** — badge 기반의
+     위조 불가능한 신원 전파(ADR-084)는 아직 구현하지 않았다(신규
+     **미결정, OPEN-38**이 이미 이 문제를 지적해 뒀다 — "핸들 전달
+     경로의 우회"와 같은 성격의 근본적 제약, v1은 협조적인 호출자만
+     가정한다).
+- **근거**: M16이 `OP_READ`만 `pages[]`로 바꾸고 `OP_WRITE`는 그대로
+  뒀던 이유(당시 검증 목표가 읽기뿐이었다)가 이제 사라졌다 — su/sudo
+  로더가 쓰기도 큰 페이로드를 다뤄야 한다. 오프셋 필드를 와이어에
+  추가하는 대신 서버 쪽 커서로 처리한 것은, 지금까지 유일한 클라이언트
+  (procsrv)가 항상 "열고 처음부터 끝까지 순차적으로만" 접근하고
+  임의 위치로 seek할 필요가 없어서다 — 필요해지면 그때 명시적
+  seek 오퍼레이션을 추가하는 게 지금 안 쓰는 오프셋 필드를 미리
+  만들어 두는 것보다 낫다(YAGNI).
+- **영향**: `servers/fs/memfs/main.cpp`(커서, `k_max_file_bytes`,
+  `pages[]` 기반 `handle_write`), `servers/vfs/main.cpp`(경로 24바이트
+  + 신원 검사), `servers/procsrv/main.cpp`의 기존 M13
+  `run_vfs_roundtrip_test()`가 이제 `OP_WRITE`도 페이지 정렬 버퍼로
+  보내야 한다(같은 파일에서 이미 M16 때 `OP_READ` 쪽을 이렇게
+  바꾼 전례를 그대로 따른다). `servers/fs/fat32`/`servers/fs/ext4`
+  의 `OP_READ`는 그대로다(읽기전용 호스트 픽스처라 커서가 필요
+  없다 — 항상 오프셋 0부터 1페이지만).

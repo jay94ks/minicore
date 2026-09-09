@@ -97,6 +97,16 @@
 #     QEMU 자동화 환경에 주입되지 않으므로(ps2가 M14부터 겪은 것과
 #     같은 제약), login은 폴링해도 키가 없으면 내장 자체 테스트
 #     계정으로 같은 OP_LOGIN 경로를 그대로 검증한다.
+#   M18 (system-servers-bringup.md, security-model.md ADR-167,
+#     docs/spec/fs-protocol.md v3): procsrv가 자기 자신의 ELF를 VFS
+#     경로(/bin/su-target)에 실제로 쓰고 다시 읽어 재조립한 뒤(경로→
+#     ELF 로더, OP_WRITE도 이제 pages[] 기반) 원본과 일치하는지
+#     확인한다. 그 재조립된 바이트로 procsrv 자신을 다시 스폰해
+#     "su-target" 역할(magic 접두사 argv로 판별)을 태운다 — 하나는
+#     guest 신원으로(VFS가 홈 밖 open을 거부하는지 확인), 다른 하나는
+#     login이 OP_SU로 요청한 신원 전환(root로, procsrv 하드코딩
+#     위임 테이블 덕에 비밀번호 없이 승인)으로. 위임이 없고 잘못된
+#     비밀번호를 쓰는 두 번째 OP_SU 요청은 거부돼야 한다.
 #
 # 커널은 아직 종료 수단이 없어 hlt 루프에서 영원히 멈춰 있으므로, 고정
 # 시간 뒤 QEMU를 강제 종료하고 그때까지 나온 로그를 검사한다.
@@ -121,7 +131,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${1:-build/x86_64-clang}"
-TIMEOUT_SEC=90  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담아 훨씬 오래 걸린다.
+TIMEOUT_SEC=100  # M17부터 부트 디스크가 11개 서비스(memfs/devmgr/ps2/console/usb/virtio-blk/fat32/ext4/vfs/procsrv/login)를 담는다. M18은 서비스 수는 그대로지만 su-target 스폰 2회+로더 IPC 왕복이 추가돼 여유를 더 둔다.
 
 if [[ -z "${MINICORE_QEMU_BOOTDISK:-}" ]]; then
   DEFAULT_BOOTDISK="${BUILD_DIR}/servers/bootdisk.img"  # M16부터 memfs+devmgr+ps2+usb+virtio-blk+fat32+ext4+vfs+procsrv(servers/CMakeLists.txt).
@@ -224,6 +234,11 @@ declare -a EXPECTED=(
   "[console] vga init ok=1"
   "[login] no keyboard input, using self-test account"
   "[login] auth ok=1"
+  "[procsrv] loader roundtrip ok=1"
+  "[su-target] guest open outside denied=1"
+  "[su-target] guest open inside ok=1"
+  "[login] su delegated ok=1"
+  "[login] su denied ok=1"
 )
 
 LOG_FILE="$(mktemp)"

@@ -30,6 +30,7 @@ constexpr uint32_t k_procsrv_handle = 4;
 constexpr uint32_t k_console_op_print = 1;
 constexpr uint32_t k_ps2_op_read_key = 1;
 constexpr uint32_t k_procsrv_op_login = 4;
+constexpr uint32_t k_procsrv_op_su = 5;  // security-model.md ADR-167.
 
 constexpr uint8_t k_ascii_backspace = 0x08;
 constexpr uint8_t k_ascii_enter = 0x0D;
@@ -147,6 +148,37 @@ bool try_login(const char* username, uint64_t username_len, const char* password
     return reply.regs[0] == 0;
 }
 
+// security-model.md ADR-167 — OP_SU: regs[0]=호출자 사용자명(8바이트),
+// regs[1]=대상 사용자명(8바이트), regs[2..3]=대상 비밀번호(16바이트,
+// 위임이 없을 때만 검사). 응답 regs[0]: 0=위임 승인, 1=비밀번호
+// 승인, 2=거부.
+uint64_t try_su(const char* caller, const char* target, const char* target_password) {
+    uapi::message req{};
+    req.label = k_procsrv_op_su;
+    pack_bytes(&req.regs[0], sizeof(uint64_t), caller, cstr_len(caller));
+    pack_bytes(&req.regs[1], sizeof(uint64_t), target, cstr_len(target));
+    pack_bytes(&req.regs[2], 2 * sizeof(uint64_t), target_password, cstr_len(target_password));
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_procsrv_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    return reply.regs[0];
+}
+
+// M18 — 정책 확인 경로 양쪽을 검증한다: (1) root가 test에게 위임해
+// 뒀으므로 비밀번호 없이 승인돼야 한다(procsrv의 g_delegations),
+// (2) guest1→test는 위임이 없고 잘못된 비밀번호를 주므로 거부돼야
+// 한다.
+void run_su_tests() {
+    uint64_t delegated_status = try_su("test", "root", "");
+    const char* m1 = (delegated_status == 0) ? "[login] su delegated ok=1\n"
+                                                : "[login] su delegated ok=0\n";
+    debug_log(m1);
+
+    uint64_t denied_status = try_su("guest1", "test", "wrongpass");
+    const char* m2 = (denied_status == 2) ? "[login] su denied ok=1\n" : "[login] su denied ok=0\n";
+    debug_log(m2);
+}
+
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
@@ -173,6 +205,9 @@ extern "C" [[noreturn]] void _start(const void*) {
         if (login_ok) {
             console_print_str("Login successful\n");
             debug_log("[login] auth ok=1\n");
+            // M18(security-model.md ADR-167) — 로그인 성공 이후
+            // su/sudo 정책 확인 경로를 검증한다(위임 승인/거부 양쪽).
+            run_su_tests();
             break;
         }
         console_print_str("Login incorrect\n");

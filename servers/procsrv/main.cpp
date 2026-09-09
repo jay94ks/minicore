@@ -26,6 +26,16 @@
 // 열고 쓰고 다시 읽어 내용이 일치하는지 확인한다. procsrv.md의 실제
 // 프로토콜(§2~9)은 여전히 구현하지 않는다 — 이 라운드트립은 그것과
 // 무관한, fs-protocol.md 클라이언트 역할의 최소 검증일 뿐이다.
+//
+// M18(system-servers-bringup.md §M18, security-model.md ADR-167) —
+// su/sudo 검증을 위해 "경로→ELF 로더"를 실제로 구현한다: procsrv가
+// 자기 자신의 ELF 바이트(M12 self_info 브릿지로 이미 갖고 있다)를
+// VFS 경로(`/bin/su-target`)에 실제로 쓰고, 다시 그 경로에서 읽어
+// 재조립한 바이트가 원본과 정확히 일치함을 확인한 뒤, 그 재조립된
+// 바이트로 `sys_process_spawn`한다 — 스폰되는 프로세스는 procsrv와
+// 같은 바이너리이지만 magic 접두사가 붙은 argv(`su_target_argv`)로
+// "이번엔 su-target 역할을 하라"고 구분해 받는다(procsrv 자신의
+// self-exec 판별 관례를 확장한 것, 이 파일 상단 argv 규약 참고).
 #include <uapi.hpp>
 
 namespace {
@@ -40,6 +50,7 @@ constexpr uint32_t k_vfs_handle = 2;
 constexpr uint32_t k_op_open = 1;
 constexpr uint32_t k_op_write = 2;
 constexpr uint32_t k_op_read = 3;
+constexpr uint32_t k_path_budget = 3 * sizeof(uint64_t);  // M18(fs-protocol.md v3) — regs[0..2]=24바이트, regs[3]=신원.
 
 // M17(security-model.md ADR-165) — procsrv가 이번 라운드에서 처음
 // 서버가 되어 받는 오퍼레이션. OP_LOGIN: regs[0]=사용자명(최대
@@ -50,6 +61,15 @@ constexpr uint32_t k_op_read = 3;
 constexpr uint32_t k_op_login = 4;
 constexpr uint64_t k_login_status_ok = 0;
 constexpr uint64_t k_login_status_denied = 1;
+
+// M18(security-model.md ADR-167) — OP_SU: regs[0]=호출자 사용자명
+// (8바이트), regs[1]=대상 사용자명(8바이트), regs[2..3]=대상
+// 비밀번호(16바이트, 위임이 없을 때만 검사). 응답 regs[0]=상태
+// (0=위임으로 승인, 1=비밀번호로 승인, 2=거부), regs[1]=대상 uid.
+constexpr uint32_t k_op_su = 5;
+constexpr uint64_t k_su_status_granted_by_delegation = 0;
+constexpr uint64_t k_su_status_granted_by_password = 1;
+constexpr uint64_t k_su_status_denied = 2;
 
 uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     uint64_t ret;
@@ -102,25 +122,36 @@ bool bytes_equal(const void* a, const void* b, uint64_t len) {
     return true;
 }
 
+// M18(security-model.md ADR-079 최소 버전/ADR-167) — uid/S·G·J
+// 비트를 이제 채운다. 여전히 하드코딩이다(ADR-165 §결정2와 같은
+// 이유) — 실제 uid 채번·해싱은 M18 범위 밖.
 struct account {
     char username[8];
     char password[16];
+    uint32_t uid;
+    bool is_super;
+    bool is_guest;
+    bool is_jail;
 };
 
-// 실제 다중 사용자 계정 관리(해싱, uid/gid 발급)는 security-model.md
-// ADR-165 §결정2가 M18 이후로 미룬 것과 같은 이유로 여기서는
-// 하드코딩한다 — "계정이 존재하고 평문 비밀번호가 일치하면 성공"만
-// 증명하면 되는 M17 범위.
-account g_accounts[2];
+constexpr uint32_t k_num_accounts = 3;
+account g_accounts[k_num_accounts];
 
 void init_accounts() {
-    const char* names[2] = {"test", "root"};
-    const char* passwords[2] = {"test1234", "root1234"};
-    for (int a = 0; a < 2; ++a) {
+    const char* names[k_num_accounts] = {"test", "root", "guest1"};
+    const char* passwords[k_num_accounts] = {"test1234", "root1234", "guest1234"};
+    const uint32_t uids[k_num_accounts] = {1000, 0, 2000};
+    const bool supers[k_num_accounts] = {false, true, false};
+    const bool guests[k_num_accounts] = {false, false, true};
+    for (uint32_t a = 0; a < k_num_accounts; ++a) {
         pack_bytes(g_accounts[a].username, sizeof(g_accounts[a].username), names[a],
                    cstr_len(names[a]));
         pack_bytes(g_accounts[a].password, sizeof(g_accounts[a].password), passwords[a],
                    cstr_len(passwords[a]));
+        g_accounts[a].uid = uids[a];
+        g_accounts[a].is_super = supers[a];
+        g_accounts[a].is_guest = guests[a];
+        g_accounts[a].is_jail = false;  // M18은 jail을 guest와 같은 규칙으로 다룬다(ADR-167 §결정2) — 별도 계정 불필요.
     }
 }
 
@@ -135,6 +166,324 @@ void handle_login(const uapi::message& in, uapi::message& out) {
     out.regs[0] = k_login_status_denied;
 }
 
+// M18(security-model.md ADR-093/167) — "@global/system/delegates/<계정>"
+// 레지스트리 테이블(cfgsrv, M19)의 하드코딩 대체. {target_uid,
+// allowed_caller_uid} — root(uid=0)가 test(uid=1000)에게 위임해
+// 뒀다: test는 root의 비밀번호 없이 su할 수 있다.
+struct delegation {
+    uint32_t target_uid;
+    uint32_t allowed_caller_uid;
+};
+constexpr delegation g_delegations[] = {
+    {0, 1000},
+};
+
+bool is_delegated(uint32_t target_uid, uint32_t caller_uid) {
+    for (const delegation& d : g_delegations) {
+        if (d.target_uid == target_uid && d.allowed_caller_uid == caller_uid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const account* find_account_by_username(const void* username_bytes) {
+    for (const account& acc : g_accounts) {
+        if (bytes_equal(username_bytes, acc.username, sizeof(acc.username))) {
+            return &acc;
+        }
+    }
+    return nullptr;
+}
+
+// ---------- M18 — 경로→ELF 로더 + su-target 스폰(security-model.md ADR-167) ----------
+constexpr uint64_t k_page_size = 4096;
+constexpr uint64_t k_max_reassembled_bytes = 131072;  // servers/fs/memfs::k_max_file_bytes와 일치.
+constexpr const char* k_su_target_path = "/bin/su-target";
+
+alignas(k_page_size) uint8_t g_write_scratch[k_page_size] = {};
+uint8_t g_reassembled[k_max_reassembled_bytes] = {};
+uint64_t g_reassembled_size = 0;
+bool g_loader_ok = false;
+
+// magic 접두사가 붙은 argv — procsrv 자신을 su-target 역할로 다시
+// 스폰할 때 쓴다(이 파일 상단 주석). 일반 부트 스폰(마커 1바이트)·
+// self-exec 사본(argv=nullptr)과는 크기/내용으로 구분된다.
+constexpr uint32_t k_su_target_magic = 0x53555354;
+struct su_target_argv {
+    uint32_t magic = 0;
+    uint32_t uid = 0;
+    uint8_t is_super = 0;
+    uint8_t is_guest = 0;
+    uint8_t is_jail = 0;
+    uint8_t reserved = 0;
+};
+
+bool is_su_target_argv(const void* argv) {
+    if (argv == nullptr) {
+        return false;
+    }
+    uint32_t magic;
+    __builtin_memcpy(&magic, argv, sizeof(magic));
+    return magic == k_su_target_magic;
+}
+
+// vfs에 path를 열어 open_file_id/fs_handle을 얻는다(identity=0 —
+// 로더 자신은 guest/jail이 아니다). 실패하면 fs_handle=0.
+void vfs_open(const char* path, uint64_t& out_open_file_id, uint32_t& out_fs_handle) {
+    uapi::message req{};
+    req.label = k_op_open;
+    pack_bytes(req.regs, k_path_budget, path, cstr_len(path));
+    req.regs[3] = 0;
+    uapi::message reply{};
+    do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    if (reply.regs[1] != 0 || reply.handle_count != 1) {
+        out_fs_handle = 0;
+        return;
+    }
+    out_open_file_id = reply.regs[0];
+    out_fs_handle = reply.handles[0].src_handle;
+}
+
+// path에 data[0..size)를 페이지 단위로 나눠 쓴다(fs-protocol.md v3
+// §2.2) — memfs의 write_cursor가 자동으로 이어 쓴다.
+bool write_elf_to_vfs(const char* path, const uint8_t* data, uint64_t size) {
+    uint64_t open_file_id = 0;
+    uint32_t fs_handle = 0;
+    vfs_open(path, open_file_id, fs_handle);
+    if (fs_handle == 0) {
+        return false;
+    }
+    uint64_t offset = 0;
+    while (offset < size) {
+        uint64_t chunk = size - offset;
+        if (chunk > k_page_size) {
+            chunk = k_page_size;
+        }
+        for (uint64_t i = 0; i < k_page_size; ++i) {
+            g_write_scratch[i] = (i < chunk) ? data[offset + i] : 0;
+        }
+        uapi::message req{};
+        req.label = k_op_write;
+        req.regs[0] = open_file_id;
+        req.regs[1] = chunk;
+        req.page_count = 1;
+        req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_write_scratch);
+        req.pages[0].length = k_page_size;
+        req.pages[0].mode = uapi::transfer_mode::copy;
+        uapi::message reply{};
+        do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&req),
+                   reinterpret_cast<uint64_t>(&reply));
+        if (reply.regs[1] != 0 || reply.regs[0] != chunk) {
+            return false;
+        }
+        offset += chunk;
+    }
+    return true;
+}
+
+// path를 열어 EOF까지 순차적으로 읽어 out_buf에 재조립한다
+// (fs-protocol.md v3 §2.3) — memfs의 read_cursor가 자동으로 이어
+// 읽는다. 반환값은 실제로 읽은 총 바이트 수.
+uint64_t read_elf_from_vfs(const char* path, uint8_t* out_buf, uint64_t max_len) {
+    uint64_t open_file_id = 0;
+    uint32_t fs_handle = 0;
+    vfs_open(path, open_file_id, fs_handle);
+    if (fs_handle == 0) {
+        return 0;
+    }
+    uint64_t total = 0;
+    for (;;) {
+        uapi::message req{};
+        req.label = k_op_read;
+        req.regs[0] = open_file_id;
+        req.regs[1] = k_page_size;
+        uapi::message reply{};
+        do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&req),
+                   reinterpret_cast<uint64_t>(&reply));
+        if (reply.regs[1] != 0 || reply.page_count != 1) {
+            break;
+        }
+        uint64_t n = reply.regs[0];
+        if (n == 0) {
+            break;  // EOF.
+        }
+        if (total + n > max_len) {
+            n = max_len - total;
+        }
+        const auto* src = reinterpret_cast<const uint8_t*>(reply.pages[0].vaddr);
+        for (uint64_t i = 0; i < n; ++i) {
+            out_buf[total + i] = src[i];
+        }
+        total += n;
+        if (n < k_page_size || total >= max_len) {
+            break;
+        }
+    }
+    return total;
+}
+
+// M12 self_info 브릿지의 ELF 바이트를 /bin/su-target에 실제로 쓰고
+// 다시 읽어 재조립한 뒤 원본과 정확히 일치하는지 확인한다 — 이후
+// su/sudo가 스폰하는 바이트는 이 재조립된 버퍼다(원본을 직접 쓰는
+// 게 아니라, "경로로 저장하고 다시 읽어 실행"이라는 로더의 실제
+// 파이프라인을 그대로 타게 한다).
+void run_loader_test(const uapi::m12_self_info& self_info) {
+    const auto* original = reinterpret_cast<const uint8_t*>(self_info.elf_addr);
+    bool write_ok = write_elf_to_vfs(k_su_target_path, original, self_info.elf_size);
+    g_reassembled_size = write_ok ? read_elf_from_vfs(k_su_target_path, g_reassembled,
+                                                       sizeof(g_reassembled))
+                                   : 0;
+    g_loader_ok = write_ok && g_reassembled_size == self_info.elf_size &&
+                  bytes_equal(g_reassembled, original, self_info.elf_size);
+    const char* msg = g_loader_ok ? "[procsrv] loader roundtrip ok=1\n"
+                                    : "[procsrv] loader roundtrip ok=0\n";
+    debug_log(msg, cstr_len(msg));
+}
+
+// 재조립된 바이트(로더로 검증된)를 su-target argv로 다시 스폰한다 —
+// 스폰되는 프로세스는 procsrv와 같은 코드이지만 magic argv로 다른
+// 역할(run_as_su_target)을 탄다. vfs 핸들을 상속시켜 guest 격리
+// 테스트가 그걸로 직접 open을 시도할 수 있게 한다.
+void spawn_su_target(uint32_t uid, bool is_super, bool is_guest, bool is_jail) {
+    if (!g_loader_ok) {
+        return;
+    }
+    su_target_argv argv{};
+    argv.magic = k_su_target_magic;
+    argv.uid = uid;
+    argv.is_super = is_super ? 1 : 0;
+    argv.is_guest = is_guest ? 1 : 0;
+    argv.is_jail = is_jail ? 1 : 0;
+
+    uapi::process_spawn_request req{};
+    req.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+    req.elf_size = g_reassembled_size;
+    req.argv_blob = reinterpret_cast<uint64_t>(&argv);
+    req.argv_size = sizeof(argv);
+    // create_endpoint=true를 유지한다 — handle 1(새 endpoint, 이
+    // su-target 역할에서는 안 쓰지만)이 먼저 차야 inherited_handles[0]
+    // 이 handle 2가 돼서 run_as_su_target()이 쓰는 k_vfs_handle(=2)
+    // 상수와 일치한다(ADR-152의 고정 순서).
+    req.create_endpoint = true;
+    req.inherited_handle_count = 1;
+    req.inherited_handles[0].src_handle = k_vfs_handle;
+    req.inherited_handles[0].rights_mask = uapi::k_right_can_send;
+    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&req), 0, 0);
+}
+
+void handle_su(const uapi::message& in, uapi::message& out) {
+    const account* caller = find_account_by_username(&in.regs[0]);
+    const account* target = find_account_by_username(&in.regs[1]);
+    if (caller == nullptr || target == nullptr) {
+        out.regs[0] = k_su_status_denied;
+        return;
+    }
+    // ADR-093 §결정7 — 대상이 guest/jail이면 위임을 무시하고 항상
+    // 비밀번호를 요구한다.
+    bool delegated = !target->is_guest && !target->is_jail &&
+                      is_delegated(target->uid, caller->uid);
+    bool granted;
+    uint64_t status;
+    if (delegated) {
+        granted = true;
+        status = k_su_status_granted_by_delegation;
+    } else {
+        bool password_ok = bytes_equal(&in.regs[2], target->password, sizeof(target->password));
+        granted = password_ok;
+        status = password_ok ? k_su_status_granted_by_password : k_su_status_denied;
+    }
+    out.regs[0] = status;
+    out.regs[1] = target->uid;
+    if (granted) {
+        spawn_su_target(target->uid, target->is_super, target->is_guest, target->is_jail);
+    }
+}
+
+// guest1 신원으로 su-target을 직접 스폰해(OP_SU를 거치지 않는다 —
+// 이건 "누가 누구로 전환하는가"가 아니라 "guest 프로세스가 VFS
+// 격리를 실제로 받는가"를 확인하는 별개의 검증이다) VFS 격리를
+// 검증한다. su-target 자신이 홈 밖/안 open을 시도하고 결과를
+// 로그로 남긴다(run_as_su_target 참고).
+void run_guest_confinement_test() {
+    spawn_su_target(2000, /*is_super=*/false, /*is_guest=*/true, /*is_jail=*/false);
+}
+
+// su_target_argv로 다시 스폰된 procsrv 사본의 역할. 신원을 로그로
+// 남기고, guest/jail이면 홈 밖(거부 기대)/홈 안(성공 기대) open을
+// 둘 다 시도해 결과를 로그로 남긴다 — handle 2는 spawn_su_target이
+// 물려준 vfs 프록시다.
+[[noreturn]] void run_as_su_target(const void* argv) {
+    su_target_argv a{};
+    __builtin_memcpy(&a, argv, sizeof(a));
+
+    char buf[96];
+    uint64_t i = 0;
+    const char* prefix = "[su-target] uid=";
+    for (; prefix[i] != '\0'; ++i) {
+        buf[i] = prefix[i];
+    }
+    // uid는 0~수천 범위라 10진수 몇 자리면 충분하다 — 손으로 변환.
+    char digits[10];
+    uint64_t ndigits = 0;
+    uint32_t v = a.uid;
+    if (v == 0) {
+        digits[ndigits++] = '0';
+    }
+    while (v > 0) {
+        digits[ndigits++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    while (ndigits > 0) {
+        buf[i++] = digits[--ndigits];
+    }
+    const char* suffix = " super=";
+    for (uint64_t j = 0; suffix[j] != '\0'; ++j) {
+        buf[i++] = suffix[j];
+    }
+    buf[i++] = a.is_super ? '1' : '0';
+    const char* suffix2 = " guest=";
+    for (uint64_t j = 0; suffix2[j] != '\0'; ++j) {
+        buf[i++] = suffix2[j];
+    }
+    buf[i++] = a.is_guest ? '1' : '0';
+    buf[i++] = '\n';
+    debug_log(buf, i);
+
+    if (a.is_guest || a.is_jail) {
+        uint64_t identity = (a.is_guest ? 1ull : 0) | (a.is_jail ? 2ull : 0);
+
+        uapi::message outside_req{};
+        outside_req.label = k_op_open;
+        pack_bytes(outside_req.regs, k_path_budget, "/etc/denied.txt",
+                   cstr_len("/etc/denied.txt"));
+        outside_req.regs[3] = identity;
+        uapi::message outside_reply{};
+        do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&outside_req),
+                   reinterpret_cast<uint64_t>(&outside_reply));
+        bool outside_denied = (outside_reply.regs[1] == 5);  // GUEST_DENIED, fs-protocol.md v3 §3.
+        const char* m1 = outside_denied ? "[su-target] guest open outside denied=1\n"
+                                          : "[su-target] guest open outside denied=0\n";
+        debug_log(m1, cstr_len(m1));
+
+        uapi::message inside_req{};
+        inside_req.label = k_op_open;
+        pack_bytes(inside_req.regs, k_path_budget, "/home/guest1/allowed.txt",
+                   cstr_len("/home/guest1/allowed.txt"));
+        inside_req.regs[3] = identity;
+        uapi::message inside_reply{};
+        do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&inside_req),
+                   reinterpret_cast<uint64_t>(&inside_reply));
+        bool inside_ok = (inside_reply.regs[1] == 0 && inside_reply.handle_count == 1);
+        const char* m2 = inside_ok ? "[su-target] guest open inside ok=1\n"
+                                     : "[su-target] guest open inside ok=0\n";
+        debug_log(m2, cstr_len(m2));
+    }
+
+    quiet_exit();
+}
+
 // vfs→memfs로 파일을 열고, 그 응답으로 위임받은 memfs 핸들에 직접
 // 쓰고 다시 읽어 내용이 일치하는지 확인한다(fs-protocol.md §2). 결과는
 // sys_debug_log로만 관찰 가능하다(klog가 유저에 노출된 적이 없어서 —
@@ -144,26 +493,26 @@ void run_vfs_roundtrip_test() {
     const char* payload = "hello vfs";
     uint64_t payload_len = cstr_len(payload);
 
-    uapi::message open_req{};
-    open_req.label = k_op_open;
-    pack_bytes(open_req.regs, sizeof(open_req.regs), path, cstr_len(path));
-    uapi::message open_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&open_req),
-               reinterpret_cast<uint64_t>(&open_reply));
-
-    bool open_ok = (open_reply.regs[1] == 0) && (open_reply.handle_count == 1);
-    if (!open_ok) {
+    uint64_t open_file_id = 0;
+    uint32_t memfs_handle = 0;
+    vfs_open(path, open_file_id, memfs_handle);
+    if (memfs_handle == 0) {
         debug_log("[procsrv] vfs open failed\n", cstr_len("[procsrv] vfs open failed\n"));
         return;
     }
-    uint64_t open_file_id = open_reply.regs[0];
-    uint32_t memfs_handle = open_reply.handles[0].src_handle;
 
+    // fs-protocol.md v3 §2.2(ADR-168) — OP_WRITE도 이제 pages[]다.
+    for (uint64_t i = 0; i < k_page_size; ++i) {
+        g_write_scratch[i] = (i < payload_len) ? static_cast<uint8_t>(payload[i]) : 0;
+    }
     uapi::message write_req{};
     write_req.label = k_op_write;
     write_req.regs[0] = open_file_id;
     write_req.regs[1] = payload_len;
-    pack_bytes(&write_req.regs[2], 2 * sizeof(uint64_t), payload, payload_len);  // regs[2..3]만.
+    write_req.page_count = 1;
+    write_req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_write_scratch);
+    write_req.pages[0].length = k_page_size;
+    write_req.pages[0].mode = uapi::transfer_mode::copy;
     uapi::message write_reply{};
     do_syscall(uapi::k_syscall_ipc_call, memfs_handle, reinterpret_cast<uint64_t>(&write_req),
                reinterpret_cast<uint64_t>(&write_reply));
@@ -204,22 +553,15 @@ void run_vfs_roundtrip_test() {
 // 읽기전용이라 OP_WRITE가 없다).
 void run_mounted_fs_read_test(const char* mount_path, const char* expected,
                                const char* log_prefix) {
-    uapi::message open_req{};
-    open_req.label = k_op_open;
-    pack_bytes(open_req.regs, sizeof(open_req.regs), mount_path, cstr_len(mount_path));
-    uapi::message open_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&open_req),
-               reinterpret_cast<uint64_t>(&open_reply));
-
-    bool open_ok = (open_reply.regs[1] == 0) && (open_reply.handle_count == 1);
-    if (!open_ok) {
+    uint64_t open_file_id = 0;
+    uint32_t fs_handle = 0;
+    vfs_open(mount_path, open_file_id, fs_handle);
+    if (fs_handle == 0) {
         debug_log(log_prefix, cstr_len(log_prefix));
         const char* msg = " open failed\n";
         debug_log(msg, cstr_len(msg));
         return;
     }
-    uint64_t open_file_id = open_reply.regs[0];
-    uint32_t fs_handle = open_reply.handles[0].src_handle;
 
     uapi::message read_req{};
     read_req.label = k_op_read;
@@ -248,6 +590,13 @@ void run_mounted_fs_read_test(const char* mount_path, const char* expected,
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void* argv_or_null) {
+    // M18(security-model.md ADR-167) — su-target 역할 판별이 가장
+    // 먼저다(이 파일 상단 주석의 argv 규약: magic 접두사가 있으면
+    // su-target, argv==nullptr이면 self-exec 사본, 그 외는 정상
+    // 부트 스폰).
+    if (is_su_target_argv(argv_or_null)) {
+        run_as_su_target(argv_or_null);
+    }
     if (argv_or_null == nullptr) {
         quiet_exit();  // sys_fork+sys_exec으로 만들어진 사본.
     }
@@ -280,9 +629,16 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     run_mounted_fs_read_test("/mnt/fat32/hello.txt", "hello fat32 world\n", "[procsrv] fat32");
     run_mounted_fs_read_test("/mnt/ext4/hello.txt", "hello ext4 world\n", "[procsrv] ext4");
 
+    // M18(security-model.md ADR-167) — 경로→ELF 로더를 검증하고
+    // (procsrv 자신의 ELF를 VFS에 쓰고 다시 읽어 재조립), guest
+    // 격리도 실제 스폰된 프로세스로 확인한다. 로그인 서버가
+    // OP_SU를 부르기 전에 로더가 준비돼 있어야 한다.
+    run_loader_test(*self_info);
+    run_guest_confinement_test();
+
     // M17(security-model.md ADR-165) — 여기서부터 procsrv가 처음으로
-    // 진짜 서버가 된다. servers/login이 OP_LOGIN으로 이 계정 저장소에
-    // 묻는다.
+    // 진짜 서버가 된다. servers/login이 OP_LOGIN/OP_SU로 이 계정
+    // 저장소와 위임 테이블에 묻는다.
     init_accounts();
     for (;;) {
         uapi::message in{};
@@ -293,6 +649,8 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
             out.label = in.label;
             if (in.label == k_op_login) {
                 handle_login(in, out);
+            } else if (in.label == k_op_su) {
+                handle_su(in, out);
             }
         }
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);

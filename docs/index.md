@@ -51,6 +51,7 @@
 | [system-servers-bringup-m15.md](done/system-servers-bringup-m15.md) | M15(완료): `servers/drivers/virtio-blk`(첫 실제 유저 드라이버)+devmgr BAR 재사용 일반화+부트 디바이스 배제(ADR-158), 그 과정에서 발견한 디스크 손상 버그(테스트 드라이버가 부트 디바이스에 그대로 쓰기 테스트해 cpio 아카이브 손상)와 avail_idx 리셋 버그 진단·수정 — system-servers-bringup.md §M15 완료 |
 | [system-servers-bringup-m16.md](done/system-servers-bringup-m16.md) | M16(완료): IPC pages[]의 유저 프로세스 매핑 경로 구현(ADR-159/161)+캐패빌리티 슬롯 경계 검증(ADR-160)+FAT32/ext4 읽기전용 FS 서버+VFS 정적 마운트 테이블+fs-protocol v2(ADR-162), 그 과정에서 발견한 devmgr I/O BAR 동시 배정 충돌 버그 진단·수정(ADR-163) — system-servers-bringup.md §M16 완료 |
 | [system-servers-bringup-m17.md](done/system-servers-bringup-m17.md) | M17(완료): VGA 텍스트 콘솔+ps2 진짜 IPC 서버 전환+procsrv 최초 서버화(OP_LOGIN)+login 서버(ADR-164/165), 그 과정에서 발견한 initrun 서비스 레지스트리 크기 초과·ps2 폴링 예산 과다 버그 진단·수정(ADR-166) — system-servers-bringup.md §M17 완료 |
+| [system-servers-bringup-m18.md](done/system-servers-bringup-m18.md) | M18(완료): fs-protocol v3(OP_WRITE도 pages[] 기반+memfs 커서+OP_OPEN 신원 필드, ADR-168)+procsrv 위임 테이블/OP_SU/실제 경로→ELF 로더+VFS guest/jail 홈 격리(ADR-167) — system-servers-bringup.md §M18 완료 |
 
 ## design — 설계/상세
 

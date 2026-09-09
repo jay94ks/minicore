@@ -1,5 +1,5 @@
 // servers/vfs/main.cpp — VFS 서버 (docs/plan/system-servers-bringup.md
-// §M13/§M16, docs/spec/fs-protocol.md, ADR-018).
+// §M13/§M16/§M18, docs/spec/fs-protocol.md, ADR-018).
 //
 // M13은 마운트 테이블이 없었다(단일 memfs). M16이 fs-protocol.md v2
 // §2.1의 정적 마운트 테이블을 추가한다 — `/mnt/fat32/`, `/mnt/ext4/`
@@ -9,6 +9,12 @@
 // 요구하는 대로 그 FS 서버의 endpoint 프록시를 응답(handles[0])에
 // 실어 클라이언트에게 위임한다 — 이후 클라이언트는 WRITE/READ를 그
 // FS 서버에게 직접 보낸다(vfs를 다시 거치지 않음, M13과 동일).
+//
+// M18(fs-protocol.md v3, security-model.md ADR-167) — 경로 예산이
+// 32→24바이트(regs[0..2])로 줄고, 남은 regs[3]에 호출자가 스스로
+// 밝히는 신원(bit0=guest, bit1=jail)이 실린다. 마운트 테이블을 찾기
+// **전에** guest/jail이면 경로가 `/home/`으로 시작하는지 검사한다 —
+// 아니면 어떤 FS 서버에도 전달하지 않고 GUEST_DENIED로 즉시 응답한다.
 #include <uapi.hpp>
 
 namespace {
@@ -25,6 +31,10 @@ constexpr uint32_t k_ext4_handle = 4;
 
 constexpr uint32_t k_op_open = 1;
 constexpr uint64_t k_status_ok = 0;
+constexpr uint64_t k_status_guest_denied = 5;
+constexpr uint32_t k_path_budget = 3 * sizeof(uint64_t);  // regs[0..2] = 24바이트(M18, regs[3]은 신원).
+constexpr uint64_t k_identity_guest_bit = 1ull << 0;
+constexpr uint64_t k_identity_jail_bit = 1ull << 1;
 
 struct mount_entry {
     const char* prefix;
@@ -70,10 +80,25 @@ bool starts_with(const char* path, const char* prefix, uint64_t prefix_len) {
 }
 
 void handle_open(const uapi::message& in, uapi::message& out) {
-    char path[33];
-    __builtin_memcpy(path, in.regs, 32);
-    path[32] = '\0';
+    char path[k_path_budget + 1];
+    __builtin_memcpy(path, in.regs, k_path_budget);
+    path[k_path_budget] = '\0';
     uint64_t path_len = cstr_len(path);
+    uint64_t identity = in.regs[3];
+
+    // M18(fs-protocol.md v3 §2.1) — guest/jail은 마운트 테이블을
+    // 찾기도 전에 홈(`/home/`) 밖이면 즉시 거부한다. jail을 이
+    // 라운드에 한해 guest와 같은 규칙으로 단순화했다(security-model.md
+    // ADR-167 §결정2 — 오버레이 네임스페이스는 아직 없다).
+    if ((identity & (k_identity_guest_bit | k_identity_jail_bit)) != 0) {
+        constexpr const char* k_home_prefix = "/home/";
+        constexpr uint64_t k_home_prefix_len = 6;
+        if (path_len < k_home_prefix_len || !starts_with(path, k_home_prefix, k_home_prefix_len)) {
+            out.regs[0] = 0;
+            out.regs[1] = k_status_guest_denied;
+            return;
+        }
+    }
 
     uint32_t target_handle = k_memfs_handle;
     const char* rest = (path[0] == '/') ? path + 1 : path;  // 기본(memfs) 경로 — M13과 동일.
@@ -99,8 +124,8 @@ void handle_open(const uapi::message& in, uapi::message& out) {
         regs_bytes[i] = 0;
     }
     uint64_t rest_len = cstr_len(rest);
-    if (rest_len > sizeof(fwd_in.regs)) {
-        rest_len = sizeof(fwd_in.regs);
+    if (rest_len > k_path_budget) {
+        rest_len = k_path_budget;
     }
     for (uint64_t i = 0; i < rest_len; ++i) {
         regs_bytes[i] = static_cast<uint8_t>(rest[i]);
