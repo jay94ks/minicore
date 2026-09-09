@@ -19,6 +19,8 @@
 | OPEN-60 | ADR-154가 "I/O 활성화 권한 부여"를 지금은 initrun의 하드코딩(스폰 시 grant_trusted)으로만 결정하도록 확정했다 — 부팅 완료 이후 cfgsrv 레지스트리를 읽어 **다른** 특수 프로세스에게도 이 권한을 동적으로 부여/회수하는 절차는 cfgsrv가 실제로 존재하는 M19 이후 재검토 대상 | ADR-154 | [boot-and-drivers.md](boot-and-drivers.md) |
 | OPEN-62 | ADR-176이 LAPIC 타이머의 initial_count/divide를 **보정 없이**(PIT/HPET 실측 없이) 고정 상수로 정했다 — `base_time_slice_us` 필드는 이름과 달리 지금 실제 마이크로초를 보장하지 않고 "타이머 틱 수"로만 쓰인다. 실제 마이크로초 단위 타임슬라이스가 필요해지면 PIT/HPET 기반 보정을 추가해야 한다(어느 시점에, 어떤 기준 클록으로 보정할지는 아직 미정) | ADR-176 | [kernel-scheduler.md](kernel-scheduler.md) |
 | OPEN-63 | ADR-176은 AP가 여전히 협조적 스케줄러/run_queue에 전혀 참여하지 않는 것을 그대로 유지한 채(M10/M11 결정) BSP 한 코어에만 선점을 추가했다 — 진짜 멀티코어 선점형 스케줄러(코어별 `g_current`/타이머, AP도 유저 스레드 실행)는 이 ADR의 범위 밖으로 남겨 뒀다. general-purpose-completion.md의 M22~M26 어디에도 아직 이 작업이 배정돼 있지 않다 | ADR-176 | [kernel-scheduler.md](kernel-scheduler.md) |
+| OPEN-64 | ADR-178은 procsrv.md §2/§6이 정의한 실제 프로세스 테이블(`process_entry`, pid 발급, parent/children 트리)과 외부에서 부를 수 있는 `OP_WAIT`/`OP_KILL`(`proc_op::wait`/`signal`) IPC 오퍼레이션을 구현하지 않았다 — procsrv가 자기 자신을 대상으로 하는 자기테스트로만 wait/kill 메커니즘 자체를 증명했다. 어느 프로세스든 임의의 다른 프로세스의 pid로 wait/kill할 수 있는 실제 프로토콜은 다음 라운드 대상 | ADR-178 | [kernel-scheduler.md](kernel-scheduler.md), [procsrv.md](../spec/procsrv.md) |
+| OPEN-65 | ADR-178의 kill은 대상이 IPC 대기열에 갇혀 있고 아무도 다시 깨우지 않으면 영원히 폐기되지 않는다(대기 타임아웃이 없다는 기존 한계의 연장) — 대기 중인 스레드도 즉시 폐기할 수 있는 매커니즘(예: 각 대기열에서도 직접 unlink)이 필요해지면 재검토 | ADR-178 | [kernel-scheduler.md](kernel-scheduler.md) |
 
 ## 해결된 항목 (이력)
 

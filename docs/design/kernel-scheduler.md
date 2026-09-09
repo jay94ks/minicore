@@ -709,3 +709,81 @@
   스택을 바꾸지 않는다) — `sync_syscall_kernel_rsp()`와 똑같이
   그 경우는 그냥 건드리지 않는다. AP는 ADR-176대로 이 타이머 자체를
   켜지 않으므로 이 수정의 대상도 아니다(TSS 자체가 BSP 전용).
+
+## ADR-178. 최소 프로세스 생명주기 — `sys_process_kill`(스케줄러 픽 타임 폐기) + procsrv의 wait 자기 전용 endpoint 패턴
+
+- **상태**: 확정 (2026-09-10)
+- **결정**:
+  1. `object::thread`에 `kill_requested`(bool) 필드를 추가한다.
+     `sched::request_kill(thread&)`는 이 플래그만 세운다 — 즉시 아무
+     일도 하지 않는다. 대신 스케줄러가 스레드를 **다음에 실제로
+     실행하려는 시점**(`scheduler.cpp::pick_next_alive()`, `start()`/
+     `yield()`/`block()`/`exit()`가 기존 `pick_next_with_stealing()`
+     대신 이걸 부른다)에 이 플래그를 확인해, 세워져 있으면 그 스레드를
+     스케줄하지 않고 즉시 폐기한다(`arch_fpu_thread_exiting()`으로
+     FPU 소유권 기록만 정리 — 나머지는 `sched::exit()`의 자기 종료와
+     동일하게 회수하지 않는다, 기존 누수의 연장일 뿐 이 결정이 새로
+     만든 것은 아니다)하고 klog로
+     `"[sched] thread killed (discarded before scheduling)"`를 남긴다.
+  2. `object_kind::thread`(M4부터 있었지만 M21까지 한 번도 실제
+     발급된 적이 없던 핸들 종류)에 대한 새 권한
+     `object::k_right_can_kill`(`uapi::k_right_can_kill`과 동일 비트값,
+     1<<4)을 추가한다. `process_spawn()`이 성공하면
+     `process_spawn_request::out_thread_handle`에 새 스레드를 가리키는
+     이 권한만 가진 소유 핸들을 **호출자 자신의** handle_table에
+     만들어 준다(`out_endpoint_proxy_handle`과 같은 자리).
+  3. 새 syscall `sys_process_kill`(번호 12) — `object_kind::thread`+
+     `k_right_can_kill` 핸들을 받아 `sched::request_kill()`을 부른다
+     (`process_ops.cpp::process_kill()`, `ipc/endpoint.cpp::resolve_endpoint()`
+     와 정확히 같은 `debug_entry()` 기반 핸들 검사 패턴 재사용).
+  4. **wait(exit code 회수)는 커널 syscall이 아니라 순수 유저 IPC
+     프로토콜로 구현한다**(procsrv.md가 이미 "POSIX 프로세스 의미론은
+     procsrv 소관"이라고 정한 그대로, ADR-002/008 정신과 일치) —
+     procsrv가 `create_endpoint=true`로 자식을 스폰해 **그 자식만의**
+     새 endpoint를 받고(`out_endpoint_proxy_handle`), 그 endpoint로
+     Call해 자식이 Reply의 `regs[0]`에 담아 돌려주는 exit code를
+     받는다.
+- **근거(범위 좁힘, M17~M20이 반복해 온 패턴)**: [general-purpose-completion.md](../plan/general-purpose-completion.md)
+  §M22가 요구한 것은 procsrv.md §2/§6의 **완전한** 프로세스
+  테이블(`process_entry`, pid/parent/children/fd_table)과 `proc_op::wait`/
+  `signal`의 실제 와이어 프로토콜이었다 — 이번 라운드는 그 전체
+  설계를 구현하지 않는다. 대신 "자식을 강제 종료할 수 있는가"와
+  "자식의 종료 코드를 회수할 수 있는가" 두 가지만, procsrv가
+  **자기 자신을 대상으로** 검증하는 자기테스트(su-target과 같은
+  argv 마커 재사용 관례, `docs/done/general-purpose-completion-m22.md`
+  참고)로 증명한다. pid 할당, 부모-자식 테이블, 외부에서 부를 수
+  있는 `OP_WAIT`/`OP_KILL` IPC 오퍼레이션(procsrv.md §6의 `proc_op::wait`/
+  `signal`)은 여전히 없다 — OPEN 항목으로 남긴다.
+- **왜 wait를 "자식이 부모에게 먼저 알린다" 대신 "부모가 자식에게
+  물어본다"로 뒤집었는가(실제 버그)**: 처음에는 자식이 procsrv의
+  기존 로그인용 공유 endpoint(handle 1)에 Call로 exit code를 먼저
+  통지하는 설계였다. QEMU 실측 결과 servers/login이 procsrv의 이
+  자기테스트 실행 시점과 무관하게 이미 `OP_LOGIN` Call을 그 같은
+  endpoint에 걸어 두고 있어서(`sys_call`은 상대가 준비됐는지 상관없이
+  즉시 대기열에 들어간다), procsrv의 자기테스트가 그 login Call을
+  가로채 자식의 것으로 오인하고(로그인 쪽은 텅 빈 응답을 상태
+  코드 0="성공"으로 오인) 실패로 관찰됐다. `object::endpoint`는
+  `process_spawn(create_endpoint=true)`로 스폰될 때만 만들어지고
+  그 recv 권한은 항상 **새로 스폰되는 쪽**에게만 간다는 이 커널의
+  근본 제약상, "자식이 부모의 기존 endpoint에 말 건다" 방향은
+  구조적으로 다른 큐잉된 호출과 충돌할 위험을 안고 있다 — 반대로
+  "부모가 자식 전용 새 endpoint에 묻는다" 방향은 그 endpoint를
+  이 자식 하나만 쓰므로 충돌이 원천적으로 없다.
+- **검증 결과(QEMU 실측)**: [general-purpose-completion-m22.md](../done/general-purpose-completion-m22.md)
+  참고 — `tools/smoke-test-x86_64.sh`에 세 문자열을 추가해
+  확인한다: `"[procsrv] wait exit_code ok=1"`, `"[procsrv] kill
+  requested ok=1"`, `"[sched] thread killed (discarded before
+  scheduling)"`. smoke/SMP/NUMA/AVX 4개 스위트 전부 회귀 없음.
+- **알려진 단순화**:
+  - kill은 대상이 **다음에 스케줄러에 뽑히려는 시점**에만 폐기된다 —
+    지금 IPC 대기열에 갇혀 있고 아무도 다시는 그를 깨우지 않으면
+    영원히 폐기되지 않는다(이 커널에 대기 타임아웃이 없다는 기존
+    한계의 연장, OPEN-63과 이어지는 성격).
+  - `yield()`가 이제 `pick_next_alive()`에서 `nullptr`을 받을 수
+    있다(자기 자신이 kill 대상이고 유일한 runnable 스레드였던 경우) —
+    이 경로를 `arch_idle_halt()`로 처리하도록 함께 고쳤다(전에는
+    "prev를 다시 enqueue했으니 최소 1개는 남는다"는 가정이 항상
+    성립했지만, kill이 그 가정을 깰 수 있게 됐다).
+  - `block()`의 기존 "no runnable thread" PANIC은 그대로 둔다 —
+    이제 이론적으로 "다른 스레드들이 전부 kill됨"으로도 도달할 수
+    있지만, 이 마일스톤의 데모 시나리오에서는 일어나지 않는다.

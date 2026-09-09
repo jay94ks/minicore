@@ -12,6 +12,10 @@
 
 #include <uapi.hpp>
 
+namespace object {
+class handle_table;  // core/object/handle_table.hpp — 전방 선언만 필요(ADR-002와 같은 정신, tss.hpp의 thread 전방 선언과 동일한 관례).
+}
+
 namespace arch_x86_64 {
 
 enum class process_spawn_error : uint32_t {
@@ -40,12 +44,32 @@ enum class process_spawn_error : uint32_t {
 // 참고) — 스폰 시점 캐패빌리티 주입. 성공하고 create_endpoint가
 // true면 out_endpoint_proxy_handle에 **호출자 자신의** handle_table에
 // 새로 생긴 프록시 핸들을 채운다.
+// M22(general-purpose-completion.md §M22, ADR-178) — 성공하면
+// out_thread_handle에도 새 스레드를 가리키는 object_kind::thread
+// 소유 핸들(k_right_can_kill만 부여)을 호출자 자신의 handle_table에
+// 만들어 채운다(out_endpoint_proxy_handle과 같은 "호출자 소유" 자리).
+// 호출자가 커널 스레드(handles==nullptr)면 조용히 건너뛴다(0 유지).
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
                                    bool grant_trusted, bool create_endpoint,
                                    const uapi::handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
-                                   uint32_t& out_endpoint_proxy_handle);
+                                   uint32_t& out_endpoint_proxy_handle,
+                                   uint32_t& out_thread_handle);
+
+enum class process_kill_error : uint32_t {
+    ok = 0,
+    invalid_handle,     // 핸들이 없거나 이미 닫힘.
+    wrong_object_type,  // object_kind::thread가 아님.
+    permission_denied,  // k_right_can_kill 없음.
+};
+
+// sys_process_kill — h(호출자 자신의 handle_table 안, object_kind::thread,
+// k_right_can_kill 필요)가 가리키는 스레드에게 강제 종료를 요청한다
+// (sched::request_kill, kernel/core/sched/scheduler.hpp 참고 — 실제
+// 폐기는 즉시가 아니라 그 스레드가 다음에 스케줄러에 뽑히려는
+// 시점이다).
+process_kill_error process_kill(object::handle_table& caller_handles, uint32_t h);
 
 // sys_fork — 호출자의 주소공간을 COW로 복제해 새 프로세스를 만든다
 // (ADR-016/140). 반환값은 **부모 관점의 syscall 반환값**이다: 1=성공,

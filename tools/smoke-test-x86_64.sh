@@ -120,6 +120,20 @@
 #     확인한다). 실제 서드파티 libc/셸 포팅은 이번 라운드에 하지
 #     않는다(ADR-170 §결정1/2 — libmc 최소 부분집합 + minicore 전용
 #     대체 셸).
+#   M22 (general-purpose-completion.md §M22, kernel-scheduler.md
+#     ADR-178): procsrv가 자기 자신을 두 번 더 재조립 스폰해(wait/kill
+#     타깃, su-target과 같은 argv 마커 관례) 프로세스 생명주기를
+#     검증한다. wait 타깃은 procsrv가 만들어 준 **자기 전용**
+#     endpoint(create_endpoint=true — su-target/OP_START처럼 procsrv의
+#     공유 로그인 endpoint를 다시 쓰면 이미 큐잉된 servers/login의
+#     OP_LOGIN Call과 충돌한다, 실제로 재현·수정)에서 procsrv의 Call을
+#     받아 exit_code(42)를 Reply로 돌려주고("[procsrv] wait exit_code
+#     ok=1"), kill 타깃은 스스로 끝나지 않는 유한 반복(M21의 "무한
+#     루프가 나머지 부팅을 굶긴다" 실수 재발 방지) 자식을
+#     sys_process_kill로 강제 종료해 그 결과를 커널이 직접 로그로
+#     남긴다("[procsrv] kill requested ok=1"/"[sched] thread killed
+#     (discarded before scheduling)" — 스케줄러가 다음에 그 스레드를
+#     뽑으려는 시점에 실제로 폐기한다).
 #   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
 #     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
 #     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
@@ -272,6 +286,9 @@ declare -a EXPECTED=(
   "[procsrv] cfgsrv permission denied before grant=1"
   "[procsrv] cfgsrv permission granted after chmod=1"
   "[procsrv] cfgsrv full protocol ok=1"
+  "[procsrv] wait exit_code ok=1"
+  "[procsrv] kill requested ok=1"
+  "[sched] thread killed (discarded before scheduling)"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

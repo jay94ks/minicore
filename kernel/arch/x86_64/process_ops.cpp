@@ -184,7 +184,8 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    bool grant_trusted, bool create_endpoint,
                                    const uapi::handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
-                                   uint32_t& out_endpoint_proxy_handle) {
+                                   uint32_t& out_endpoint_proxy_handle,
+                                   uint32_t& out_thread_handle) {
     built_process built;
     auto err = build_process(elf_data, elf_size, argv_blob, argv_size, grant_trusted, built);
     if (err != process_spawn_error::ok) {
@@ -256,6 +257,18 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
     sched::enqueue(*t);
     klog::printf("[process] spawn ok entry=0x%lx trusted=%u\n",
                  static_cast<unsigned long>(built.entry_rip), grant_trusted);
+
+    // M22(ADR-178) — out_endpoint_proxy_handle과 같은 "호출자 소유"
+    // 자리에 새 스레드를 가리키는 kill 전용 핸들을 만들어 둔다.
+    // caller는 위 236번째 줄에서 이미 구한 값(같은 스레드, 그 사이
+    // g_current가 바뀔 일이 없다)을 그대로 재사용한다.
+    if (caller != nullptr && caller->handles != nullptr) {
+        auto thread_owner =
+            caller->handles->create_owner(object::object_kind::thread, object::k_right_can_kill, t);
+        if (thread_owner.is_ok()) {
+            out_thread_handle = thread_owner.value();
+        }
+    }
     return process_spawn_error::ok;
 }
 
@@ -437,6 +450,24 @@ process_spawn_error io_deactivate() {
     self->io_port_count = 0;
     sync_io_permission(*self);
     return process_spawn_error::ok;
+}
+
+// M22(general-purpose-completion.md §M22, ADR-178) — endpoint.cpp::
+// resolve_endpoint()와 정확히 같은 패턴(debug_entry로 핸들 검사)을
+// object_kind::thread에 재사용한다.
+process_kill_error process_kill(object::handle_table& caller_handles, uint32_t h) {
+    const object::handle_entry* e = caller_handles.debug_entry(h);
+    if (e == nullptr || !e->valid) {
+        return process_kill_error::invalid_handle;
+    }
+    if (e->kind != object::object_kind::thread) {
+        return process_kill_error::wrong_object_type;
+    }
+    if ((e->rights & object::k_right_can_kill) == 0) {
+        return process_kill_error::permission_denied;
+    }
+    sched::request_kill(*static_cast<object::thread*>(e->object));
+    return process_kill_error::ok;
 }
 
 }  // namespace arch_x86_64

@@ -129,7 +129,8 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
                 req->grant_trusted, req->create_endpoint, req->inherited_handles,
-                req->inherited_handle_count, req->out_endpoint_proxy_handle);
+                req->inherited_handle_count, req->out_endpoint_proxy_handle,
+                req->out_thread_handle);
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_fork: {
@@ -203,6 +204,14 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         }
         case uapi::k_syscall_io_deactivate: {
             auto err = arch_x86_64::io_deactivate();
+            return static_cast<uint64_t>(err);
+        }
+        case uapi::k_syscall_process_kill: {
+            object::thread* self = sched::current();
+            if (self == nullptr || self->handles == nullptr) {
+                return static_cast<uint64_t>(arch_x86_64::process_kill_error::invalid_handle);
+            }
+            auto err = arch_x86_64::process_kill(*self->handles, static_cast<uint32_t>(a1));
             return static_cast<uint64_t>(err);
         }
         default:

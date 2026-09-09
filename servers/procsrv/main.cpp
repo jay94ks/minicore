@@ -255,6 +255,39 @@ bool is_su_target_argv(const void* argv) {
     return magic == k_su_target_magic;
 }
 
+// M22(general-purpose-completion.md §M22, ADR-178) — wait/kill 검증용
+// 데모 두 개도 su-target과 같은 방식(procsrv 자신의 재조립 ELF를
+// 다른 argv 마커로 다시 스폰)으로 만든다 — 별도 CMake 타깃을 새로
+// 만들지 않는다.
+constexpr uint32_t k_wait_target_magic = 0x57414954;  // "WAIT"
+struct wait_target_argv {
+    uint32_t magic = 0;
+    int32_t exit_code = 0;
+};
+
+bool is_wait_target_argv(const void* argv) {
+    if (argv == nullptr) {
+        return false;
+    }
+    uint32_t magic;
+    __builtin_memcpy(&magic, argv, sizeof(magic));
+    return magic == k_wait_target_magic;
+}
+
+constexpr uint32_t k_kill_target_magic = 0x4B494C4C;  // "KILL"
+struct kill_target_argv {
+    uint32_t magic = 0;
+};
+
+bool is_kill_target_argv(const void* argv) {
+    if (argv == nullptr) {
+        return false;
+    }
+    uint32_t magic;
+    __builtin_memcpy(&magic, argv, sizeof(magic));
+    return magic == k_kill_target_magic;
+}
+
 // vfs에 path를 열어 open_file_id/fs_handle을 얻는다(identity=0 —
 // 로더 자신은 guest/jail이 아니다). 실패하면 fs_handle=0.
 void vfs_open(const char* path, uint64_t& out_open_file_id, uint32_t& out_fs_handle) {
@@ -509,6 +542,101 @@ void run_guest_confinement_test() {
     }
 
     quiet_exit();
+}
+
+// M22(general-purpose-completion.md §M22, ADR-178) — wait() 검증용
+// 자식. **최초 설계는 procsrv 자신의 메인 endpoint(handle 1)에
+// Call로 exit_code를 "먼저 알리는" 것이었으나, 실제 QEMU 실행에서
+// servers/login의 OP_LOGIN Call이 procsrv가 이 자기테스트에 도달하기
+// **전에** 이미 그 endpoint의 waiting_callers에 큐잉돼 있어서
+// (login은 procsrv의 진행 상태와 무관하게 즉시 Call을 건다), procsrv
+// 가 sys_recv를 부르는 순간 login의 메시지를 이 wait 자기테스트가
+// 가로채 버리는 것을 실제로 재현했다(그 결과 login 쪽은 텅 빈
+// 응답을 "성공(0)"으로 오인하고, 이 자기테스트는 login의 페이로드를
+// exit_code로 오인해 실패로 보였다). **그래서 방향을 뒤집었다**:
+// 자식이 procsrv의 공유 endpoint로 먼저 말 거는 대신, procsrv가
+// create_endpoint=true로 이 자식만을 위한 **새** endpoint를 만들어
+// (handle 1 = 이 자식 전용, 아무도 공유하지 않음) 자식에게 "네
+// 상태를 알려달라"고 먼저 Call하고 이 자식이 Reply로 exit_code를
+// 담아 응답한다 — 충돌할 다른 큐가 원천적으로 없다.
+constexpr uint32_t k_wait_target_own_endpoint_handle = 1;
+
+[[noreturn]] void run_as_wait_target(const void* argv) {
+    wait_target_argv a{};
+    __builtin_memcpy(&a, argv, sizeof(a));
+
+    uapi::message ask{};
+    do_syscall(uapi::k_syscall_ipc_recv, k_wait_target_own_endpoint_handle,
+               reinterpret_cast<uint64_t>(&ask), 0);
+    uapi::message reply{};
+    reply.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(a.exit_code));
+    do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&reply), 0, 0);
+    quiet_exit();
+}
+
+// M22 — kill() 검증용 자식. 아무 handle도 물려받지 않는다(procsrv가
+// 이 스레드를 직접 sys_process_kill로 끝내지, IPC로 대화할 일이
+// 없다). 스스로는 절대 끝나지 않는 게 정상이지만(강제 종료로만
+// 없어져야 검증이 성립한다), M21에서 겪은 "무한 루프가 나머지
+// 부팅을 굶긴다" 실수를 반복하지 않도록 충분히 큰 유한 반복 뒤
+// 스스로도 끝나게 방어적으로 막아 둔다(kill이 실패해도 시스템
+// 전체가 멈추지는 않는다).
+[[noreturn]] void run_as_kill_target(const void*) {
+    const unsigned long k_iterations = 200000000ul;
+    for (unsigned long i = 0; i < k_iterations; ++i) {
+        asm volatile("nop");
+    }
+    quiet_exit();
+}
+
+// M22 — 위 둘을 실제로 스폰해 wait/kill 왕복을 검증한다. g_loader_ok/
+// g_reassembled(run_loader_test가 이미 채워 둔 procsrv 자신의 재조립
+// ELF 바이트)를 spawn_su_target과 같은 방식으로 재사용한다 — 반드시
+// run_loader_test() 이후에 불러야 한다.
+void run_process_lifecycle_test() {
+    if (!g_loader_ok) {
+        return;
+    }
+
+    // --- wait: 자식이 보낸 exit_code를 정확히 회수하는지 확인 ---
+    wait_target_argv wargv{};
+    wargv.magic = k_wait_target_magic;
+    wargv.exit_code = 42;
+
+    uapi::process_spawn_request wreq{};
+    wreq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+    wreq.elf_size = g_reassembled_size;
+    wreq.argv_blob = reinterpret_cast<uint64_t>(&wargv);
+    wreq.argv_size = sizeof(wargv);
+    wreq.create_endpoint = true;  // 이 자식만의 새 endpoint — 위 run_as_wait_target 주석 참고.
+    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&wreq), 0, 0);
+
+    uapi::message ask{};
+    uapi::message notify{};
+    do_syscall(uapi::k_syscall_ipc_call, wreq.out_endpoint_proxy_handle,
+               reinterpret_cast<uint64_t>(&ask), reinterpret_cast<uint64_t>(&notify));
+
+    bool wait_ok = (static_cast<int64_t>(notify.regs[0]) == wargv.exit_code);
+    const char* m1 =
+        wait_ok ? "[procsrv] wait exit_code ok=1\n" : "[procsrv] wait exit_code ok=0\n";
+    debug_log(m1, cstr_len(m1));
+
+    // --- kill: 대상 스레드 핸들을 얻어 강제 종료를 요청한다 ---
+    kill_target_argv kargv{};
+    kargv.magic = k_kill_target_magic;
+
+    uapi::process_spawn_request kreq{};
+    kreq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+    kreq.elf_size = g_reassembled_size;
+    kreq.argv_blob = reinterpret_cast<uint64_t>(&kargv);
+    kreq.argv_size = sizeof(kargv);
+    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&kreq), 0, 0);
+
+    uint64_t kill_err =
+        do_syscall(uapi::k_syscall_process_kill, kreq.out_thread_handle, 0, 0);
+    const char* m2 =
+        (kill_err == 0) ? "[procsrv] kill requested ok=1\n" : "[procsrv] kill requested ok=0\n";
+    debug_log(m2, cstr_len(m2));
 }
 
 // vfs→memfs로 파일을 열고, 그 응답으로 위임받은 memfs 핸들에 직접
@@ -903,6 +1031,14 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     if (is_su_target_argv(argv_or_null)) {
         run_as_su_target(argv_or_null);
     }
+    // M22(general-purpose-completion.md §M22) — su-target과 같은 자리,
+    // 같은 이유로 가장 먼저 판별한다.
+    if (is_wait_target_argv(argv_or_null)) {
+        run_as_wait_target(argv_or_null);
+    }
+    if (is_kill_target_argv(argv_or_null)) {
+        run_as_kill_target(argv_or_null);
+    }
     if (argv_or_null == nullptr) {
         quiet_exit();  // sys_fork+sys_exec으로 만들어진 사본.
     }
@@ -947,6 +1083,10 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // (owner/other RWX)이 실제로 동작하는지 확인한다. handle 3(cfgsrv)
     // 는 initrun이 이미 넣어 줬다(lib/*.ini의 depends=vfs,cfgsrv).
     run_cfgsrv_roundtrip_test();
+
+    // M22(general-purpose-completion.md §M22, ADR-178) — 프로세스
+    // 생명주기(자식의 exit_code 회수 + 강제 종료)를 검증한다.
+    run_process_lifecycle_test();
 
     // M17(security-model.md ADR-165) — 여기서부터 procsrv가 처음으로
     // 진짜 서버가 된다. servers/login이 OP_LOGIN/OP_SU로 이 계정

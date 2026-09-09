@@ -52,6 +52,9 @@ inline constexpr uint32_t k_right_can_send = 1u << 0;
 inline constexpr uint32_t k_right_can_recv = 1u << 1;
 inline constexpr uint32_t k_right_can_move = 1u << 2;
 inline constexpr uint32_t k_right_can_map = 1u << 3;
+// M22(general-purpose-completion.md §M22, ADR-178) — object_kind::thread
+// 핸들 전용 권한. sys_process_kill이 요구한다.
+inline constexpr uint32_t k_right_can_kill = 1u << 4;
 
 // M12(system-servers-bringup.md §M12, ADR-142) — ADR-131이 이름만
 // 정해 둔 `sys_process_spawn`과, procsrv가 자기 자신을 fork/exec하는
@@ -101,6 +104,14 @@ struct process_spawn_request {
     // IPC 메시지가 아니라 이 구조체로 직접 지정한다.
     uint32_t inherited_handle_count = 0;
     handle_transfer inherited_handles[k_max_spawn_inherited_handles] = {};
+
+    // M22(general-purpose-completion.md §M22, ADR-178) — 성공하면
+    // 새로 만든 스레드를 가리키는 object_kind::thread 소유 핸들을
+    // **호출자 자신의** handle_table에 만들어 채운다(out_endpoint_proxy_handle
+    // 과 같은 자리, 같은 "호출자 소유" 원칙). k_right_can_kill만
+    // 부여한다 — sys_process_kill(process_ops.hpp)의 유일한 용도.
+    // 호출자가 커널 스레드(handle_table 없음)면 0(무효) 그대로 둔다.
+    uint32_t out_thread_handle = 0;  // 출력.
 };
 
 // sys_exec(a1 = 이 구조체의 유저 가상주소, a2/a3 미사용) — 성공하면
@@ -197,6 +208,14 @@ struct map_phys_request {
 // 인자 없음). 둘 다 반환값 0=성공.
 inline constexpr uint64_t k_syscall_io_activate = 10;
 inline constexpr uint64_t k_syscall_io_deactivate = 11;
+
+// M22(general-purpose-completion.md §M22, ADR-178) — a1 = 대상
+// object_kind::thread 핸들(process_spawn_request::out_thread_handle로
+// 받은 값), a2/a3 미사용. 반환값 0=성공(요청 접수 — 실제 폐기는
+// 대상이 다음에 스케줄러에 뽑히려는 시점에 일어난다,
+// process_ops.hpp::process_kill 참고), 그 외는
+// process_ops.hpp::process_kill_error 값.
+inline constexpr uint64_t k_syscall_process_kill = 12;
 
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process가
 // initrun 자신의 원본 ELF 바이트를(자기 자신을 fork/process_spawn/exec으로

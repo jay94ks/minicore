@@ -77,6 +77,18 @@ struct thread {
     // §2가 정의한 필드 그대로만 담는다는 그 struct 상단 주석의 불변식을
     // 지킨다.
     uint64_t preempt_ticks_remaining = 0;
+
+    // M22(general-purpose-completion.md §M22, ADR-178) — 다른 프로세스가
+    // sys_process_kill로 이 스레드에게 강제 종료를 요청했다는 표시.
+    // 이 스레드 자신은 절대 확인하지 않는다(그러면 협조적 확인에
+    // 의존하게 돼 "강제"라는 이름이 무색해진다) — 대신 스케줄러가
+    // 이 스레드를 **다음에 실행하려는 시점**(scheduler.cpp::pick_next_alive())
+    // 에 확인해 아예 실행시키지 않고 폐기한다. 알려진 단순화: 이
+    // 스레드가 지금 IPC 대기열에 갇혀 있고 아무도 다시는
+    // enqueue()하지 않으면(예: 대기 상대가 죽거나 응답을 안 보내면)
+    // 이 스레드는 다시 "뽑히는" 순간 자체가 없어 영원히 폐기되지
+    // 않는다 — 이 커널에 대기 타임아웃이 없다는 기존 한계의 연장.
+    bool kill_requested = false;
     list_hook ipc_wait_hook;   // endpoint의 대기열(M6, kernel/core/ipc)이 이 훅을 쓴다.
     ipc_state ipc;
 
@@ -152,6 +164,13 @@ constexpr uint32_t k_right_can_send = 1u << 0;
 constexpr uint32_t k_right_can_recv = 1u << 1;
 constexpr uint32_t k_right_can_move = 1u << 2;
 constexpr uint32_t k_right_can_map = 1u << 3;
+
+// M22(general-purpose-completion.md §M22, ADR-178) — object_kind::thread
+// 핸들에 대해서만 의미 있다. sys_process_kill(process_ops.cpp)이 이
+// 권한을 요구한다 — process_spawn()이 새 스레드를 만들 때 호출자
+// 자신의 handle_table에 이 권한을 담아 발급한다(kind=thread는 M4부터
+// object_kind에 존재했지만 M21까지 실제로 발급된 적이 없었다).
+constexpr uint32_t k_right_can_kill = 1u << 4;
 
 struct endpoint {
     spinlock lock;

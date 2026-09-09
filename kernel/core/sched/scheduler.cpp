@@ -4,6 +4,7 @@
 
 #include <new>
 
+#include <klog.hpp>
 #include <libk/irq_safe.hpp>  // scoped_lock
 #include <libk/panic.hpp>
 
@@ -190,6 +191,31 @@ object::thread* pick_next_with_stealing() {
         }
     }
     return nullptr;
+}
+
+// M22(general-purpose-completion.md §M22, ADR-178) — pick_next_with_stealing()
+// 이 고른 스레드가 kill_requested라면 그 스레드를 실제로 스케줄하지
+// 않고 그 자리에서 폐기한 뒤 다시 고른다. run_queue에서는 이미
+// try_pick_band()가 erase까지 마쳐 뒀으므로(제거된 상태) 여기서
+// 추가로 큐를 건드릴 필요가 없다 — sched::exit()의 자기 종료와
+// 똑같이 "다시 enqueue하지 않는다"가 곧 폐기다. FPU 소유권 기록만
+// exit()와 동일하게 정리한다(다른 코어가 이 스레드를 계속 FPU
+// 소유자로 오인하지 않도록, M11b ADR-133 §결정3과 같은 이유) —
+// 나머지 리소스(주소공간/핸들 테이블/스택)는 exit()과 마찬가지로
+// 회수하지 않는다(기존에도 있던 누수, 이 변경이 새로 만든 것은
+// 아니다).
+object::thread* pick_next_alive() {
+    for (;;) {
+        object::thread* candidate = pick_next_with_stealing();
+        if (candidate == nullptr) {
+            return nullptr;
+        }
+        if (!candidate->kill_requested) {
+            return candidate;
+        }
+        klog::printf("[sched] thread killed (discarded before scheduling)\n");
+        arch_fpu_thread_exiting(candidate);
+    }
 }
 
 }  // namespace
@@ -437,7 +463,7 @@ void start() {
     // 실제로 여러 노드가 있을 수 있어 pick_next_with_stealing()이
     // "이 코어의 노드"를 먼저 보고, 비어 있으면 다른 노드를 훔쳐본다
     // (ADR-053).
-    object::thread* next = pick_next_with_stealing();
+    object::thread* next = pick_next_alive();
     if (next == nullptr) {
         LIBK_PANIC("sched::start: no runnable thread");
     }
@@ -467,7 +493,16 @@ void yield() {
     // 재현됐다 — M1~M11까지는 항상 "함께 도는" 커널 밴드 스레드가
     // 2개 이상이라 이 경합이 드러날 기회가 없었다.
     enqueue(*prev);
-    object::thread* next = pick_next_with_stealing();
+    object::thread* next = pick_next_alive();
+    if (next == nullptr) {
+        // M22(ADR-178) — pick_next_alive()가 prev 자신을(방금 위
+        // enqueue()로 다시 큐에 들어갔다가) kill_requested라서 폐기했고,
+        // 그 외에는 아무도 runnable하지 않은 경우다. prev는 이미
+        // 폐기됐으므로(arch_fpu_thread_exiting까지 끝남) 이 함수는 그
+        // 실행 흐름으로 "돌아갈" 수 없다 — exit()의 "아무도 안 남음"
+        // 경로와 동일하게 이 코어를 멈춘다.
+        arch_idle_halt();
+    }
     if (next == prev) {
         // 나 말고는 아무도 실행 가능하지 않다 — 방금 넣은 나 자신을
         // pick_next_with_stealing() 내부의 try_pick_band()가 그대로
@@ -498,7 +533,7 @@ void yield() {
 void block() {
     object::thread* prev = g_current;
 
-    object::thread* next = pick_next_with_stealing();
+    object::thread* next = pick_next_alive();
     if (next == nullptr) {
         LIBK_PANIC("sched::block: no runnable thread (deadlock)");
     }
@@ -525,7 +560,7 @@ void block() {
     object::thread* prev = g_current;
     arch_fpu_thread_exiting(prev);
 
-    object::thread* next = pick_next_with_stealing();
+    object::thread* next = pick_next_alive();
     if (next == nullptr) {
         // 이 코어에서 더 이상 아무도 runnable하지 않다 — 진짜로 멈춘다.
         // prev의 context_rsp는 이제 아무도 다시 읽지 않는다(scheduler.hpp
@@ -547,6 +582,8 @@ void block() {
 }
 
 object::thread* current() { return g_current; }
+
+void request_kill(object::thread& t) { t.kill_requested = true; }
 
 // M21(ADR-176) — idt.cpp가 EOI를 먼저 보낸 뒤 부른다(scheduler.hpp의
 // on_timer_tick() 선언 주석 참고). g_current가 nullptr일 수 있는

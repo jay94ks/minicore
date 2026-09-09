@@ -26,7 +26,7 @@
 | [kernel-bootstrap.md](plan/kernel-bootstrap.md) | x86_64 부팅→IPC→initrun 최초 수직 슬라이스 마일스톤 계획 (M1~M8 전부 완료 — 결과는 done 참고) |
 | [smp-fpu-bringup.md](plan/smp-fpu-bringup.md) | M9(FPU/SIMD 컨텍스트 스위칭)~M11b(lazy XSAVE/AVX 전환) — AP 기동·IPI·TLB shootdown(M10), 다중 코어/NUMA 검증+락 순서 문서화(M11) 포함, kernel-bootstrap.md 이후 계획 |
 | [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순. libmc(네이티브 C API 라이브러리)가 전 구간 교차 트랙. **M12~M20 전부 완료** — 결과는 done 참고 |
-| [general-purpose-completion.md](plan/general-purpose-completion.md) | M21(선점형 스케줄링)~M26(실제 libc 포팅 재도전) — 프로세스 생명주기(wait/시그널), 진짜 fork/exec의 fd 상속, 유저랜드 동적 메모리, 최소 네트워킹까지. aarch64 이식보다 먼저 하기로 결정된 계획. **M21 완료** — 결과는 done 참고, 다음은 M22 |
+| [general-purpose-completion.md](plan/general-purpose-completion.md) | M21(선점형 스케줄링)~M26(실제 libc 포팅 재도전) — 프로세스 생명주기(wait/시그널), 진짜 fork/exec의 fd 상속, 유저랜드 동적 메모리, 최소 네트워킹까지. aarch64 이식보다 먼저 하기로 결정된 계획. **M21~M22 완료** — 결과는 done 참고, 다음은 M23 |
 
 ## done — 완료 보고
 | 문서 | 설명 |
@@ -57,6 +57,7 @@
 | [system-servers-bringup-m20.md](done/system-servers-bringup-m20.md) | M20(완료, 계획 최종 마일스톤): libmc 최소 부분집합 신설(ADR-170)+minicore 전용 대체 셸(userland/shell, ls/cat 빌트인)+procsrv→셸 OP_START 세션 시작(ADR-171)+memfs OP_LIST(fs-protocol v4, ADR-172) — 실제 서드파티 libc/셸 포팅은 이번 라운드에 하지 않음(명시적으로 남긴 갭) — system-servers-bringup.md §M20 완료, 계획 전체(M12~M20) 완료 |
 | [real-hardware-boot-verification.md](done/real-hardware-boot-verification.md) | 마일스톤 외 확인 작업(완료): ADR-017/114가 미검증으로 남겨 뒀던 실제 부팅 경로 둘 다 처음 검증 — (1) GRUB Multiboot2(Docker grub-mkrescue ISO), 레거시 8259 PIC 미마스킹으로 인한 IRQ0/#DF 벡터 충돌 버그 진단·수정(ADR-173); (2) UEFI(Docker OVMF), 별도 PE32+ EFI 스텁을 처음부터 구현(ADR-175)하며 retf/스택 순서 버그와 initrun/devmgr의 오래된 arch_data_addr=0 버그(ADR-174, 세 경로 전부에 영향) 진단·수정 — 두 경로 모두 M1~M20 공식 스모크 테스트 82개 문자열 기준 동일한 최종 상태 도달 확인(UEFI는 OVMF 고유의 USB xHCI BAR 이슈만 알려진 제약으로 남김) |
 | [general-purpose-completion-m21.md](done/general-purpose-completion-m21.md) | M21(완료): LAPIC 타이머 기반 선점형 스케줄링(ADR-176, BSP·ring3 한정) — 새 IDT 벡터+`sched::on_timer_tick()`+`run_queue::lock`을 `irq_safe`로 승격, `init/preempt_demo/`(busy/counter)로 QEMU 실측 검증. 이 과정에서 TSS.RSP0 전역 공유 버그를 발견·수정(ADR-177, M12 ADR-141과 같은 문제 형태) — 스모크/SMP/NUMA/AVX 4개 스위트 전부 회귀 없음 확인 |
+| [general-purpose-completion-m22.md](done/general-purpose-completion-m22.md) | M22(완료): 프로세스 생명주기 최소 구현(ADR-178) — `sys_process_kill`(스케줄러가 대상을 다음에 뽑으려는 시점에 폐기)+procsrv가 자기 자신을 wait/kill 타깃으로 재스폰하는 자기테스트. wait는 procsrv의 기존 공유 로그인 endpoint 대신 자식 전용 새 endpoint로 방향을 뒤집어 servers/login의 큐잉된 Call과의 충돌을 해결(실제 재현) — procsrv.md의 완전한 프로세스 테이블/외부 OP_WAIT·OP_KILL 프로토콜은 범위 밖(OPEN-64) |
 
 ## design — 설계/상세
 

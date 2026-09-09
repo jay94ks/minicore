@@ -134,6 +134,14 @@ void block();
 
 object::thread* current();
 
+// M22(general-purpose-completion.md §M22, ADR-178) — t에게 강제 종료
+// 요청 표시를 남긴다(object::thread::kill_requested 참고). t 자신도,
+// 이 함수를 부른 스레드도 즉시 어떤 변화를 겪지 않는다 — t가 스스로
+// yield()/시간슬라이스 소진으로 run_queue에 다시 들어갔다가 스케줄러가
+// 다음에 그를 뽑으려는 순간(pick_next_alive(), scheduler.cpp) 실제
+// 폐기가 일어난다. 멱등이다(이미 요청된 스레드에 다시 불러도 안전).
+void request_kill(object::thread& t);
+
 // M21(general-purpose-completion.md §M21, ADR-176) — LAPIC 타이머
 // ISR(idt.cpp, k_vector_timer)이 매 틱 부른다. 반드시 EOI를 먼저 보낸
 // 뒤 호출해야 한다(idt.cpp 호출부 주석 참고 — 이 함수가 내부적으로

@@ -1054,13 +1054,15 @@ object::thread* setup_initrun_process() {
 void spawn_preempt_demo_processes() {
     uint64_t initrd_size = static_cast<uint64_t>(g_embedded_initrd_end - g_embedded_initrd_start);
     uint32_t unused_endpoint_handle = 0;
+    uint32_t unused_thread_handle = 0;
 
     auto busy = initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_busy");
     klog::printf("[preempt-demo] find preempt_busy ok=%u\n", busy.is_ok());
     if (busy.is_ok()) {
         auto err = arch_x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
                                                /*grant_trusted=*/false, /*create_endpoint=*/false,
-                                               nullptr, 0, unused_endpoint_handle);
+                                               nullptr, 0, unused_endpoint_handle,
+                                               unused_thread_handle);
         klog::printf("[preempt-demo] spawn busy err=%u\n", static_cast<uint32_t>(err));
     }
 
@@ -1070,7 +1072,7 @@ void spawn_preempt_demo_processes() {
         auto err = arch_x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
                                                0, /*grant_trusted=*/false,
                                                /*create_endpoint=*/false, nullptr, 0,
-                                               unused_endpoint_handle);
+                                               unused_endpoint_handle, unused_thread_handle);
         klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
     }
 }
