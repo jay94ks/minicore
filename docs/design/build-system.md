@@ -344,6 +344,76 @@ CMake·툴체인·저장소 레이아웃·서드파티 소스 관리에 관한 �
     범위 밖이다 — 지금은 "매번 새로 export한다"는 전제로 충분하다
     (배포/버저닝 정책은 실제 외부 사용자가 생기는 시점의 후속 결정).
 
+## ADR-213. M38 완성: `export-sdk.py`가 정적 libc.a/libmc.a+musl 헤더만 내보냄(동적 링킹 계획은 빠짐) — CMake 경로는 컴파일러 래퍼가 아니라 툴체인 파일이 clang을 직접 부름
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M38 실행 중 확정)
+- **배경**: ADR-190(계획 단계)의 결정을 실제로 구현한다. 계획이
+  예정한 3개 산출물(export-sdk.py, 컴파일러 래퍼, CMake 툴체인
+  파일)을 전부 만들었지만, 실행 중 계획 문서 작성 시점엔 몰랐던
+  두 가지를 발견해 범위를 조정했다.
+- **결정**:
+  1. `tools/export-sdk.py` — 이미 빌드된 트리(`build/<arch>-clang`)
+     에서 `<out>/x86_64-minicore/`로 뽑는다: `include/musl/{arch/
+     x86_64,arch/generic,generated,include}/`(libc/CMakeLists.txt가
+     `minicore_libc`에 PUBLIC으로 거는 include 디렉터리 4개와
+     정확히 같은 목록·순서 — 순서가 실제로 의미 있다는 것을 M36이
+     이미 알아냈다), `include/mc/`(libmc 공개 헤더), `lib/libc.a`+
+     `lib/libmc.a`, 공용 `link.ld`(저장소 안
+     `userland/musl-hello/link.ld`를 그대로 재사용 — 그 자체가
+     musl-hello 특화 내용이 없었다), `bin/x86_64-minicore-clang`
+     (참고용 셸 스크립트, 아래 §결정3), `x86_64-minicore.cmake`.
+  2. **동적 `libc.so`/`ld-musl-x86_64.so.1`은 내보내지 않는다** —
+     ADR-190 원안은 M29의 동적 링킹 결과물을 가정했지만, M29 자신이
+     이미 ADR-203으로 정적 링킹으로 되돌아가 있다(이 계획 문서
+     자체가 그렇게 기록해 뒀다) — 존재하지 않는 산출물을 내보낼
+     수는 없으므로, SDK는 처음부터 정적 `libc.a`만 다룬다(계획
+     문서를 다시 읽고서야 이 불일치를 알아챘다).
+  3. **타깃 트리플은 ADR-190 원안의 `x86_64-linux-musl`이 아니라
+     `x86_64-unknown-none-elf`로 확정한다** — minicore 저장소 안의
+     `libc.a` 자신이 실제로 이 트리플로 컴파일됐다
+     (`toolchain/x86_64-clang.cmake`, ADR-020). 이 SDK의 헤더/
+     라이브러리를 다른 트리플로 컴파일하는 조합은 한 번도 검증된
+     적이 없어, 검증된 조합을 그대로 유지한다 — "sysroot만 바꾼
+     표준 트리플"이라는 ADR-190의 원래 그림보다는 덜 "표준"이지만,
+     실제로 동작이 확인된 조합을 우선한다.
+  4. **CMake 경로는 `bin/x86_64-minicore-clang`(bash 스크립트)를
+     `CMAKE_C_COMPILER`로 직접 가리키지 않는다** — cmake/ninja는
+     컴파일러를 셸을 거치지 않고 OS 프로세스 실행기로 직접
+     실행하는데, 이 세션의 호스트(Windows)에서는 bash 스크립트를
+     그렇게 실행할 수 없다는 것을 실제로 겪었다("%1 is not a valid
+     Win32 application"). `x86_64-minicore.cmake`는 대신
+     `toolchain/x86_64-clang.cmake`(ADR-020)와 완전히 같은 방식으로
+     `CMAKE_C_COMPILER=clang`+`CMAKE_C_FLAGS_INIT`(타깃 트리플+
+     include 경로)를 직접 설정해 clang을 그대로 부른다 — 이 경로가
+     크로스플랫폼에서 실제로 검증된 방식이다. 셸 스크립트 래퍼는
+     CMake를 안 쓰는 사용자(수동 명령줄, 또는 셸을 거치는
+     Makefile)를 위한 참고 자료로만 남긴다. 최종 링크는 두 경로
+     모두 clang을 링크 드라이버로 쓰지 않고 `ld.lld`를 직접
+     부른다(`userland/musl-hello/CMakeLists.txt`와 완전히 같은
+     이유 — clang의 링크 모드는 자기 자신의 기본 crt/libc 탐색을
+     가정해서 이 SDK의 정적 라이브러리+커스텀 `link.ld` 조합과 안
+     맞는다).
+- **검증**: 저장소 밖 스크래치 디렉터리에 `printf`+`malloc`+
+  `strcpy`만 쓰는 순수 C "hello world"(minicore 소스 트리를 전혀
+  참조하지 않음)를 작성하고, `x86_64-minicore.cmake` 하나만 지정해
+  CMake+ninja로 컴파일·링크에 성공했다. 결과 ELF를
+  `tools/mkbootdisk.py --service=sdk-hello=<그 ELF>
+  --linux-abi-stack=sdk-hello`(수동 호출, 저장소의
+  `servers/CMakeLists.txt`는 건드리지 않았다 — 이 검증은 일회성
+  증명이라 영구 기능으로 편입하지 않는다)로 임시 bootdisk에 넣고,
+  `MINICORE_QEMU_BOOTDISK` 환경변수로 그 이미지를 지정해
+  `tools/run-qemu.sh`로 부팅해 "hello from minicore SDK (23 bytes)"
+  가 정확히 출력됨을 확인했다 — `tools/mkbootdisk.py`는 수정 없이
+  그대로 받아들였다(ADR-190이 미리 걸어 둔 "확인한다" 항목,
+  실제로 형식이 같아 수정이 필요 없었다).
+- **범위 밖**: SDK 버전 고정/배포 정책(ADR-190이 이미 범위 밖으로
+  남김), 동적 링킹 지원(M29/ADR-203의 정적 링킹 복귀가 유효한 한
+  이 SDK도 정적만 다룬다), Linux/macOS 호스트에서의 실제 검증(이
+  세션은 Windows 호스트에서만 확인했다 — 셸 스크립트 래퍼 자체는
+  다른 호스트에서 더 유용해질 수 있지만 이번 라운드는 검증하지
+  않았다).
+
 ## ADR-195. 와이어 프로토콜 정의: 각 서버 헤더에 추출 가능한 마크업 + Python 추출 도구 (OPEN-54 방법론 확정)
 
 - **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)

@@ -382,5 +382,31 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   `__lock`/`__unlock`을, 두 pthread의 `pthread_exit()`이 거의
   동시에 끝나는 시나리오에서 musl의 스레드 목록이 깨질 수 있다는
   것을 QEMU로 재현하기 전에 소스 분석으로 먼저 발견해, 진짜 futex
-  기반(musl 원본 `__lock.c`)으로 되돌렸다. 다음은 M38(minicore
-  타깃 SDK 내보내기)이다.
+  기반(musl 원본 `__lock.c`)으로 되돌렸다.
+  **M38(완료)**(결과는
+  [docs/done/real-libc-syscall-layer-m38.md](docs/done/real-libc-syscall-layer-m38.md),
+  [ADR-213](docs/design/build-system.md) 참고): minicore 타깃 SDK
+  내보내기 — `tools/export-sdk.py`+`tools/sdk-template/`(공용
+  link.ld/컴파일러 래퍼/CMake 툴체인 파일). 계획(ADR-190) 대비
+  범위 조정 2건: (1) 동적 `libc.so`는 내보내지 않는다(M29/ADR-203
+  이 이미 정적 링킹으로 되돌아가 있어 존재하지 않는 산출물이었다,
+  계획 문서를 다시 읽고서야 이 불일치를 알아챘다) (2) 타깃
+  트리플을 계획의 `x86_64-linux-musl`이 아니라 이 저장소의 `libc.a`
+  자신이 실제로 컴파일된 `x86_64-unknown-none-elf`로 확정했다.
+  실행 중 발견: 컴파일러 래퍼(bash 스크립트)를 `CMAKE_C_COMPILER`
+  로 직접 지정하면 이 세션의 Windows 호스트에서 ninja가 `%1 is not
+  a valid Win32 application`으로 실패했다(cmake/ninja는 컴파일러를
+  셸을 거치지 않고 직접 실행한다) — `x86_64-minicore.cmake`를
+  `toolchain/x86_64-clang.cmake`(ADR-020)와 같은 방식(clang을
+  `CMAKE_C_FLAGS_INIT`으로 직접 감싼다)으로 바꿔 해결했다. 검증:
+  저장소 밖 스크래치 디렉터리에서 minicore 소스를 전혀 참조하지
+  않는 순수 C "hello world"(printf+malloc+strcpy)를 이 SDK만으로
+  CMake+ninja로 컴파일·링크했고, 결과 ELF를
+  `tools/mkbootdisk.py`(수정 없이 그대로 받음 — ADR-190이 미리
+  걸어 둔 확인 항목)로 임시 부트디스크에 넣어 `MINICORE_QEMU_BOOTDISK`
+  로 QEMU에서 부팅해 "hello from minicore SDK (23 bytes)"가 정확히
+  출력됨을 확인했다(이 검증은 일회성 증명이라 저장소의
+  `servers/CMakeLists.txt`에는 편입하지 않았다). 새 커널/유저랜드
+  코드 변경이 없어 QEMU 5개 회귀 스위트는 다시 돌리지 않았다(M37
+  완료 시점의 확인이 유효). 다음은 M39(실제 서드파티 셸/coreutils
+  재포팅 시도, 스트레치)다.
