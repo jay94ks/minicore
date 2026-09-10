@@ -583,5 +583,21 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   (i386 전용이라고 잘못 가정했었다) musl의 `pipe()`가 계획이 미리
   준비해 둔 `SYS_pipe2`(293)가 아니라 `SYS_pipe`로 왔다 — 처음엔
   그대로 `-ENOSYS`로 떨어졌고, 둘 다 같은 핸들러로 처리하도록
-  케이스를 합쳐 해결했다. 다음은 M52(BusyBox submodule 추가+정적
-  링크 빌드)다.
+  케이스를 합쳐 해결했다.
+  **M52는 착수했으나 사용자 결정으로 잠시 멈췄다**(2026-09-11) —
+  BusyBox를 `third_party/busybox`(release `1_36_1`)로 submodule만
+  추가한 상태다(빌드 연결은 아직 안 함). 착수 중 발견한 진짜 장벽
+  하나를 **OPEN-74**로 등록했다: BusyBox의 Makefile(`scripts/
+  trylink`)은 `$(CC)`가 컴파일과 링크를 한 번에 다 하는 정상적인
+  hosted gcc/clang이라고 전제하는데, 이 저장소는 정확히 그
+  반대다(ADR-020/M38 — clang은 컴파일에만, 최종 링크는 `ld.lld`를
+  커스텀 link.ld와 함께 직접 부른다). 실제로 손으로
+  `-fuse-ld=lld`를 줘서 clang을 링커로 써 봤더니, 이 Windows
+  호스트에서 그 플래그가 조용히 무시되고 MSYS2 gcc의 collect2로
+  새는 것까지 직접 확인했다(M38이 겪은 것과 같은 부류의 문제).
+  `trylink`는 그 외에도 `int main(){}`을 실제로 컴파일+링크해 보는
+  식의 여러 "hosted 환경 가정" 프로브를 한다 — 풀려면 컴파일/링크
+  모드를 구분해 후자를 `ld.lld` 호출로 바꿔치는 `CC` 셈 스크립트를
+  새로 만들고 `third_party/patches/busybox/`(ADR-022 관례)로
+  `trylink`의 프로브를 우회시켜야 한다는 것까지는 파악했다 — 다음
+  대화에서 이어간다.
