@@ -131,7 +131,8 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
                 req->grant_trusted, req->create_endpoint, req->inherited_handles,
                 req->inherited_handle_count, req->out_endpoint_proxy_handle,
-                req->out_thread_handle, req->linux_abi_stack != 0);
+                req->out_thread_handle, req->linux_abi_stack != 0,
+                reinterpret_cast<const uint8_t*>(req->interp_data), req->interp_size);
             return static_cast<uint64_t>(err);
         }
         case MC_SYSCALL_FORK: {

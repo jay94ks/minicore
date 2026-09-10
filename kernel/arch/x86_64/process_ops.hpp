@@ -54,13 +54,20 @@ enum class process_spawn_error : uint32_t {
 // process_ops.cpp::build_process 참고)을 구성한다 — musl의 crt_arch.h
 // (`_start`)가 이 관례로 %rsp를 읽는다. false(기본, 기존 모든
 // 호출자)면 이 커널의 기존 관례(arg0 레지스터 하나)만 쓴다.
+// M29(real-libc-syscall-layer.md §M29, ADR-189) — interp_data!=nullptr이면
+// 그 ET_DYN 인터프리터(musl의 ld-musl-x86_64.so.1)를 별도 베이스에
+// 추가로 적재하고, 실제 진입점을 그것으로 바꾸며 auxv에 진짜
+// AT_PHDR/AT_PHENT/AT_PHNUM/AT_ENTRY/AT_BASE를 채운다(linux_abi_stack
+// 이 true일 때만 의미 있다). nullptr(기본)이면 M28과 동일하다.
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
                                    bool grant_trusted, bool create_endpoint,
                                    const mc_handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
                                    uint32_t& out_endpoint_proxy_handle,
-                                   uint32_t& out_thread_handle, bool linux_abi_stack);
+                                   uint32_t& out_thread_handle, bool linux_abi_stack,
+                                   const uint8_t* interp_data = nullptr,
+                                   uint64_t interp_size = 0);
 
 enum class process_kill_error : uint32_t {
     ok = 0,

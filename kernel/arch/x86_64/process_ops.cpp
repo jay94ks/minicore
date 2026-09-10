@@ -66,9 +66,17 @@ constexpr uint64_t k_mmio_user_vaddr = 0x0000700000300000ull;
 constexpr uint64_t k_heap_user_vaddr = 0x0000700000500000ull;
 constexpr uint64_t k_heap_region_size = 0x100000ull;  // 1MiB.
 
+// M29(real-libc-syscall-layer.md §M29) — 인터프리터를 올릴 고정
+// 베이스. 주 프로그램 베이스(0x10000000, build_process 상단
+// INITRUN_BASE류 상수와 같은 계열)와 유저 스택(0x700000000000...)
+// 사이 충분히 떨어진 자리 — musl의 ld-musl-x86_64.so.1은 수십~
+// 수백 KiB뿐이라 이 간격이면 충분하다.
+constexpr uint64_t k_interp_base = 0x0000000020000000ull;
+
 process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size, bool trusted,
-                                   bool linux_abi_stack, built_process& out) {
+                                   bool linux_abi_stack, const uint8_t* interp_data,
+                                   uint64_t interp_size, built_process& out) {
     if (argv_size > kern::mm::k_page_size) {
         return process_spawn_error::invalid_argument;
     }
@@ -91,6 +99,20 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
     if (!load_result.is_ok()) {
         kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::elf_load_failed;
+    }
+
+    // M29 — 인터프리터가 있으면 별도 베이스에 추가로 적재한다(ET_DYN,
+    // load_elf()의 새 load_bias 인자 — elf_loader.hpp 참고). 실패해도
+    // 주 프로그램 로드 자체는 이미 끝났으므로 여기서만 정리한다.
+    bool has_interp = (interp_data != nullptr && interp_size > 0);
+    uint64_t interp_entry = 0;
+    if (has_interp) {
+        auto interp_result = load_elf(pml4_phys, interp_data, interp_size, k_interp_base);
+        if (!interp_result.is_ok()) {
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
+            return process_spawn_error::elf_load_failed;
+        }
+        interp_entry = interp_result.value();
     }
 
     uint64_t user_rsp_value = k_user_stack_top;
@@ -128,7 +150,7 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
             uint64_t argv0_ptr;
             uint64_t argv_null;
             uint64_t envp_null;
-            uint64_t auxv[9][2];
+            uint64_t auxv[12][2];
             char argv0_str[32];
         };
         static_assert(sizeof(stack_layout) <= 512, "linux_abi_stack 레이아웃이 예약 공간을 넘는다");
@@ -152,13 +174,12 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         l->argv_null = 0;
         l->envp_null = 0;
         // AT_PAGESZ=6, AT_UID=11, AT_EUID=12, AT_GID=13, AT_EGID=14,
-        // AT_SECURE=23, AT_PHDR=3, AT_PHNUM=5, AT_NULL=0(마지막) —
-        // musl/include/elf.h와 정확히 같은 값(third_party/musl 자신의
-        // 헤더를 참고했다 — 이 커널이 그 값을 재정의하지 않는다).
-        // AT_UID==AT_EUID && AT_GID==AT_EGID && !AT_SECURE가 전부
-        // 성립해야 __init_libc가 poll() 기반 stdio 보안 검사를
-        // 건너뛴다(이 커널엔 SYS_poll이 없다) — 전부 0으로 둬서
-        // 이 조건을 항상 만족시킨다.
+        // AT_SECURE=23, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9,
+        // AT_BASE=7, AT_NULL=0(마지막) — musl/include/elf.h와 정확히
+        // 같은 값. AT_UID==AT_EUID && AT_GID==AT_EGID && !AT_SECURE가
+        // 전부 성립해야 __init_libc가 poll() 기반 stdio 보안 검사를
+        // 건너뛴다(이 커널엔 SYS_poll이 없다) — 전부 0으로 둬서 이
+        // 조건을 항상 만족시킨다.
         l->auxv[0][0] = 6;
         l->auxv[0][1] = kern::mm::k_page_size;
         l->auxv[1][0] = 11;
@@ -171,12 +192,44 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         l->auxv[4][1] = 0;
         l->auxv[5][0] = 23;
         l->auxv[5][1] = 0;
-        l->auxv[6][0] = 3;
-        l->auxv[6][1] = 0;
-        l->auxv[7][0] = 5;
-        l->auxv[7][1] = 0;
-        l->auxv[8][0] = 0;
-        l->auxv[8][1] = 0;
+
+        if (has_interp) {
+            // M29 — PT_INTERP 경로: AT_PHDR/AT_PHENT/AT_PHNUM은 **주
+            // 프로그램**의 것(ld.so가 이미 커널이 매핑해 둔 주 프로그램의
+            // phdr을 이 값으로 찾아간다), AT_ENTRY는 주 프로그램의 진짜
+            // 진입점(load_result.value(), bias=0이라 그대로), AT_BASE는
+            // 인터프리터의 로드 바이어스다. 표준 ELF64 헤더 레이아웃
+            // (e_phoff@32, e_phentsize@54, e_phnum@56)을 직접 읽는다 —
+            // elf_loader.cpp의 elf64_ehdr은 그 파일의 익명 네임스페이스
+            // 안에만 있어 여기서 재사용할 수 없다(중복이 아니라 그
+            // 파일의 로컬 세부로 남기는 편이 낫다는 판단, ADR-002와
+            // 같은 최소 헤더 의존 정신).
+            uint64_t e_phoff = 0;
+            uint16_t e_phentsize = 0;
+            uint16_t e_phnum = 0;
+            __builtin_memcpy(&e_phoff, elf_data + 32, sizeof(e_phoff));
+            __builtin_memcpy(&e_phentsize, elf_data + 54, sizeof(e_phentsize));
+            __builtin_memcpy(&e_phnum, elf_data + 56, sizeof(e_phnum));
+
+            l->auxv[6][0] = 3;  // AT_PHDR.
+            l->auxv[6][1] = e_phoff;  // 주 프로그램 베이스(bias=0)라 파일 오프셋=가상주소.
+            l->auxv[7][0] = 4;  // AT_PHENT.
+            l->auxv[7][1] = e_phentsize;
+            l->auxv[8][0] = 5;  // AT_PHNUM.
+            l->auxv[8][1] = e_phnum;
+            l->auxv[9][0] = 9;  // AT_ENTRY — 주 프로그램의 진짜 진입점.
+            l->auxv[9][1] = load_result.value();
+            l->auxv[10][0] = 7;  // AT_BASE — 인터프리터의 로드 바이어스.
+            l->auxv[10][1] = k_interp_base;
+            // auxv[11]은 memset으로 이미 (0,0) — AT_NULL 종료.
+        } else {
+            l->auxv[6][0] = 3;
+            l->auxv[6][1] = 0;
+            l->auxv[7][0] = 5;
+            l->auxv[7][1] = 0;
+            l->auxv[8][0] = 0;
+            l->auxv[8][1] = 0;
+        }
 
         user_rsp_value = layout_vaddr;
     }
@@ -255,7 +308,10 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
     }
 
     out.space = space;
-    out.entry_rip = load_result.value();
+    // M29 — 인터프리터가 있으면 진짜 진입점은 인터프리터의 것이다(주
+    // 프로그램은 매핑만 해 두고, ld.so가 auxv의 AT_ENTRY로 나중에
+    // 직접 찾아간다 — 위 has_interp 블록 참고).
+    out.entry_rip = has_interp ? interp_entry : load_result.value();
     out.user_rsp = user_rsp_value;
     out.arg0 = arg0;
     return process_spawn_error::ok;
@@ -269,10 +325,11 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const mc_handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
                                    uint32_t& out_endpoint_proxy_handle,
-                                   uint32_t& out_thread_handle, bool linux_abi_stack) {
+                                   uint32_t& out_thread_handle, bool linux_abi_stack,
+                                   const uint8_t* interp_data, uint64_t interp_size) {
     built_process built;
     auto err = build_process(elf_data, elf_size, argv_blob, argv_size, grant_trusted,
-                              linux_abi_stack, built);
+                              linux_abi_stack, interp_data, interp_size, built);
     if (err != process_spawn_error::ok) {
         return err;
     }
@@ -446,7 +503,8 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
     // (musl의 execve() 번역은 M32 대상, procsrv.md §4처럼 신원 유지만
     // 다루는 이 경로는 여전히 우리 자신의 arg0 관례를 쓴다).
     auto err = build_process(elf_data, elf_size, argv_blob, argv_size,
-                              self->owner_space->trusted, /*linux_abi_stack=*/false, built);
+                              self->owner_space->trusted, /*linux_abi_stack=*/false,
+                              /*interp_data=*/nullptr, /*interp_size=*/0, built);
     if (err != process_spawn_error::ok) {
         return err;
     }

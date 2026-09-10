@@ -44,6 +44,7 @@ constexpr uint32_t k_pf_exec = 1u << 0;
 constexpr uint32_t k_pf_write = 1u << 1;
 
 constexpr uint16_t k_et_exec = 2;
+constexpr uint16_t k_et_dyn = 3;  // M29 — musl의 ld-musl-x86_64.so.1(PIE).
 constexpr uint16_t k_em_x86_64 = 62;
 
 uint64_t page_align_down(uint64_t v) { return v & ~static_cast<uint64_t>(kern::mm::k_page_size - 1); }
@@ -54,7 +55,7 @@ uint64_t page_align_up(uint64_t v) {
 }  // namespace
 
 result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data,
-                                      uint64_t elf_size) {
+                                      uint64_t elf_size, uint64_t load_bias) {
     if (elf_size < sizeof(elf64_ehdr)) {
         kern::klog::printf("[elf_loader] truncated(header) elf_size=0x%lx\n",
                      static_cast<unsigned long>(elf_size));
@@ -76,10 +77,17 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
         kern::klog::printf("[elf_loader] unsupported_machine=%u\n", eh.e_machine);
         return result<uint64_t, elf_error>::err(elf_error::unsupported_machine);
     }
-    if (eh.e_type != k_et_exec) {
-        // ET_DYN(PIE)은 재배치 처리가 필요해 이 최소 로더의 범위 밖 —
-        // init/initrun/link.ld가 항상 ET_EXEC(고정 주소)로 링크한다.
+    bool is_dyn = (eh.e_type == k_et_dyn);
+    if (eh.e_type != k_et_exec && !is_dyn) {
         kern::klog::printf("[elf_loader] unsupported_type=%u\n", eh.e_type);
+        return result<uint64_t, elf_error>::err(elf_error::unsupported_type);
+    }
+    if (is_dyn && load_bias == 0) {
+        // ET_DYN을 바이어스 없이(=0) 로드하면 p_vaddr가 대부분 0 근처라
+        // 실제로 유효하지 않은 낮은 주소에 매핑을 시도하게 된다 —
+        // 호출자가 반드시 0이 아닌 바이어스를 골라야 한다(M29,
+        // build_process()의 인터프리터 로딩이 실제 호출자).
+        kern::klog::printf("[elf_loader] et_dyn requires nonzero load_bias\n");
         return result<uint64_t, elf_error>::err(elf_error::unsupported_type);
     }
 
@@ -120,10 +128,11 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
             perm = perm | page_perm::exec;
         }
 
-        uint64_t seg_start = page_align_down(ph.p_vaddr);
-        uint64_t seg_end = page_align_up(ph.p_vaddr + ph.p_memsz);
-        uint64_t file_start = ph.p_vaddr;
-        uint64_t file_end = ph.p_vaddr + ph.p_filesz;
+        uint64_t vaddr = ph.p_vaddr + load_bias;
+        uint64_t seg_start = page_align_down(vaddr);
+        uint64_t seg_end = page_align_up(vaddr + ph.p_memsz);
+        uint64_t file_start = vaddr;
+        uint64_t file_end = vaddr + ph.p_filesz;
 
         for (uint64_t page_vaddr = seg_start; page_vaddr < seg_end;
              page_vaddr += kern::mm::k_page_size) {
@@ -153,7 +162,7 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
         }
     }
 
-    return result<uint64_t, elf_error>::ok(eh.e_entry);
+    return result<uint64_t, elf_error>::ok(eh.e_entry + load_bias);
 }
 
 }  // namespace kern::arch::x86_64

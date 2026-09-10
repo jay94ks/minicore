@@ -104,6 +104,17 @@ typedef struct {
     // 최상단에 Linux ABI 초기 스택(argc/argv/envp/auxv)을 구성한다
     // (musl의 crt_arch.h가 요구). false(기본)면 기존 arg0 관례만 쓴다.
     uint8_t linux_abi_stack;
+
+    // M29(real-libc-syscall-layer.md §M29, ADR-189) — 0(기본)이면
+    // 인터프리터 없음(M28과 동일한 정적 실행). 0이 아니면 이
+    // 인터프리터(ET_DYN, 예: musl 자신의 ld-musl-x86_64.so.1)를
+    // 별도 베이스에 추가로 적재하고, 실제 진입점을 인터프리터의
+    // 것으로 바꾸며, auxv에 AT_PHDR/AT_PHENT/AT_PHNUM(주 프로그램의
+    // 것)+AT_ENTRY(주 프로그램의 진짜 진입점)+AT_BASE(이 인터프리터의
+    // 로드 바이어스)를 실제 값으로 채운다 — linux_abi_stack이
+    // true일 때만 의미 있다(false면 무시된다).
+    uint64_t interp_data;
+    uint64_t interp_size;
 } mc_process_spawn_request;
 
 // sys_exec(a1 = 이 구조체의 유저 가상주소) — 성공하면 반환하지

@@ -233,17 +233,25 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   (M27~M39) 전체를 먼저 끝내고, 그 다음 user-service-manager.md
   (M40~M43)를 진행**하기로 확정했다(2026-09-10).
   [real-libc-syscall-layer.md](docs/plan/real-libc-syscall-layer.md)의
-  **M27~M28이 완료됐다**(결과는
+  **M27~M29가 완료됐다(M29는 부분 완료)**(결과는
   [docs/done/real-libc-syscall-layer-m27.md](docs/done/real-libc-syscall-layer-m27.md),
   [docs/done/real-libc-syscall-layer-m28.md](docs/done/real-libc-syscall-layer-m28.md),
-  [ADR-201](docs/design/security-model.md)/[ADR-202](docs/design/kernel-memory.md)
-  참고) — M27: procsrv 실제 process_entry 테이블+범용
-  `proc_op::wait`/`kill`(caller_pid 자기주장+비블로킹 폴링으로 범위
-  좁힘, OPEN-54 해소+OPEN-67 신설)+재부모화 메커니즘 증명. M28:
-  `tools/apply-patches.sh` 실제 구현+musl의 syscall_arch.h 패치
-  (모든 syscall을 `libc/sysdeps/minicore/syscall_shim.c`로 우회)+
-  `userland/musl-hello`가 musl의 진짜 시작 경로로 진입해 "hello
-  from real musl" 출력 — 실행 중 musl의 `__init_tls`가 `arch_prctl`
-  (FS_BASE)을 무조건 요구하고 Linux ABI 초기 스택(argc/argv/envp/
-  auxv)도 필요함을 발견해, 원래 M30/M29 계획이던 두 커널 기능을
-  M28로 앞당겼다(ADR-202). **M29(동적 링킹 도입)부터 진행 중**이다.
+  [docs/done/real-libc-syscall-layer-m29.md](docs/done/real-libc-syscall-layer-m29.md),
+  [ADR-201](docs/design/security-model.md)/[ADR-202](docs/design/kernel-memory.md)/
+  [ADR-203](docs/design/kernel-memory.md) 참고) — M27: procsrv 실제
+  process_entry 테이블+범용 `proc_op::wait`/`kill`(caller_pid
+  자기주장+비블로킹 폴링으로 범위 좁힘, OPEN-54 해소+OPEN-67 신설)+
+  재부모화 메커니즘 증명. M28: `tools/apply-patches.sh` 실제 구현+
+  musl의 syscall_arch.h 패치(모든 syscall을 `libc/sysdeps/minicore/
+  syscall_shim.c`로 우회)+`userland/musl-hello`가 musl의 진짜 시작
+  경로로 진입해 "hello from real musl" 출력 — 실행 중 musl의
+  `__init_tls`가 `arch_prctl`(FS_BASE)을 무조건 요구하고 Linux ABI
+  초기 스택(argc/argv/envp/auxv)도 필요함을 발견해, 원래 M30/M29
+  계획이던 두 커널 기능을 M28로 앞당겼다(ADR-202). M29(부분 완료):
+  커널 ELF 로더의 ET_DYN+load_bias 지원+진짜 AT_PHDR/AT_ENTRY/
+  AT_BASE auxv 구성까지는 완료했지만, musl 자신의 `libc.so`
+  (ldso/dynlink.c 2439줄, 전체를 -fPIC로 재컴파일한 멀티콜
+  바이너리+자기재배치 부트스트랩)를 실제로 빌드해 동작시키는 것은
+  M27/M28과 질적으로 다른 위험도라 판단해 시도하지 않았다 — 계획
+  문서 자신이 명시한 "크게 막히면 정적 링킹 복귀" 조항을 실행했다
+  (ADR-203). **M30(정적 링킹 기반)부터 진행 중**이다.
