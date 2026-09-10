@@ -67,6 +67,10 @@ extern "C" void arch_sync_io_permission(const kern::object::thread& next);
 // 과 같은 4곳(start/yield/block/exit)에서 함께 부른다.
 extern "C" void arch_sync_exception_stack(const kern::object::thread& next);
 
+// M28(real-libc-syscall-layer.md §M28) — tss.hpp::sync_fs_base() 참고.
+// 위 두 훅과 같은 자리에서 함께 부른다.
+extern "C" void arch_sync_fs_base(const kern::object::thread& next);
+
 namespace kern::sched {
 
 namespace {
@@ -473,6 +477,7 @@ void start() {
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
     arch_sync_exception_stack(*next);
+    arch_sync_fs_base(*next);
     arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
@@ -525,6 +530,7 @@ void yield() {
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
     arch_sync_exception_stack(*next);
+    arch_sync_fs_base(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
     // arch_context_switch에서 돌아왔다는 것은 prev가 다시 스케줄되어
     // 이 지점부터 재개됐다는 뜻이다.
@@ -547,6 +553,7 @@ void block() {
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
     arch_sync_exception_stack(*next);
+    arch_sync_fs_base(*next);
     arch_context_switch(&prev->context_rsp, next->context_rsp, next_pml4_phys(*next));
 }
 
@@ -577,6 +584,7 @@ void block() {
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
     arch_sync_exception_stack(*next);
+    arch_sync_fs_base(*next);
     arch_context_switch(&discard_rsp, next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }

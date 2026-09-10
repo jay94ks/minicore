@@ -163,6 +163,20 @@ void sync_exception_stack(const kern::object::thread& t) {
     }
 }
 
+namespace {
+constexpr uint32_t k_msr_fs_base = 0xC0000100;
+
+void wrmsr(uint32_t msr, uint64_t value) {
+    uint32_t lo = static_cast<uint32_t>(value);
+    uint32_t hi = static_cast<uint32_t>(value >> 32);
+    asm volatile("wrmsr" ::"c"(msr), "a"(lo), "d"(hi));
+}
+}  // namespace
+
+void sync_fs_base(const kern::object::thread& t) {
+    wrmsr(k_msr_fs_base, t.fs_base);
+}
+
 }  // namespace kern::arch::x86_64
 
 // kernel/core/sched/scheduler.cpp가 컨텍스트 스위치마다 부르는 훅
@@ -177,4 +191,11 @@ extern "C" void arch_sync_io_permission(const kern::object::thread& next) {
 // 부른다.
 extern "C" void arch_sync_exception_stack(const kern::object::thread& next) {
     kern::arch::x86_64::sync_exception_stack(next);
+}
+
+// M28(real-libc-syscall-layer.md §M28) — tss.hpp::sync_fs_base() 참고.
+// scheduler.cpp가 위 두 훅과 같은 자리(컨텍스트 스위치 4곳)에서
+// 함께 부른다.
+extern "C" void arch_sync_fs_base(const kern::object::thread& next) {
+    kern::arch::x86_64::sync_fs_base(next);
 }

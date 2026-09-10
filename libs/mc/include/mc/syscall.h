@@ -76,6 +76,7 @@ typedef struct {
 #define MC_SYSCALL_IO_DEACTIVATE 11u
 #define MC_SYSCALL_PROCESS_KILL 12u
 #define MC_SYSCALL_BRK 13u
+#define MC_SYSCALL_ARCH_PRCTL_SET_FS 14u
 
 #define MC_MAX_DEBUG_LOG_BYTES 96u
 #define MC_MAX_MMIO_MAP_BYTES (16ull * 1024 * 1024)
@@ -98,6 +99,11 @@ typedef struct {
     mc_handle_transfer inherited_handles[MC_MAX_SPAWN_INHERITED_HANDLES];
 
     uint32_t out_thread_handle;  // 출력(M22, ADR-178) — k_right_can_kill만 부여.
+
+    // M28(real-libc-syscall-layer.md §M28, ADR-183) — true면 유저 스택
+    // 최상단에 Linux ABI 초기 스택(argc/argv/envp/auxv)을 구성한다
+    // (musl의 crt_arch.h가 요구). false(기본)면 기존 arg0 관례만 쓴다.
+    uint8_t linux_abi_stack;
 } mc_process_spawn_request;
 
 // sys_exec(a1 = 이 구조체의 유저 가상주소) — 성공하면 반환하지
@@ -138,6 +144,14 @@ typedef struct {
     int64_t increment;
     uint64_t out_old_top;  // 출력 — 증가 전 heap_top(sbrk() 관례).
 } mc_brk_request;
+
+// sys_arch_prctl_set_fs(a1=fs_base) — musl의 SYS_arch_prctl(ARCH_SET_FS,
+// addr) 번역 대상(M28, real-libc-syscall-layer.md §M28). Linux의
+// arch_prctl은 여러 code(ARCH_SET_FS/GET_FS/SET_GS/GET_GS)를 하나의
+// syscall로 다루지만, 이 커널은 musl 시작 경로가 실제로 쓰는 경우
+// (ARCH_SET_FS)만 전용 syscall로 노출한다(ADR-001 — 정확성 우선,
+// 안 쓰는 경우를 미리 일반화하지 않는다). 항상 성공(0)한다 — 실패
+// 조건이 없다(호출 스레드 자신의 MSR을 즉시 쓴다).
 
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process와
 // procsrv가 자기 자신을 fork/spawn/exec으로 다시 만들어 보는 데
@@ -199,6 +213,11 @@ static inline _Noreturn void mc_thread_exit(void) {
 // out_of_memory — 힙 슬롯 예산 초과).
 static inline uint64_t mc_brk(mc_brk_request* req) {
     return mc_raw_syscall(MC_SYSCALL_BRK, (uint64_t)(uintptr_t)req, 0, 0);
+}
+
+// M28(real-libc-syscall-layer.md §M28) — sys_arch_prctl_set_fs.
+static inline uint64_t mc_arch_prctl_set_fs(uint64_t fs_base) {
+    return mc_raw_syscall(MC_SYSCALL_ARCH_PRCTL_SET_FS, fs_base, 0, 0);
 }
 
 #endif  // !MC_LAND_KERNEL

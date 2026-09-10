@@ -169,6 +169,13 @@ struct thread {
     // 읽어 이전 매핑을 frame_release한다.
     uint32_t ipc_mapped_page_count = 0;
     uint64_t ipc_mapped_frames[4] = {};
+
+    // M28(real-libc-syscall-layer.md §M28, ADR-183) — sys_arch_prctl_set_fs가
+    // 채우는 이 스레드의 IA32_FS_BASE 값(기본 0 = 미설정). musl의
+    // __init_tp가 TLS/errno 접근 전제조건으로 무조건 요구한다(tss.hpp::
+    // sync_fs_base 참고) — 컨텍스트 스위치마다 이 값이 실제 MSR에
+    // 반영돼야 스레드마다 독립된 TLS가 성립한다.
+    uint64_t fs_base = 0;
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/

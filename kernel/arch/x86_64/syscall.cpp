@@ -12,6 +12,7 @@
 
 #include "gdt_selectors.hpp"
 #include "process_ops.hpp"
+#include "tss.hpp"
 
 #include <cstdint>
 
@@ -130,7 +131,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
                 req->grant_trusted, req->create_endpoint, req->inherited_handles,
                 req->inherited_handle_count, req->out_endpoint_proxy_handle,
-                req->out_thread_handle);
+                req->out_thread_handle, req->linux_abi_stack != 0);
             return static_cast<uint64_t>(err);
         }
         case MC_SYSCALL_FORK: {
@@ -221,6 +222,22 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             }
             auto err = kern::arch::x86_64::brk(req->increment, req->out_old_top);
             return static_cast<uint64_t>(err);
+        }
+        case MC_SYSCALL_ARCH_PRCTL_SET_FS: {
+            // M28(real-libc-syscall-layer.md §M28) — mc/syscall.h의
+            // mc_arch_prctl_set_fs 주석 참고. 즉시 이 스레드의
+            // fs_base를 기록하고 지금 당장 MSR에도 반영한다(다음
+            // 컨텍스트 스위치에서 tss.hpp::sync_fs_base가 다시
+            // 덮어쓰겠지만, 이 스레드가 SYSRET로 곧바로 유저모드로
+            // 돌아가는 동안에도 유효해야 한다 — 컨텍스트 스위치 없이
+            // 같은 스레드가 곧바로 TLS를 쓰는 경우).
+            kern::object::thread* self = kern::sched::current();
+            if (self == nullptr) {
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
+            }
+            self->fs_base = a1;
+            kern::arch::x86_64::sync_fs_base(*self);
+            return 0;
         }
         default:
             return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);

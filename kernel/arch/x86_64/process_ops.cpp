@@ -68,7 +68,7 @@ constexpr uint64_t k_heap_region_size = 0x100000ull;  // 1MiB.
 
 process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size, bool trusted,
-                                   built_process& out) {
+                                   bool linux_abi_stack, built_process& out) {
     if (argv_size > kern::mm::k_page_size) {
         return process_spawn_error::invalid_argument;
     }
@@ -93,11 +93,16 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         return process_spawn_error::elf_load_failed;
     }
 
+    uint64_t user_rsp_value = k_user_stack_top;
+    uint64_t top_stack_page_phys = 0;
     for (uint32_t i = 0; i < k_user_stack_pages; ++i) {
         auto page = kern::mm::alloc_pages(0, 0);
         if (!page.is_ok()) {
             kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
+        }
+        if (i == k_user_stack_pages - 1) {
+            top_stack_page_phys = page.value();  // 아래 linux_abi_stack용.
         }
         uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * kern::mm::k_page_size;
         auto mapped =
@@ -106,6 +111,74 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
             kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
+    }
+
+    // M28(real-libc-syscall-layer.md §M28, ADR-183) — musl의 crt_arch.h
+    // (`_start`)는 %rsp를 그대로 읽어 argc부터 해석한다(Linux ABI 초기
+    // 스택 관례) — 이 커널의 기존 유저 스레드(initrun/서버들)는 전혀
+    // 이 관례를 쓰지 않고 arg0(레지스터 하나)만 쓰므로, 이 레이아웃은
+    // linux_abi_stack이 실제로 요청될 때만(musl 링크 프로그램) 유저
+    // 스택 최상단에 덧써진다. 이번 라운드는 고정된 최소값만 채운다
+    // (argv[0] 하나, envp 없음, __init_libc/__init_tls가 크래시 없이
+    // 지나가는 데 필요한 auxv만) — 실제 인자 전달/일반 auxv 확장은
+    // M29(동적 링킹, PT_INTERP 지원 시 AT_PHDR 등 추가)에서 다룬다.
+    if (linux_abi_stack) {
+        struct stack_layout {
+            uint64_t argc;
+            uint64_t argv0_ptr;
+            uint64_t argv_null;
+            uint64_t envp_null;
+            uint64_t auxv[9][2];
+            char argv0_str[32];
+        };
+        static_assert(sizeof(stack_layout) <= 512, "linux_abi_stack 레이아웃이 예약 공간을 넘는다");
+
+        constexpr uint64_t k_layout_offset = kern::mm::k_page_size - 512;
+        uint64_t layout_vaddr = k_user_stack_top - kern::mm::k_page_size + k_layout_offset;
+
+        // top_stack_page_phys는 유저 쪽엔 (k_user_stack_top-k_page_size)에
+        // 매핑돼 있다 — phys_to_virt는 같은 물리 페이지의 커널 자신의
+        // 항등 매핑 뷰이므로, 여기서 그 뷰로 써 넣은 바이트가 그대로
+        // 유저 쪽 layout_vaddr에서 읽힌다(argv_virt와 같은 관례, 위
+        // 참고).
+        auto* l = reinterpret_cast<stack_layout*>(
+            static_cast<uint8_t*>(kern::mm::phys_to_virt(top_stack_page_phys)) + k_layout_offset);
+        __builtin_memset(l, 0, sizeof(*l));
+        constexpr const char k_argv0[] = "/bin/musl-hello";
+        __builtin_memcpy(l->argv0_str, k_argv0, sizeof(k_argv0));
+
+        l->argc = 1;
+        l->argv0_ptr = layout_vaddr + __builtin_offsetof(stack_layout, argv0_str);
+        l->argv_null = 0;
+        l->envp_null = 0;
+        // AT_PAGESZ=6, AT_UID=11, AT_EUID=12, AT_GID=13, AT_EGID=14,
+        // AT_SECURE=23, AT_PHDR=3, AT_PHNUM=5, AT_NULL=0(마지막) —
+        // musl/include/elf.h와 정확히 같은 값(third_party/musl 자신의
+        // 헤더를 참고했다 — 이 커널이 그 값을 재정의하지 않는다).
+        // AT_UID==AT_EUID && AT_GID==AT_EGID && !AT_SECURE가 전부
+        // 성립해야 __init_libc가 poll() 기반 stdio 보안 검사를
+        // 건너뛴다(이 커널엔 SYS_poll이 없다) — 전부 0으로 둬서
+        // 이 조건을 항상 만족시킨다.
+        l->auxv[0][0] = 6;
+        l->auxv[0][1] = kern::mm::k_page_size;
+        l->auxv[1][0] = 11;
+        l->auxv[1][1] = 0;
+        l->auxv[2][0] = 12;
+        l->auxv[2][1] = 0;
+        l->auxv[3][0] = 13;
+        l->auxv[3][1] = 0;
+        l->auxv[4][0] = 14;
+        l->auxv[4][1] = 0;
+        l->auxv[5][0] = 23;
+        l->auxv[5][1] = 0;
+        l->auxv[6][0] = 3;
+        l->auxv[6][1] = 0;
+        l->auxv[7][0] = 5;
+        l->auxv[7][1] = 0;
+        l->auxv[8][0] = 0;
+        l->auxv[8][1] = 0;
+
+        user_rsp_value = layout_vaddr;
     }
 
     uint64_t arg0 = 0;
@@ -183,7 +256,7 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
 
     out.space = space;
     out.entry_rip = load_result.value();
-    out.user_rsp = k_user_stack_top;
+    out.user_rsp = user_rsp_value;
     out.arg0 = arg0;
     return process_spawn_error::ok;
 }
@@ -196,9 +269,10 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const mc_handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
                                    uint32_t& out_endpoint_proxy_handle,
-                                   uint32_t& out_thread_handle) {
+                                   uint32_t& out_thread_handle, bool linux_abi_stack) {
     built_process built;
-    auto err = build_process(elf_data, elf_size, argv_blob, argv_size, grant_trusted, built);
+    auto err = build_process(elf_data, elf_size, argv_blob, argv_size, grant_trusted,
+                              linux_abi_stack, built);
     if (err != process_spawn_error::ok) {
         return err;
     }
@@ -368,8 +442,11 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
     // 유지된다. trusted는 기존 address_space에서 그대로 물려받는다
     // (exec는 새 신원 부여가 아니다).
     built_process built;
-    auto err =
-        build_process(elf_data, elf_size, argv_blob, argv_size, self->owner_space->trusted, built);
+    // M28 — exec()은 이번 라운드에 linux_abi_stack을 지원하지 않는다
+    // (musl의 execve() 번역은 M32 대상, procsrv.md §4처럼 신원 유지만
+    // 다루는 이 경로는 여전히 우리 자신의 arg0 관례를 쓴다).
+    auto err = build_process(elf_data, elf_size, argv_blob, argv_size,
+                              self->owner_space->trusted, /*linux_abi_stack=*/false, built);
     if (err != process_spawn_error::ok) {
         return err;
     }

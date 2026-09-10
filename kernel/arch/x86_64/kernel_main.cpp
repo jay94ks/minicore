@@ -1062,7 +1062,7 @@ void spawn_preempt_demo_processes() {
         auto err = kern::arch::x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
                                                /*grant_trusted=*/false, /*create_endpoint=*/false,
                                                nullptr, 0, unused_endpoint_handle,
-                                               unused_thread_handle);
+                                               unused_thread_handle, /*linux_abi_stack=*/false);
         kern::klog::printf("[preempt-demo] spawn busy err=%u\n", static_cast<uint32_t>(err));
     }
 
@@ -1072,8 +1072,24 @@ void spawn_preempt_demo_processes() {
         auto err = kern::arch::x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
                                                0, /*grant_trusted=*/false,
                                                /*create_endpoint=*/false, nullptr, 0,
-                                               unused_endpoint_handle, unused_thread_handle);
+                                               unused_endpoint_handle, unused_thread_handle,
+                                               /*linux_abi_stack=*/false);
         kern::klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
+    }
+
+    // M28(real-libc-syscall-layer.md §M28) — 위 두 데모와 같은 자리에
+    // musl로 실제로 링크된 최초의 프로그램을 심어 둔다(init/
+    // initrun/CMakeLists.txt가 initrd에 함께 담는다). linux_abi_stack=true
+    // 만 다르다 — musl의 crt_arch.h(`_start`)가 이 관례로 %rsp를
+    // 읽는다(process_ops.cpp::build_process 참고).
+    auto musl_hello = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "musl_hello");
+    kern::klog::printf("[musl-hello] find musl_hello ok=%u\n", musl_hello.is_ok());
+    if (musl_hello.is_ok()) {
+        auto err = kern::arch::x86_64::process_spawn(
+            musl_hello.value().data, musl_hello.value().size, nullptr, 0,
+            /*grant_trusted=*/false, /*create_endpoint=*/false, nullptr, 0,
+            unused_endpoint_handle, unused_thread_handle, /*linux_abi_stack=*/true);
+        kern::klog::printf("[musl-hello] spawn err=%u\n", static_cast<uint32_t>(err));
     }
 }
 

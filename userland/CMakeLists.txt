@@ -3,3 +3,7 @@
 # minicore 전용 최소 셸(ADR-049 대체 구현)을 먼저 채운다.
 # TODO: third_party/<도구>(ADR-022) 확정 시 add_subdirectory(<도구>) 추가.
 add_subdirectory(shell)
+
+# real-libc-syscall-layer.md §M28 — musl 진짜 시작 경로 검증용 최초
+# 테스트 프로그램(기존 셸/서버와 무관).
+add_subdirectory(musl-hello)

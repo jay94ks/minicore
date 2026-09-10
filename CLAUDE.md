@@ -233,10 +233,17 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   (M27~M39) 전체를 먼저 끝내고, 그 다음 user-service-manager.md
   (M40~M43)를 진행**하기로 확정했다(2026-09-10).
   [real-libc-syscall-layer.md](docs/plan/real-libc-syscall-layer.md)의
-  **M27이 완료됐다**(결과는
+  **M27~M28이 완료됐다**(결과는
   [docs/done/real-libc-syscall-layer-m27.md](docs/done/real-libc-syscall-layer-m27.md),
-  [ADR-201](docs/design/security-model.md) 참고) — procsrv 실제
-  process_entry 테이블+범용 `proc_op::wait`/`kill`(caller_pid
-  자기주장+비블로킹 폴링으로 범위 좁힘, OPEN-54 해소+OPEN-67 신설)+
-  재부모화 메커니즘 증명. **M28(musl syscall 번역 계층 착수)부터
-  진행 중**이다.
+  [docs/done/real-libc-syscall-layer-m28.md](docs/done/real-libc-syscall-layer-m28.md),
+  [ADR-201](docs/design/security-model.md)/[ADR-202](docs/design/kernel-memory.md)
+  참고) — M27: procsrv 실제 process_entry 테이블+범용
+  `proc_op::wait`/`kill`(caller_pid 자기주장+비블로킹 폴링으로 범위
+  좁힘, OPEN-54 해소+OPEN-67 신설)+재부모화 메커니즘 증명. M28:
+  `tools/apply-patches.sh` 실제 구현+musl의 syscall_arch.h 패치
+  (모든 syscall을 `libc/sysdeps/minicore/syscall_shim.c`로 우회)+
+  `userland/musl-hello`가 musl의 진짜 시작 경로로 진입해 "hello
+  from real musl" 출력 — 실행 중 musl의 `__init_tls`가 `arch_prctl`
+  (FS_BASE)을 무조건 요구하고 Linux ABI 초기 스택(argc/argv/envp/
+  auxv)도 필요함을 발견해, 원래 M30/M29 계획이던 두 커널 기능을
+  M28로 앞당겼다(ADR-202). **M29(동적 링킹 도입)부터 진행 중**이다.

@@ -61,4 +61,16 @@ void sync_io_permission(const kern::object::thread& t);
 // sync_syscall_kernel_rsp()와 똑같이 그 경우는 그냥 건드리지 않는다.
 void sync_exception_stack(const kern::object::thread& t);
 
+// M28(real-libc-syscall-layer.md §M28, ADR-183) — t.fs_base(sys_arch_prctl_set_fs가
+// 채운 값, 기본 0)를 IA32_FS_BASE MSR에 WRMSR로 반영한다. musl의
+// __init_tp(src/env/__init_tls.c)가 __set_thread_area(ARCH_SET_FS)를
+// TLS/errno 접근의 전제조건으로 무조건 호출하므로(실패하면 a_crash()),
+// 원래 M30으로 계획됐던 이 기능을 M28로 앞당겼다(done 보고 참고).
+// arch_sync_io_permission/arch_sync_exception_stack과 같은 자리
+// (컨텍스트 스위치 4곳)에서 함께 호출한다 — 커널 스레드도 항상 0으로
+// 덮어써 이전 유저 스레드의 FS_BASE가 새어 나가지 않게 한다(다른 두
+// 훅과 달리 owner_space==nullptr 체크를 하지 않는 이유 — 커널 스레드는
+// FS_BASE를 쓰지 않으므로 0으로 두는 것이 안전하다).
+void sync_fs_base(const kern::object::thread& t);
+
 }  // namespace kern::arch::x86_64

@@ -164,6 +164,24 @@
 #     (open/read/write 등)·동적 링커·스레드까지의 완전한 포팅은 범위
 #     밖이다(ADR-182 "알려진 단순화" — M20/ADR-170이 미뤄 둔 것의
 #     연장, 이번에도 전체가 아니라 검증 가능한 부분집합만).
+#   M28 (real-libc-syscall-layer.md §M28, foundations.md ADR-183):
+#     third_party/patches/musl/0001-syscall-shim.patch(tools/apply-patches.sh
+#     로 처음 실전 적용)가 musl의 arch/x86_64/syscall_arch.h를 패치해
+#     모든 __syscallN을 libc/sysdeps/minicore/syscall_shim.c의
+#     __minicore_syscall_dispatch로 우회시킨다. userland/musl-hello가
+#     musl의 진짜 시작 경로(crt1.c→__libc_start_main.c→__init_tls.c)를
+#     거쳐 main()에 진입해 musl 자신의 write()/_exit()로 종료한다
+#     ("hello from real musl"). __init_tp가 무조건 요구하는
+#     arch_prctl(ARCH_SET_FS)는 원래 M30 계획이었으나 이 마일스톤으로
+#     앞당겨 커널에 실제 FS_BASE MSR 지원(kern::arch::x86_64::sync_fs_base,
+#     새 syscall MC_SYSCALL_ARCH_PRCTL_SET_FS)을 추가했다. 커널의
+#     기존 spawn 경로(initrun/서버들)는 전혀 안 쓰는 Linux ABI 초기
+#     스택(argc/argv/envp/auxv)도 이번에 처음 구현했다
+#     (mc_process_spawn_request::linux_abi_stack, musl-hello 전용).
+#     구현하지 않은 syscall(예: SYS_set_tid_address=218)은 조용히
+#     무시되지 않고 반드시 "[syscall_shim] unimplemented n=" 로그를
+#     남긴 뒤 -ENOSYS를 반환한다(musl은 이 실패를 무시하고 계속
+#     진행하도록 설계돼 있어 크래시하지 않는다).
 #   M27 (real-libc-syscall-layer.md §M27, security-model.md ADR-201):
 #     procsrv가 실제 process_entry 테이블(pid 발급, parent_pid)을
 #     처음으로 갖는다. procsrv가 스폰하는 세 프로세스 C(kill 대상)→
@@ -337,6 +355,8 @@ declare -a EXPECTED=(
   "[procsrv] m27 wait exit_code ok=1"
   "[procsrv] m27 kill ok=1"
   "[procsrv] reparent mechanism ok=1"
+  "[musl-hello] spawn err=0"
+  "hello from real musl"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

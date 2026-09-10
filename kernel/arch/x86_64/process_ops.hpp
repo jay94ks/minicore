@@ -49,13 +49,18 @@ enum class process_spawn_error : uint32_t {
 // 소유 핸들(k_right_can_kill만 부여)을 호출자 자신의 handle_table에
 // 만들어 채운다(out_endpoint_proxy_handle과 같은 "호출자 소유" 자리).
 // 호출자가 커널 스레드(handles==nullptr)면 조용히 건너뛴다(0 유지).
+// M28(real-libc-syscall-layer.md §M28, ADR-183) — linux_abi_stack=true면
+// 유저 스택 최상단에 Linux ABI 초기 스택(argc/argv/envp/auxv,
+// process_ops.cpp::build_process 참고)을 구성한다 — musl의 crt_arch.h
+// (`_start`)가 이 관례로 %rsp를 읽는다. false(기본, 기존 모든
+// 호출자)면 이 커널의 기존 관례(arg0 레지스터 하나)만 쓴다.
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
                                    bool grant_trusted, bool create_endpoint,
                                    const mc_handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
                                    uint32_t& out_endpoint_proxy_handle,
-                                   uint32_t& out_thread_handle);
+                                   uint32_t& out_thread_handle, bool linux_abi_stack);
 
 enum class process_kill_error : uint32_t {
     ok = 0,

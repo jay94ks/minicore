@@ -1266,3 +1266,78 @@
   (기존 정적 `minicore_libc` 타깃은 그대로 유지). ADR-190(build-system.md,
   M38 SDK 내보내기)이 이 동적 libc.so를 내보낼 산출물 중 하나로
   그대로 흡수한다.
+
+## ADR-202. M28 실행 중 발견: musl의 진짜 시작 경로가 `arch_prctl`(FS_BASE)과 Linux ABI 초기 스택을 무조건 요구 — 둘 다 M28로 앞당김
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M28 실행 중 발견)
+- **배경**: M28의 계획 문서는 `SYS_arch_prctl`(TLS/errno 지원)을
+  M30으로 미뤄 뒀다 — "M28은 `SYS_write`(fd 1/2)·`SYS_exit`·
+  `SYS_exit_group`만 구현"이 원래 범위였다. 실제로 musl의 진짜 시작
+  경로(`crt1.c`→`__libc_start_main.c`→`__init_libc`→`__init_tls.c`)를
+  추적해 보니 **두 가지가 이미 M28 시점에 무조건 필요했다**:
+  1. `__init_tls`→`__init_tp`→`__set_thread_area`가 TLS/errno 접근의
+     전제조건으로 **항상** `arch_prctl(ARCH_SET_FS, ...)`를 호출한다
+     (auxv가 전부 비어 있어 실제 TLS 모듈이 없는 경우에도) — 실패하면
+     (`-ENOSYS` 등 음수 반환) `__init_tp`가 `-1`을 돌려주고
+     `static_init_tls`가 곧바로 `a_crash()`를 호출해 **`main()`에
+     도달하기도 전에 프로그램이 죽는다**.
+  2. musl의 `crt/x86_64/crt_arch.h`(`_start`)는 `%rsp`를 그대로 읽어
+     `argc`부터 해석한다(Linux ABI 초기 스택 관례) — 이 커널의 기존
+     유저 스레드(initrun/서버들)는 이 관례를 전혀 안 쓰고 `arg0`
+     레지스터 하나만 쓴다(`process_ops.cpp::build_process`가 스택을
+     그냥 미초기화 상태로 매핑만 해 둔다). 이 상태로 musl 프로그램을
+     스폰하면 `_start_c`가 스택의 **쓰레기 값**을 `argc`/`argv`/
+     `envp`/`auxv`로 오인해 임의 주소를 역참조하다 죽는다.
+- **결정**:
+  1. **커널에 FS_BASE MSR 지원을 추가한다**(원래 M30 계획을 앞당김) —
+     `kern::object::thread::fs_base`(신규 필드) + 컨텍스트 스위치마다
+     이를 `IA32_FS_BASE`에 반영하는 `kern::arch::x86_64::sync_fs_base`
+     (`arch_sync_io_permission`/`arch_sync_exception_stack`과 같은 자리,
+     ADR-177의 "훅 추가" 관례 재사용) + 새 유저 syscall
+     `MC_SYSCALL_ARCH_PRCTL_SET_FS`(호출 스레드 자신의 `fs_base`를
+     즉시 설정+즉시 WRMSR). musl 쪽은 `libc/sysdeps/minicore/
+     set_thread_area.c`(신규, `third_party/musl/src/thread/x86_64/
+     __set_thread_area.s`의 raw `syscall` 직접 발행을 대체 — 그
+     방식은 패치된 `syscall_arch.h`의 `__syscallN` 우회 경로를
+     완전히 건너뛴다)가 `__syscall2(SYS_arch_prctl, ARCH_SET_FS, p)`로
+     이 새 syscall까지 연결한다.
+  2. **`mc_process_spawn_request`에 `linux_abi_stack`(bool) 필드를
+     추가한다** — true면 `build_process()`가 유저 스택 최상단에
+     최소 Linux ABI 스택(`argc=1, argv=["/bin/musl-hello"], envp=[]`,
+     `AT_PAGESZ`/`AT_UID`/`AT_EUID`/`AT_GID`/`AT_EGID`/`AT_SECURE`/
+     `AT_PHDR`/`AT_PHNUM`/`AT_NULL`만 채운 auxv)을 직접 써 넣고
+     `user_rsp`를 그 구조체 시작 주소로 맞춘다. `AT_UID==AT_EUID`
+     `&&` `AT_GID==AT_EGID` `&&` `!AT_SECURE`를 전부 0으로 둬
+     `__init_libc`의 `poll()` 기반 stdio 보안 검사(이 커널엔
+     `SYS_poll`이 없다)를 항상 건너뛰게 만든다. `AT_PHNUM=0`이라
+     `__init_tls`의 PT_TLS 탐색 루프가 즉시 종료돼(TLS 모듈 없음)
+     안전하다. **기존 모든 호출자(initrun/14개 서버)는 이 필드를
+     생략(zero-init 기본값 false)하므로 전혀 영향받지 않는다** — 이
+     스택 레이아웃은 오직 musl 링크 프로그램(`userland/musl-hello`,
+     이후 M29~) 전용이다.
+  3. **인자 전달/일반 auxv(PT_INTERP 대응 `AT_PHDR` 등)의 실제 확장은
+     M29(동적 링킹)로 그대로 남긴다** — 이번엔 "크래시 없이 `main()`에
+     도달"이 목표이므로 고정된 최소값만 채운다.
+- **근거**: 계획 문서(M28/M30 경계)는 "필요한 시점에 맞춰 순서를
+  나눈다"는 가정으로 작성됐지만, 실제 musl 소스를 추적해 보니 그
+  경계가 musl 자신의 실제 초기화 순서와 맞지 않았다 — TLS 초기화는
+  "나중에 확장할 수 있는 기능"이 아니라 `__libc_start_main`의
+  **무조건적인 첫 단계**다. ADR-183 §결정4가 이미 "새 syscall이
+  필요해질 때마다 libmc를 먼저 확장한다"는 절차를 정해 뒀으므로,
+  이 발견에 맞춰 그 절차를 앞당겨 적용하는 것이 계획 문서 자체를
+  틀렸다고 미루는 것보다 정직하다(ADR-049/M17~M27이 반복해 온
+  "실행하며 발견한 것은 즉시 기록하고 반영한다" 패턴과 같다).
+- **영향**:
+  - M30의 "TLS(`arch_prctl`)" 항목은 이제 **완료된 상태로 M28에
+    흡수됐다** — M30 착수 시점에는 `SYS_mmap`/`SYS_munmap`(musl
+    자신의 malloc, mallocng)만 남는다.
+  - M29(동적 링킹)가 "유저 스택에 최소 auxv 구성"이라고 적어 둔
+    작업은 이제 "고정 최소값(M28)을 PT_INTERP에 필요한 실제 값
+    (`AT_PHDR`/`AT_PHENT`/`AT_PHNUM`/`AT_ENTRY`/`AT_BASE`)으로
+    **확장**하는 작업"으로 범위가 좁아진다 — 완전히 새로 만드는
+    것이 아니다.
+  - `docs/spec/procsrv.md`/`kernel-memory.md` ADR-160(가상주소
+    슬롯 표)은 이 변경으로 새 슬롯을 쓰지 않는다 — Linux ABI 스택은
+    기존 유저 스택 영역(슬롯 자체, k_user_stack_top 근방) 안에
+    덧써질 뿐이다.
