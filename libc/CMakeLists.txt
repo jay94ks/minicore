@@ -212,6 +212,10 @@ add_library(minicore_libc STATIC
     ${MUSL_PATCHED_ROOT}/src/unistd/close.c
     ${MUSL_PATCHED_ROOT}/src/unistd/read.c
 
+    # docs/plan/musl-userland-porting.md §M52(ADR-221) — userland/cat
+    # 이 open()의 첫 실제 소비자다.
+    ${MUSL_PATCHED_ROOT}/src/fcntl/open.c
+
     # M31 — vfprintf.c(printf_core)의 나머지 링크 의존성. 이 라운드의
     # 실제 사용(%s/%zu류 정수·문자열 서식)은 이 중 대부분을 런타임에
     # 타지 않지만(예: 부동소수점 서식·와이드 문자), vfprintf.c는

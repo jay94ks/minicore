@@ -33,11 +33,15 @@ constexpr uint32_t k_max_files = 8;
 // musl-exec-target ELF를 자기 컴파일 시점 데이터로 심으면서(tools/
 // bin2c.py) procsrv 자신의 ELF도 같이 커져 131072를 넘어서기 시작해
 // (실제로 겪음, 2026-09-10 — 139072바이트) 131072→262144로 다시
-// 늘렸다. 이 값이 여전히 procsrv 자신의 M18 self-exec 왕복
-// (run_loader_test, su-target 경로) 상한이라는 점은 그대로다 — 그
-// 왕복이 실패하지 않을 만큼 여유를 둔 것뿐, 정확한 크기 계산에
-// 기반한 값은 아니다.
-constexpr uint32_t k_max_file_bytes = 262144;
+// 늘렸다. M52(musl-userland-porting.md §M52) — echo/ls/cat 블롭
+// 셋을 더 심으면서 procsrv 자신의 ELF가 418640바이트까지 커져
+// 262144를 다시 넘었다(run_loader_test의 su-target 왕복이 매 부팅
+// "ok=0"으로 조용히 실패하고 있었다 — 실행 중 발견) — 여유를 더
+// 두고 262144→1048576(1MiB)으로 늘린다. 이 값이 여전히 procsrv
+// 자신의 M18 self-exec 왕복(run_loader_test, su-target 경로) 상한
+// 이라는 점은 그대로다 — 정확한 크기 계산에 기반한 값이 아니라,
+// 그 왕복이 실패하지 않을 만큼 넉넉히 여유를 둔 것뿐이다.
+constexpr uint32_t k_max_file_bytes = 1048576;
 // M41(user-service-manager.md §M41) 실행 중 발견 — fs-protocol에
 // close(open_file_id 반환)가 애초에 없어(OPEN-70 신규 등록,
 // docs/design/open-items.md) 모든 소비자가 open()할 때마다 이
@@ -59,7 +63,25 @@ constexpr uint64_t k_page_size = 4096;
 // 필드(다른 파일의 내용 등)까지 함께 보게 된다 — 그래서 읽기 응답
 // 전용의 독립된 페이지 정렬 버퍼를 하나 둔다(요청마다 이 버퍼에
 // 복사해 담은 뒤 그 프레임을 넘긴다).
-alignas(k_page_size) uint8_t g_read_scratch[k_page_size] = {};
+//
+// M52(musl-userland-porting.md) 실행 중 발견 — 이 버퍼가 open
+// 인스턴스 전체가 공유하는 **하나뿐인** 슬롯이었다: ADR-159/161의
+// "COPY" 모드는 이름과 달리 실제로는 그 물리 프레임을 수신자에게
+// 그대로 매핑한다(진짜 바이트 복사가 아니다) — 지금까지는 memfs와
+// 대화하는 클라이언트가 항상 하나씩 순서대로만 있었어서(매 요청이
+// 그 클라이언트 자신의 다음 요청으로만 이어짐, 자기 자신과의
+// 경합은 없다) 드러나지 않았다. msh가 fork()+execve()로 "/bin/echo"
+// 여러 페이지를 읽는 동안, 마침 같은 시각에 실행 중이던 다른
+// musl fork/exec 자기테스트(M32)가 이 memfs에 별도로 접속해 자기
+// 파일을 읽으면서 이 하나뿐인 버퍼를 동시에 덮어써, 한쪽이 아직
+// 못 읽은 응답 내용이 다른 쪽 요청으로 그 자리에서 바뀌는 실제
+// 데이터 손상을 냈다(echo 실행 이미지가 자기 파일의 다른 위치
+// 내용으로 섞여 실행 진입점이 깨진 코드를 실행 — 진짜 페이지
+// 폴트로 이어짐). open 인스턴스마다 독립된 버퍼를 두어 해결한다.
+// +1: handle_list()는 특정 open 인스턴스에 묶여 있지 않아(open_id가
+// 없다) 별도로 마지막 슬롯(k_max_open_files 인덱스)을 전용으로 쓴다.
+alignas(k_page_size) uint8_t g_read_scratch[k_max_open_files + 1][k_page_size] = {};
+constexpr uint32_t k_list_scratch_slot = k_max_open_files;
 
 struct file_slot {
     bool used = false;
@@ -209,12 +231,13 @@ void handle_read(const mc_message& in, mc_message& out) {
     uint64_t remaining = (o.read_cursor < f.size) ? (f.size - o.read_cursor) : 0;
     uint64_t to_read = (requested < remaining) ? requested : remaining;
 
+    uint8_t* scratch = g_read_scratch[open_id - 1];
     for (uint64_t i = 0; i < k_page_size; ++i) {
-        g_read_scratch[i] = (i < to_read) ? f.data[o.read_cursor + i] : 0;
+        scratch[i] = (i < to_read) ? f.data[o.read_cursor + i] : 0;
     }
     o.read_cursor += to_read;
     out.page_count = 1;
-    out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
+    out.pages[0].vaddr = reinterpret_cast<uint64_t>(scratch);
     out.pages[0].length = k_page_size;
     out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = to_read;
@@ -225,8 +248,9 @@ void handle_read(const mc_message& in, mc_message& out) {
 // 같은 정신으로 VFS를 거치지 않고 클라이언트가 직접 부른다. 채워진
 // 파일 슬롯 이름을 NUL로 구분해 한 페이지에 눌러 담는다.
 void handle_list(const mc_message&, mc_message& out) {
+    uint8_t* scratch = g_read_scratch[k_list_scratch_slot];
     for (uint64_t i = 0; i < k_page_size; ++i) {
-        g_read_scratch[i] = 0;
+        scratch[i] = 0;
     }
     uint32_t off = 0;
     uint32_t count = 0;
@@ -242,13 +266,13 @@ void handle_list(const mc_message&, mc_message& out) {
             break;
         }
         for (uint32_t k = 0; k < name_len; ++k) {
-            g_read_scratch[off++] = static_cast<uint8_t>(g_files[i].name[k]);
+            scratch[off++] = static_cast<uint8_t>(g_files[i].name[k]);
         }
-        g_read_scratch[off++] = '\0';
+        scratch[off++] = '\0';
         ++count;
     }
     out.page_count = 1;
-    out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
+    out.pages[0].vaddr = reinterpret_cast<uint64_t>(scratch);
     out.pages[0].length = k_page_size;
     out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = k_status_ok;

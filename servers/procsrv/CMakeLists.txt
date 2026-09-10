@@ -52,12 +52,39 @@ add_custom_command(
 )
 add_custom_target(minicore_procsrv_user_service_unit_blob DEPENDS ${USER_SERVICE_UNIT_BLOB_H})
 
+# docs/plan/musl-userland-porting.md §M52(ADR-221) — 자체 작성 최소
+# coreutils(echo/ls/cat)를 위 musl-exec-target과 같은 이유로 procsrv
+# 자신의 컴파일 시점 데이터로 심는다 — userland/msh가 execve()로
+# "/bin/echo" 등을 열 수 있으려면 그 바이트가 부팅 시 VFS(memfs)에
+# 먼저 쓰여 있어야 한다.
+function(minicore_embed_coreutil name target)
+    set(blob_h ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_blob.h)
+    add_custom_command(
+        OUTPUT ${blob_h}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/bin2c.py
+                $<TARGET_FILE:${target}>
+                ${blob_h}
+                g_${name}_elf
+        DEPENDS ${target}
+                ${CMAKE_SOURCE_DIR}/tools/bin2c.py
+        COMMENT "Generating ${name} ELF blob header (tools/bin2c.py)"
+        VERBATIM
+    )
+    add_custom_target(minicore_procsrv_${name}_blob DEPENDS ${blob_h})
+endfunction()
+
+minicore_embed_coreutil(echo minicore_echo_elf)
+minicore_embed_coreutil(ls minicore_ls_elf)
+minicore_embed_coreutil(cat minicore_cat_elf)
+
 add_executable(minicore_procsrv_elf
     main.cpp
 )
 
 add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob
-                  minicore_procsrv_user_service_unit_blob)
+                  minicore_procsrv_user_service_unit_blob
+                  minicore_procsrv_echo_blob minicore_procsrv_ls_blob minicore_procsrv_cat_blob)
 
 target_include_directories(minicore_procsrv_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/mc/include

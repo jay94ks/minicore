@@ -26,3 +26,12 @@ add_subdirectory(user-service-delegate-test)
 # docs/plan/musl-userland-porting.md §M51 — 익명 파이프+dup2() 검증용
 # 실제 musl 프로그램.
 add_subdirectory(pipe-test)
+
+# docs/plan/musl-userland-porting.md §M52(ADR-221) — BusyBox 도입을
+# 철회하고 이 저장소 안에서 직접 작성한 최소 셸+coreutils. 셸
+# (userland/msh)이 이 셋을 별도 실행파일로 진짜 fork()+execve()
+# 한다(빌트인 아님).
+add_subdirectory(echo)
+add_subdirectory(ls)
+add_subdirectory(cat)
+add_subdirectory(msh)

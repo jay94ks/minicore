@@ -154,13 +154,23 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
     // 지나가는 데 필요한 auxv만) — 실제 인자 전달/일반 auxv 확장은
     // M29(동적 링킹, PT_INTERP 지원 시 AT_PHDR 등 추가)에서 다룬다.
     if (linux_abi_stack) {
+        // docs/plan/musl-userland-porting.md §M52 — M28은 argv0 하나만
+        // 고정 문자열("/bin/musl-hello")로 채웠다("인자 전달이 아니라
+        // 실행 이미지가 바뀌는 것"만 검증하면 됐던 시절의 단순화). 진짜
+        // 셸이 자식에게 실제 명령줄 인자를 넘기려면 이제 argv_blob
+        // (NUL로 구분된 문자열들, 마지막도 NUL — mc_process_spawn_request/
+        // mc_exec_request가 이미 갖고 있던 필드다)을 실제 argc/argv[]로
+        // 반영해야 한다. argv_blob이 없으면(대다수 initrun 스폰 서비스는
+        // 여전히 안 준다) 기존 "/bin/musl-hello" 한 개짜리로 그대로
+        // 되돌아간다 — 기존 동작은 전혀 안 바뀐다.
+        constexpr uint32_t k_max_argv = 8;         // YAGNI — 짧은 명령줄만 지원.
+        constexpr uint32_t k_argv_strs_bytes = 224;
         struct stack_layout {
             uint64_t argc;
-            uint64_t argv0_ptr;
-            uint64_t argv_null;
+            uint64_t argv_ptrs[k_max_argv + 1];  // argv[argc]=NULL 포함.
             uint64_t envp_null;
             uint64_t auxv[12][2];
-            char argv0_str[32];
+            char argv_strs[k_argv_strs_bytes];
         };
         static_assert(sizeof(stack_layout) <= 512, "linux_abi_stack 레이아웃이 예약 공간을 넘는다");
 
@@ -175,12 +185,41 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         auto* l = reinterpret_cast<stack_layout*>(
             static_cast<uint8_t*>(kern::mm::phys_to_virt(top_stack_page_phys)) + k_layout_offset);
         __builtin_memset(l, 0, sizeof(*l));
-        constexpr const char k_argv0[] = "/bin/musl-hello";
-        __builtin_memcpy(l->argv0_str, k_argv0, sizeof(k_argv0));
 
-        l->argc = 1;
-        l->argv0_ptr = layout_vaddr + __builtin_offsetof(stack_layout, argv0_str);
-        l->argv_null = 0;
+        uint64_t argc = 0;
+        uint64_t str_off = 0;
+        if (argv_blob != nullptr && argv_size > 0) {
+            uint64_t i = 0;
+            while (i < argv_size && argc < k_max_argv) {
+                uint64_t start = i;
+                while (i < argv_size && argv_blob[i] != '\0') {
+                    ++i;
+                }
+                uint64_t len = i - start;
+                if (str_off + len + 1 > k_argv_strs_bytes) {
+                    break;  // 예약 공간을 넘으면 여기서 멈춘다.
+                }
+                __builtin_memcpy(l->argv_strs + str_off, argv_blob + start, len);
+                l->argv_strs[str_off + len] = '\0';
+                l->argv_ptrs[argc] =
+                    layout_vaddr + __builtin_offsetof(stack_layout, argv_strs) + str_off;
+                str_off += len + 1;
+                ++argc;
+                if (i < argv_size && argv_blob[i] == '\0') {
+                    ++i;  // 구분자 건너뜀.
+                }
+            }
+        }
+        if (argc == 0) {
+            // argv_blob이 없을 때의 기존 M28 기본값.
+            constexpr const char k_argv0[] = "/bin/musl-hello";
+            __builtin_memcpy(l->argv_strs, k_argv0, sizeof(k_argv0));
+            l->argv_ptrs[0] = layout_vaddr + __builtin_offsetof(stack_layout, argv_strs);
+            argc = 1;
+        }
+
+        l->argc = argc;
+        l->argv_ptrs[argc] = 0;  // argv[argc] = NULL.
         l->envp_null = 0;
         // AT_PAGESZ=6, AT_UID=11, AT_EUID=12, AT_GID=13, AT_EGID=14,
         // AT_SECURE=23, AT_PHDR=3, AT_PHENT=4, AT_PHNUM=5, AT_ENTRY=9,

@@ -75,6 +75,12 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               # dup2() 검증용 실제 musl 프로그램. pipesrv(위)+procsrv
               # 둘 다 핸들이 필요하다.
               --service=pipe-test=$<TARGET_FILE:minicore_pipe_test_elf>
+              # docs/plan/musl-userland-porting.md §M52(ADR-221) —
+              # 자체 작성 셸. echo/ls/cat은 --service= 목록에 없다 —
+              # musl-exec-target과 같은 이유로 procsrv가 VFS에 미리
+              # 써 두고 msh가 런타임에 execve()로 여는 대상이다
+              # (servers/procsrv/CMakeLists.txt의 bin2c.py 배선).
+              --service=msh=$<TARGET_FILE:minicore_msh_elf>
               --service=user-service-delegate-test=$<TARGET_FILE:minicore_user_service_delegate_test_elf>
               --service=svcmgr=$<TARGET_FILE:minicore_svcmgr_elf>
               --service=svcmgr-ctl-test=$<TARGET_FILE:minicore_svcmgr_ctl_test_elf>
@@ -132,6 +138,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               # 첫 의존으로 둔다 — 실제 사용은 procsrv(fork/wait)+
               # pipesrv(pipe)뿐이다.
               --depends=pipe-test:vfs,procsrv,pipesrv
+              --depends=msh:vfs,procsrv
               --depends=user-service-delegate-test:cfgsrv
               --depends=svcmgr:procsrv,cfgsrv
               # M42(user-service-manager.md §M42) — "새 컨트롤
@@ -141,6 +148,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=svcmgr-ctl-test:svcmgr,cfgsrv
               --linux-abi-stack=musl-hello
               --linux-abi-stack=pipe-test
+              --linux-abi-stack=msh
               --trusted=devmgr
               --trusted=ps2
               --trusted=usb
@@ -159,11 +167,12 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               minicore_drv_console_elf minicore_login_elf
               minicore_musl_hello_elf
               minicore_pipe_test_elf
+              minicore_msh_elf
               minicore_user_service_delegate_test_elf
               minicore_svcmgr_elf
               minicore_svcmgr_ctl_test_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+pipesrv+netsrv+shell+procsrv+login+musl-hello+pipe-test+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+pipesrv+netsrv+shell+procsrv+login+musl-hello+pipe-test+msh+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})

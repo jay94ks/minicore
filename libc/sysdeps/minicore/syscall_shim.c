@@ -192,16 +192,17 @@ static long open_common(const char* path) {
 }
 
 // M32 — SYS_execve. musl execve(path, argv, envp)는 이 셋을 그대로
-// syscall에 넘기지만(third_party/musl/src/process/execve.c), 이
-// 커널의 Linux ABI 초기 스택은 M28부터 argc/argv를 고정값(argc=1,
-// argv[0]="/bin/musl-hello")으로 못박아 둔다(kernel/arch/x86_64/
-// process_ops.cpp::build_process()) — 그래서 이 함수는 argv/envp를
-// 그냥 무시한다. 이건 M32가 새로 만든 단순화가 아니라 M28이 이미
-// 받아들인 것을 그대로 물려받는 것뿐이다(진짜 인자 전달은 이
-// 커널에 애초에 없다) — 이 라운드가 검증하는 것은 "실행 이미지가
-// 실제로 바뀌고, 그 새 이미지의 exit code를 부모가 회수한다"이지
-// 인자 전달이 아니다.
-static long exec_common(const char* path) {
+// syscall에 넘긴다(third_party/musl/src/process/execve.c) — M32
+// 시절엔 이 커널의 Linux ABI 초기 스택이 argc/argv를 고정값(argc=1,
+// argv[0]="/bin/musl-hello")으로 못박아 둬서(kernel/arch/x86_64/
+// process_ops.cpp::build_process()) argv/envp를 그냥 무시했다.
+// docs/plan/musl-userland-porting.md §M52부터 진짜 셸이 자식에게
+// 실제 명령줄 인자를 넘겨야 해서, argv를 NUL로 구분된 blob으로
+// 엮어 mc_exec()에 실제로 실어 보낸다(build_process()도 M52에서
+// 그 blob을 진짜 argc/argv[]로 반영하도록 함께 고쳤다) — envp는
+// 여전히 범위 밖(이 커널에 환경변수 전달 관례가 아직 없다).
+#define MC_MAX_ARGV_BLOB_BYTES 224
+static long exec_common(const char* path, char* const argv[]) {
     uint64_t open_file_id = 0;
     uint32_t fs_handle = 0;
     uint64_t status = mc_vfs_open(MC_VFS_HANDLE, path, /*identity=*/0, &open_file_id, &fs_handle);
@@ -213,7 +214,27 @@ static long exec_common(const char* path) {
     if (n == 0) {
         return MC_ENOENT;
     }
-    uint64_t err = mc_exec((uint64_t)(unsigned long)g_exec_image, n, 0, 0, /*linux_abi_stack=*/1);
+    static char g_exec_argv_blob[MC_MAX_ARGV_BLOB_BYTES];
+    uint64_t blob_len = 0;
+    if (argv != 0) {
+        for (int i = 0; argv[i] != 0; ++i) {
+            uint64_t slen = 0;
+            while (argv[i][slen] != '\0') {
+                ++slen;
+            }
+            if (blob_len + slen + 1 > sizeof(g_exec_argv_blob)) {
+                break;  // 커널 쪽 예약 공간과 같은 한도 — 넘으면 여기서 멈춘다.
+            }
+            for (uint64_t j = 0; j < slen; ++j) {
+                g_exec_argv_blob[blob_len + j] = argv[i][j];
+            }
+            g_exec_argv_blob[blob_len + slen] = '\0';
+            blob_len += slen + 1;
+        }
+    }
+    uint64_t err = mc_exec((uint64_t)(unsigned long)g_exec_image, n,
+                            blob_len > 0 ? (uint64_t)(unsigned long)g_exec_argv_blob : 0, blob_len,
+                            /*linux_abi_stack=*/1);
     // 성공하면 mc_exec()가 반환하지 않는다 — 여기 도달했다면 실패
     // (mc/process_ops.hpp::process_spawn_error의 작은 양수 코드).
     // Linux syscall 관례상 음수라는 사실만 중요하다(musl의
@@ -596,7 +617,8 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             return (long)mc_getpid(MC_PROCSRV_HANDLE);
         case SYS_execve: {
             const char* path = (const char*)(unsigned long)a;
-            return exec_common(path);
+            char* const* argv = (char* const*)(unsigned long)b;
+            return exec_common(path, argv);
         }
         case SYS_wait4: {
             // a=pid, b=wstatus(int*), c=options(무시), d=rusage(무시).

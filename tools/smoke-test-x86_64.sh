@@ -414,6 +414,41 @@
 #     write_refcount)로 관리하고 syscall_shim.c가 fork()/dup2()
 #     시점마다 명시적으로 op_dup을 불러 알려 준다(pipesrv 자신은
 #     fork()가 일어난 사실을 관찰할 수 없다).
+#   M52 (docs/plan/musl-userland-porting.md §M52, foundations.md
+#     ADR-221, kernel-memory.md ADR-222, kernel-ipc-objects.md
+#     ADR-223): BusyBox(서드파티) 도입을 철회하고 셸(userland/msh)+
+#     coreutils(echo/ls/cat)를 이 저장소 안에서 직접 작성했다 — 셸이
+#     빌트인이 아니라 진짜 fork()+execve()로 별도 실행파일을 띄운다.
+#     msh는 키보드 입력이 없으면("[msh] no keyboard input, running
+#     self-test commands") 고정된 명령줄 셋(echo hello msh/ls/
+#     cat /bin/echo)을 순서대로 실행하고("[msh] running: <cmd>"), 셋
+#     다 성공하면 "[msh] self-test done ok=1"을 남긴다. 실행 중 발견한
+#     진짜 버그 2건: (1) execve()가 M28부터 argc=1/argv[0]="/bin/
+#     musl-hello" 고정값만 넘겨 왔다는 것(build_process()의 Linux ABI
+#     초기 스택이 실제 argv_blob을 반영하지 않았다) — 셸이 자식에게
+#     실제 인자를 넘기려면 필요해 진짜 argc/argv[] 구성으로 고쳤다
+#     (ADR-222). (2) **가장 심각한 발견**: servers/fs/memfs::
+#     handle_read()가 응답 페이지 전송에 쓰는 g_read_scratch 버퍼가
+#     열린 파일 인스턴스 전체가 공유하는 하나뿐인 슬롯이었다 — IPC의
+#     "COPY" 모드(ADR-159/161)는 실제로는 바이트 복사가 아니라 그
+#     물리 프레임을 수신자에게 그대로 매핑하는 것이라, 지금까지는
+#     memfs와 대화하는 클라이언트가 한 번에 하나씩만 있어서(자기
+#     자신의 다음 요청과만 이어짐) 드러나지 않았다. msh가 fork()+
+#     execve()로 "/bin/echo"의 여러 페이지를 읽는 동안, 마침 같은
+#     시각에 실행 중이던 기존 M32 musl fork/exec 자기테스트가 같은
+#     memfs에 접속해 자기 파일을 읽으면서 이 하나뿐인 버퍼를 동시에
+#     덮어써, 한쪽이 아직 못 읽은 응답 내용이 다른 쪽 요청으로 그
+#     자리에서 바뀌는 실제 데이터 손상을 냈다(echo 실행 이미지가
+#     자기 파일의 다른 위치 내용과 섞여 실행 진입점이 깨진 코드를
+#     실행 — 진짜 페이지 폴트로 이어졌다). open 인스턴스마다 독립된
+#     버퍼를 두어 해결했다(ADR-223) — M52 이전엔 memfs와 대화하는
+#     multi-page 소비자가 항상 한 번에 하나씩만 있어 절대 드러날 수
+#     없던 동시성 버그다. 부수적으로: procsrv 자신이 echo/ls/cat
+#     블롭 셋을 더 심으며 자신의 ELF가 262144바이트를 다시 넘어서
+#     (M32가 이미 한 번 늘렸던 servers/fs/memfs::k_max_file_bytes와
+#     procsrv 자신의 g_reassembled 버퍼 둘 다) 1048576으로 함께
+#     올렸다 — 그렇지 않으면 M18의 loader roundtrip 자기테스트
+#     ("[procsrv] loader roundtrip ok=1")가 매 부팅 조용히 실패했다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -659,6 +694,13 @@ declare -a EXPECTED=(
   "[pipe-test] fork pipe roundtrip ok=1"
   "[pipe-test] dup2 stdin ok=1"
   "[pipe-test] all ok=1"
+  "[msh] no keyboard input, running self-test commands"
+  "[msh] running: echo hello msh"
+  "[msh] running: ls"
+  "[msh] running: cat /bin/echo"
+  "[msh] self-test done ok=1"
+  "[procsrv] coreutils seed ok=1"
+  "[procsrv] loader roundtrip ok=1"
   "[svcmgr] self_register ok=1"
   "[svcmgr] adopt_orphans ok=1"
   "[svcmgr] services table open ok=1"

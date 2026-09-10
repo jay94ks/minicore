@@ -196,6 +196,10 @@ extern "C" void interrupt_dispatch(kern::arch::x86_64::interrupt_frame* frame) {
             return;
         }
         // COW 대상이 아니었다 — 진짜 폴트. M10의 catch-all로 떨어진다.
+        // M52 디버깅 중 발견: catch-all이 CR2(실제 폴트 가상주소)를
+        // 찍지 않아 "레지스터 값이 우연히 특정 주소와 같다"만으로
+        // 추측해야 했다 — 페이지폴트 한정으로 CR2를 먼저 남긴다.
+        kern::klog::printf("[idt] page fault cr2=0x%lx\n", static_cast<unsigned long>(cr2));
         kern::arch::x86_64::diagnose_and_halt(*frame);
     }
 

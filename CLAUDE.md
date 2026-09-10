@@ -584,24 +584,42 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   준비해 둔 `SYS_pipe2`(293)가 아니라 `SYS_pipe`로 왔다 — 처음엔
   그대로 `-ENOSYS`로 떨어졌고, 둘 다 같은 핸들러로 처리하도록
   케이스를 합쳐 해결했다.
-  **M52는 착수 중 방향을 바꿨다**(2026-09-11, ADR-221): BusyBox를
-  `third_party/busybox`(release `1_36_1`)로 vendoring까지는
-  됐지만, 빌드 연결 중 서로 다른 두 층위의 환경 문제를 만났다 —
-  (1) BusyBox의 Makefile(`scripts/trylink`)이 `$(CC)` 하나가
-  컴파일+링크를 다 하는 정상적인 hosted gcc/clang을 전제하는데,
-  이 저장소는 정확히 반대(clang은 컴파일만, 최종 링크는 `ld.lld`
-  직접 호출, ADR-020/M38)라 안 맞았다 — 이건 컴파일/링크 모드를
-  구분해 링크를 `ld.lld` 호출로 바꿔치는 `CC` 셈 스크립트로 실제로
-  풀었다. (2) 그 뒤 Kconfig 호스트 도구(`fixdep`)조차 이 MSYS2
-  설치의 호스트 `gcc`에 표준 헤더 패키지(`msys2-runtime-*-devel`)
-  가 없어 컴파일이 안 됐다 — 패키지 설치로 고칠 수 있는 문제였지만,
-  사용자가 이 시점에서 **BusyBox 도입 자체를 철회하고 셸/coreutils
-  를 이 저장소에서 직접 작성**하기로 결정했다. 정적으로 이
-  저장소의 musl에 링크한다는 원래 결정(ADR-203)은 그대로 유지되고,
-  `userland/musl-hello`/`pipe-test`가 이미 증명한 CMake+clang+
-  `ld.lld` 빌드 경로를 그대로 새 셸/coreutils에도 쓴다 — 바뀐 건
-  "어디서 소스를 가져오는가"뿐이다. `third_party/busybox`
+  **M52는 착수 중 방향을 바꿨고, 그 방향으로 완료됐다**
+  (2026-09-11, ADR-221/222/223): BusyBox를 `third_party/busybox`
+  (release `1_36_1`)로 vendoring까지는 됐지만, 빌드 연결 중 서로
+  다른 두 층위의 환경 문제를 만났다 — (1) BusyBox의 Makefile
+  (`scripts/trylink`)이 `$(CC)` 하나가 컴파일+링크를 다 하는
+  정상적인 hosted gcc/clang을 전제하는데, 이 저장소는 정확히 반대
+  (clang은 컴파일만, 최종 링크는 `ld.lld` 직접 호출, ADR-020/M38)라
+  안 맞았다 — 이건 컴파일/링크 모드를 구분해 링크를 `ld.lld` 호출로
+  바꿔치는 `CC` 셈 스크립트로 실제로 풀었다. (2) 그 뒤 Kconfig
+  호스트 도구(`fixdep`)조차 이 MSYS2 설치의 호스트 `gcc`에 표준
+  헤더 패키지(`msys2-runtime-*-devel`)가 없어 컴파일이 안 됐다 —
+  패키지 설치로 고칠 수 있는 문제였지만, 사용자가 이 시점에서
+  **BusyBox 도입 자체를 철회하고 셸/coreutils를 이 저장소에서
+  직접 작성**하기로 결정했다(ADR-221). `third_party/busybox`
   submodule과 `tools/busybox-cc-shim.sh`는 되돌렸다. OPEN-74는
   "그 문제 자체가 더 이상 적용되지 않는 대상에 대한 것이었다"는
-  뜻으로 ADR-221로 해소 처리했다. 다음 대화에서 자체 셸/coreutils
-  구현으로 M52를 이어간다.
+  뜻으로 ADR-221로 해소 처리했다. 그 결정을 실제로 완주했다 — 새
+  `userland/msh`(진짜 fork()+execve()로 명령을 실행하는 최소 셸,
+  빌트인 아님)+`echo`/`ls`/`cat`(coreutils, `ls`는 mc_fs_list를
+  직접 호출). 실행 중 진짜 버그 2건을 발견·수정했다: (1)
+  `execve()`가 M28부터 `argc=1`/고정 `argv[0]`만 넘겨 실제 인자를
+  전달한 적이 없었던 것 — `build_process()`의 Linux ABI 초기
+  스택을 진짜 `argc`/`argv[]`로 재구성했다(ADR-222). (2) **가장
+  심각한 발견**: `servers/fs/memfs`의 응답 스크래치 버퍼
+  (`g_read_scratch`)가 열린 파일 인스턴스 전체가 공유하는 하나뿐인
+  슬롯이었던 것 — IPC의 "COPY" 페이지 전송(ADR-159/161)이 실제로는
+  물리 프레임을 그대로 매핑하는 zero-copy라, `msh`가 `/bin/echo`를
+  읽는 동안 마침 동시에 실행 중이던 기존 M32 musl fork/exec
+  자기테스트가 같은 버퍼를 동시에 덮어써 실행 이미지가 손상되고
+  진짜 페이지 폴트로 이어졌다 — memfs 이전엔 이 서버와 동시에
+  대화하는 multi-page 소비자가 항상 하나뿐이라 절대 드러날 수
+  없던 동시성 버그다. open 인스턴스별 독립 버퍼로 분리해
+  해결했다(ADR-223). 부수적으로 procsrv 자신의 ELF가 다시 커져
+  조용히 실패하던 M18 loader roundtrip 자기테스트도 버퍼 한도
+  상향(262144→1048576)으로 함께 고쳤다. `tools/smoke-test-x86_64.sh`
+  에 M52 어서션 7개 추가, 스모크(146)+SMP(11)+NUMA(24)+AVX(12)+
+  net(6) 5개 회귀 스위트 전부 PASS(결과는
+  [docs/done/musl-userland-porting-m52.md](docs/done/musl-userland-porting-m52.md)
+  참고). 다음은 M53(로그인 후 실제 셸로 `msh` 배선)이다.

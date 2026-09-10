@@ -1574,3 +1574,43 @@
   **물려주지 않는 것이 맞는** 필드다(자식은 자기만의 새 pid를
   받아야 하므로, `create_forked_thread()`의 기본값 0을 그대로
   둔다).
+
+## ADR-222. M52 실행 중 발견: `execve()`가 M28부터 `argc=1`/고정 `argv[0]` 만 넘겨 왔다 — Linux ABI 초기 스택에 진짜 `argv_blob`을 반영
+
+- **상태**: 확정 (2026-09-11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M52 실행 중 발견).
+- **배경**: M28(ADR-202)이 `build_process()`의 `linux_abi_stack` 경로에
+  Linux ABI 초기 스택(argc/argv/envp/auxv)을 처음 만들었을 때는
+  "실행 이미지가 바뀌는 것만 증명하면 충분"했던 시절이라, `argc=1`,
+  `argv[0]="/bin/musl-hello"` 고정 문자열 하나만 채우고 실제
+  `argv_blob`/`argv_size`(`mc_exec_request`가 M27부터 이미 갖고 있던
+  필드)는 완전히 무시했다. `libc/sysdeps/minicore/syscall_shim.c`의
+  `exec_common()`도 `execve(path, argv, envp)`의 `argv` 인자를
+  그대로 버렸다. M28~M51의 모든 소비자(musl-hello, musl-exec-target,
+  pipe-test)가 인자 없이 실행되는 프로그램(또는 `argv[0]`만 보고
+  아무 인자도 읽지 않는 프로그램)이라 이 간극이 한 번도 드러나지
+  않았다 — M52의 `userland/msh`가 자식에게 실제 명령줄 인자
+  (`"echo" "hello" "msh"` 등)를 넘기는 **첫 소비자**다.
+- **결정**:
+  1. `libc/sysdeps/minicore/syscall_shim.c::exec_common()`이 `argv[]`
+     (NUL로 끝나는 문자열 포인터 배열)를 순회해 NUL로 구분된 하나의
+     blob(`g_exec_argv_blob`, 224바이트 예산)으로 엮은 뒤
+     `mc_exec()`에 실제로 실어 보낸다.
+  2. `kernel/arch/x86_64/process_ops.cpp::build_process()`의
+     `linux_abi_stack` 스택 레이아웃을 고정 1개 문자열 구조에서
+     진짜 `argc`/`argv[]` 배열(최대 8개, 문자열 총합 224바이트)로
+     바꾼다 — `argv_blob`이 없으면(대다수 initrun 스폰 서비스는
+     여전히 안 준다) 기존 M28 기본값("/bin/musl-hello" 한 개)으로
+     그대로 되돌아간다. 기존 호출자는 전혀 회귀하지 않는다.
+- **근거**: 셸이 자식에게 실제 인자를 넘기지 못하면 `echo`/`cat`
+  같은 코레스유틸이 애초에 무엇을 할지 알 방법이 없다 — M52의
+  최소 요구사항이다. 예산(8개 argv, 224바이트)은 셸 자기테스트의
+  짧은 명령줄만 지원하면 충분하다는 YAGNI 판단(계획 문서가 이미
+  "짧은 명령줄만" 범위로 좁혀 뒀다).
+- **영향**: `mc_exec_request`/`mc_process_spawn_request`의
+  `argv_blob`/`argv_size` 필드 자체는 M27부터 있던 것을 처음으로
+  실제로 소비하는 것뿐이라 와이어 변경은 없다. `build_process()`의
+  이 변경은 모든 `linux_abi_stack=1` 소비자(musl-hello, pipe-test,
+  msh/echo/ls/cat)에 영향을 주는 블라스트 라디우스가 있어, 이번
+  라운드는 QEMU 5개 회귀 스위트 전체로 기존 소비자의 "인자 없음"
+  기본 경로가 그대로 유지됨을 확인했다.

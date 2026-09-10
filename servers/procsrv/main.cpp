@@ -41,6 +41,9 @@
 
 #include "musl_exec_target_blob.h"
 #include "user_service_unit_blob.h"
+#include "echo_blob.h"
+#include "ls_blob.h"
+#include "cat_blob.h"
 
 namespace kernsrv::procsrv {
 
@@ -462,8 +465,14 @@ constexpr uint64_t k_page_size = 4096;
 // ELF도 131072를 넘어서(139072바이트, 2026-09-10) servers/fs/memfs::
 // k_max_file_bytes와 함께 262144로 늘렸다 — 이 값은 BSS 배열(아래
 // g_reassembled) 크기라 늘려도 procsrv 자신의 ELF **파일** 크기에는
-// 영향이 없다(BSS는 파일에 저장되지 않는다).
-constexpr uint64_t k_max_reassembled_bytes = 262144;  // servers/fs/memfs::k_max_file_bytes와 일치.
+// 영향이 없다(BSS는 파일에 저장되지 않는다). M52 — echo/ls/cat 블롭
+// 셋을 더 심으며 procsrv 자신의 ELF가 418640바이트까지 커져 262144를
+// 다시 넘었다(memfs::k_max_file_bytes만 늘리고 이 값을 깜빡해 loader
+// roundtrip이 "ok=0"으로 계속 실패했다 — read_elf_from_vfs가 이
+// 버퍼 크기(max_len)에서 그대로 잘려 write_ok=true인데도
+// g_reassembled_size != self_info.elf_size가 됐다) — 함께 1048576로
+// 올린다.
+constexpr uint64_t k_max_reassembled_bytes = 1048576;  // servers/fs/memfs::k_max_file_bytes와 일치.
 constexpr const char* k_su_target_path = "/bin/su-target";
 
 alignas(k_page_size) uint8_t g_write_scratch[k_page_size] = {};
@@ -1268,6 +1277,19 @@ void run_exec_target_seed() {
     debug_log(msg, cstr_len(msg));
 }
 
+// docs/plan/musl-userland-porting.md §M52(ADR-221) — 자체 작성 최소
+// coreutils(echo/ls/cat)를 위와 같은 이유로 VFS에 미리 써 둔다 —
+// userland/msh가 execve("/bin/echo", ...)류로 열 수 있으려면 그
+// 경로가 부팅 시 이미 준비돼 있어야 한다.
+void run_coreutils_seed() {
+    bool echo_ok = write_elf_to_vfs("/bin/echo", g_echo_elf, g_echo_elf_len);
+    bool ls_ok = write_elf_to_vfs("/bin/ls", g_ls_elf, g_ls_elf_len);
+    bool cat_ok = write_elf_to_vfs("/bin/cat", g_cat_elf, g_cat_elf_len);
+    const char* msg = (echo_ok && ls_ok && cat_ok) ? "[procsrv] coreutils seed ok=1\n"
+                                                     : "[procsrv] coreutils seed ok=0\n";
+    debug_log(msg, cstr_len(msg));
+}
+
 // M16(fs-protocol.md v2, ADR-057/129) — vfs의 마운트 테이블을 거쳐
 // fat32/ext4 서버가 실제로 마운트한 이미지에서 파일을 열어 읽는다.
 // tools/make-fs-test-images.sh가 각 이미지의 루트에 hello.txt를
@@ -1762,6 +1784,7 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // 확인한다.
     run_vfs_roundtrip_test();
     run_exec_target_seed();
+    run_coreutils_seed();
 
     // M16 — tools/make-fs-test-images.sh가 심어 둔 내용과 정확히
     // 일치해야 한다(그 스크립트의 FAT32_CONTENT/EXT4_CONTENT).
