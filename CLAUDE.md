@@ -549,3 +549,15 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   신원을 안 받음)/OPEN-73(ADR-193 준비완료 핸드셰이크 미연결) 신규
   등록. **user-service-manager.md는 이제 M40~M43 전부 완료됐다** —
   이 계획에는 더 이상 다음 마일스톤이 없다.
+- user-service-manager.md 완료 후, 실행되지 않고 남아 있던 유일한
+  마일스톤(real-libc-syscall-layer.md M39, 사용자 결정으로 스킵)을
+  사용자가 다시 다루기로 정했다. M39는 "동적 링킹으로 여러 바이너리가
+  musl의 공유 `libc.so`를 나눠 쓴다"는 것을 전제하고 있었는데, 그
+  전제 자체가 M29(ADR-203)에서 이미 무효화돼 있었다 — 그래서 M39를
+  그대로 되살리지 않고, 정적 링킹 전제로 다시 설계한 새 계획
+  [docs/plan/musl-userland-porting.md](docs/plan/musl-userland-porting.md)
+  (M51 파이프+dup2 ~ M55 job control 최소, 스트레치)를 세웠다 —
+  **아직 착수 전**. BusyBox(sh+coreutils 단일 정적 바이너리)를
+  `third_party/`에 새 submodule로 추가해 M20/M26/M39가 세 번 미룬
+  "실제 포팅된 셸/coreutils로 로그인 후 셸 대체"를 이번에 달성하는
+  것이 목표다.
