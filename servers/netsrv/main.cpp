@@ -18,7 +18,24 @@
 // 않는 이유).
 #include <uapi.hpp>
 
+// ADR-198 예외 규칙 — 이 서버가 발명한 값이 아니라 외부 표준(IEEE
+// EtherType 레지스트리, IANA IP 프로토콜 번호, RFC 2131의 DHCP
+// well-known 포트/매직 쿠키)이 정의하는 값들이라, netsrv 전용이
+// 아닌 공용 `kernsrv::proto`에 둔다("클라이언트·서버가 함께 참조하는
+// 계약"이라는 성격을 이름으로 드러낸다) — `kernsrv::netsrv`보다
+// 먼저 정의해야 안에서 중첩 네임스페이스 정의(`namespace kernsrv::proto`)
+// 를 다시 쓰지 않고 `using`으로 끌어올 수 있다.
+namespace kernsrv::proto {
+constexpr uint16_t k_ethertype_ipv4 = 0x0800;
+constexpr uint8_t k_ip_proto_udp = 17;
+constexpr uint16_t k_dhcp_client_port = 68;
+constexpr uint16_t k_dhcp_server_port = 67;
+constexpr uint32_t k_dhcp_magic_cookie = 0x63825363;
+}  // namespace kernsrv::proto
+
 namespace kernsrv::netsrv {
+
+using namespace kernsrv::proto;  // 기존 호출부를 그대로 두기 위한 unqualified 재노출.
 
 namespace {
 
@@ -135,12 +152,7 @@ uint64_t get_mac(uint8_t out_mac[6]) {
     return 0;
 }
 
-constexpr uint16_t k_ethertype_ipv4 = 0x0800;
-constexpr uint8_t k_ip_proto_udp = 17;
-constexpr uint16_t k_dhcp_client_port = 68;
-constexpr uint16_t k_dhcp_server_port = 67;
-constexpr uint32_t k_dhcp_magic_cookie = 0x63825363;
-constexpr uint32_t k_dhcp_xid = 0x4D435231;  // "MCR1" — 이 왕복만의 식별자.
+constexpr uint32_t k_dhcp_xid = 0x4D435231;  // "MCR1" — 이 왕복만의 식별자(netsrv 자신의 값, proto가 아님).
 
 // DHCPDISCOVER 하나를 담은 완전한 이더넷 프레임을 g_tx_scratch에
 // 만들고 길이를 반환한다. 이더넷/IP 둘 다 브로드캐스트라 ARP가
