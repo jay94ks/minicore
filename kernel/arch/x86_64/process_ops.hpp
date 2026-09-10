@@ -91,10 +91,20 @@ process_kill_error process_kill(kern::object::handle_table& caller_handles, uint
 // fd 테이블 복제는 커널이 하지 않는다(procsrv.md §3.6 — procsrv 자신이
 // IPC로 각 소유 서버에 요청할 몫) — 자식은 빈 handle_table로
 // 시작한다.
+//
+// out_thread_handle(M36, real-libc-syscall-layer.md §M36) — 성공하면
+// (부모 관점) 호출자(부모) 자신의 handle_table에 자식을 가리키는
+// object_kind::thread 핸들을 새로 만들어 그 번호를 여기 채운다
+// (process_spawn()의 기존 out_thread_handle과 완전히 같은 자리·같은
+// 권한(k_right_can_signal=k_right_can_kill) — M22/ADR-178이 이미
+// 확립한 패턴을 fork에도 재사용한다). 부모가 나중에 이 핸들로
+// sys_signal_send를 불러 자식에게 시그널을 보낼 수 있다 — pid는
+// procsrv만 아는 개념이라(ADR-201) 커널 레벨에서 "pid로 자식을
+// 찾아 시그널 보내기"는 여전히 안 되고, 이 핸들이 유일한 경로다.
 uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
                        uint64_t saved_user_rsp, uint64_t saved_rbx, uint64_t saved_rbp,
                        uint64_t saved_r12, uint64_t saved_r13, uint64_t saved_r14,
-                       uint64_t saved_r15);
+                       uint64_t saved_r15, uint32_t& out_thread_handle);
 
 // sys_exec — 호출한 스레드의 실행 이미지를 완전히 새 주소공간+ELF로
 // 교체한다. pid/identity에 해당하는 어떤 것도 이 계층에는 없으므로

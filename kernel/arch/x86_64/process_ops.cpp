@@ -424,7 +424,7 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
 uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
                        uint64_t saved_user_rsp, uint64_t saved_rbx, uint64_t saved_rbp,
                        uint64_t saved_r12, uint64_t saved_r13, uint64_t saved_r14,
-                       uint64_t saved_r15) {
+                       uint64_t saved_r15, uint32_t& out_thread_handle) {
     kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return static_cast<uint64_t>(process_spawn_error::not_a_user_process);
@@ -501,6 +501,19 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
     // 블록)도 자식 쪽에 그대로 유효한 COW 사본으로 존재한다 — 값만
     // 그대로 넘기면 된다(위 io_port_base/count와 완전히 같은 패턴).
     child->fs_base = self->fs_base;
+
+    // M36(real-libc-syscall-layer.md §M36) — process_spawn()의 기존
+    // out_thread_handle 자리(ADR-178)와 완전히 같은 패턴. self는
+    // 여전히 부모다(이 함수 전체가 부모의 syscall 컨텍스트에서만
+    // 실행된다 — 자식은 이 코드를 절대 거치지 않는다, 위 함수
+    // 주석 참고).
+    if (self->handles != nullptr) {
+        auto thread_owner =
+            self->handles->create_owner(kern::object::object_kind::thread, kern::object::k_right_can_signal, child);
+        if (thread_owner.is_ok()) {
+            out_thread_handle = thread_owner.value();
+        }
+    }
 
     kern::sched::enqueue(*child);
     kern::klog::printf("[process] fork ok child_pml4=0x%lx\n",

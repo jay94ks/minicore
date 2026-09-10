@@ -50,6 +50,7 @@ add_executable(minicore_kernel_x86_64
     pci_bringup.cpp
     pit.cpp
     process_ops.cpp
+    signal.cpp
     smp.cpp
     syscall.cpp
     syscall_entry.S

@@ -46,6 +46,12 @@
 #define SYS_execve 59
 #define SYS_wait4 61
 #define SYS_getpid 39
+// M36(real-libc-syscall-layer.md §M36, ADR-186) — 완전한 signal 계층.
+#define SYS_rt_sigaction 13
+#define SYS_rt_sigprocmask 14  // 여전히 미구현(default -ENOSYS) — signal_mask 자체는 있지만 이 syscall로 바꾸는 경로는 이번 라운드 범위 밖.
+#define SYS_rt_sigreturn 15
+#define SYS_kill 62  // pid 기반 라우팅(procsrv 경유)이 필요해 이번 라운드는 미구현 — 아래 주석 참고.
+#define SYS_sched_yield 24  // mc_yield() -> MC_SYSCALL_YIELD(syscall.h 주석 참고)로 우회.
 
 #define ARCH_SET_FS 0x1002
 
@@ -61,6 +67,18 @@
 // procsrv는 handle 3이다(ADR-152의 고정 순서 — MC_VFS_HANDLE 주석과
 // 같은 관례).
 #define MC_PROCSRV_HANDLE 3
+
+// M36(real-libc-syscall-layer.md §M36) — musl의 실제 struct k_sigaction
+// (third_party/musl/arch/x86_64/ksigaction.h)과 바이트 단위로 맞춰야
+// 한다 — musl의 sigaction()이 이 정확한 레이아웃으로 값을 채워
+// SYS_rt_sigaction에 포인터로 넘긴다. mask[1](32번 이후 실시간
+// 시그널)은 이 라운드가 다루지 않는 표준 시그널(1~31)뿐이라 무시한다.
+struct mc_ksigaction {
+    void (*handler)(int);
+    unsigned long flags;
+    void (*restorer)(void);
+    unsigned mask[2];
+};
 
 // M32 — SYS_execve가 VFS에서 통째로 읽어 올 대상 ELF의 최대 크기.
 // musl-hello 자신이 stdio를 포함해 약 160KiB이므로(2026-09-10 빌드
@@ -376,6 +394,35 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             }
             return target_pid;
         }
+        case SYS_rt_sigaction: {
+            // a=signum, b=act(새 등록, NULL이면 조회만), c=oldact(출력,
+            // NULL이면 안 받음), d=sigsetsize(무시 — 이 프로젝트는
+            // 항상 표준 시그널 1~31만 다룬다).
+            const struct mc_ksigaction* act = (const struct mc_ksigaction*)(unsigned long)b;
+            struct mc_ksigaction* oldact = (struct mc_ksigaction*)(unsigned long)c;
+            uint64_t out_old_handler = 0;
+            uint64_t out_old_restorer = 0;
+            uint64_t ret = mc_signal_action(
+                (uint32_t)a, act != 0, act != 0 ? (uint64_t)(unsigned long)act->handler : 0,
+                act != 0 ? (uint64_t)(unsigned long)act->restorer : 0, oldact != 0,
+                &out_old_handler, &out_old_restorer);
+            if (oldact != 0) {
+                oldact->handler = (void (*)(int))(unsigned long)out_old_handler;
+                oldact->restorer = (void (*)(void))(unsigned long)out_old_restorer;
+                oldact->flags = 0;
+                oldact->mask[0] = 0;
+                oldact->mask[1] = 0;
+            }
+            return (long)ret;
+        }
+        case SYS_sched_yield:
+            return (long)mc_yield();
+        case SYS_rt_sigreturn:
+            // 핸들러가 반환한 뒤 restorer(musl의 __restore_rt)가 부른다
+            // — 정상적으로는 이 값이 실제로 쓰이지 않는다(커널이
+            // syscall_entry.S의 saved_regs를 그 자리에서 다시 써서
+            // 원래 실행으로 곧바로 돌아간다).
+            return (long)mc_sigreturn();
         default:
             log_unimplemented(n);
             return MC_ENOSYS;

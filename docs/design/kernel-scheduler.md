@@ -1201,3 +1201,92 @@
   하나"라는 전제로 "그 스레드 하나만" 교체해도 충분했다. M37 착수
   시점에 `sys_exec`의 의미론을 이 경우까지 넓혀야 한다는 점을 기록해
   둔다.
+
+## ADR-211. M36 완성: syscall-리턴 시점 한정 signal 전달 — ADR-186의 계획 범위를 더 좁힘(IRETQ 경로/SIGCHLD 자동 전달/SIGKILL 즉시 unlink는 전부 미구현으로 남김)
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M36 실행 중 확정)
+- **배경**: ADR-186(계획 단계)의 결정을 실제로 구현한다. ADR-186은
+  6개 결정을 예정해 뒀지만, M36 실행은 §결정1/2/3(일부)/4만 실제로
+  만들었고 §결정3의 나머지(IRETQ 리턴 경로)·§결정5(`SIGCHLD` 자동
+  전달)·§결정6(`SIGKILL` 즉시 unlink)은 전부 범위 밖으로 남겼다 —
+  M17~M26이 반복해 온 "이번 라운드는 범위를 좁힌다" 패턴 그대로다.
+  **OPEN-65는 ADR-186 계획 단계에 앞당겨 해소 표시가 돼 있었으나,
+  §결정6이 실제로 구현되지 않아 다시 열었다**([open-items.md](open-items.md)
+  참고).
+- **결정**:
+  1. `object::thread`에 `pending_signals: uint64_t`/`signal_mask: uint64_t`
+     (기본 0, `sys_rt_sigprocmask`로 바꾸는 경로는 미구현이라 항상
+     0 — 모든 시그널이 항상 "차단 없음")/`sigactions[32]`
+     (`{handler, restorer}` 32개 슬롯)를 추가했다. `k_right_can_signal`은
+     `k_right_can_kill`(ADR-178)의 별칭이다 — 새 권한 비트를 만들지
+     않고 그대로 재사용한다.
+  2. 새 syscall 3개(순수 트램폴린, procsrv IPC 없음): `sys_signal_action`
+     (자기 자신의 핸들러 등록/조회), `sys_signal_send`(대상
+     `object_kind::thread` 핸들의 `pending_signals`에 비트만 세운다 —
+     즉시 아무 일도 안 한다, ADR-178의 `kill_requested` 관례 재사용),
+     `sys_rt_sigreturn`(핸들러가 끝난 뒤 저장된 실행 상태 복원).
+  3. **전달 확인 지점은 syscall 리턴 직전 한 곳뿐이다**(ADR-186
+     §결정3의 "IRETQ 직전도" 부분은 구현하지 않았다 — 이 라운드의
+     자기테스트가 필요로 하는 유일한 경로가 syscall 리턴이라, 인터럽트
+     리턴 경로까지 건드릴 이유가 없었다). `syscall_entry.S`가
+     `call syscall_dispatch` 직후(그 호출의 반환값을 보존한 채)
+     `check_signal_delivery(saved_regs, dispatch_ret)`를 부른다 —
+     saved_regs 9워드(r15~user_rsp, 기존 fork 레이아웃과 완전히
+     같다)를 그 자리에서 다시 써서 rip/rsp를 핸들러 엔트리로
+     리다이렉트한다. 핸들러 인자(RDI=시그널 번호)는 SysV의 2필드
+     구조체 RAX:RDX 반환 관례를 그대로 타고 내려와 스택을 더 건드릴
+     필요가 없었다.
+  4. `SIGKILL`(9)은 `signal_send`/`signal_action` 양쪽에서 조용히
+     거부한다(ADR-186 §결정4 그대로) — `sys_process_kill`(ADR-178)
+     이 여전히 유일한 경로다. `SIG_DFL`(0)/`SIG_IGN`(1) 둘 다 "무시"로
+     단순화했다(§결정3 서술과 달리, 진짜 기본 종료 의미론은 이
+     라운드도 범위 밖) — 대기 중인 다음 시그널을 계속 살핀다.
+  5. `fork_current()`(process_ops.cpp)가 `process_spawn`의 기존
+     `out_thread_handle` 자리(ADR-178)와 같은 패턴으로 부모의
+     handle_table에 자식을 가리키는 `object_kind::thread` 핸들(권한
+     `k_right_can_signal`)을 새로 만들어 돌려준다 — `SYS_kill(pid, sig)`
+     의 pid→handle 라우팅(procsrv가 fork_register된 자식의 handle을
+     모른다, OPEN-67과 같은 뿌리)이 없어 이번 라운드는 구현하지
+     않았고, 자기테스트는 이 핸들을 직접 받아 `mc_signal_send()`를
+     쓴다.
+- **실행 중 발견**: 두 가지 실제 버그를 QEMU로 재현·수정했다(각각
+  [real-libc-syscall-layer-m36.md](../done/real-libc-syscall-layer-m36.md)
+  에 더 자세히 적었다).
+  1. **musl 소스 include 순서 버그**(신호와 직접 관련은 없지만 M36
+     빌드 중 처음 드러남) — `libc/CMakeLists.txt`가 musl 자신의
+     Makefile과 다른 include 순서(`src/internal`이 `arch/x86_64`보다
+     먼저)를 쓰고 있어, arch별로 오버라이드되는 헤더(`ksigaction.h`)
+     가 제네릭 버전으로 잡혀 `sigaction.c`가 존재하지 않는 `__restore`
+     심벌을 참조했다 — 순서를 musl 원본과 맞춰 고쳤다.
+  2. **`__restore_rt` 트램폴린의 syscall 번호 채널 불일치** — musl의
+     `restore.s`(핸들러가 `ret`한 뒤 CPU가 곧바로 뛰어드는 손짜기
+     트램폴린, `__syscallN`류를 거치지 않는다)는 원본 그대로 진짜
+     Linux ABI(번호를 RAX에 싣는다)를 쓰는데, 이 커널의
+     `syscall_entry`는 번호를 RDI에서 읽는다 — 그대로 두면 `sigreturn`
+     이 전혀 실행되지 않고 핸들러가 남긴 임의의 RDI 값을 번호로
+     오인해 엉뚱한 syscall이 실행되다가 결국 SYSRET 이후 사용자
+     코드가 예상 못한 지점에서 죽었다(`#GP`). `third_party/patches/musl/
+     0002-restore-trampoline.patch`(ADR-022/ADR-183이 이미 마련해 둔
+     패치 파이프라인 재사용)로 그 한 줄만 이 커널의 번호를 쓰도록
+     고쳤다.
+  3. **자기테스트 자체의 fork 스케줄링 경합** — 부모가 자식보다 먼저
+     스케줄돼 자식이 `sigaction()`으로 핸들러를 등록하기 전에
+     `mc_signal_send()`가 도착하면, §결정4의 "SIG_DFL=무시" 단순화가
+     그 신호를 조용히 버린다. fork()는 COW라 자식이 "등록 끝났다"는
+     플래그를 부모가 직접 읽을 수 있는 공유 메모리에 쓸 방법이
+     없다(각자의 쓰기가 자기 사본에만 반영된다) — 그리고 `getpid()`
+     처럼 pid가 이미 캐시된 syscall은 스케줄러를 전혀 건드리지
+     않아(순수 로컬 반환) 재시도의 "쉬는 시간"으로 못 쓴다는 것도
+     함께 겪었다. 새 syscall `sys_yield`(`kern::sched::yield()`를
+     그대로 유저랜드에 노출, musl의 `SYS_sched_yield`가 이 자리로
+     우회)를 추가해, 부모가 신호를 재전송하며 매번 실제로 양보하도록
+     고쳤다.
+- **영향**: `pthread_cancel`(ADR-187 §결정6)이 이 ADR을 선행 조건으로
+  요구했던 부분은 이제 최소한의 신호 전달 자체는 갖춰졌지만, 실시간
+  시그널·`sigprocmask`·job control은 여전히 없다 — M37 착수 시점에
+  pthread가 이 최소 집합만으로 충분한지 재확인해야 한다.
+  `sys_yield`는 M37의 futex 대기/깨우기 설계에도 재사용할 수 있는
+  일반 프리미티브다(스케줄러 자체는 이미 임의 스레드 컨텍스트에서
+  안전하게 호출 가능하도록 돼 있었다 — 이번에 유저랜드로 노출만 한
+  것뿐이다).

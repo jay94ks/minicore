@@ -198,6 +198,27 @@
 #     linux_abi_stack 필드 추가). SYS_wait4는 pid>0(특정 자식)만
 #     지원한다(pid<=0의 "임의의 자식" 의미론은 범위 밖 — 2026-09-10
 #     사용자 확인, fork/clone 범위 좁힘과 같은 결정).
+#   M36 (real-libc-syscall-layer.md §M36, kernel-scheduler.md ADR-211):
+#     musl 자신의 진짜 signal — sigaction()이 실제로 SYS_rt_sigaction
+#     커널 syscall이다(struct k_sigaction 마샬링), 핸들러 진입은
+#     syscall_entry.S가 syscall_dispatch 반환 직후(return-to-user
+#     경계) check_signal_delivery()로 saved_regs를 다시 써서 만든다.
+#     자식(fork())이 SIGUSR1 핸들러를 등록해 두고 자기 pid를 바쁜
+#     루프로 기다리다가, 부모가 mc_signal_send(자식의 thread handle,
+#     SIGUSR1)로 직접 보낸 신호를 받으면 핸들러가 카운터를 올리고
+#     _exit(55)한다 — waitpid()로 그 exit code를 회수해 확인한다
+#     ("musl signal handler ok=1"). 범위를 여러 겹 좁혔다: SIGKILL은
+#     이 새 pending_signals 경로를 전혀 안 타고 기존 sys_process_kill
+#     (ADR-178)에 그대로 남는다 · SIG_DFL/SIG_IGN 둘 다 "무시"로만
+#     처리한다(진짜 기본 종료 의미론 없음) · SYS_kill(pid, sig)은
+#     구현하지 않는다(procsrv가 관리하는 pid→커널 thread handle
+#     역매핑이 없어서 — fork_register된 자식들 한정, OPEN-67과
+#     같은 뿌리) · 그래서 자기테스트는 musl의 kill()이 아니라
+#     fork_current()가 새로 내주는 out_thread_handle(ADR-178의
+#     process_spawn out_thread_handle 패턴을 그대로 fork에도 적용)
+#     을 mc_last_fork_child_thread_handle()로 받아 mc_signal_send()
+#     를 직접 쓴다. 신호 전달 검사 지점도 syscall 리턴 한 곳뿐이다
+#     (IRETQ/인터럽트 리턴 경로는 범위 밖).
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -435,6 +456,7 @@ declare -a EXPECTED=(
   "musl setlocale empty ok=1"
   "musl setlocale unknown name ok=1"
   "musl locale ctype still C ok=1"
+  "musl signal handler ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

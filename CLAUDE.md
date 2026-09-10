@@ -325,5 +325,33 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   로케일(`ko_KR.UTF-8`)은 실패해야 한다"는 실제 musl 동작과 다름을
   소스 확인으로 발견했다(musl은 알 수 없는 로케일도 실패시키지
   않고 C.UTF-8로 조용히 대체한다) — 검증 목표를 "요청은 성공하지만
-  ctype 동작은 여전히 C"로 조정했다. 다음은 M36(완전한 signal
-  계층)이다.
+  ctype 동작은 여전히 C"로 조정했다.
+  **M36(완료, 범위 재좁힘)**(결과는
+  [docs/done/real-libc-syscall-layer-m36.md](docs/done/real-libc-syscall-layer-m36.md),
+  [ADR-211](docs/design/kernel-scheduler.md) 참고): 완전한 signal
+  계층 — `pending_signals`/`signal_mask`/`sigactions[32]`+새 syscall
+  3개(`sys_signal_action`/`sys_signal_send`/`sys_rt_sigreturn`)+
+  `syscall_entry.S`의 return-to-user 훅. 계획 단계 ADR-186의 6개
+  결정 중 syscall 리턴 시점 전달만 실제로 구현했다 — IRETQ 경로,
+  `SIGCHLD` 자동 전달, `SIGKILL` 즉시 대기열 unlink는 전부 범위
+  밖으로 남겨 **OPEN-65를 다시 열었다**(ADR-186 계획 단계에 앞당겨
+  "해소" 표시가 돼 있었으나 실제로는 구현되지 않았음을 뒤늦게
+  확인). 실행 중 진짜 버그 3건을 QEMU로 재현·수정했다: (1)
+  `libc/CMakeLists.txt`의 musl include 검색 순서가 musl 원본
+  Makefile과 반대라 arch별 `ksigaction.h` 오버라이드가 안 먹혀
+  `sigaction.c`가 존재하지 않는 `__restore` 심벌을 참조(순서를
+  원본과 맞춰 고침), (2) musl의 `restore.s`(핸들러가 `ret`한 뒤
+  CPU가 곧바로 뛰어드는 손짜기 트램폴린 — `__syscallN` 우회를
+  전혀 거치지 않는다)가 진짜 Linux ABI(syscall 번호를 RAX에 싣는다)
+  를 그대로 써 이 커널의 RDI 기반 syscall ABI와 맞지 않아
+  `sys_rt_sigreturn`이 전혀 실행되지 않고 핸들러가 남긴 임의의 RDI
+  값을 번호로 오인해 `#GP`로 죽음(`third_party/patches/musl/
+  0002-restore-trampoline.patch`로 그 한 줄만 이 커널의 번호를
+  쓰도록 고침 — 0001 다음 이 패치 파이프라인의 두 번째 실사용), (3)
+  자기테스트 자체의 fork 스케줄링 경합(부모가 자식의 `sigaction()`
+  등록보다 먼저 `mc_signal_send()`를 보내면 "SIG_DFL=무시"
+  단순화가 그 신호를 조용히 버림, `getpid()`처럼 pid가 이미
+  캐시된 syscall은 스케줄러를 안 건드려 재시도의 "쉬는 시간"으로
+  못 씀 — 새 syscall `sys_yield`(`kern::sched::yield()`를 유저랜드에
+  노출, musl `sched_yield()`가 우회)로 해결). 다음은 M37(pthread
+  최소 — `sys_thread_create`+`sys_futex`)이다.

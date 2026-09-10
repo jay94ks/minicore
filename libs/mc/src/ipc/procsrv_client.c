@@ -39,6 +39,13 @@ uint32_t mc_getpid(uint32_t procsrv_handle) {
     return pid;
 }
 
+// M36(real-libc-syscall-layer.md §M36) — 가장 최근 mc_fork() 성공
+// (부모 관점) 호출이 받은 자식의 thread 핸들. mc_last_fork_child_thread_handle()
+// 참고.
+static uint32_t g_last_fork_child_thread_handle = 0;
+
+uint32_t mc_last_fork_child_thread_handle(void) { return g_last_fork_child_thread_handle; }
+
 long mc_fork(uint32_t procsrv_handle) {
     uint32_t self_pid = mc_getpid(procsrv_handle);
 
@@ -60,13 +67,22 @@ long mc_fork(uint32_t procsrv_handle) {
     // procsrv_pid=0부터 시작한다 — 아래에서 명시적으로 채워 줘야 한다.
     uint32_t child_pid = (uint32_t)reply.regs[1];
 
-    uint64_t raw = mc_raw_syscall(MC_SYSCALL_FORK, 0, 0, 0);
+    // M36 — sys_fork(a1)에 "자식의 thread 핸들을 여기 채워 달라"는
+    // 출력 슬롯의 유저 가상주소를 넘긴다(process_ops.cpp::fork_current()
+    // 참고). 부모 분기에서만 실제로 의미 있는 값이 채워진다 — COW
+    // 복제는 이미 그 전에 끝나 있어(clone_address_space_cow), 이후
+    // 부모가 이 스택 슬롯에 쓰는 순간 그 페이지만 부모 전용으로
+    // 갈라진다(자식의 같은 가상주소는 여전히 옛 값 — 자식은 이
+    // 값을 아예 안 쓰므로 무해하다).
+    uint32_t out_thread_handle = 0;
+    uint64_t raw = mc_raw_syscall(MC_SYSCALL_FORK, (uint64_t)(uintptr_t)&out_thread_handle, 0, 0);
     if (raw == 0) {
         // 자식 분기 — 이 스레드(자식) 자신의 procsrv_pid를 채운다.
         mc_procsrv_pid_set(child_pid);
         return 0;
     }
     if (raw == 1) {
+        g_last_fork_child_thread_handle = out_thread_handle;
         return (long)child_pid;
     }
     // mc/syscall.h::process_spawn_error(실패 코드) — sys_fork 자체가

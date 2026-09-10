@@ -12,6 +12,7 @@
 
 #include "gdt_selectors.hpp"
 #include "process_ops.hpp"
+#include "signal.hpp"
 #include "tss.hpp"
 
 #include <cstdint>
@@ -84,9 +85,11 @@ void install_syscall_entry(uint64_t kernel_gs_base_slot) {
 // saved_regs(M12, ADR-142) — syscall_entry.S가 %r8로 넘긴다. push 역순
 // 배열: [0]=r15,[1]=r14,[2]=r13,[3]=r12,[4]=rbp,[5]=rbx,[6]=rflags,
 // [7]=rip,[8]=user_rsp(syscall_entry.S 상단 주석과 정확히 대응). fork
-// 외의 syscall은 이 값을 쓰지 않는다.
+// 외의 대부분 syscall은 이 값을 읽기만 한다 — M36(real-libc-syscall-layer.md
+// §M36)의 MC_SYSCALL_RT_SIGRETURN만 예외로 이 배열에 **쓴다**(시그널
+// 프레임에서 원래 실행 상태를 복원) — 그래서 포인터가 이제 non-const다.
 extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
-                                      const uint64_t* saved_regs) {
+                                      uint64_t* saved_regs) {
     switch (num) {
         case MC_SYSCALL_IPC_CALL: {
             kern::object::thread* self = kern::sched::current();
@@ -145,11 +148,22 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             return static_cast<uint64_t>(err);
         }
         case MC_SYSCALL_FORK: {
-            return kern::arch::x86_64::fork_current(/*rip=*/saved_regs[7], /*rflags=*/saved_regs[6],
-                                              /*user_rsp=*/saved_regs[8], /*rbx=*/saved_regs[5],
-                                              /*rbp=*/saved_regs[4], /*r12=*/saved_regs[3],
-                                              /*r13=*/saved_regs[2], /*r14=*/saved_regs[1],
-                                              /*r15=*/saved_regs[0]);
+            // M36(real-libc-syscall-layer.md §M36) — a1(이전에는 안 쓰던
+            // 인자)은 이제 "새 자식 thread 핸들을 여기 채워 달라"는
+            // 유저 가상주소 출력 슬롯이다(0이면 안 채운다 — 이 슬롯이
+            // 필요 없는 호출자를 위한 하위호환). mc_fork()(libmc)가
+            // 항상 채워서 부른다.
+            uint32_t out_thread_handle = 0;
+            auto ret = kern::arch::x86_64::fork_current(
+                /*rip=*/saved_regs[7], /*rflags=*/saved_regs[6],
+                /*user_rsp=*/saved_regs[8], /*rbx=*/saved_regs[5],
+                /*rbp=*/saved_regs[4], /*r12=*/saved_regs[3],
+                /*r13=*/saved_regs[2], /*r14=*/saved_regs[1],
+                /*r15=*/saved_regs[0], out_thread_handle);
+            if (a1 != 0) {
+                *reinterpret_cast<uint32_t*>(a1) = out_thread_handle;
+            }
+            return ret;
         }
         case MC_SYSCALL_EXEC: {
             const auto* req = reinterpret_cast<const mc_exec_request*>(a1);
@@ -273,6 +287,43 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             }
             self->procsrv_pid = static_cast<uint32_t>(a1);
             return 0;
+        }
+        case MC_SYSCALL_SIGNAL_ACTION: {
+            kern::object::thread* self = kern::sched::current();
+            auto* req = reinterpret_cast<mc_signal_action_request*>(a2);
+            if (self == nullptr || self->handles == nullptr || req == nullptr) {
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
+            }
+            kern::arch::x86_64::signal_action(*self, static_cast<uint32_t>(a1), *req);
+            return 0;
+        }
+        case MC_SYSCALL_SIGNAL_SEND: {
+            kern::object::thread* self = kern::sched::current();
+            if (self == nullptr || self->handles == nullptr) {
+                return static_cast<uint64_t>(kern::arch::x86_64::signal_send_error::invalid_handle);
+            }
+            auto err = kern::arch::x86_64::signal_send(*self->handles, static_cast<uint32_t>(a1),
+                                                        static_cast<uint32_t>(a2));
+            return static_cast<uint64_t>(err);
+        }
+        case MC_SYSCALL_YIELD: {
+            // M36(real-libc-syscall-layer.md §M36) — mc/syscall.h::
+            // MC_SYSCALL_YIELD 주석 참고. kern::sched::yield()는 이미
+            // 타이머 틱 핸들러가 임의의 "현재 스레드" 컨텍스트에서
+            // 부르는 것과 완전히 같은 함수라, 여기서 유저 syscall
+            // 컨텍스트로부터 직접 불러도 안전하다(그 자리에서 다른
+            // runnable 스레드로 전환했다가, 이 스레드가 다시 뽑히면
+            // 바로 이 지점으로 돌아온다).
+            kern::sched::yield();
+            return 0;
+        }
+        case MC_SYSCALL_RT_SIGRETURN: {
+            // M36(real-libc-syscall-layer.md §M36) — signal.cpp::mc_signal_return()
+            // 가 saved_regs를 그 자리에서 다시 쓴다(원래 실행 상태로
+            // 복원) — syscall_entry.S의 post-dispatch 훅(check_signal_delivery)
+            // 이 이 rewrite 이후에도 이어서 도는 것은 의도적이다(또 다른
+            // 시그널이 대기 중이면 그것도 이 시점에 전달될 수 있다).
+            return mc_signal_return(saved_regs);
         }
         default:
             return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);

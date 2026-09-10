@@ -42,6 +42,18 @@ uint32_t mc_getpid_cached(void);
 // 다시 조율해야 했을 것이다).
 long mc_fork(uint32_t procsrv_handle);
 
+// M36(real-libc-syscall-layer.md §M36) — mc_fork()가 부모 관점으로
+// 성공했을 때(가장 최근 호출 한 번) 커널이 함께 내준
+// object_kind::thread 핸들(k_right_can_signal 부여 —
+// process_ops.hpp::fork_current() 참고)을 캐시해 둔 것. musl의 진짜
+// fork()는 이 핸들을 모른다(POSIX ABI에 그런 자리가 없다) — 그래서
+// 별도로 꺼내 쓸 수 있게 이 접근자를 둔다. pid는 procsrv만 아는
+// 개념이라(ADR-201) 커널 레벨에서 "pid로 자식을 찾아 시그널 보내기"
+// (SYS_kill의 pid 인자)는 여전히 이 라운드에서 지원하지 않는다 —
+// 자식에게 직접 시그널을 보내려면(예: sigaction+kill 왕복 테스트)
+// mc_fork() 직후 이 핸들을 mc_signal_send()에 그대로 넘긴다.
+uint32_t mc_last_fork_child_thread_handle(void);
+
 // musl의 waitpid(target_pid, ...)/wait4(target_pid, ...)(target_pid>0
 // 인 경우만 — 이 라운드는 "특정 자식 pid를 기다린다"만 지원한다,
 // pid<=0의 "임의의 자식"/"프로세스 그룹" 의미론은 범위 밖이다,

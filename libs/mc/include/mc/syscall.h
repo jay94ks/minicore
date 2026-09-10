@@ -81,6 +81,22 @@ typedef struct {
 #define MC_SYSCALL_MUNMAP 16u
 #define MC_SYSCALL_PROCSRV_PID_GET 17u
 #define MC_SYSCALL_PROCSRV_PID_SET 18u
+#define MC_SYSCALL_SIGNAL_ACTION 19u
+#define MC_SYSCALL_SIGNAL_SEND 20u
+#define MC_SYSCALL_RT_SIGRETURN 21u
+// M36(real-libc-syscall-layer.md §M36) — sys_yield(인자 없음, 항상 0
+// 반환). kern::sched::yield()를 유저랜드에 그대로 노출한다 — 자기
+// 자신을 run queue에 다시 넣고 다른 runnable 스레드에게 이 코어를
+// 양보한다. musl의 SYS_sched_yield가 이 자리를 통해 우회한다
+// (syscall_shim.c). fork()로 COW 분리된 자식과 부모 사이에는 공유
+// 메모리로 "준비됐다" 신호를 주고받을 방법이 없어(각자 쓰기는
+// 자기 사본에만 반영된다) — 협조가 필요한 자기테스트(예: 자식이
+// sigaction()을 마칠 시간을 실제로 벌어 주는 것)가 대신 이걸
+// 반복 호출해 스케줄러가 다른 스레드를 실행할 기회를 준다(musl-hello
+// 참고). getpid() 같은 캐시된 syscall은 실제로 스케줄러를 건드리지
+// 않아(카드가 이미 유저랜드에 있음) 이 목적에 안 맞는다는 것을 실제로
+// 겪었다(2026-09-10).
+#define MC_SYSCALL_YIELD 22u
 
 #define MC_MAX_DEBUG_LOG_BYTES 96u
 #define MC_MAX_MMIO_MAP_BYTES (16ull * 1024 * 1024)
@@ -136,6 +152,23 @@ typedef struct {
     // 그대로다.
     uint8_t linux_abi_stack;
 } mc_exec_request;
+
+// M36(real-libc-syscall-layer.md §M36, ADR-186) — sys_signal_action
+// (a1=시그널 번호(1~31), a2=이 구조체의 유저 가상주소). handler==0=
+// SIG_DFL(이 라운드는 "무시"로 취급, 진짜 기본 동작은 범위 밖),
+// handler==1=SIG_IGN. new_action이 채워져 있으면(set_new!=0) 새
+// 등록으로 갈아 끼우고, want_old!=0이면 그 전 값을 out_old에
+// 채운다(POSIX sigaction()의 oldact 관례). 항상 성공한다(SIGKILL/
+// SIGSTOP류에 대한 거부는 syscall_shim.c가 musl 쪽에서 먼저 걸러도
+// 되지만, 커널도 방어적으로 그 번호는 조용히 무시한다).
+typedef struct {
+    uint8_t set_new;
+    uint64_t new_handler;
+    uint64_t new_restorer;
+    uint8_t want_old;
+    uint64_t out_old_handler;   // 출력.
+    uint64_t out_old_restorer;  // 출력.
+} mc_signal_action_request;
 
 // sys_fork(인자 없음) — 반환값: 자식에서는 0, 부모에서는 1(성공)
 // 또는 process_spawn_error(실패).
@@ -287,6 +320,53 @@ static inline uint64_t mc_exec(uint64_t elf_data, uint64_t elf_size, uint64_t ar
     req.argv_size = argv_size;
     req.linux_abi_stack = linux_abi_stack;
     return mc_raw_syscall(MC_SYSCALL_EXEC, (uint64_t)(uintptr_t)&req, 0, 0);
+}
+
+// M36(real-libc-syscall-layer.md §M36, ADR-186) — sys_signal_action/
+// sys_signal_send/sys_rt_sigreturn. 셋 다 IPC/프로토콜 로직이 없는
+// 순수 syscall 트램폴린이라(procsrv를 거치지 않는다 — 대상은 항상
+// 호출자가 이미 들고 있는 object_kind::thread 핸들이다)
+// procsrv_client.h가 아니라 mc_exec류와 같은 자리에 둔다.
+static inline uint64_t mc_signal_action(uint32_t signal_number, uint8_t set_new,
+                                         uint64_t new_handler, uint64_t new_restorer,
+                                         uint8_t want_old, uint64_t* out_old_handler,
+                                         uint64_t* out_old_restorer) {
+    mc_signal_action_request req;
+    req.set_new = set_new;
+    req.new_handler = new_handler;
+    req.new_restorer = new_restorer;
+    req.want_old = want_old;
+    req.out_old_handler = 0;
+    req.out_old_restorer = 0;
+    uint64_t ret = mc_raw_syscall(MC_SYSCALL_SIGNAL_ACTION, signal_number,
+                                   (uint64_t)(uintptr_t)&req, 0);
+    if (out_old_handler != 0) {
+        *out_old_handler = req.out_old_handler;
+    }
+    if (out_old_restorer != 0) {
+        *out_old_restorer = req.out_old_restorer;
+    }
+    return ret;
+}
+
+// target_thread_handle은 MC_RIGHT_CAN_SIGNAL(=MC_RIGHT_CAN_KILL과
+// 같은 비트)이 필요하다 — sys_process_kill(ADR-178)이 이미 발급하는
+// 그 핸들을 그대로 쓴다. SIGKILL(9)은 이 경로를 거부한다(항상
+// process_kill_error 계열의 음수 아닌 실패 코드) — sys_process_kill
+// 을 대신 쓴다(ADR-186 §결정4, 일반화하지 않는다).
+static inline uint64_t mc_signal_send(uint32_t target_thread_handle, uint32_t signal_number) {
+    return mc_raw_syscall(MC_SYSCALL_SIGNAL_SEND, target_thread_handle, signal_number, 0);
+}
+
+// 시그널 핸들러가 반환한 뒤(restorer 트램폴린이 부른다) 원래
+// 실행으로 복귀한다 — 정상적으로는 반환하지 않는다(syscall_entry.S
+// 의 saved_regs를 그 자리에서 다시 덮어써 버린다).
+static inline uint64_t mc_sigreturn(void) {
+    return mc_raw_syscall(MC_SYSCALL_RT_SIGRETURN, 0, 0, 0);
+}
+
+static inline uint64_t mc_yield(void) {
+    return mc_raw_syscall(MC_SYSCALL_YIELD, 0, 0, 0);
 }
 
 #endif  // !MC_LAND_KERNEL

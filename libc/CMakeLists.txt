@@ -28,8 +28,20 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 # *.patch를 실제로 적용한 작업 트리(tools/apply-patches.sh, ADR-022가
 # 예약해 둔 자리를 처음 실제로 씀). 이 아래 minicore_libc의 모든
 # musl 소스 include 경로는 원본이 아니라 이 패치된 트리를 가리킨다 —
-# 지금은 arch/x86_64/syscall_arch.h 하나만 실제로 바뀌지만, 앞으로
-# 추가되는 패치도 전부 이 경로를 통해 자동으로 반영된다.
+# 0001은 arch/x86_64/syscall_arch.h(모든 __syscallN을 우회), 0002는
+# src/signal/x86_64/restore.s를 바꾼다. restore.s는 __syscallN을
+# 거치지 않는 특수 경로다 — 시그널 핸들러가 ret한 뒤 CPU가 곧바로
+# 뛰어드는 손짜기 트램폴린이라(진짜 Linux도 이 트램폴린은 raw
+# `syscall`을 직접 쓴다, C 러너타임을 아예 안 거친다) 0001의 우회가
+# 적용될 자리가 없다 — 원본은 Linux ABI 그대로 번호를 RAX에 싣지만
+# (mov $15,%rax), 이 커널의 syscall_entry는 번호를 RDI에서 읽는다
+# (syscall_entry.S 상단 주석) — 그대로 두면 syscall_dispatch가 핸들러
+# 실행 후 RDI에 남은 임의 값을 번호로 오인해 rt_sigreturn이 전혀
+# 실행되지 않는다(M36에서 실제로 겪음: #GP로 죽었고, 죽은 위치가
+# 정확히 __restore_rt의 syscall 다음 명령이었다, 2026-09-10). 0002는
+# 그 한 줄을 이 커널의 번호(MC_SYSCALL_RT_SIGRETURN=21, mc/syscall.h)
+# 를 RDI에 싣도록 바꾼다 — sigreturn은 인자가 없어 RSI/RDX/R10에
+# 남는 값은 무해하다.
 set(MUSL_PATCHED_ROOT ${CMAKE_CURRENT_BINARY_DIR}/_patched/musl)
 set(MUSL_PATCHED_STAMP ${MUSL_PATCHED_ROOT}/.stamp)
 
@@ -39,6 +51,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E touch ${MUSL_PATCHED_STAMP}
     DEPENDS ${CMAKE_SOURCE_DIR}/tools/apply-patches.sh
             ${CMAKE_SOURCE_DIR}/third_party/patches/musl/0001-syscall-shim.patch
+            ${CMAKE_SOURCE_DIR}/third_party/patches/musl/0002-restore-trampoline.patch
     COMMENT "Applying musl patches (tools/apply-patches.sh) -> ${MUSL_PATCHED_ROOT}"
     VERBATIM
 )
@@ -229,6 +242,20 @@ add_library(minicore_libc STATIC
     ${MUSL_PATCHED_ROOT}/src/exit/abort_lock.c
     ${MUSL_PATCHED_ROOT}/src/signal/block.c
 
+    # M36(real-libc-syscall-layer.md §M36, ADR-186) — 완전한 signal
+    # 계층. musl 자신의 진짜 sigaction()(SYS_rt_sigaction을 부른다,
+    # third_party/musl/src/signal/sigaction.c)이 이번에 처음
+    # 필요해졌다.
+    ${MUSL_PATCHED_ROOT}/src/signal/sigaction.c
+    ${MUSL_PATCHED_ROOT}/src/signal/x86_64/restore.s
+
+    # M36 — musl-hello의 fork() 자기테스트가 부모/자식 사이 실제
+    # 동기화 수단이 없어(COW라 서로의 쓰기가 보이지 않는다) 부모가
+    # sched_yield()를 반복 호출해 스케줄러에게 자식을 실행할 기회를
+    # 강제로 준다(syscall_shim.c::SYS_sched_yield, mc/syscall.h::
+    # MC_SYSCALL_YIELD 주석 참고).
+    ${MUSL_PATCHED_ROOT}/src/sched/sched_yield.c
+
     # M35(real-libc-syscall-layer.md §M35, ADR-188) — setlocale()과
     # 그 링크 의존성(locale_map.c::__get_locale, c_locale.c::
     # __c_dot_utf8/__c_locale, __mo_lookup.c::__mo_lookup — __lctrans_impl
@@ -280,7 +307,21 @@ set_source_files_properties(
     PROPERTIES COMPILE_OPTIONS "-msse;-msse2"
 )
 
-# musl 자신의 Makefile이 쓰는 것과 같은 include 경로 목록.
+# musl 자신의 Makefile이 쓰는 것과 같은 include 경로 목록 — 순서까지
+# 그대로 맞춘다(third_party/musl/Makefile:50의 CFLAGS_ALL 참고:
+# arch/$(ARCH) → arch/generic → obj/src/internal → src/include →
+# src/internal → obj/include → include). arch/x86_64가 src/internal
+# 보다 **먼저** 와야 한다 — 그렇지 않으면 `#include "ksigaction.h"`
+# 같은 "같은 이름, arch별 오버라이드 있음" 헤더가 arch 버전이
+# 아니라 src/internal의 제네릭 버전으로 잡힌다(M36에서 실제로 겪음,
+# 2026-09-10: src/internal/ksigaction.h는 `__restore`/`__restore_rt`를
+# 별도 심벌 두 개로 선언하고, arch/x86_64/ksigaction.h만
+# `#define __restore __restore_rt`로 별칭 처리한다 — 순서가 뒤바뀌면
+# sigaction.c가 존재하지 않는 `__restore` 심벌을 참조해 링크가
+# 깨진다). arch/x86_64(패치된 트리)를 원본보다 먼저 넣는 것도 이미
+# 이 순서의 일부다 — #include "syscall_arch.h" 등이 패치된 버전을
+# 먼저 찾게 한다(M28, 위 add_library 주석 참고).
+#
 # src/include·src/internal(weak_alias 등)은 minicore_libc 자신의
 # .c 파일을 빌드할 때만 필요해 PRIVATE다. 나머지(arch/x86_64,
 # arch/generic, 생성 헤더, 공개 include/)는 **PUBLIC**이어야
@@ -293,17 +334,26 @@ set_source_files_properties(
 # PRIVATE로 남으면 소비자 쪽에서 그 헤더를 못 찾아 빌드가 깨진다
 # (실제로 bits/alltypes.h, 그다음 bits/stdint.h 순서로 두 번 겪음,
 # 2026-09-10).
+#
+# 위 순서 주석대로 PUBLIC/PRIVATE 두 그룹으로만 나누면 안 된다 —
+# real musl 순서는 arch/* 다음에 src/include·src/internal이 오고
+# **그 다음에** 생성된 공개 헤더(obj/include)·공개 include/가
+# 온다(예: <string.h>가 src/internal에도, 공개 include/에도 있고,
+# musl 자신의 .c는 __memrchr/__strchrnul 같은 내부 전용 선언이
+# 추가된 src/internal 버전을 먼저 봐야 한다 — 공개 버전이 먼저
+# 잡히면 그 내부 심벌들이 전부 "선언 없음"이 된다, M36에서
+# ksigaction.h 순서를 고치며 함께 겪음, 2026-09-10). 그래서 arch
+# 그룹과 생성/공개 그룹을 별도 PUBLIC 호출로 쪼개 그 사이에
+# PRIVATE(src/include, src/internal) 호출을 끼워 넣는다.
+target_include_directories(minicore_libc PUBLIC
+    ${MUSL_PATCHED_ROOT}/arch/x86_64
+    ${MUSL_PATCHED_ROOT}/arch/generic
+)
 target_include_directories(minicore_libc PRIVATE
     ${MUSL_PATCHED_ROOT}/src/include
     ${MUSL_PATCHED_ROOT}/src/internal
 )
-# 패치된 트리(arch/x86_64)를 원본보다 먼저 넣는다 — #include
-# "syscall_arch.h" 등이 패치된 버전을 먼저 찾게 한다(M28, 위 add_library
-# 주석 참고). 지금은 arch/x86_64 하나만 실제로 다르지만, 나머지
-# (arch/generic, include/)도 패치 파이프라인의 일부로 통일해 둔다.
 target_include_directories(minicore_libc PUBLIC
-    ${MUSL_PATCHED_ROOT}/arch/x86_64
-    ${MUSL_PATCHED_ROOT}/arch/generic
     ${MUSL_GENERATED_INCLUDE}
     ${MUSL_PATCHED_ROOT}/include
 )

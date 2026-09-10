@@ -29,14 +29,36 @@
 // 그대로임을 확인한다(계획 문서가 원래 기대했던 "알려지지 않은
 // 이름은 실패해야 한다"는 실제 musl 동작과 다르다는 것을 소스
 // 확인으로 발견 — 아래 main() 안 주석 참고).
+// M36(real-libc-syscall-layer.md §M36, ADR-186): 완전한 signal
+// 계층. fork()의 자식이 sigaction(SIGUSR1, ...)으로 진짜 musl
+// signal 핸들러를 등록하고, 부모가 mc_signal_send()(mc_fork()가
+// 함께 내주는 커널 thread 핸들로 — SYS_kill의 pid 라우팅은 procsrv
+// 를 거쳐야 해서 이번 라운드는 다루지 않는다, docs/done 참고)로
+// SIGUSR1을 보내면 그 핸들러가 실제로 실행됨을 자식의 exit code로
+// 확인한다.
 #include <ctype.h>
 #include <errno.h>
 #include <locale.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <mc/procsrv_client.h>
+#include <mc/syscall.h>
+
+// M36 — sigaction()에 등록할 실제 핸들러. 파일 스코프 플래그로
+// "실행됐다"는 사실만 남긴다(신호 안전성 상 진짜로 안전한 것은
+// 이런 단순 플래그/카운터 갱신 정도뿐이다 — POSIX 관례 그대로).
+static volatile int g_sigusr1_count = 0;
+
+static void sigusr1_handler(int sig) {
+    (void)sig;
+    g_sigusr1_count++;
+}
 
 static void write_str(const char* s) {
     write(1, s, strlen(s));
@@ -123,6 +145,59 @@ int main(void) {
         int wait_ok =
             (waited == child) && WIFEXITED(status) && WEXITSTATUS(status) == 42;
         write_str(wait_ok ? "musl fork+exec+wait ok=1\n" : "musl fork+exec+wait ok=0\n");
+    }
+
+    // M36(real-libc-syscall-layer.md §M36, ADR-186) — 완전한 signal
+    // 계층. 자식은 sigaction()으로 진짜 핸들러를 등록한 뒤, 부모가
+    // 신호를 보낼 때까지 값싼 syscall(getpid — 매 호출이 커널의
+    // return-to-user 확인 지점이다)을 반복해 기다린다. 핸들러가
+    // 실행됐는지는 자식 자신의 exit code로 부모에게 알린다(fork()
+    // 로 COW 분리된 g_sigusr1_count는 부모가 직접 읽을 수 없다).
+    pid_t sig_child = fork();
+    if (sig_child == 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = sigusr1_handler;
+        sigaction(SIGUSR1, &sa, NULL);
+        for (int i = 0; i < 2000000 && g_sigusr1_count == 0; i++) {
+            getpid();
+        }
+        _exit(g_sigusr1_count > 0 ? 55 : 66);
+    }
+    int sig_fork_ok = (sig_child > 0);
+    if (sig_fork_ok) {
+        // pid가 아니라 mc_fork()가 함께 내준 커널 thread 핸들로 직접
+        // 보낸다 — SYS_kill(pid, sig)의 pid 라우팅은 procsrv가 그
+        // pid의 thread_handle을 실제로 알고 있어야 하는데, M32의
+        // fork_register 경로로 만들어진 자식은 procsrv가 그 핸들을
+        // 모른다(ADR-206이 이미 남긴 한계, kill()도 같은 이유로
+        // 지원 안 함) — 그래서 이번 라운드는 mc_signal_send()를 직접
+        // 쓴다(docs/done/real-libc-syscall-layer-m36.md 참고).
+        //
+        // 한 번만 보내지 않고 짧게 재시도한다 — fork() 직후 부모가
+        // 자식보다 먼저 스케줄될 수 있어(실제로 QEMU에서 겪음,
+        // 2026-09-10), sigaction()으로 핸들러를 등록하기 전에 신호가
+        // 도착하면 이 커널의 SIG_DFL은 "무시"로 단순화돼 있어(ADR-186
+        // §결정4) 그 신호는 조용히 버려진다. fork()는 COW라 자식이
+        // "핸들러 등록 끝났다"는 플래그를 부모가 직접 읽을 수 있는
+        // 공유 메모리에 쓸 방법이 없다(위 g_sigusr1_count 주석과 같은
+        // 이유) — 그래서 대신 짧은 재전송 루프로 등록이 끝날 때까지의
+        // 창을 덮는다. getpid()는 이 프로세스의 pid가 이미
+        // procsrv_pid에 캐시돼 있어(M32) 순수 로컬 반환이라 스케줄러를
+        // 전혀 건드리지 않는다는 것을 실제로 겪었다(재시도를 아무리
+        // 늘려도 자식이 단 한 번도 실행되지 않았다, 2026-09-10) —
+        // 대신 진짜로 스케줄러를 양보하는 sched_yield()(M36이 새로
+        // 추가, mc/syscall.h::MC_SYSCALL_YIELD)를 각 반복 사이에 쓴다.
+        uint32_t child_handle = mc_last_fork_child_thread_handle();
+        for (int attempt = 0; attempt < 200; ++attempt) {
+            mc_signal_send(child_handle, SIGUSR1);
+            sched_yield();
+        }
+
+        int status = 0;
+        pid_t waited = waitpid(sig_child, &status, 0);
+        int sig_ok = (waited == sig_child) && WIFEXITED(status) && WEXITSTATUS(status) == 55;
+        write_str(sig_ok ? "musl signal handler ok=1\n" : "musl signal handler ok=0\n");
     }
 
     // M35(real-libc-syscall-layer.md §M35, ADR-188) — setlocale(LC_ALL,

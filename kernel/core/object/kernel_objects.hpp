@@ -208,6 +208,27 @@ struct thread {
     // "실제 Linux에서 pid/tgid가 execve() 이후에도 그대로 유지된다"
     // 는 성질을 이 커널에서도 재현할 수 있다.
     uint32_t procsrv_pid = 0;
+
+    // M36(real-libc-syscall-layer.md §M36, ADR-186) — kill_requested
+    // (위, ADR-178)을 일반화한 표준 시그널(1~31 — 실시간 시그널 확장은
+    // 범위 밖) 상태. SIGKILL은 여전히 kill_requested/sys_process_kill
+    // 전용 경로를 그대로 쓴다(일반화하지 않는다, ADR-186 §결정4) —
+    // 그래서 이 비트마스크는 SIGKILL을 표현할 필요가 없다(비워 둬도
+    // 무해하다). 비트 (N-1)이 시그널 번호 N에 대응한다.
+    uint64_t pending_signals = 0;
+    uint64_t signal_mask = 0;  // sys_signal_action(sigprocmask 대응)이 가린 시그널.
+
+    // sys_signal_action이 등록한 핸들러/복귀 트램폴린 — index는 시그널
+    // 번호 그대로(0번은 안 쓴다, 1~31만 유효). handler==0은 SIG_DFL,
+    // handler==1은 SIG_IGN — 이 라운드는 둘 다 "무시하고 비트만
+    // 지운다"로 단순화한다(진짜 기본 동작(대부분 "종료")은 범위 밖,
+    // docs/design 참고).
+    struct signal_action {
+        uint64_t handler = 0;
+        uint64_t restorer = 0;
+    };
+    static constexpr uint32_t k_max_signal = 32;
+    signal_action sigactions[k_max_signal] = {};
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/
@@ -224,6 +245,14 @@ constexpr uint32_t k_right_can_map = 1u << 3;
 // 자신의 handle_table에 이 권한을 담아 발급한다(kind=thread는 M4부터
 // object_kind에 존재했지만 M21까지 실제로 발급된 적이 없었다).
 constexpr uint32_t k_right_can_kill = 1u << 4;
+
+// M36(real-libc-syscall-layer.md §M36, ADR-186 §결정2) — k_right_can_kill
+// 의 "이 thread 핸들에 강제력을 행사할 수 있다"는 의미를 일반
+// 시그널 전송(sys_signal_send)까지 재사용한다. 같은 비트를 그대로
+// 쓴다(리네임하지 않는다 — k_right_can_kill을 참조하는 기존 코드
+// 전체를 건드릴 이유가 없다, 새 이름은 그저 이 권한을 "시그널"
+// 관점에서 부르는 별칭일 뿐이다).
+constexpr uint32_t k_right_can_signal = k_right_can_kill;
 
 struct endpoint {
     spinlock lock;

@@ -84,6 +84,20 @@ syscall_entry:
 
     call syscall_dispatch   /* rdi,rsi,rdx,rcx,r8 = num,a1,a2,a3,saved_regs. 반환값은 RAX. */
 
+    /* M36(real-libc-syscall-layer.md §M36, ADR-186) — return-to-user
+     * 경계 확인. %rsp는 call 전후로 변하지 않으므로(SysV, 호출자가
+     * 되돌아온 rsp는 호출 전과 같다) 여기서도 여전히 &saved_regs[0]
+     * 이다 — 그 포인터를 그대로 다음 호출에 넘긴다. check_signal_delivery
+     * 는 작은 두 필드짜리 구조체(rax_value, rdi_value)를 SysV 관례상
+     * RAX:RDX로 돌려준다 — 스택을 더 건드릴 필요가 없다. 시그널을
+     * 전달하기로 했으면 saved_regs[7]/[8](rip/user_rsp)을 이미 그
+     * 자리에서 핸들러 진입용 값으로 덮어써 뒀다(RDX=시그널 번호,
+     * 아니면 0). */
+    movq %rax, %rsi
+    movq %rsp, %rdi
+    call check_signal_delivery
+    movq %rdx, %rdi
+
     popq %r15
     popq %r14
     popq %r13
