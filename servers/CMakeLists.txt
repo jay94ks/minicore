@@ -14,8 +14,16 @@ add_subdirectory(svcmgr)
 # memfs/vfs/procsrv 세 서비스를 함께 담는다(M12는 procsrv 하나만이라
 # servers/procsrv/CMakeLists.txt에 있었다 — 이제 여기서만 셋 다 참조
 # 가능해서 옮겼다). M14부터 devmgr/ps2/usb, M15부터 virtio-blk,
-# M16부터 fat32/ext4, M17부터 console/login, M19부터 cfgsrv, M20부터
-# userland/shell, M25부터 virtio-net/netsrv을 더 담는다. --depends는
+# M16부터 fat32/ext4, M17부터 console/login, M19부터 cfgsrv, M25부터
+# virtio-net/netsrv을 더 담는다. M20이 이 자리에 잠깐 minicore 네이티브
+# 셸(userland/shell, ADR-170)을 두고 부팅 시 바로 스폰해 자기 handle
+# 1에서 procsrv의 OP_START(security-model.md ADR-171)를 기다리며
+# 블록시켜 뒀지만, M53(ADR-224)이 그 자리를 실제로 포팅된 셸
+# (userland/msh)로 완전히 대체하면서 userland/shell 자체를 제거했다 —
+# msh는 이제 부팅 시점 서비스가 아니라 procsrv가 로그인 성공 시마다
+# 직접 sys_process_spawn하는 대상이라(servers/procsrv/main.cpp::
+# start_session_once(), servers/procsrv/CMakeLists.txt의 bin2c.py
+# 배선) 이 --service=/--depends= 목록에도 없다. --depends는
 # ADR-152의 스폰 시점 캐패빌리티 주입과 맞물린다 — initrun이
 # lib/*.ini의 depends= 키를 보고 그 의존 서비스(들)의 endpoint
 # 프록시를 물려준다(M16부터 콤마로 여러 개 가능, init/initrun/main.cpp
@@ -25,14 +33,9 @@ add_subdirectory(svcmgr)
 # 프로세스 보호 대상이다) — netsrv는 하드웨어를 직접 만지지 않고
 # virtio-net에게 IPC로만 위임하므로 trusted가 아니다(vfs와 같은
 # 정신). 나열 순서(=cpio 기록 순서=파일명순=실행순, ADR-131 §결정5)
-# 가 곧 의존성 해결 순서다 — shell은 vfs/console/ps2에 의존해 부팅
-# 시 바로 스폰되지만 자기 handle 1에서 procsrv의 OP_START
-# (security-model.md ADR-171)를 기다리며 블록한다. procsrv는
-# vfs/cfgsrv/shell 셋 다에 의존해(로그인 성공 시 셸에 OP_START를
-# 보내려면 그 핸들이 필요) login은 console/ps2/procsrv 전부에
-# 의존하므로 전체 순서는 memfs→devmgr→ps2→console→usb→virtio-blk→
-# virtio-net→fat32→ext4→vfs→cfgsrv→netsrv→shell→procsrv→login→
-# musl-hello. musl-hello는 M31(real-libc-syscall-layer.md §M31)이
+# 가 곧 의존성 해결 순서다 — 전체 순서는 memfs→devmgr→ps2→console→
+# usb→virtio-blk→virtio-net→fat32→ext4→vfs→cfgsrv→netsrv→procsrv→
+# login→musl-hello. musl-hello는 M31(real-libc-syscall-layer.md §M31)이
 # vfs 의존을 추가한 것 — --linux-abi-stack=(mkbootdisk.py 신규,
 # tools/mkbootdisk.py 참고)로 표시된 유일한 서비스라 initrun이
 # musl의 crt_arch.h가 요구하는 Linux ABI 초기 스택으로 스폰한다
@@ -67,7 +70,6 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=cfgsrv=$<TARGET_FILE:minicore_cfgsrv_elf>
               --service=pipesrv=$<TARGET_FILE:minicore_pipesrv_elf>
               --service=netsrv=$<TARGET_FILE:minicore_netsrv_elf>
-              --service=shell=$<TARGET_FILE:minicore_shell_elf>
               --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
               --service=login=$<TARGET_FILE:minicore_login_elf>
               --service=musl-hello=$<TARGET_FILE:minicore_musl_hello_elf>
@@ -75,12 +77,13 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               # dup2() 검증용 실제 musl 프로그램. pipesrv(위)+procsrv
               # 둘 다 핸들이 필요하다.
               --service=pipe-test=$<TARGET_FILE:minicore_pipe_test_elf>
-              # docs/plan/musl-userland-porting.md §M52(ADR-221) —
-              # 자체 작성 셸. echo/ls/cat은 --service= 목록에 없다 —
-              # musl-exec-target과 같은 이유로 procsrv가 VFS에 미리
-              # 써 두고 msh가 런타임에 execve()로 여는 대상이다
-              # (servers/procsrv/CMakeLists.txt의 bin2c.py 배선).
-              --service=msh=$<TARGET_FILE:minicore_msh_elf>
+              # docs/plan/musl-userland-porting.md §M52(ADR-221) — 자체
+              # 작성 셸(msh)+coreutils(echo/ls/cat). 셋 다 --service=
+              # 목록에 없다 — musl-exec-target과 같은 이유로 procsrv
+              # 자신의 컴파일 시점 데이터로 심어(servers/procsrv/
+              # CMakeLists.txt의 bin2c.py 배선) VFS에 쓰거나(echo/ls/cat,
+              # msh가 execve()로 여는 대상) 로그인 성공 시 직접
+              # sys_process_spawn(msh, M53/ADR-224)한다.
               --service=user-service-delegate-test=$<TARGET_FILE:minicore_user_service_delegate_test_elf>
               --service=svcmgr=$<TARGET_FILE:minicore_svcmgr_elf>
               --service=svcmgr-ctl-test=$<TARGET_FILE:minicore_svcmgr_ctl_test_elf>
@@ -121,8 +124,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=vfs:memfs,fat32,ext4
               --depends=cfgsrv:vfs
               --depends=netsrv:virtio-net
-              --depends=shell:vfs,console,ps2
-              --depends=procsrv:vfs,cfgsrv,shell
+              --depends=procsrv:vfs,cfgsrv
               --depends=usb:devmgr
               --depends=virtio-blk:devmgr
               --depends=virtio-net:devmgr
@@ -138,7 +140,6 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               # 첫 의존으로 둔다 — 실제 사용은 procsrv(fork/wait)+
               # pipesrv(pipe)뿐이다.
               --depends=pipe-test:vfs,procsrv,pipesrv
-              --depends=msh:vfs,procsrv
               --depends=user-service-delegate-test:cfgsrv
               --depends=svcmgr:procsrv,cfgsrv
               # M42(user-service-manager.md §M42) — "새 컨트롤
@@ -148,7 +149,6 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=svcmgr-ctl-test:svcmgr,cfgsrv
               --linux-abi-stack=musl-hello
               --linux-abi-stack=pipe-test
-              --linux-abi-stack=msh
               --trusted=devmgr
               --trusted=ps2
               --trusted=usb
@@ -160,19 +160,18 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --trusted=cfgsrv
       DEPENDS minicore_memfs_elf minicore_vfs_elf minicore_cfgsrv_elf
               minicore_pipesrv_elf
-              minicore_netsrv_elf minicore_shell_elf minicore_procsrv_elf
+              minicore_netsrv_elf minicore_procsrv_elf
               minicore_devmgr_elf minicore_drv_ps2_elf minicore_drv_usb_elf
               minicore_drv_virtio_blk_elf minicore_drv_virtio_net_elf
               minicore_fat32_elf minicore_ext4_elf
               minicore_drv_console_elf minicore_login_elf
               minicore_musl_hello_elf
               minicore_pipe_test_elf
-              minicore_msh_elf
               minicore_user_service_delegate_test_elf
               minicore_svcmgr_elf
               minicore_svcmgr_ctl_test_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+pipesrv+netsrv+shell+procsrv+login+musl-hello+pipe-test+msh+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+pipesrv+netsrv+procsrv+login+musl-hello+pipe-test+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})

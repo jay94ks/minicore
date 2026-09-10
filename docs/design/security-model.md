@@ -1291,7 +1291,13 @@ ADR-011/023)만으로 표현한다.
 
 ## ADR-171. M20: 로그인 후 셸 시작을 procsrv→셸 OP_START 신호로 단순화 (ADR-089 보강, 대체 아님)
 
-- **상태**: 확정 (2026-09-09)
+- **상태**: 확정 (2026-09-09) — **대체됨 (→ ADR-224, 같은 파일 아래)**
+  (2026-09-11, musl-userland-porting.md §M53). 이 ADR의 §근거가
+  명시한 "임의 경로의 ELF를 다른 프로세스에 전달하는 일반 메커니즘이
+  없다"는 전제가 M32(real-libc-syscall-layer.md §M32, ADR-206/207)
+  에서 이미 무효화됐었다는 것을 M53 착수 중 뒤늦게 확인했다 — 그
+  메커니즘(procsrv 자신이 컴파일 시점 데이터로 심은 ELF를
+  `sys_process_spawn`으로 스폰)을 로그인 경로에 그제서야 연결했다.
 - **결정**: ADR-089가 정한 "로그인 성공 시 procsrv가 `session_program`을
   `exec()`한다"를 이번 라운드는 다음으로 단순화해 구현한다.
   1. 셸(`userland/shell/`, foundations.md ADR-170)은 **부팅 시
@@ -1686,6 +1692,82 @@ ADR-011/023)만으로 표현한다.
   - `docs/spec/generated/procsrv-wire.md`를
     `tools/gen-wire-docs.py`로 재생성한다(op_poll_login_event/
     op_spawn_delegated_unit 추가).
+
+## ADR-224. M53: 로그인 성공 시 procsrv가 실제로 msh를 `sys_process_spawn`한다 — OP_START 핑 철회, ADR-171 대체
+
+- **상태**: 확정 (2026-09-11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M53 실행). ADR-171을 대체한다(그 ADR은 위에 `상태: 대체됨` 표시만
+  하고 본문은 그대로 둔다).
+- **배경**: ADR-171(M20)은 "procsrv가 `session_program`을 `exec()`
+  한다"(ADR-089)를 "부팅 시 이미 떠 있는 셸(`userland/shell`,
+  ADR-170)에게 OP_START 신호만 보낸다"로 단순화했다 — 그 근거는
+  "임의 경로의 ELF를 다른 프로세스에 전달하는 일반 메커니즘이 없다"
+  였다. 그런데 그 메커니즘은 이미 M32(real-libc-syscall-layer.md
+  §M32, ADR-206/207)에서 만들어졌다 — musl-hello가 fork()+execve()로
+  `musl-exec-target`(procsrv가 컴파일 시점 데이터로 심어 둔 다른
+  ELF)을 실행하는 것이 정확히 "임의의 다른 ELF를 이미 스폰된
+  프로세스가 아니라 새로 만드는" 시나리오다. M52가 그 위에 진짜
+  포팅된 셸(`userland/msh`)까지 만들어 둔 지금, ADR-171의 단순화는
+  더 이상 필요하지 않다 — M39가 원래 세운 목표("포팅된 바이너리가
+  로그인 후 셸을 맡는다")를 이번에 완주한다.
+- **결정**:
+  1. `servers/procsrv/main.cpp::start_session_once()`가 더 이상
+     고정 handle(4, 예전 `userland/shell`의 handle)에 `OP_START`를
+     보내지 않는다 — `mc_process_spawn_request`를 직접 채워
+     `sys_process_spawn`으로 msh를 스폰한다. `elf_data`/`elf_size`는
+     procsrv 자신의 컴파일 시점 데이터(`tools/bin2c.py`로 심은
+     `g_msh_elf`, echo/ls/cat과 같은 배선)이고, `linux_abi_stack=1`
+     (musl의 `crt_arch.h`가 요구, M28/ADR-183).
+  2. **핸들 상속 순서를 msh가 예전에 initrun에게서 받던 것과
+     정확히 맞춘다** — `create_endpoint=true`(msh 자신의 새
+     endpoint가 handle 1), `inherited_handles[0]=procsrv 자신의
+     vfs 핸들`(handle 2 → `MC_VFS_HANDLE`), `inherited_handles[1]=
+     procsrv 자신의 수신 endpoint`(handle 3 → `MC_PROCSRV_HANDLE`) —
+     `syscall_shim.c`가 모든 musl 프로그램이 공유하는 단일 빌드라
+     이 두 핸들 번호를 하드코딩 전제로 삼는다(M51/M52와 같은
+     제약). `spawn_su_target()`/M27 wait-target 자기테스트가 이미
+     쓰던 "procsrv 자신의 handle을 inherited_handles로 넘긴다"는
+     패턴을 그대로 재사용했을 뿐, 새 메커니즘은 아니다.
+  3. `userland/shell`(ADR-170)은 이제 아무도 스폰하지 않아
+     완전히 제거한다 — `servers/CMakeLists.txt`의 `--service=shell=`/
+     `--depends=shell:...`/procsrv의 `shell` 의존, `userland/
+     CMakeLists.txt`의 `add_subdirectory(shell)`, `userland/shell/`
+     디렉터리 자체를 모두 지웠다. msh도 더 이상 부팅 시점 서비스가
+     아니다(`--service=msh=`/`--depends=msh:...`/
+     `--linux-abi-stack=msh` 전부 제거) — 이 스폰이 유일한 진입점이다.
+  4. 세션 하나만 다루는 기존 단순화(정적 플래그로 두 번째 호출
+     방지)는 그대로 유지한다 — `user_account.session_program` 필드,
+     계정별 재정의는 여전히 범위 밖(ADR-171 §결정4와 같은 이유,
+     이번 라운드는 "포팅된 바이너리가 로그인 셸을 맡는다"만 증명).
+- **근거**: ADR-171이 걸어 뒀던 전제가 이미 무효화된 채로 3개
+  마일스톤(M32/M51/M52)이 지나갔다는 것 자체가, 이 프로젝트가
+  반복해 겪은 "이전 라운드의 단순화 근거를 재검토하지 않고 지나감"
+  패턴이다 — M53 착수 전 계획을 다시 읽으며 뒤늦게 발견했다.
+  네이티브 셸(ADR-170)과 msh를 **둘 다 살려 두는 대신 완전히
+  교체**하기로 한 것은, 계획 문서(M53 목표) 자체가 명시한 "로그인
+  후 뜨는 셸이 minicore 네이티브 구현이 아니라 포팅된 바이너리"
+  라는 표현이 대체를 의미하기 때문이다 — 두 구현을 동시에 유지하는
+  것은 이후 마일스톤(M54 파이프라인, M55 job control)이 "어느
+  셸"을 대상으로 하는지 모호해진다.
+- **영향**:
+  - `servers/procsrv/CMakeLists.txt`: `minicore_embed_coreutil`을
+    `minicore_embed_userland_elf`로 이름을 바꾸고(더 이상 coreutils
+    전용이 아니다) msh도 같은 방식으로 심는다.
+  - `servers/procsrv/main.cpp`: `#include "msh_blob.h"` 추가,
+    `start_session_once()` 재작성. `k_shell_handle`/`k_op_start`
+    상수는 더 이상 쓰이지 않아 지웠다.
+  - `userland/shell/` 디렉터리 전체 삭제(`CMakeLists.txt`/`link.ld`/
+    `main.c`).
+  - `servers/CMakeLists.txt`/`userland/CMakeLists.txt`/루트
+    `CMakeLists.txt`의 관련 `--service=`/`--depends=`/주석 정리.
+  - `tools/smoke-test-x86_64.sh`: `[shell] ...` 어서션 6개 제거
+    (`"[procsrv] shell session start ok=1"`만 남는다 — 이제 msh
+    스폰을 가리킨다). msh 자신의 M52 어서션(`"[msh] running: ..."`
+    등)은 트리거만 바뀌었을 뿐 그대로 유지·재확인했다.
+  - QEMU로 msh의 self-test(`echo`/`ls`/`cat /bin/echo`)가 이제
+    로그인 성공 **이후에** 실행됨을 확인 — 부팅 시점 서비스 목록
+    에서 실행되던 M52 때와 로그가 나오는 시점만 달라졌을 뿐 내용은
+    동일하다.
 
 ## 아직 정하지 않은 것
 

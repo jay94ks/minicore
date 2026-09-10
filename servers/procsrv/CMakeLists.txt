@@ -56,8 +56,11 @@ add_custom_target(minicore_procsrv_user_service_unit_blob DEPENDS ${USER_SERVICE
 # coreutils(echo/ls/cat)를 위 musl-exec-target과 같은 이유로 procsrv
 # 자신의 컴파일 시점 데이터로 심는다 — userland/msh가 execve()로
 # "/bin/echo" 등을 열 수 있으려면 그 바이트가 부팅 시 VFS(memfs)에
-# 먼저 쓰여 있어야 한다.
-function(minicore_embed_coreutil name target)
+# 먼저 쓰여 있어야 한다. M53(ADR-224)부터는 msh 자신도 같은 방식으로
+# 심는다 — 다만 msh는 VFS에 쓰지 않는다(procsrv가 로그인 성공 시
+# sys_process_spawn의 elf_data로 이 바이트를 직접 넘겨 스폰하므로,
+# 경로로 다시 열어 볼 필요가 없다).
+function(minicore_embed_userland_elf name target)
     set(blob_h ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_blob.h)
     add_custom_command(
         OUTPUT ${blob_h}
@@ -74,9 +77,10 @@ function(minicore_embed_coreutil name target)
     add_custom_target(minicore_procsrv_${name}_blob DEPENDS ${blob_h})
 endfunction()
 
-minicore_embed_coreutil(echo minicore_echo_elf)
-minicore_embed_coreutil(ls minicore_ls_elf)
-minicore_embed_coreutil(cat minicore_cat_elf)
+minicore_embed_userland_elf(echo minicore_echo_elf)
+minicore_embed_userland_elf(ls minicore_ls_elf)
+minicore_embed_userland_elf(cat minicore_cat_elf)
+minicore_embed_userland_elf(msh minicore_msh_elf)
 
 add_executable(minicore_procsrv_elf
     main.cpp
@@ -84,7 +88,8 @@ add_executable(minicore_procsrv_elf
 
 add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob
                   minicore_procsrv_user_service_unit_blob
-                  minicore_procsrv_echo_blob minicore_procsrv_ls_blob minicore_procsrv_cat_blob)
+                  minicore_procsrv_echo_blob minicore_procsrv_ls_blob minicore_procsrv_cat_blob
+                  minicore_procsrv_msh_blob)
 
 target_include_directories(minicore_procsrv_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/mc/include

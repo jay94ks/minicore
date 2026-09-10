@@ -60,8 +60,12 @@ declare -a EXPECTED=(
   # 네트워킹 왕복 뒤로도 나머지 시스템(M12~M24)이 그대로 끝까지
   # 진행됨을 함께 확인한다 — virtio-net/netsrv가 이 자리(virtio-blk
   # 다음, fat32/ext4 이전)에 새로 끼어들어도 나머지 부팅 순서를
-  # 깨지 않았는가가 이 스위트의 회귀 검증 대상이다.
-  "[shell] self-test done"
+  # 깨지 않았는가가 이 스위트의 회귀 검증 대상이다. M53(ADR-224)이
+  # 로그인 후 셸을 userland/shell에서 userland/msh로 교체하면서
+  # "[shell] self-test done"은 더 이상 나오지 않는다 — 같은 목적
+  # (부팅이 로그인 후 셸 자기테스트까지 끝까지 진행됐는가)의
+  # msh 마커로 교체했다.
+  "[msh] self-test done ok=1"
 )
 
 LOG_FILE="$(mktemp)"

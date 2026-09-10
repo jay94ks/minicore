@@ -36,9 +36,12 @@ add_subdirectory(kernel)
 # aarch64는 현재 범위에서 커널 컴파일 검증까지만 다룬다 (ADR-009).
 if(MINICORE_ARCH STREQUAL "x86_64")
   add_subdirectory(libs/mc)
-  # userland를 servers보다 먼저 추가한다 — M20(system-servers-bringup.md
-  # §M20)부터 부트 디스크 조립(servers/CMakeLists.txt)이 userland/shell의
-  # $<TARGET_FILE:minicore_shell_elf>를 참조한다(그 반대 참조는 없다).
+  # userland를 servers보다 먼저 추가한다 — M32(real-libc-syscall-layer.md
+  # §M32)부터 servers/procsrv/CMakeLists.txt가 userland/musl-exec-target
+  # 등의 $<TARGET_FILE:...>을 참조한다(그 반대 참조는 없다). M20~M52는
+  # 이 순서가 필요한 이유가 userland/shell이었지만, M53(ADR-224)이
+  # 그 대상을 제거하고 userland/msh로 대체했다 — 이유(단방향 참조)는
+  # 그대로다.
   add_subdirectory(userland)
   add_subdirectory(servers)
   add_subdirectory(libc)

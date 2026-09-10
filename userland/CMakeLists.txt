@@ -1,8 +1,7 @@
-# 포팅된 셸·coreutils 등 (ADR-005). 실제 서드파티 포팅 대상은 아직
-# 확정되지 않았다 — M20(docs/design/foundations.md ADR-170)이 그 자리에
-# minicore 전용 최소 셸(ADR-049 대체 구현)을 먼저 채운다.
-# TODO: third_party/<도구>(ADR-022) 확정 시 add_subdirectory(<도구>) 추가.
-add_subdirectory(shell)
+# 포팅된 셸·coreutils 등 (ADR-005). M20(ADR-170)이 한동안 이 자리를
+# minicore 전용 최소 셸(userland/shell)로 채웠으나, M53(ADR-224)이
+# 실제 포팅된 셸(userland/msh, 아래)로 완전히 대체하면서 제거했다 —
+# userland/shell은 더 이상 이 저장소에 없다.
 
 # real-libc-syscall-layer.md §M28 — musl 진짜 시작 경로 검증용 최초
 # 테스트 프로그램(기존 셸/서버와 무관).
@@ -28,9 +27,11 @@ add_subdirectory(user-service-delegate-test)
 add_subdirectory(pipe-test)
 
 # docs/plan/musl-userland-porting.md §M52(ADR-221) — BusyBox 도입을
-# 철회하고 이 저장소 안에서 직접 작성한 최소 셸+coreutils. 셸
-# (userland/msh)이 이 셋을 별도 실행파일로 진짜 fork()+execve()
-# 한다(빌트인 아님).
+# 철회하고 이 저장소 안에서 직접 작성한 최소 셸(msh)+coreutils
+# (echo/ls/cat). msh가 이 셋을 별도 실행파일로 진짜 fork()+execve()
+# 한다(빌트인 아님). M53(ADR-224)부터 msh는 더 이상 부팅 시점
+# 서비스가 아니다 — servers/procsrv가 로그인 성공 시 자신의 컴파일
+# 시점 데이터(bin2c로 심은 바이트)로 직접 스폰한다.
 add_subdirectory(echo)
 add_subdirectory(ls)
 add_subdirectory(cat)

@@ -449,6 +449,21 @@
 #     procsrv 자신의 g_reassembled 버퍼 둘 다) 1048576으로 함께
 #     올렸다 — 그렇지 않으면 M18의 loader roundtrip 자기테스트
 #     ("[procsrv] loader roundtrip ok=1")가 매 부팅 조용히 실패했다.
+#   M53 (docs/plan/musl-userland-porting.md §M53, foundations.md
+#     ADR-224): 로그인 성공 시 procsrv가 이제 minicore 네이티브 셸
+#     (userland/shell, ADR-170 — M20이 부팅 즉시 스폰해 자기 handle
+#     1에서 OP_START를 기다리며 블록시켜 뒀던 것)을 깨우는 대신,
+#     msh를 자신의 컴파일 시점 데이터로 직접 sys_process_spawn한다
+#     (vfs+procsrv 자신의 endpoint를 inherited_handles로 주입 —
+#     userland/msh가 예전엔 initrun의 --depends=msh:vfs,procsrv로
+#     받던 것과 같은 배선). userland/shell은 더 이상 아무도 부르지
+#     않아 저장소에서 완전히 제거했다 — 아래 M20/M22/M24/M26 블록의
+#     "[shell] ..." 어서션들은 그 시절의 검증 기록으로 주석은
+#     남기지만, 실제 어서션 목록(ASSERTIONS)에서는 뺐다("[procsrv]
+#     shell session start ok=1"만 여전히 남는다 — 이제 msh 스폰을
+#     가리킨다). msh 자신의 self-test("[msh] running: ...")는 M52에서
+#     이미 검증됐고 이번엔 트리거만 바뀌었다(부팅 시점 서비스 →
+#     로그인 시점 스폰) — 같은 어서션이 여전히 통과함을 확인했다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -726,14 +741,7 @@ declare -a EXPECTED=(
   "[svcmgr-ctl-test] status svc-u@test running=1"
   "[svcmgr-ctl-test] status svc-u@root running=1"
   "[svcmgr-ctl-test] per-account instances distinct=1"
-  "[shell] session started"
   "[procsrv] shell session start ok=1"
-  "[shell] no keyboard input, running self-test commands"
-  "[shell] ls ok=1"
-  "[shell] malloc buffer ok=1"
-  "[shell] cat ok=1"
-  "[shell] libc strcpy/strcat/strdup ok=1"
-  "[shell] self-test done"
 )
 
 LOG_FILE="$(mktemp)"

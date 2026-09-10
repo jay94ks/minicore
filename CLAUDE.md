@@ -622,4 +622,31 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   에 M52 어서션 7개 추가, 스모크(146)+SMP(11)+NUMA(24)+AVX(12)+
   net(6) 5개 회귀 스위트 전부 PASS(결과는
   [docs/done/musl-userland-porting-m52.md](docs/done/musl-userland-porting-m52.md)
-  참고). 다음은 M53(로그인 후 실제 셸로 `msh` 배선)이다.
+  참고).
+  **M53(완료)**(2026-09-11, [ADR-224](docs/design/security-model.md)
+  — [ADR-171](docs/design/security-model.md)을 대체): 로그인 후 셸을
+  minicore 네이티브(`userland/shell`, ADR-170) 대신 실제 포팅된
+  `msh`로 완전히 교체했다 — M39가 원래 세운 목표를 완주. 착수하며
+  ADR-171의 "임의 경로의 ELF를 다른 프로세스에 전달하는 일반
+  메커니즘이 없다"는 전제가 이미 M32(real-libc-syscall-layer.md
+  §M32)에서 무효화돼 있었다는 것을 뒤늦게 발견했다 — `procsrv`가
+  컴파일 시점 데이터로 심은 ELF를 `sys_process_spawn`으로 스폰하는
+  것이 정확히 그 메커니즘이었다(M32~M52 사이 아무도 이 연결을
+  만들지 않았을 뿐). `servers/procsrv/main.cpp::start_session_once()`
+  가 이제 고정 handle에 OP_START를 보내는 대신 `msh`를 실제로
+  스폰한다 — `inherited_handles`로 procsrv 자신의 vfs 핸들+수신
+  endpoint를 `msh`가 예전에 `--depends=msh:vfs,procsrv`로 받던 것과
+  똑같은 순서로 주입해, `syscall_shim.c`의 고정 핸들 관례
+  (`MC_VFS_HANDLE=2`/`MC_PROCSRV_HANDLE=3`)를 그대로 유지했다 — 새
+  커널/IPC 기능은 필요 없었다(M18/M27이 이미 쓰던 패턴 재사용).
+  `userland/shell`은 더 이상 아무도 부르지 않아 저장소에서 완전히
+  제거했고(디렉터리 자체를 지웠다), `msh`도 더 이상 부팅 시점
+  서비스가 아니다(`--service=msh=`/`--depends=msh:...`/
+  `--linux-abi-stack=msh` 전부 제거 — procsrv의 로그인 스폰이
+  유일한 진입점). `tools/smoke-test-x86_64.sh`의 `[shell] ...`
+  어서션 6개 제거+`tools/smoke-test-net-x86_64.sh`의 부팅 완료
+  마커를 `[msh] self-test done ok=1`로 교체, 스모크(139)+SMP(11)+
+  NUMA(24)+AVX(12)+net(6) 5개 회귀 스위트 전부 PASS(결과는
+  [docs/done/musl-userland-porting-m53.md](docs/done/musl-userland-porting-m53.md)
+  참고). 다음은 M54(파이프라인/리다이렉션 통합 검증, 새 구현 없음)
+  이다.

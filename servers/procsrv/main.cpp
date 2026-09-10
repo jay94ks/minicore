@@ -44,6 +44,7 @@
 #include "echo_blob.h"
 #include "ls_blob.h"
 #include "cat_blob.h"
+#include "msh_blob.h"
 
 namespace kernsrv::procsrv {
 
@@ -355,14 +356,18 @@ void init_accounts() {
     }
 }
 
-// M20(security-model.md ADR-171) — 로그인 성공 시 셸(부팅 시 이미
-// 떠서 자기 handle 1에서 sys_ipc_recv로 블록 중)에게 OP_START를
-// 보내 세션을 시작시킨다. 이번 라운드는 세션 하나만 다루므로 두
-// 번째 호출을 막는 정적 플래그를 둔다(셸은 OP_START 이후 다시는
-// sys_ipc_recv를 부르지 않아, 두 번째 호출은 응답 없이 영원히
-// 블록한다 — 이 가드가 그 상황을 원천적으로 막는다).
-constexpr uint32_t k_shell_handle = 4;
-constexpr uint32_t k_op_start = 1;
+// M53(musl-userland-porting.md §M53, ADR-224) — 로그인 성공 시
+// 이제 minicore 네이티브 셸(ADR-170, 부팅 시 이미 떠서 자기 handle
+// 1에서 sys_ipc_recv로 블록 중이던 것을 OP_START로 깨우는 방식)이
+// 아니라, 포팅된 실제 musl 셸(userland/msh)을 그 자리에서 진짜로
+// fork+exec 스폰한다 — M39가 원래 세운 목표(포팅된 바이너리가
+// 로그인 후 셸을 맡는다)를 이번에 완주한다. msh는 더 이상 부팅
+// 시점 서비스가 아니다(servers/CMakeLists.txt에서 --service=msh=
+// 제거) — 이 스폰이 유일한 진입점이다. 이번 라운드도 세션 하나만
+// 다루므로 두 번째 호출을 막는 기존 정적 플래그 가드는 그대로
+// 둔다(msh는 자기테스트를 마치면 종료하므로 두 번째 로그인이 같은
+// msh 인스턴스를 다시 깨울 방법이 없다 — 매번 새로 스폰해야 하는데,
+// 이번 라운드는 "세션 하나" 검증만 목표라 그 확장은 다루지 않는다).
 bool g_session_started = false;
 
 void start_session_once() {
@@ -370,11 +375,25 @@ void start_session_once() {
         return;
     }
     g_session_started = true;
-    mc_message req{};
-    req.label = k_op_start;
-    mc_message reply{};
-    do_syscall(MC_SYSCALL_IPC_CALL, k_shell_handle, reinterpret_cast<uint64_t>(&req),
-               reinterpret_cast<uint64_t>(&reply));
+    // msh는 실제 musl 프로그램이라 execve()/fork()/waitpid()로
+    // procsrv에게 되돌아와야 한다 — syscall_shim.c의 고정 핸들 관례
+    // (MC_VFS_HANDLE=2, MC_PROCSRV_HANDLE=3)와 맞추려면
+    // inherited_handles[0]=vfs, [1]=procsrv 자신(순서 그대로) —
+    // create_endpoint=true가 먼저 handle 1을 차지하므로 [0]이 2,
+    // [1]이 3이 된다(userland/msh가 예전엔 initrun의 --depends=
+    // msh:vfs,procsrv로 받던 것과 정확히 같은 배선, 이제는 procsrv
+    // 자신이 스폰자가 됐을 뿐이다).
+    mc_process_spawn_request req{};
+    req.elf_data = reinterpret_cast<uint64_t>(g_msh_elf);
+    req.elf_size = g_msh_elf_len;
+    req.linux_abi_stack = 1;  // musl crt_arch.h가 요구하는 초기 스택(M28/ADR-183).
+    req.create_endpoint = true;
+    req.inherited_handle_count = 2;
+    req.inherited_handles[0].src_handle = k_vfs_handle;
+    req.inherited_handles[0].rights_mask = MC_RIGHT_CAN_SEND;
+    req.inherited_handles[1].src_handle = k_own_endpoint_handle;
+    req.inherited_handles[1].rights_mask = MC_RIGHT_CAN_SEND;
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&req), 0, 0);
     const char* msg = "[procsrv] shell session start ok=1\n";
     debug_log(msg, cstr_len(msg));
 }
