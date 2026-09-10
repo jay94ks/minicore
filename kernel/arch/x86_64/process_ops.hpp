@@ -10,7 +10,7 @@
 
 #include <cstdint>
 
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kern::object {
 class handle_table;  // core/object/handle_table.hpp — 전방 선언만 필요(ADR-002와 같은 정신, tss.hpp의 thread 전방 선언과 동일한 관례).
@@ -40,7 +40,7 @@ enum class process_spawn_error : uint32_t {
 // 완전히 새 신원을 시작하는 연산이므로 여기서 처음 정해진다.
 //
 // M13(ADR-151) — create_endpoint/inherited_handles/inherited_handle_count는
-// uapi::process_spawn_request와 정확히 같은 의미(그 파일 상단 주석
+// mc_process_spawn_request와 정확히 같은 의미(그 파일 상단 주석
 // 참고) — 스폰 시점 캐패빌리티 주입. 성공하고 create_endpoint가
 // true면 out_endpoint_proxy_handle에 **호출자 자신의** handle_table에
 // 새로 생긴 프록시 핸들을 채운다.
@@ -52,7 +52,7 @@ enum class process_spawn_error : uint32_t {
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
                                    bool grant_trusted, bool create_endpoint,
-                                   const uapi::handle_transfer* inherited_handles,
+                                   const mc_handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
                                    uint32_t& out_endpoint_proxy_handle,
                                    uint32_t& out_thread_handle);

@@ -12,10 +12,10 @@ add_executable(minicore_devmgr_elf
 )
 
 target_include_directories(minicore_devmgr_elf PRIVATE
-    ${CMAKE_SOURCE_DIR}/kernel/include
+    ${CMAKE_SOURCE_DIR}/libs/mc/include
 )
 
-target_link_libraries(minicore_devmgr_elf PRIVATE minicore_libk)
+target_link_libraries(minicore_devmgr_elf PRIVATE minicore_libk minicore_libmc)
 
 # init/initrun/CMakeLists.txt와 같은 이유(SSE/MMX 미사용, red zone 불필요).
 target_compile_options(minicore_devmgr_elf PRIVATE

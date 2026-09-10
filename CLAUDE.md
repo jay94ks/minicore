@@ -204,12 +204,28 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   뗀다(`libk`→`k`→`libs/k/`, `libmc`→`mc`→`libs/mc/`,
   [ADR-199](docs/design/build-system.md)). 더 나아가 `mc`를
   **커널·유저 공용**으로 통합한다 — 소비자가 정의하는 전처리기
-  매크로(가칭 `MC_LAND_KERNEL`)로 커널-랜드/유저-랜드를 가르고,
-  지금 `kernel/include/uapi.hpp`가 손으로 복제해 온 커널 syscall
-  ABI를 `mc`의 헤더로 흡수해 `uapi.hpp`를 폐지한다
-  ([ADR-200](docs/design/foundations.md), ADR-132 보강). 규칙만
-  확정, 실제 실행은 [docs/plan/libs-restructure.md](docs/plan/libs-restructure.md)
-  (M49 이동+리네임, M50 `uapi.hpp` 폐지+매크로 도입 — M45를
-  대체) — **아직 착수 전**. [repo-layout.md](docs/design/repo-layout.md)
-  의 트리는 이미 목표 상태(`libs/k/`, `libs/mc/`)로 갱신해 뒀고,
-  실제 저장소는 아직 옛 경로 그대로임을 문서 상단에 명시했다.
+  매크로(`MC_LAND_KERNEL`)로 커널-랜드/유저-랜드를 가르고, 커널
+  syscall ABI를 `mc`의 헤더로 흡수해 `uapi.hpp`를 폐지한다
+  ([ADR-200](docs/design/foundations.md), ADR-132 보강).
+  [docs/plan/libs-restructure.md](docs/plan/libs-restructure.md)
+  (M49 이동+리네임, M50 `uapi.hpp` 폐지+매크로 도입 — M45를 대체)
+  **전체(M49~M50)가 완료됐다** — 결과는
+  [docs/done/libs-restructure-m49.md](docs/done/libs-restructure-m49.md),
+  [docs/done/libs-restructure-m50.md](docs/done/libs-restructure-m50.md)
+  참고. `kernel/include/uapi.hpp`는 실제로 삭제됐고, 저장소는
+  이제 [repo-layout.md](docs/design/repo-layout.md)의 목표 트리
+  (`libs/k/`, `libs/mc/`) 그대로다. M50 실행 중 발견한 것: `uapi::message`
+  등 옛 구조체는 필드별 NSDMI가 있어 비트리비얼 타입이었지만 새
+  순수 C `mc_message` 등은 트리비얼 aggregate라 `{}` zero-init이
+  `memset` 호출로 낮춰져 유저랜드(이전엔 `minicore_libmc`를 링크한
+  적이 없었다)에 `undefined symbol: memset` 링크 에러가 났다 —
+  `libs/mc/src/freestanding_mem.c` 신설+유저 실행파일 15개 전부에
+  `minicore_libmc` 링크 추가로 해결(커널은 자신의
+  `freestanding_mem.cpp`가 있어 `minicore_libmc`를 링크하지 않으므로
+  중복 심벌 없음). 이 계획에는 더 이상 다음 마일스톤이 없다.
+- `namespace-refactor.md`와 `libs-restructure.md` 둘 다 완료됐으므로,
+  사용자가 지정한 순서("네 계획 전부를 순서대로")에 따라 다음은
+  [docs/plan/user-service-manager.md](docs/plan/user-service-manager.md)
+  (M40~M43, **착수 전**), 그 다음
+  [docs/plan/real-libc-syscall-layer.md](docs/plan/real-libc-syscall-layer.md)
+  (M27~M39, **착수 전**)이다.

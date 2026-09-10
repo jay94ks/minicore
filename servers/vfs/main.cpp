@@ -15,7 +15,7 @@
 // 밝히는 신원(bit0=guest, bit1=jail)이 실린다. 마운트 테이블을 찾기
 // **전에** guest/jail이면 경로가 `/home/`으로 시작하는지 검사한다 —
 // 아니면 어떤 FS 서버에도 전달하지 않고 GUEST_DENIED로 즉시 응답한다.
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::vfs {
 
@@ -81,7 +81,7 @@ bool starts_with(const char* path, const char* prefix, uint64_t prefix_len) {
     return true;
 }
 
-void handle_open(const uapi::message& in, uapi::message& out) {
+void handle_open(const mc_message& in, mc_message& out) {
     char path[k_path_budget + 1];
     __builtin_memcpy(path, in.regs, k_path_budget);
     path[k_path_budget] = '\0';
@@ -119,7 +119,7 @@ void handle_open(const uapi::message& in, uapi::message& out) {
     // 가변 길이 __builtin_memset/memcpy는 이 freestanding 빌드에서
     // 실제 libc 심볼 호출로 낮춰져 링크에 실패한다 — 손으로 바이트
     // 루프를 쓴다(servers/fs/fat32/main.cpp와 같은 이유).
-    uapi::message fwd_in{};
+    mc_message fwd_in{};
     fwd_in.label = k_op_open;
     auto* regs_bytes = reinterpret_cast<uint8_t*>(fwd_in.regs);
     for (uint64_t i = 0; i < sizeof(fwd_in.regs); ++i) {
@@ -132,8 +132,8 @@ void handle_open(const uapi::message& in, uapi::message& out) {
     for (uint64_t i = 0; i < rest_len; ++i) {
         regs_bytes[i] = static_cast<uint8_t>(rest[i]);
     }
-    uapi::message fwd_out{};
-    do_syscall(uapi::k_syscall_ipc_call, target_handle, reinterpret_cast<uint64_t>(&fwd_in),
+    mc_message fwd_out{};
+    do_syscall(MC_SYSCALL_IPC_CALL, target_handle, reinterpret_cast<uint64_t>(&fwd_in),
                reinterpret_cast<uint64_t>(&fwd_out));
 
     out.regs[0] = fwd_out.regs[0];  // open_file_id(대상 FS 서버가 발급).
@@ -142,7 +142,7 @@ void handle_open(const uapi::message& in, uapi::message& out) {
         // ADR-018 — open() 성공 응답에 대상 FS 서버 핸들을 위임한다.
         out.handle_count = 1;
         out.handles[0].src_handle = target_handle;
-        out.handles[0].rights_mask = uapi::k_right_can_send;
+        out.handles[0].rights_mask = MC_RIGHT_CAN_SEND;
     }
 }
 
@@ -150,17 +150,17 @@ void handle_open(const uapi::message& in, uapi::message& out) {
 
 extern "C" [[noreturn]] void _start(const void*) {
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             if (in.label == k_op_open) {
                 handle_open(in, out);
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

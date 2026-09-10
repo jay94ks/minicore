@@ -11,10 +11,10 @@ add_executable(minicore_login_elf
 )
 
 target_include_directories(minicore_login_elf PRIVATE
-    ${CMAKE_SOURCE_DIR}/kernel/include
+    ${CMAKE_SOURCE_DIR}/libs/mc/include
 )
 
-target_link_libraries(minicore_login_elf PRIVATE minicore_libk)
+target_link_libraries(minicore_login_elf PRIVATE minicore_libk minicore_libmc)
 
 target_compile_options(minicore_login_elf PRIVATE
     -mno-red-zone

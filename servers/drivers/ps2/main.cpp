@@ -13,7 +13,7 @@
 // `OP_READ_KEY`가 그냥 "없음"을 반환할 뿐이라, self-test 결과와
 // 마찬가지로 결정적이다(servers/login의 자체 테스트 폴백이 이걸
 // 받아 처리한다, security-model.md ADR-165 §결정4).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::drivers::ps2 {
 
@@ -50,7 +50,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 void debug_log_hex(const char* prefix, uint64_t value) {
     char buf[96];
@@ -69,7 +69,7 @@ void debug_log_hex(const char* prefix, uint64_t value) {
         }
     }
     buf[i++] = '\n';
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(buf), i, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(buf), i, 0);
 }
 
 // 출력 버퍼가 찰 때까지 유한 횟수만 기다린다(ADR-131 §근거와 같은
@@ -121,7 +121,7 @@ uint8_t scancode_to_ascii(uint8_t code) {
 
 // 결정적 예산 안에서 키 하나를 읽어 본다. brk 코드(0x80 이상, 키를
 // 뗄 때 나오는 코드)는 무시한다 — make 코드만 다룬다.
-void handle_read_key(uapi::message& out) {
+void handle_read_key(mc_message& out) {
     if (!wait_output_full(k_read_key_poll_budget)) {
         out.regs[0] = 0;  // 없음.
         out.regs[1] = k_status_ok;
@@ -151,7 +151,7 @@ void handle_read_key(uapi::message& out) {
 extern "C" [[noreturn]] void _start(const void*) {
     // ADR-154 — 이 스레드 자신이 필요한 순간에 직접 활성화한다(포트
     // 0x60~0x64, 5개 — 데이터/상태/커맨드 레지스터를 넉넉히 덮는다).
-    do_syscall(uapi::k_syscall_io_activate, k_port_data, 5, 0);
+    do_syscall(MC_SYSCALL_IO_ACTIVATE, k_port_data, 5, 0);
 
     // 컨트롤러 자체 테스트 — 사용자 입력과 무관하게 항상 결정적인
     // 결과를 준다(이 파일 상단 주석).
@@ -185,17 +185,17 @@ extern "C" [[noreturn]] void _start(const void*) {
     // 유지한다(이 스레드가 계속 포트에 접근해야 하므로 io_deactivate
     // 호출을 없앴다).
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             if (in.label == k_op_read_key) {
                 handle_read_key(out);
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

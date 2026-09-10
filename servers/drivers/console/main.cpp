@@ -11,7 +11,7 @@
 // (ADR-156)로 매핑한다 — PCI 장치가 아니라 QEMU q35의 레거시 VGA
 // 호환 영역에 직접 접근하므로 devmgr 등록이 필요 없다(trusted=1만
 // 필요).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::drivers::console {
 
@@ -50,7 +50,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 
 // 한 줄을 위로 밀어 올린다(마지막 줄이 25번째를 넘어갈 때) — 문자
@@ -101,7 +101,7 @@ void print_char(char c) {
     }
 }
 
-void handle_print(const uapi::message& in, uapi::message& out) {
+void handle_print(const mc_message& in, mc_message& out) {
     uint64_t length = in.regs[0];
     if (length > 3 * sizeof(uint64_t)) {
         length = 3 * sizeof(uint64_t);  // regs[1..3] = 24바이트 상한.
@@ -116,13 +116,13 @@ void handle_print(const uapi::message& in, uapi::message& out) {
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
-    uapi::map_phys_request req{};
+    mc_map_phys_request req{};
     req.phys_addr = k_vga_phys;
     req.size = k_cols * k_rows * 2;
-    uint64_t err = do_syscall(uapi::k_syscall_map_phys, reinterpret_cast<uint64_t>(&req), 0, 0);
+    uint64_t err = do_syscall(MC_SYSCALL_MAP_PHYS, reinterpret_cast<uint64_t>(&req), 0, 0);
     if (err != 0) {
         debug_log("[console] map_phys failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     g_vga = reinterpret_cast<uint16_t*>(req.out_virt_addr);
 
@@ -137,17 +137,17 @@ extern "C" [[noreturn]] void _start(const void*) {
     debug_log("[console] vga init ok=1\n");
 
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             if (in.label == k_op_print) {
                 handle_print(in, out);
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

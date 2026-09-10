@@ -36,7 +36,7 @@
 // 같은 바이너리이지만 magic 접두사가 붙은 argv(`su_target_argv`)로
 // "이번엔 su-target 역할을 하라"고 구분해 받는다(procsrv 자신의
 // self-exec 판별 관례를 확장한 것, 이 파일 상단 argv 규약 참고).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::procsrv {
 
@@ -86,14 +86,14 @@ uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
 }
 
 [[noreturn]] void quiet_exit() {
-    do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+    do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     for (;;) {
         asm volatile("pause");
     }
 }
 
 void debug_log(const char* msg, uint64_t len) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), len, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), len, 0);
 }
 
 uint64_t cstr_len(const char* s) {
@@ -174,16 +174,16 @@ void start_session_once() {
         return;
     }
     g_session_started = true;
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_start;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_shell_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_shell_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     const char* msg = "[procsrv] shell session start ok=1\n";
     debug_log(msg, cstr_len(msg));
 }
 
-void handle_login(const uapi::message& in, uapi::message& out) {
+void handle_login(const mc_message& in, mc_message& out) {
     for (const account& acc : g_accounts) {
         if (bytes_equal(&in.regs[0], acc.username, sizeof(acc.username)) &&
             bytes_equal(&in.regs[1], acc.password, sizeof(acc.password))) {
@@ -316,12 +316,12 @@ bool is_fd_continue_argv(const void* argv) {
 // vfs에 path를 열어 open_file_id/fs_handle을 얻는다(identity=0 —
 // 로더 자신은 guest/jail이 아니다). 실패하면 fs_handle=0.
 void vfs_open(const char* path, uint64_t& out_open_file_id, uint32_t& out_fs_handle) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_open;
     pack_bytes(req.regs, k_path_budget, path, cstr_len(path));
     req.regs[3] = 0;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_vfs_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     if (reply.regs[1] != 0 || reply.handle_count != 1) {
         out_fs_handle = 0;
@@ -349,16 +349,16 @@ bool write_elf_to_vfs(const char* path, const uint8_t* data, uint64_t size) {
         for (uint64_t i = 0; i < k_page_size; ++i) {
             g_write_scratch[i] = (i < chunk) ? data[offset + i] : 0;
         }
-        uapi::message req{};
+        mc_message req{};
         req.label = k_op_write;
         req.regs[0] = open_file_id;
         req.regs[1] = chunk;
         req.page_count = 1;
         req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_write_scratch);
         req.pages[0].length = k_page_size;
-        req.pages[0].mode = uapi::transfer_mode::copy;
-        uapi::message reply{};
-        do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&req),
+        req.pages[0].mode = MC_TRANSFER_COPY;
+        mc_message reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, fs_handle, reinterpret_cast<uint64_t>(&req),
                    reinterpret_cast<uint64_t>(&reply));
         if (reply.regs[1] != 0 || reply.regs[0] != chunk) {
             return false;
@@ -380,12 +380,12 @@ uint64_t read_elf_from_vfs(const char* path, uint8_t* out_buf, uint64_t max_len)
     }
     uint64_t total = 0;
     for (;;) {
-        uapi::message req{};
+        mc_message req{};
         req.label = k_op_read;
         req.regs[0] = open_file_id;
         req.regs[1] = k_page_size;
-        uapi::message reply{};
-        do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&req),
+        mc_message reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, fs_handle, reinterpret_cast<uint64_t>(&req),
                    reinterpret_cast<uint64_t>(&reply));
         if (reply.regs[1] != 0 || reply.page_count != 1) {
             break;
@@ -414,7 +414,7 @@ uint64_t read_elf_from_vfs(const char* path, uint8_t* out_buf, uint64_t max_len)
 // su/sudo가 스폰하는 바이트는 이 재조립된 버퍼다(원본을 직접 쓰는
 // 게 아니라, "경로로 저장하고 다시 읽어 실행"이라는 로더의 실제
 // 파이프라인을 그대로 타게 한다).
-void run_loader_test(const uapi::m12_self_info& self_info) {
+void run_loader_test(const mc_m12_self_info& self_info) {
     const auto* original = reinterpret_cast<const uint8_t*>(self_info.elf_addr);
     bool write_ok = write_elf_to_vfs(k_su_target_path, original, self_info.elf_size);
     g_reassembled_size = write_ok ? read_elf_from_vfs(k_su_target_path, g_reassembled,
@@ -442,7 +442,7 @@ void spawn_su_target(uint32_t uid, bool is_super, bool is_guest, bool is_jail) {
     argv.is_guest = is_guest ? 1 : 0;
     argv.is_jail = is_jail ? 1 : 0;
 
-    uapi::process_spawn_request req{};
+    mc_process_spawn_request req{};
     req.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
     req.elf_size = g_reassembled_size;
     req.argv_blob = reinterpret_cast<uint64_t>(&argv);
@@ -454,11 +454,11 @@ void spawn_su_target(uint32_t uid, bool is_super, bool is_guest, bool is_jail) {
     req.create_endpoint = true;
     req.inherited_handle_count = 1;
     req.inherited_handles[0].src_handle = k_vfs_handle;
-    req.inherited_handles[0].rights_mask = uapi::k_right_can_send;
-    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&req), 0, 0);
+    req.inherited_handles[0].rights_mask = MC_RIGHT_CAN_SEND;
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&req), 0, 0);
 }
 
-void handle_su(const uapi::message& in, uapi::message& out) {
+void handle_su(const mc_message& in, mc_message& out) {
     const account* caller = find_account_by_username(&in.regs[0]);
     const account* target = find_account_by_username(&in.regs[1]);
     if (caller == nullptr || target == nullptr) {
@@ -506,12 +506,12 @@ void run_guest_confinement_test() {
     fd_continue_argv a{};
     __builtin_memcpy(&a, argv, sizeof(a));
 
-    uapi::message read_req{};
+    mc_message read_req{};
     read_req.label = k_op_read;
     read_req.regs[0] = a.open_file_id;
     read_req.regs[1] = 4;
-    uapi::message read_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, a.memfs_handle, reinterpret_cast<uint64_t>(&read_req),
+    mc_message read_reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, a.memfs_handle, reinterpret_cast<uint64_t>(&read_req),
                reinterpret_cast<uint64_t>(&read_reply));
     bool ok = (read_reply.regs[1] == 0) && (read_reply.regs[0] == 4) &&
               read_reply.page_count == 1 &&
@@ -546,12 +546,12 @@ void run_fd_inheritance_test() {
     // 앞부분 5바이트("hello")만 읽어 서버 쪽 read_cursor를 5로
     // 옮겨 둔다 — 나머지(" vfs")를 자식이 이어 읽는 것이 검증
     // 대상이다.
-    uapi::message read_req{};
+    mc_message read_req{};
     read_req.label = k_op_read;
     read_req.regs[0] = open_file_id;
     read_req.regs[1] = 5;
-    uapi::message read_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, memfs_handle, reinterpret_cast<uint64_t>(&read_req),
+    mc_message read_reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, memfs_handle, reinterpret_cast<uint64_t>(&read_req),
                reinterpret_cast<uint64_t>(&read_reply));
     bool first_ok = (read_reply.regs[1] == 0) && (read_reply.regs[0] == 5) &&
                      read_reply.page_count == 1 &&
@@ -563,7 +563,7 @@ void run_fd_inheritance_test() {
         return;
     }
 
-    uint64_t fork_ret = do_syscall(uapi::k_syscall_fork, 0, 0, 0);
+    uint64_t fork_ret = do_syscall(MC_SYSCALL_FORK, 0, 0, 0);
     if (fork_ret == 0) {
         // 자식 — M23(ADR-179)의 fork() 수정으로 이 시점에 이미
         // memfs_handle이 그대로 유효하다. exec로 완전히 새 이미지로
@@ -574,12 +574,12 @@ void run_fd_inheritance_test() {
         fargv.open_file_id = open_file_id;
         fargv.memfs_handle = memfs_handle;
 
-        uapi::exec_request exec_req{};
+        mc_exec_request exec_req{};
         exec_req.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
         exec_req.elf_size = g_reassembled_size;
         exec_req.argv_blob = reinterpret_cast<uint64_t>(&fargv);
         exec_req.argv_size = sizeof(fargv);
-        do_syscall(uapi::k_syscall_exec, reinterpret_cast<uint64_t>(&exec_req), 0, 0);
+        do_syscall(MC_SYSCALL_EXEC, reinterpret_cast<uint64_t>(&exec_req), 0, 0);
         quiet_exit();  // exec 실패 시에만 도달.
     }
     // 부모는 그대로 다음 자기테스트로 진행한다 — fork 성공 자체는
@@ -630,26 +630,26 @@ void run_fd_inheritance_test() {
     if (a.is_guest || a.is_jail) {
         uint64_t identity = (a.is_guest ? 1ull : 0) | (a.is_jail ? 2ull : 0);
 
-        uapi::message outside_req{};
+        mc_message outside_req{};
         outside_req.label = k_op_open;
         pack_bytes(outside_req.regs, k_path_budget, "/etc/denied.txt",
                    cstr_len("/etc/denied.txt"));
         outside_req.regs[3] = identity;
-        uapi::message outside_reply{};
-        do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&outside_req),
+        mc_message outside_reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, k_vfs_handle, reinterpret_cast<uint64_t>(&outside_req),
                    reinterpret_cast<uint64_t>(&outside_reply));
         bool outside_denied = (outside_reply.regs[1] == 5);  // GUEST_DENIED, fs-protocol.md v3 §3.
         const char* m1 = outside_denied ? "[su-target] guest open outside denied=1\n"
                                           : "[su-target] guest open outside denied=0\n";
         debug_log(m1, cstr_len(m1));
 
-        uapi::message inside_req{};
+        mc_message inside_req{};
         inside_req.label = k_op_open;
         pack_bytes(inside_req.regs, k_path_budget, "/home/guest1/allowed.txt",
                    cstr_len("/home/guest1/allowed.txt"));
         inside_req.regs[3] = identity;
-        uapi::message inside_reply{};
-        do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&inside_req),
+        mc_message inside_reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, k_vfs_handle, reinterpret_cast<uint64_t>(&inside_req),
                    reinterpret_cast<uint64_t>(&inside_reply));
         bool inside_ok = (inside_reply.regs[1] == 0 && inside_reply.handle_count == 1);
         const char* m2 = inside_ok ? "[su-target] guest open inside ok=1\n"
@@ -681,12 +681,12 @@ constexpr uint32_t k_wait_target_own_endpoint_handle = 1;
     wait_target_argv a{};
     __builtin_memcpy(&a, argv, sizeof(a));
 
-    uapi::message ask{};
-    do_syscall(uapi::k_syscall_ipc_recv, k_wait_target_own_endpoint_handle,
+    mc_message ask{};
+    do_syscall(MC_SYSCALL_IPC_RECV, k_wait_target_own_endpoint_handle,
                reinterpret_cast<uint64_t>(&ask), 0);
-    uapi::message reply{};
+    mc_message reply{};
     reply.regs[0] = static_cast<uint64_t>(static_cast<int64_t>(a.exit_code));
-    do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&reply), 0, 0);
+    do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&reply), 0, 0);
     quiet_exit();
 }
 
@@ -719,17 +719,17 @@ void run_process_lifecycle_test() {
     wargv.magic = k_wait_target_magic;
     wargv.exit_code = 42;
 
-    uapi::process_spawn_request wreq{};
+    mc_process_spawn_request wreq{};
     wreq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
     wreq.elf_size = g_reassembled_size;
     wreq.argv_blob = reinterpret_cast<uint64_t>(&wargv);
     wreq.argv_size = sizeof(wargv);
     wreq.create_endpoint = true;  // 이 자식만의 새 endpoint — 위 run_as_wait_target 주석 참고.
-    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&wreq), 0, 0);
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&wreq), 0, 0);
 
-    uapi::message ask{};
-    uapi::message notify{};
-    do_syscall(uapi::k_syscall_ipc_call, wreq.out_endpoint_proxy_handle,
+    mc_message ask{};
+    mc_message notify{};
+    do_syscall(MC_SYSCALL_IPC_CALL, wreq.out_endpoint_proxy_handle,
                reinterpret_cast<uint64_t>(&ask), reinterpret_cast<uint64_t>(&notify));
 
     bool wait_ok = (static_cast<int64_t>(notify.regs[0]) == wargv.exit_code);
@@ -741,15 +741,15 @@ void run_process_lifecycle_test() {
     kill_target_argv kargv{};
     kargv.magic = k_kill_target_magic;
 
-    uapi::process_spawn_request kreq{};
+    mc_process_spawn_request kreq{};
     kreq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
     kreq.elf_size = g_reassembled_size;
     kreq.argv_blob = reinterpret_cast<uint64_t>(&kargv);
     kreq.argv_size = sizeof(kargv);
-    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&kreq), 0, 0);
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&kreq), 0, 0);
 
     uint64_t kill_err =
-        do_syscall(uapi::k_syscall_process_kill, kreq.out_thread_handle, 0, 0);
+        do_syscall(MC_SYSCALL_PROCESS_KILL, kreq.out_thread_handle, 0, 0);
     const char* m2 =
         (kill_err == 0) ? "[procsrv] kill requested ok=1\n" : "[procsrv] kill requested ok=0\n";
     debug_log(m2, cstr_len(m2));
@@ -776,16 +776,16 @@ void run_vfs_roundtrip_test() {
     for (uint64_t i = 0; i < k_page_size; ++i) {
         g_write_scratch[i] = (i < payload_len) ? static_cast<uint8_t>(payload[i]) : 0;
     }
-    uapi::message write_req{};
+    mc_message write_req{};
     write_req.label = k_op_write;
     write_req.regs[0] = open_file_id;
     write_req.regs[1] = payload_len;
     write_req.page_count = 1;
     write_req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_write_scratch);
     write_req.pages[0].length = k_page_size;
-    write_req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message write_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, memfs_handle, reinterpret_cast<uint64_t>(&write_req),
+    write_req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message write_reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, memfs_handle, reinterpret_cast<uint64_t>(&write_req),
                reinterpret_cast<uint64_t>(&write_reply));
     bool write_ok = (write_reply.regs[1] == 0) && (write_reply.regs[0] == payload_len);
 
@@ -794,12 +794,12 @@ void run_vfs_roundtrip_test() {
     // 이미 이 프로세스의 고정 슬롯에 매핑을 마쳐 뒀으므로,
     // read_reply.pages[0].vaddr을 그냥 읽으면 된다(별도 매핑/해제
     // 호출 불필요).
-    uapi::message read_req{};
+    mc_message read_req{};
     read_req.label = k_op_read;
     read_req.regs[0] = open_file_id;
     read_req.regs[1] = payload_len;
-    uapi::message read_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, memfs_handle, reinterpret_cast<uint64_t>(&read_req),
+    mc_message read_reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, memfs_handle, reinterpret_cast<uint64_t>(&read_req),
                reinterpret_cast<uint64_t>(&read_reply));
     bool read_ok = (read_reply.regs[1] == 0) && (read_reply.regs[0] == payload_len) &&
                     read_reply.page_count == 1 &&
@@ -834,12 +834,12 @@ void run_mounted_fs_read_test(const char* mount_path, const char* expected,
         return;
     }
 
-    uapi::message read_req{};
+    mc_message read_req{};
     read_req.label = k_op_read;
     read_req.regs[0] = open_file_id;
     read_req.regs[1] = 4096;
-    uapi::message read_reply{};
-    do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&read_req),
+    mc_message read_reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, fs_handle, reinterpret_cast<uint64_t>(&read_req),
                reinterpret_cast<uint64_t>(&read_reply));
 
     uint64_t expected_len = cstr_len(expected);
@@ -894,16 +894,16 @@ void fill_page_buf(uint8_t* buf, const char* text) {
 uint64_t reg_open_or_create(uint32_t op, uint32_t caller_uid, const char* caller_username,
                              const char* path, uint64_t& out_table_id) {
     fill_page_buf(g_cfg_path_buf, path);
-    uapi::message req{};
+    mc_message req{};
     req.label = op;
     req.regs[0] = caller_uid;
     pack_bytes(&req.regs[1], sizeof(uint64_t), caller_username, cstr_len(caller_username));
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     out_table_id = reply.regs[1];
     return reply.regs[0];
@@ -912,16 +912,16 @@ uint64_t reg_open_or_create(uint32_t op, uint32_t caller_uid, const char* caller
 uint64_t reg_get_string(uint32_t caller_uid, uint64_t table_id, const char* key, char* out_buf,
                          uint64_t out_cap, uint64_t& out_len) {
     fill_page_buf(g_cfg_key_buf, key);
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_get_value;
     req.regs[0] = caller_uid;
     req.regs[1] = table_id;
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_key_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     if (reply.regs[0] != k_reg_err_ok) {
         return reply.regs[0];
@@ -941,7 +941,7 @@ uint64_t reg_set_string(uint32_t caller_uid, uint64_t table_id, const char* key,
                          const char* value) {
     fill_page_buf(g_cfg_key_buf, key);
     fill_page_buf(g_cfg_value_buf, value);
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_set_value;
     req.regs[0] = caller_uid;
     req.regs[1] = table_id;
@@ -950,39 +950,39 @@ uint64_t reg_set_string(uint32_t caller_uid, uint64_t table_id, const char* key,
     req.page_count = 2;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_key_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
+    req.pages[0].mode = MC_TRANSFER_COPY;
     req.pages[1].vaddr = reinterpret_cast<uint64_t>(g_cfg_value_buf);
     req.pages[1].length = k_page_size;
-    req.pages[1].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[1].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0];
 }
 
 uint64_t reg_delete_value(uint32_t caller_uid, uint64_t table_id, const char* key) {
     fill_page_buf(g_cfg_key_buf, key);
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_delete_value;
     req.regs[0] = caller_uid;
     req.regs[1] = table_id;
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_key_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0];
 }
 
 uint64_t reg_list_values(uint32_t caller_uid, uint64_t table_id, uint64_t& out_count) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_list_values;
     req.regs[0] = caller_uid;
     req.regs[1] = table_id;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     out_count = reply.regs[1];
     return reply.regs[0];
@@ -991,16 +991,16 @@ uint64_t reg_list_values(uint32_t caller_uid, uint64_t table_id, uint64_t& out_c
 uint64_t reg_list_children(uint32_t caller_uid, const char* caller_username, const char* path,
                             uint64_t& out_count) {
     fill_page_buf(g_cfg_path_buf, path);
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_list_children;
     req.regs[0] = caller_uid;
     pack_bytes(&req.regs[1], sizeof(uint64_t), caller_username, cstr_len(caller_username));
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     out_count = reply.regs[1];
     return reply.regs[0];
@@ -1008,16 +1008,16 @@ uint64_t reg_list_children(uint32_t caller_uid, const char* caller_username, con
 
 uint64_t reg_delete_table(uint32_t caller_uid, const char* caller_username, const char* path) {
     fill_page_buf(g_cfg_path_buf, path);
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_delete_table;
     req.regs[0] = caller_uid;
     pack_bytes(&req.regs[1], sizeof(uint64_t), caller_username, cstr_len(caller_username));
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0];
 }
@@ -1039,16 +1039,16 @@ uint64_t reg_set_permissions(uint32_t caller_uid, uint64_t table_id, uint32_t ow
     for (uint64_t i = 12; i < k_page_size; ++i) {
         p[i] = 0;
     }
-    uapi::message req{};
+    mc_message req{};
     req.label = k_reg_op_set_permissions;
     req.regs[0] = caller_uid;
     req.regs[1] = table_id;
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_cfg_path_buf);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_cfgsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0];
 }
@@ -1165,17 +1165,17 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     }
 
     const auto* self_info =
-        reinterpret_cast<const uapi::m12_self_info*>(uapi::k_m12_self_info_user_vaddr);
+        reinterpret_cast<const mc_m12_self_info*>(MC_M12_SELF_INFO_USER_VADDR);
 
-    uint64_t fork_ret = do_syscall(uapi::k_syscall_fork, 0, 0, 0);
+    uint64_t fork_ret = do_syscall(MC_SYSCALL_FORK, 0, 0, 0);
     if (fork_ret == 0) {
         // 자식 — sys_exec으로 자기 자신을 다시 실행(argv 없음 = 0,
         // 위 상단 주석의 규약대로 이 경로가 다음번 _start에서 사본으로
         // 식별된다).
-        uapi::exec_request exec_req{};
+        mc_exec_request exec_req{};
         exec_req.elf_data = self_info->elf_addr;
         exec_req.elf_size = self_info->elf_size;
-        do_syscall(uapi::k_syscall_exec, reinterpret_cast<uint64_t>(&exec_req), 0, 0);
+        do_syscall(MC_SYSCALL_EXEC, reinterpret_cast<uint64_t>(&exec_req), 0, 0);
         quiet_exit();  // exec 실패 시에만 도달.
     }
 
@@ -1220,10 +1220,10 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // 저장소와 위임 테이블에 묻는다.
     init_accounts();
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             if (in.label == k_op_login) {
@@ -1232,7 +1232,7 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
                 handle_su(in, out);
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

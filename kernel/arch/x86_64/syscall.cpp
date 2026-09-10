@@ -3,7 +3,7 @@
 // 맡는다 — 이 파일은 그 진입을 준비하는 MSR 설정과, 진입 후 C++에서
 // syscall 번호로 분기하는 부분만 다룬다.
 //
-// 이 milestone은 syscall 번호를 딱 하나(uapi::k_syscall_ipc_call)만
+// 이 milestone은 syscall 번호를 딱 하나(MC_SYSCALL_IPC_CALL)만
 // 인식한다 — initrun 데모가 그 이상을 쓰지 않는다(kernel-bootstrap.md
 // M8 목표: "IPC Call에 대한 응답을 받는다"). 알 수 없는 번호는
 // invalid_handle로 취급한다(적당한 매핑이 없어 가장 가까운 기존
@@ -19,7 +19,7 @@
 #include <sched/scheduler.hpp>
 
 #include <klog.hpp>
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace {
 
@@ -78,7 +78,7 @@ void install_syscall_entry() {
 extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
                                       const uint64_t* saved_regs) {
     switch (num) {
-        case uapi::k_syscall_ipc_call: {
+        case MC_SYSCALL_IPC_CALL: {
             kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
                 return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
@@ -92,7 +92,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 kern::ipc::sys_call(*self->handles, static_cast<kern::object::handle>(a1), *msg_in, *msg_out);
             return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
-        case uapi::k_syscall_ipc_recv: {
+        case MC_SYSCALL_IPC_RECV: {
             kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
                 return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
@@ -105,7 +105,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 kern::ipc::sys_recv(*self->handles, static_cast<kern::object::handle>(a1), *msg_out);
             return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
-        case uapi::k_syscall_ipc_reply: {
+        case MC_SYSCALL_IPC_REPLY: {
             kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
                 return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
@@ -117,12 +117,12 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             auto result = kern::ipc::sys_reply(*self->handles, *msg_in);
             return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
-        case uapi::k_syscall_process_spawn: {
-            auto* req = reinterpret_cast<uapi::process_spawn_request*>(a1);
+        case MC_SYSCALL_PROCESS_SPAWN: {
+            auto* req = reinterpret_cast<mc_process_spawn_request*>(a1);
             if (req == nullptr || req->elf_data == 0) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
-            if (req->inherited_handle_count > uapi::k_max_spawn_inherited_handles) {
+            if (req->inherited_handle_count > MC_MAX_SPAWN_INHERITED_HANDLES) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
             auto err = kern::arch::x86_64::process_spawn(
@@ -133,15 +133,15 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 req->out_thread_handle);
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_fork: {
+        case MC_SYSCALL_FORK: {
             return kern::arch::x86_64::fork_current(/*rip=*/saved_regs[7], /*rflags=*/saved_regs[6],
                                               /*user_rsp=*/saved_regs[8], /*rbx=*/saved_regs[5],
                                               /*rbp=*/saved_regs[4], /*r12=*/saved_regs[3],
                                               /*r13=*/saved_regs[2], /*r14=*/saved_regs[1],
                                               /*r15=*/saved_regs[0]);
         }
-        case uapi::k_syscall_exec: {
-            const auto* req = reinterpret_cast<const uapi::exec_request*>(a1);
+        case MC_SYSCALL_EXEC: {
+            const auto* req = reinterpret_cast<const mc_exec_request*>(a1);
             if (req == nullptr || req->elf_data == 0) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
@@ -152,11 +152,11 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size);
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_thread_exit: {
+        case MC_SYSCALL_THREAD_EXIT: {
             kern::sched::exit();  // noreturn.
         }
-        case uapi::k_syscall_alloc_dma_buffer: {
-            auto* out = reinterpret_cast<uapi::dma_buffer_result*>(a1);
+        case MC_SYSCALL_ALLOC_DMA_BUFFER: {
+            auto* out = reinterpret_cast<mc_dma_buffer_result*>(a1);
             if (out == nullptr) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
@@ -169,16 +169,16 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             }
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_debug_log: {
+        case MC_SYSCALL_DEBUG_LOG: {
             const auto* str = reinterpret_cast<const char*>(a1);
             if (str == nullptr) {
                 return 1;
             }
             uint64_t len = a2;
-            if (len > uapi::k_max_debug_log_bytes) {
-                len = uapi::k_max_debug_log_bytes;
+            if (len > MC_MAX_DEBUG_LOG_BYTES) {
+                len = MC_MAX_DEBUG_LOG_BYTES;
             }
-            char buf[uapi::k_max_debug_log_bytes + 1];
+            char buf[MC_MAX_DEBUG_LOG_BYTES + 1];
             for (uint64_t i = 0; i < len; ++i) {
                 buf[i] = str[i];
             }
@@ -186,8 +186,8 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             kern::klog::printf("%s", buf);
             return 0;
         }
-        case uapi::k_syscall_map_phys: {
-            auto* req = reinterpret_cast<uapi::map_phys_request*>(a1);
+        case MC_SYSCALL_MAP_PHYS: {
+            auto* req = reinterpret_cast<mc_map_phys_request*>(a1);
             if (req == nullptr) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
@@ -198,15 +198,15 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             }
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_io_activate: {
+        case MC_SYSCALL_IO_ACTIVATE: {
             auto err = kern::arch::x86_64::io_activate(static_cast<uint16_t>(a1), static_cast<uint16_t>(a2));
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_io_deactivate: {
+        case MC_SYSCALL_IO_DEACTIVATE: {
             auto err = kern::arch::x86_64::io_deactivate();
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_process_kill: {
+        case MC_SYSCALL_PROCESS_KILL: {
             kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_kill_error::invalid_handle);
@@ -214,8 +214,8 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             auto err = kern::arch::x86_64::process_kill(*self->handles, static_cast<uint32_t>(a1));
             return static_cast<uint64_t>(err);
         }
-        case uapi::k_syscall_brk: {
-            auto* req = reinterpret_cast<uapi::brk_request*>(a1);
+        case MC_SYSCALL_BRK: {
+            auto* req = reinterpret_cast<mc_brk_request*>(a1);
             if (req == nullptr) {
                 return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }

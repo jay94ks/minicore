@@ -17,6 +17,18 @@ target_include_directories(minicore_kernel INTERFACE
 )
 target_link_libraries(minicore_kernel INTERFACE minicore_libk)
 
+# ADR-200(foundations.md) — kernel/include/uapi.hpp가 폐지되고 그
+# 내용은 libs/mc/include/mc/syscall.h로 흡수됐다. 커널은 그 헤더의
+# "구조체/enum/상수만" 보는 커널-랜드 뷰가 필요하다(syscall
+# 트램폴린/프로토콜 클라이언트 함수는 필요 없다 — 커널은 자기
+# 자신을 syscall로 호출하지 않는다). `MC_LAND_KERNEL`을 전역으로
+# 정의해 그 뷰를 켠다 — mc의 .c 구현은 링크하지 않고(필요 없다)
+# 인클루드 경로만 가져온다.
+target_compile_definitions(minicore_kernel INTERFACE MC_LAND_KERNEL)
+target_include_directories(minicore_kernel INTERFACE
+    ${CMAKE_SOURCE_DIR}/libs/mc/include
+)
+
 # arch 독립 커널 코어 소스. kernel/core는 arch 헤더를 include하지 않는다
 # (ADR-002 HAL 경계) — klog::putc()/arch_irq_save 등은 arch 쪽이
 # 구현해 링크 시점에 채워진다.

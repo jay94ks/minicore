@@ -6,7 +6,7 @@
 // 있다. OPEN은 vfs가 대신 호출해 준다(ADR-018) — memfs 자신은 마운트
 // 개념도, 경로 정규화도 모른다. WRITE/READ는 그 이후 클라이언트가
 // (vfs를 거치지 않고) memfs의 endpoint에 직접 건다.
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::fs::memfs {
 
@@ -122,7 +122,7 @@ uint32_t alloc_open_instance(uint32_t file_index) {
     return 0;
 }
 
-void handle_open(const uapi::message& in, uapi::message& out) {
+void handle_open(const mc_message& in, mc_message& out) {
     char path[33];
     __builtin_memcpy(path, in.regs, 32);
     path[32] = '\0';
@@ -142,7 +142,7 @@ void handle_open(const uapi::message& in, uapi::message& out) {
 // fs-protocol.md v3 §2.2 — 요청이 이제 pages[]로 온다(M13 시절엔
 // regs[2..3] 16바이트 상한). write_cursor 위치부터 이어 쓰고 그만큼
 // 전진시킨다 — seek는 없다(§4).
-void handle_write(const uapi::message& in, uapi::message& out) {
+void handle_write(const mc_message& in, mc_message& out) {
     uint32_t open_id = static_cast<uint32_t>(in.regs[0]);
     uint64_t length = in.regs[1];
     if (open_id == 0 || open_id > k_max_open_files || !g_opens[open_id - 1].used) {
@@ -175,7 +175,7 @@ void handle_write(const uapi::message& in, uapi::message& out) {
 // fs-protocol.md v3 §2.3 — read_cursor 위치부터 이어 읽고 그만큼
 // 전진시킨다(M16에서는 항상 오프셋 0이었다). 요청 길이는 4096(한
 // 페이지)으로 클램프될 뿐 TOO_LARGE로 거부하지 않는다.
-void handle_read(const uapi::message& in, uapi::message& out) {
+void handle_read(const mc_message& in, mc_message& out) {
     uint32_t open_id = static_cast<uint32_t>(in.regs[0]);
     uint64_t requested = in.regs[1];
     if (open_id == 0 || open_id > k_max_open_files || !g_opens[open_id - 1].used) {
@@ -198,7 +198,7 @@ void handle_read(const uapi::message& in, uapi::message& out) {
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
     out.pages[0].length = k_page_size;
-    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = to_read;
     out.regs[1] = k_status_ok;
 }
@@ -206,7 +206,7 @@ void handle_read(const uapi::message& in, uapi::message& out) {
 // fs-protocol.md v4 §2.4(filesystem.md ADR-172) — OP_WRITE/OP_READ와
 // 같은 정신으로 VFS를 거치지 않고 클라이언트가 직접 부른다. 채워진
 // 파일 슬롯 이름을 NUL로 구분해 한 페이지에 눌러 담는다.
-void handle_list(const uapi::message&, uapi::message& out) {
+void handle_list(const mc_message&, mc_message& out) {
     for (uint64_t i = 0; i < k_page_size; ++i) {
         g_read_scratch[i] = 0;
     }
@@ -232,7 +232,7 @@ void handle_list(const uapi::message&, uapi::message& out) {
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
     out.pages[0].length = k_page_size;
-    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = k_status_ok;
     out.regs[1] = count;
 }
@@ -241,10 +241,10 @@ void handle_list(const uapi::message&, uapi::message& out) {
 
 extern "C" [[noreturn]] void _start(const void*) {
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             switch (in.label) {
@@ -265,7 +265,7 @@ extern "C" [[noreturn]] void _start(const void*) {
                     break;
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

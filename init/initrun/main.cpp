@@ -16,14 +16,14 @@
 // 것으로 대체됐다(kernel/arch/x86_64/process_ops.cpp가 호출자를
 // 구분하지 않고 남기는 같은 "[process] fork/exec/spawn ok" 로그이므로
 // 같은 스모크 테스트 어써션이 이제는 이 실제 경로로 충족된다) —
-// uapi.hpp::m12_self_info 주석이 예고한 대로 이 자리에서 그 임시
+// mc/syscall.h::mc_m12_self_info 주석이 예고한 대로 이 자리에서 그 임시
 // 다리를 걷어냈다.
 #include "cpio_reader.hpp"
 #include "ini_parser.hpp"
 #include "virtio_blk.hpp"
 
 #include <boot_info.hpp>
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace {
 
@@ -147,7 +147,7 @@ uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
 }
 
 [[noreturn]] void quiet_exit() {
-    do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+    do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     // sys_thread_exit은 절대 반환하지 않는다 — 도달하면 커널 쪽 버그.
     for (;;) {
         asm volatile("pause");
@@ -311,7 +311,7 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
         return;
     }
 
-    uapi::process_spawn_request req{};
+    mc_process_spawn_request req{};
     req.elf_data = reinterpret_cast<uint64_t>(elf_entry.value().data);
     req.elf_size = elf_entry.value().size;
     req.argv_blob = reinterpret_cast<uint64_t>(k_service_argv_marker);
@@ -358,7 +358,7 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
             }
             uint32_t count = 0;
             uint64_t seg_start = 0;
-            for (uint64_t i = 0; i <= len && count < uapi::k_max_spawn_inherited_handles; ++i) {
+            for (uint64_t i = 0; i <= len && count < MC_MAX_SPAWN_INHERITED_HANDLES; ++i) {
                 if (i == len || deps_buf[i] == ',') {
                     uint64_t seg_len = i - seg_start;
                     if (seg_len > 0 && seg_len < 32) {
@@ -370,7 +370,7 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
                         uint32_t dep_handle = find_registered_handle(*ctx, dep_name);
                         if (dep_handle != 0) {
                             req.inherited_handles[count].src_handle = dep_handle;
-                            req.inherited_handles[count].rights_mask = uapi::k_right_can_send;
+                            req.inherited_handles[count].rights_mask = MC_RIGHT_CAN_SEND;
                             ++count;
                         }
                     }
@@ -381,7 +381,7 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
         }
     }
 
-    do_syscall(uapi::k_syscall_process_spawn, reinterpret_cast<uint64_t>(&req), 0, 0);
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&req), 0, 0);
     ++ctx->spawned_count;
 
     if (req.out_endpoint_proxy_handle != 0 && ctx->registry_count < k_max_registered_services) {
@@ -412,8 +412,8 @@ bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
     // 담는다 — 앞으로 서비스가 늘어도 3MiB 상한(k_max_boot_disk_bytes)
     // 안에서는 그대로 재사용 가능하다.
     constexpr uint32_t k_dma_buffer_order = 10;
-    uapi::dma_buffer_result dma{};
-    uint64_t alloc_err = do_syscall(uapi::k_syscall_alloc_dma_buffer,
+    mc_dma_buffer_result dma{};
+    uint64_t alloc_err = do_syscall(MC_SYSCALL_ALLOC_DMA_BUFFER,
                                      reinterpret_cast<uint64_t>(&dma), k_dma_buffer_order, 0);
     if (alloc_err != 0) {
         return false;
@@ -426,7 +426,7 @@ bool mount_boot_device_and_spawn_services(const boot::boot_info& bi) {
     // (스레드별 IOPB로 바뀌면서, "필요한 순간에 직접 활성화"가 원칙이
     // 됐다) — virtio-blk 레지스터에 실제로 접근하기 직전에 이 스레드
     // 자신이 활성화한다. 0x20(가정한 레지스터 범위, ADR-147과 동일).
-    do_syscall(uapi::k_syscall_io_activate, io_base, 0x20, 0);
+    do_syscall(MC_SYSCALL_IO_ACTIVATE, io_base, 0x20, 0);
 
     if (!virtio_blk::init(io_base, dma_virt, dma.phys_addr)) {
         return false;
@@ -464,16 +464,16 @@ extern "C" [[noreturn]] void _start(const void* boot_info_or_null) {
     // 이 종류의 파서에 대한 이 프로젝트의 관례 — mcpack/elf_loader와
     // 마찬가지로 QEMU 왕복으로 검증). 이 자체 테스트는 실제 부트
     // 디바이스와 무관하게 항상 돈다.
-    uapi::message out{};
+    mc_message out{};
     out.label = k_boot_label;
     out.regs[0] = test_cpio_and_ini() ? 1 : 0;
-    uapi::message in{};
-    do_syscall(uapi::k_syscall_ipc_call, k_boot_endpoint_handle,
+    mc_message in{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_boot_endpoint_handle,
                reinterpret_cast<uint64_t>(&out), reinterpret_cast<uint64_t>(&in));
 
     // M12(ADR-131) — 실제 부트 디바이스 마운트 + 서비스 스폰. 이후
     // 하나 이상의 서비스가 스케줄될 기회를 얻으려면(협조적 스케줄러라
-    // sys_yield가 없다, uapi.hpp 참고) initrun 자신이 물러나야 한다 —
+    // sys_yield가 없다, mc/syscall.h 참고) initrun 자신이 물러나야 한다 —
     // 그래서 성공/실패와 무관하게 곧바로 quiet_exit()한다. OPEN-51
     // ("systemd류 초기 프로세스"의 정체성)은 아직 미해결이라 M12는
     // 스폰된 서비스가 곧 initrun 이후의 유일한 프로세스다.

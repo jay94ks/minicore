@@ -18,9 +18,10 @@ add_executable(minicore_initrun_elf
 
 target_include_directories(minicore_initrun_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/kernel/include
+    ${CMAKE_SOURCE_DIR}/libs/mc/include
 )
 
-target_link_libraries(minicore_initrun_elf PRIVATE minicore_libk)
+target_link_libraries(minicore_initrun_elf PRIVATE minicore_libk minicore_libmc)
 
 # 유저 프로세스도 SSE/MMX를 쓰지 않는다 — 이 마일스톤 어디서도
 # CR4.OSFXSR을 설정하지 않아(IDT/#NM 처리 없음, kernel/arch/x86_64/

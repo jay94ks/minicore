@@ -15,7 +15,7 @@
 // 범위 밖이다 — VFS가 임의 경로의 ELF를 찾아 실행하는 일반 메커니즘이
 // 아직 없다(system-servers-bringup.md §M20이 "로그인 후 셸"을 자신의
 // 목표로 이미 명시해 뒀다).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::login {
 
@@ -65,7 +65,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 
 void pack_bytes(void* dst, uint64_t dst_bytes, const char* data, uint64_t len) {
@@ -82,12 +82,12 @@ void console_print(const char* text, uint64_t len) {
     if (len > k_max_line_len) {
         len = k_max_line_len;
     }
-    uapi::message req{};
+    mc_message req{};
     req.label = k_console_op_print;
     req.regs[0] = len;
     pack_bytes(&req.regs[1], 3 * sizeof(uint64_t), text, len);
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_console_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_console_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
 }
 void console_print_str(const char* s) { console_print(s, cstr_len(s)); }
@@ -104,10 +104,10 @@ read_line_result read_line(char* buf, uint32_t max_len, bool echo) {
     read_line_result result{};
     uint32_t consecutive_misses = 0;
     while (consecutive_misses < k_max_consecutive_misses) {
-        uapi::message req{};
+        mc_message req{};
         req.label = k_ps2_op_read_key;
-        uapi::message reply{};
-        do_syscall(uapi::k_syscall_ipc_call, k_ps2_handle, reinterpret_cast<uint64_t>(&req),
+        mc_message reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, k_ps2_handle, reinterpret_cast<uint64_t>(&req),
                    reinterpret_cast<uint64_t>(&reply));
         if (reply.regs[0] == 0) {
             ++consecutive_misses;
@@ -140,12 +140,12 @@ read_line_result read_line(char* buf, uint32_t max_len, bool echo) {
 
 bool try_login(const char* username, uint64_t username_len, const char* password,
                uint64_t password_len) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_procsrv_op_login;
     pack_bytes(&req.regs[0], sizeof(uint64_t), username, username_len);
     pack_bytes(&req.regs[1], 2 * sizeof(uint64_t), password, password_len);
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_procsrv_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_procsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0] == 0;
 }
@@ -155,13 +155,13 @@ bool try_login(const char* username, uint64_t username_len, const char* password
 // 위임이 없을 때만 검사). 응답 regs[0]: 0=위임 승인, 1=비밀번호
 // 승인, 2=거부.
 uint64_t try_su(const char* caller, const char* target, const char* target_password) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_procsrv_op_su;
     pack_bytes(&req.regs[0], sizeof(uint64_t), caller, cstr_len(caller));
     pack_bytes(&req.regs[1], sizeof(uint64_t), target, cstr_len(target));
     pack_bytes(&req.regs[2], 2 * sizeof(uint64_t), target_password, cstr_len(target_password));
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_procsrv_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_procsrv_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0];
 }
@@ -221,7 +221,7 @@ extern "C" [[noreturn]] void _start(const void*) {
 
     // M20("로그인 후 셸")이 session_program 스폰을 맡는다 — 이
     // 라운드는 인증 성공/실패 판정까지만 증명한다(ADR-165 §결정3).
-    do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+    do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     for (;;) {
         asm volatile("pause");
     }

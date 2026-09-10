@@ -35,7 +35,7 @@
 //      첫 시나리오가 됐다 — 매칭에 성공해 BAR를 내준 장치는
 //      `pci_device_entry::claimed`로 표시해 이후 매칭 후보에서
 //      제외한다(부트 디바이스 제외와 같은 정신).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::devmgr {
 
@@ -62,7 +62,7 @@ uint64_t cstr_len(const char* s) {
 }
 
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 
 // 32바이트 이하 메시지 하나로 로그를 찍는 게 대부분이라 매번 문자열을
@@ -85,7 +85,7 @@ void debug_log_hex(const char* prefix, uint64_t value) {
         }
     }
     buf[i++] = '\n';
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(buf), i, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(buf), i, 0);
 }
 
 // ---------- 물리 메모리 창(phys window) ----------
@@ -102,10 +102,10 @@ const uint8_t* map_window(uint64_t phys_addr, uint64_t len) {
         phys_addr + len <= g_window_phys_base + g_window_size) {
         return reinterpret_cast<const uint8_t*>(g_window_virt_base + (phys_addr - g_window_phys_base));
     }
-    uapi::map_phys_request req{};
+    mc_map_phys_request req{};
     req.phys_addr = phys_addr;
     req.size = len;
-    uint64_t err = do_syscall(uapi::k_syscall_map_phys, reinterpret_cast<uint64_t>(&req), 0, 0);
+    uint64_t err = do_syscall(MC_SYSCALL_MAP_PHYS, reinterpret_cast<uint64_t>(&req), 0, 0);
     if (err != 0) {
         return nullptr;
     }
@@ -493,7 +493,7 @@ constexpr uint64_t k_match_mode_class_code = 1;
 constexpr uint64_t k_status_ok = 0;
 constexpr uint64_t k_status_not_found = 1;
 
-void handle_register_driver(const uapi::message& in, uapi::message& out) {
+void handle_register_driver(const mc_message& in, mc_message& out) {
     uint64_t mode = in.regs[0];
     uint64_t match_a = in.regs[1];
     uint64_t match_mask = in.regs[2];
@@ -561,17 +561,17 @@ extern "C" [[noreturn]] void _start(const void* argv) {
     debug_log_hex("[devmgr] device_count=", g_device_count);
 
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             if (in.label == k_op_register_driver) {
                 handle_register_driver(in, out);
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

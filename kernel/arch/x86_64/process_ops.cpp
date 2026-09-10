@@ -16,7 +16,7 @@
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
 
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 // usermode.S(M8) — 유저모드로 직접 진입한다(IRETQ). sys_exec가 성공
 // 경로에서 곧바로 이걸 부른다(create_user_thread류의 "다음에 스케줄될
@@ -127,20 +127,20 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         arg0 = k_argv_user_vaddr;
     }
 
-    // M12(uapi.hpp::k_m12_self_info_user_vaddr 주석) — kernel_main.cpp::
+    // M12(mc/syscall.h::MC_M12_SELF_INFO_USER_VADDR 주석) — kernel_main.cpp::
     // setup_initrun_process가 initrun의 최초 스폰에서만 하던 "원본 ELF
     // 바이트를 새 주소공간에도 복사해 self_info로 알려 준다"를 여기
     // build_process()로 일반화한다 — process_spawn/exec_current로 만드는
     // **모든** 프로세스가 다 이걸 받는다. procsrv도 initrun의
     // sys_process_spawn으로 만들어지는 이상 이 경로를 그대로 타므로,
-    // initrun과 똑같은 방식(uapi::k_m12_self_info_user_vaddr을 읽어
+    // initrun과 똑같은 방식(MC_M12_SELF_INFO_USER_VADDR을 읽어
     // sys_fork+sys_exec)으로 "자기 자신을 fork/exec"할 수 있다 — M12
     // QEMU 목표(procsrv 자기 자신 fork/exec)가 요구하는 조건이 이것뿐.
     // ADR-160(kernel-memory.md, 슬롯 0의 예산 검증) — self_elf 복사가
-    // 이웃 슬롯(self_info, uapi::k_m12_self_info_user_vaddr)을 침범하기
+    // 이웃 슬롯(self_info, MC_M12_SELF_INFO_USER_VADDR)을 침범하기
     // 전에 명시적으로 거부한다. ADR-149가 겪은 버그(간격을 넘은 ELF가
     // already_mapped로만 우회 발견됨)를 재발 방지한다.
-    if (elf_size > uapi::k_m12_self_info_user_vaddr - uapi::k_m12_self_elf_user_vaddr) {
+    if (elf_size > MC_M12_SELF_INFO_USER_VADDR - MC_M12_SELF_ELF_USER_VADDR) {
         kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::capability_slot_overflow;
     }
@@ -158,7 +158,7 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         uint64_t copy_len = remaining < kern::mm::k_page_size ? remaining : kern::mm::k_page_size;
         __builtin_memset(virt, 0, kern::mm::k_page_size);
         __builtin_memcpy(virt, elf_data + offset, copy_len);
-        auto mapped = map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset, page.value(),
+        auto mapped = map_page(pml4_phys, MC_M12_SELF_ELF_USER_VADDR + offset, page.value(),
                                 page_perm::user);
         if (!mapped.is_ok()) {
             kern::mm::slab_free(space, sizeof(kern::object::address_space));
@@ -171,10 +171,10 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
         kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::out_of_memory;
     }
-    auto* self_info = static_cast<uapi::m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
-    self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
+    auto* self_info = static_cast<mc_m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
+    self_info->elf_addr = MC_M12_SELF_ELF_USER_VADDR;
     self_info->elf_size = elf_size;
-    auto info_mapped = map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr, info_page.value(),
+    auto info_mapped = map_page(pml4_phys, MC_M12_SELF_INFO_USER_VADDR, info_page.value(),
                                  page_perm::user);
     if (!info_mapped.is_ok()) {
         kern::mm::slab_free(space, sizeof(kern::object::address_space));
@@ -193,7 +193,7 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
 process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size,
                                    bool grant_trusted, bool create_endpoint,
-                                   const uapi::handle_transfer* inherited_handles,
+                                   const mc_handle_transfer* inherited_handles,
                                    uint32_t inherited_handle_count,
                                    uint32_t& out_endpoint_proxy_handle,
                                    uint32_t& out_thread_handle) {
@@ -241,7 +241,7 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
         }
     }
 
-    if (inherited_handle_count > uapi::k_max_spawn_inherited_handles) {
+    if (inherited_handle_count > MC_MAX_SPAWN_INHERITED_HANDLES) {
         kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
         return process_spawn_error::invalid_argument;
     }
@@ -432,7 +432,7 @@ process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_vi
     if (!self->owner_space->trusted) {
         return process_spawn_error::not_a_user_process;
     }
-    if (size == 0 || size > uapi::k_max_mmio_map_bytes) {
+    if (size == 0 || size > MC_MAX_MMIO_MAP_BYTES) {
         return process_spawn_error::invalid_argument;
     }
 

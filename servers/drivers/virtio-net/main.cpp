@@ -12,7 +12,7 @@
 // 이 드라이버는 순수 하드웨어 계층이다 — 이더넷 프레임을 그대로
 // 보내고 받을 뿐, ARP/IP/UDP 같은 프로토콜은 전혀 모른다(그건
 // servers/netsrv 소관, ADR-002/006/008과 같은 계층 분리 정신).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::drivers::virtio_net {
 
@@ -119,7 +119,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 void debug_log_hex(const char* prefix, uint64_t value) {
     char buf[96];
@@ -138,7 +138,7 @@ void debug_log_hex(const char* prefix, uint64_t value) {
         }
     }
     buf[i++] = '\n';
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(buf), i, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(buf), i, 0);
 }
 
 void out8(uint16_t port, uint8_t v) { asm volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
@@ -360,37 +360,37 @@ uint64_t do_recv_frame(const uint8_t* /*unused*/, uint8_t* out_data) {
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_register_driver;
     req.regs[0] = k_match_mode_vendor_device;
     req.regs[1] = k_virtio_net_vendor_device;
     req.regs[2] = 0;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
 
     if (reply.regs[0] != k_status_ok || (reply.regs[3] & k_is_io_bit) == 0) {
         debug_log("[virtio-net] no I/O-BAR virtio-net device registered by devmgr\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     auto io_base = static_cast<uint16_t>(reply.regs[1]);
     debug_log_hex("[virtio-net] io_base=", io_base);
 
-    do_syscall(uapi::k_syscall_io_activate, io_base, 0x20, 0);
+    do_syscall(MC_SYSCALL_IO_ACTIVATE, io_base, 0x20, 0);
 
-    uapi::dma_buffer_result dma{};
-    uint64_t alloc_err = do_syscall(uapi::k_syscall_alloc_dma_buffer,
+    mc_dma_buffer_result dma{};
+    uint64_t alloc_err = do_syscall(MC_SYSCALL_ALLOC_DMA_BUFFER,
                                      reinterpret_cast<uint64_t>(&dma), k_dma_buffer_order, 0);
     if (alloc_err != 0) {
         debug_log("[virtio-net] alloc_dma_buffer failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     g_dma_virt = reinterpret_cast<uint8_t*>(dma.virt_addr);
     g_dma_phys = dma.phys_addr;
 
     if (!init(io_base)) {
         debug_log("[virtio-net] init failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     debug_log("[virtio-net] init ok\n");
 
@@ -400,10 +400,10 @@ extern "C" [[noreturn]] void _start(const void*) {
     }
 
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             if (in.label == k_op_send_frame) {
@@ -431,7 +431,7 @@ extern "C" [[noreturn]] void _start(const void*) {
                     out.page_count = 1;
                     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_frame_scratch);
                     out.pages[0].length = k_page_size;
-                    out.pages[0].mode = uapi::transfer_mode::copy;
+                    out.pages[0].mode = MC_TRANSFER_COPY;
                 } else {
                     out.regs[0] = 1;
                 }
@@ -441,7 +441,7 @@ extern "C" [[noreturn]] void _start(const void*) {
                 out.regs[0] = reg;
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

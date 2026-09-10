@@ -46,7 +46,7 @@
 #include <object/handle_table.hpp>
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 // init/initrun/CMakeLists.txt가 만들고 kernel/arch/x86_64/initrd_blob.S.in이
 // .incbin으로 커널 이미지에 심은 MCPACK 이미지(M8, initrd_blob.S.in
@@ -817,7 +817,7 @@ void thread_i_notifier_entry() {
 // 찾아 로드하고, 새 주소공간·핸들 테이블을 가진 유저 스레드로 진입시킨다.
 // init/initrun/main.cpp 상단 주석과 짝을 이루는 값 — 두 실행파일이
 // 서로 다른 컴파일 단위라 공유 헤더로 두지 않고 각자 정의했다(레이블
-// 값 자체는 uapi.hpp의 syscall ABI와 달리 이 데모 하나만의 관례라
+// 값 자체는 mc/syscall.h의 syscall ABI와 달리 이 데모 하나만의 관례라
 // kernel/include로 옮길 만큼의 재사용 가치가 없다고 판단했다).
 constexpr uint32_t k_initrun_boot_label = 0xB007;
 
@@ -999,7 +999,7 @@ kern::object::thread* setup_initrun_process() {
         return nullptr;
     }
 
-    // M12(uapi.hpp::k_m12_self_info_user_vaddr 주석 참고) — initrun 자신의
+    // M12(mc/syscall.h::MC_M12_SELF_INFO_USER_VADDR 주석 참고) — initrun 자신의
     // 원본 ELF 바이트를 자기 주소공간에도 매핑해 둔다. entry.value().data는
     // 커널 이미지(initrd_blob.S) 안의 커널 가상주소라 지금(아직 initrun의
     // CR3로 전환하기 전, 커널 컨텍스트) 그대로 읽을 수 있다 — 유저 접근
@@ -1017,7 +1017,7 @@ kern::object::thread* setup_initrun_process() {
         uint64_t copy_len = remaining < kern::mm::k_page_size ? remaining : kern::mm::k_page_size;
         __builtin_memset(virt, 0, kern::mm::k_page_size);
         __builtin_memcpy(virt, entry.value().data + offset, copy_len);
-        auto mapped = kern::arch::x86_64::map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset,
+        auto mapped = kern::arch::x86_64::map_page(pml4_phys, MC_M12_SELF_ELF_USER_VADDR + offset,
                                              page.value(), kern::arch::x86_64::page_perm::user);
         if (!mapped.is_ok()) {
             return nullptr;
@@ -1028,10 +1028,10 @@ kern::object::thread* setup_initrun_process() {
     if (!info_page.is_ok()) {
         return nullptr;
     }
-    auto* self_info = static_cast<uapi::m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
-    self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
+    auto* self_info = static_cast<mc_m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
+    self_info->elf_addr = MC_M12_SELF_ELF_USER_VADDR;
     self_info->elf_size = self_elf_size;
-    auto info_mapped = kern::arch::x86_64::map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr,
+    auto info_mapped = kern::arch::x86_64::map_page(pml4_phys, MC_M12_SELF_INFO_USER_VADDR,
                                               info_page.value(), kern::arch::x86_64::page_perm::user);
     if (!info_mapped.is_ok()) {
         return nullptr;

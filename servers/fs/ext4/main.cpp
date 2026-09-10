@@ -20,7 +20,7 @@
 //     이 라운드의 작은 테스트 이미지가 항상 이 형태다.
 //   - 루트 디렉터리 평평한 스캔만(하위 디렉터리 진입 없음, memfs/
 //     fat32와 같은 전제), 파일 하나당 최대 1페이지(4096바이트).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::fs::ext4 {
 
@@ -92,7 +92,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 void debug_log_hex(const char* prefix, uint64_t value) {
     char buf[96];
@@ -111,7 +111,7 @@ void debug_log_hex(const char* prefix, uint64_t value) {
         }
     }
     buf[i++] = '\n';
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(buf), i, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(buf), i, 0);
 }
 
 void out8(uint16_t port, uint8_t v) { asm volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
@@ -455,7 +455,7 @@ open_instance g_opens[k_max_open_files];
 
 alignas(k_page_size) uint8_t g_read_scratch[k_page_size] = {};
 
-void handle_open(const uapi::message& in, uapi::message& out) {
+void handle_open(const mc_message& in, mc_message& out) {
     char path[33];
     __builtin_memcpy(path, in.regs, 32);
     path[32] = '\0';
@@ -479,7 +479,7 @@ void handle_open(const uapi::message& in, uapi::message& out) {
     out.regs[1] = k_fs_status_not_found;
 }
 
-void handle_read(const uapi::message& in, uapi::message& out) {
+void handle_read(const mc_message& in, mc_message& out) {
     uint32_t open_id = static_cast<uint32_t>(in.regs[0]);
     if (open_id == 0 || open_id > k_max_open_files || !g_opens[open_id - 1].used) {
         out.regs[0] = 0;
@@ -496,7 +496,7 @@ void handle_read(const uapi::message& in, uapi::message& out) {
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_read_scratch);
     out.pages[0].length = k_page_size;
-    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = n;
     out.regs[1] = k_fs_status_ok;
 }
@@ -504,36 +504,36 @@ void handle_read(const uapi::message& in, uapi::message& out) {
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_register_driver;
     req.regs[0] = k_match_mode_vendor_device;
     req.regs[1] = k_virtio_vendor_device;
     req.regs[2] = 0;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     if (reply.regs[0] != k_status_ok || (reply.regs[3] & k_is_io_bit) == 0) {
         debug_log("[ext4] no I/O-BAR virtio-blk device registered by devmgr\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     g_io_base = static_cast<uint16_t>(reply.regs[1]);
     debug_log_hex("[ext4] io_base=", g_io_base);
 
-    do_syscall(uapi::k_syscall_io_activate, g_io_base, 0x20, 0);
+    do_syscall(MC_SYSCALL_IO_ACTIVATE, g_io_base, 0x20, 0);
 
-    uapi::dma_buffer_result dma{};
-    uint64_t alloc_err = do_syscall(uapi::k_syscall_alloc_dma_buffer,
+    mc_dma_buffer_result dma{};
+    uint64_t alloc_err = do_syscall(MC_SYSCALL_ALLOC_DMA_BUFFER,
                                      reinterpret_cast<uint64_t>(&dma), k_dma_buffer_order, 0);
     if (alloc_err != 0) {
         debug_log("[ext4] alloc_dma_buffer failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     g_dma_virt = reinterpret_cast<uint8_t*>(dma.virt_addr);
     g_dma_phys = dma.phys_addr;
 
     if (!virtio_init()) {
         debug_log("[ext4] virtio init failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
 
     mount_ok = ext4_mount();
@@ -543,10 +543,10 @@ extern "C" [[noreturn]] void _start(const void*) {
     }
 
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0 && mount_ok) {
             out.label = in.label;
             switch (in.label) {
@@ -564,7 +564,7 @@ extern "C" [[noreturn]] void _start(const void*) {
             out.label = in.label;
             out.regs[1] = k_fs_status_not_found;
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

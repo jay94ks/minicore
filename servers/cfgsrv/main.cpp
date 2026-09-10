@@ -24,7 +24,7 @@
 //     프로토콜-레벨 정수다(servers/fs/memfs의 open_file_id와 같은
 //     선례 — 살아있는 유저 프로세스가 런타임에 새 커널 객체를 만드는
 //     syscall이 아직 없다).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::cfgsrv {
 
@@ -112,7 +112,7 @@ void pack_bytes(void* dst, uint64_t dst_bytes, const char* data, uint64_t len) {
 }
 
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 
 // 가변 길이 __builtin_memset/memcpy는 이 freestanding 빌드에서 실제
@@ -302,12 +302,12 @@ alignas(k_page_size) uint8_t g_io_scratch[k_page_size] = {};
 alignas(k_page_size) uint8_t g_persist_buf[2 * k_page_size] = {};
 
 void vfs_open(const char* path, uint64_t& out_open_file_id, uint32_t& out_fs_handle) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_fs_op_open;
     pack_bytes(req.regs, k_fs_path_budget, path, cstr_len(path));
     req.regs[3] = 0;  // cfgsrv 자신은 guest/jail이 아니다(fs-protocol.md v3 §2.1).
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_vfs_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_vfs_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     if (reply.regs[1] != k_fs_status_ok || reply.handle_count != 1) {
         out_fs_handle = 0;
@@ -333,16 +333,16 @@ bool persist_write_all(const uint8_t* data, uint64_t size) {
         for (uint64_t i = 0; i < k_page_size; ++i) {
             g_io_scratch[i] = (i < chunk) ? data[offset + i] : 0;
         }
-        uapi::message req{};
+        mc_message req{};
         req.label = k_fs_op_write;
         req.regs[0] = open_file_id;
         req.regs[1] = chunk;
         req.page_count = 1;
         req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_io_scratch);
         req.pages[0].length = k_page_size;
-        req.pages[0].mode = uapi::transfer_mode::copy;
-        uapi::message reply{};
-        do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&req),
+        req.pages[0].mode = MC_TRANSFER_COPY;
+        mc_message reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, fs_handle, reinterpret_cast<uint64_t>(&req),
                    reinterpret_cast<uint64_t>(&reply));
         if (reply.regs[1] != k_fs_status_ok || reply.regs[0] != chunk) {
             return false;
@@ -364,12 +364,12 @@ uint64_t persist_read_all(uint8_t* out_buf, uint64_t max_len) {
     }
     uint64_t total = 0;
     for (;;) {
-        uapi::message req{};
+        mc_message req{};
         req.label = k_fs_op_read;
         req.regs[0] = open_file_id;
         req.regs[1] = k_page_size;
-        uapi::message reply{};
-        do_syscall(uapi::k_syscall_ipc_call, fs_handle, reinterpret_cast<uint64_t>(&req),
+        mc_message reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, fs_handle, reinterpret_cast<uint64_t>(&req),
                    reinterpret_cast<uint64_t>(&reply));
         if (reply.regs[1] != k_fs_status_ok || reply.page_count != 1) {
             break;
@@ -551,7 +551,7 @@ void persist_load() {
 
 // ---------- 프로토콜 핸들러 ----------
 
-void handle_open_or_create(const uapi::message& in, uapi::message& out, bool create) {
+void handle_open_or_create(const mc_message& in, mc_message& out, bool create) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     char caller_username[9];
     unpack_username_reg(caller_username, in.regs[1]);
@@ -623,7 +623,7 @@ void handle_open_or_create(const uapi::message& in, uapi::message& out, bool cre
     out.regs[1] = table_id_of(existing);
 }
 
-void handle_delete_table(const uapi::message& in, uapi::message& out) {
+void handle_delete_table(const mc_message& in, mc_message& out) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     char caller_username[9];
     unpack_username_reg(caller_username, in.regs[1]);
@@ -662,7 +662,7 @@ void handle_delete_table(const uapi::message& in, uapi::message& out) {
 // ADR-169 §결정1 — 중간 경로에는 별도 권한 메타데이터를 두지 않는다
 // (registry.md §3 "아직 정하지 않은 것"과 같은 유예) — 항상 허용하고,
 // 주어진 중간 경로 바로 아래 세그먼트(스키마 내 다음 계층)만 나열한다.
-void handle_list_children(const uapi::message& in, uapi::message& out) {
+void handle_list_children(const mc_message& in, mc_message& out) {
     char caller_username[9];
     unpack_username_reg(caller_username, in.regs[1]);
 
@@ -747,7 +747,7 @@ void handle_list_children(const uapi::message& in, uapi::message& out) {
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_io_scratch);
     out.pages[0].length = k_page_size;
-    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = k_err_ok;
     out.regs[1] = count;
 }
@@ -773,7 +773,7 @@ kv_entry* find_value(table_entry& t, const char* key) {
     return nullptr;
 }
 
-void handle_get_value(const uapi::message& in, uapi::message& out) {
+void handle_get_value(const mc_message& in, mc_message& out) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     table_entry* t = table_by_id(in.regs[1]);
     if (t == nullptr) {
@@ -807,13 +807,13 @@ void handle_get_value(const uapi::message& in, uapi::message& out) {
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_io_scratch);
     out.pages[0].length = k_page_size;
-    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = k_err_ok;
     out.regs[1] = e->type;
     out.regs[2] = e->len;
 }
 
-void handle_set_value(const uapi::message& in, uapi::message& out) {
+void handle_set_value(const mc_message& in, mc_message& out) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     table_entry* t = table_by_id(in.regs[1]);
     if (t == nullptr) {
@@ -870,7 +870,7 @@ void handle_set_value(const uapi::message& in, uapi::message& out) {
     out.regs[0] = k_err_ok;
 }
 
-void handle_delete_value(const uapi::message& in, uapi::message& out) {
+void handle_delete_value(const mc_message& in, mc_message& out) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     table_entry* t = table_by_id(in.regs[1]);
     if (t == nullptr) {
@@ -902,7 +902,7 @@ void handle_delete_value(const uapi::message& in, uapi::message& out) {
     out.regs[0] = k_err_ok;
 }
 
-void handle_list_values(const uapi::message& in, uapi::message& out) {
+void handle_list_values(const mc_message& in, mc_message& out) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     table_entry* t = table_by_id(in.regs[1]);
     if (t == nullptr) {
@@ -932,12 +932,12 @@ void handle_list_values(const uapi::message& in, uapi::message& out) {
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_io_scratch);
     out.pages[0].length = k_page_size;
-    out.pages[0].mode = uapi::transfer_mode::copy;
+    out.pages[0].mode = MC_TRANSFER_COPY;
     out.regs[0] = k_err_ok;
     out.regs[1] = count;
 }
 
-void handle_set_permissions(const uapi::message& in, uapi::message& out) {
+void handle_set_permissions(const mc_message& in, mc_message& out) {
     uint32_t caller_uid = static_cast<uint32_t>(in.regs[0]);
     table_entry* t = table_by_id(in.regs[1]);
     if (t == nullptr) {
@@ -973,10 +973,10 @@ extern "C" [[noreturn]] void _start(const void*) {
     persist_load();
 
     for (;;) {
-        uapi::message in{};
-        uint64_t recv_err = do_syscall(uapi::k_syscall_ipc_recv, k_own_endpoint_handle,
+        mc_message in{};
+        uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
                                         reinterpret_cast<uint64_t>(&in), 0);
-        uapi::message out{};
+        mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
             switch (in.label) {
@@ -1012,7 +1012,7 @@ extern "C" [[noreturn]] void _start(const void*) {
                     break;
             }
         }
-        do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
+        do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
 

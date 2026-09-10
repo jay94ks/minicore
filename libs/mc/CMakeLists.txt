@@ -20,10 +20,18 @@ add_library(minicore_libmc STATIC
     src/ipc/ps2_client.c
     src/mem/heap.c
     src/x86_64/start.c
+    src/freestanding_mem.c
 )
 
 target_include_directories(minicore_libmc PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# freestanding_mem.c 자신의 이유(파일 상단 주석과 kernel/CMakeLists.txt
+# 의 같은 처리) — 아니면 아래 루프가 다시 memcpy/memset 호출로
+# 최적화돼 무한 재귀가 된다.
+set_source_files_properties(src/freestanding_mem.c PROPERTIES
+    COMPILE_OPTIONS "-fno-builtin"
 )
 
 # init/initrun/CMakeLists.txt와 같은 이유(SSE/MMX 미사용, red zone

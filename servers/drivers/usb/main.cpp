@@ -13,7 +13,7 @@
 // 밖으로 명시적으로 남김, docs/done/system-servers-bringup-m14.md
 // 참고) — xHCI 명령/이벤트 링(TRB 큐)까지 다뤄야 해서 이 자체로
 // 별도 마일스톤급 작업이다.
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::drivers::usb {
 
@@ -50,7 +50,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 void debug_log_hex(const char* prefix, uint64_t value) {
     char buf[96];
@@ -69,7 +69,7 @@ void debug_log_hex(const char* prefix, uint64_t value) {
         }
     }
     buf[i++] = '\n';
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(buf), i, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(buf), i, 0);
 }
 
 uint32_t read_reg32(const void* base, uint32_t offset) {
@@ -91,18 +91,18 @@ constexpr uint32_t k_usbsts_cnr = 1u << 11;  // Controller Not Ready.
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_register_driver;
     req.regs[0] = k_match_mode_class_code;
     req.regs[1] = k_class_xhci;
     req.regs[2] = k_class_mask_exact;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
 
     if (reply.regs[0] != k_status_ok) {
         debug_log("[usb] no xHCI controller registered by devmgr\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
 
     uint64_t bar_phys = reply.regs[1];
@@ -110,13 +110,13 @@ extern "C" [[noreturn]] void _start(const void*) {
     debug_log_hex("[usb] xhci bar_phys=", bar_phys);
     debug_log_hex("[usb] xhci bar_size=", bar_size);
 
-    uapi::map_phys_request map_req{};
+    mc_map_phys_request map_req{};
     map_req.phys_addr = bar_phys;
     map_req.size = bar_size;
-    uint64_t map_err = do_syscall(uapi::k_syscall_map_phys, reinterpret_cast<uint64_t>(&map_req), 0, 0);
+    uint64_t map_err = do_syscall(MC_SYSCALL_MAP_PHYS, reinterpret_cast<uint64_t>(&map_req), 0, 0);
     if (map_err != 0) {
         debug_log("[usb] map_phys failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
 
     const void* cap_base = reinterpret_cast<const void*>(map_req.out_virt_addr);
@@ -180,7 +180,7 @@ extern "C" [[noreturn]] void _start(const void*) {
     // 멈춘다(이 파일 상단 주석 — 별도 마일스톤급 작업).
     debug_log("[usb] xhci reset+port scan done\n");
 
-    do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+    do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     for (;;) {
         asm volatile("pause");
     }

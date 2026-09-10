@@ -16,7 +16,7 @@
 // 응답이 오고, DHCPDISCOVER는 이더넷/IP 둘 다 브로드캐스트라 ARP로
 // 목적지 MAC을 먼저 구할 필요조차 없다(이 라운드가 ARP를 구현하지
 // 않는 이유).
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 // ADR-198 예외 규칙 — 이 서버가 발명한 값이 아니라 외부 표준(IEEE
 // EtherType 레지스트리, IANA IP 프로토콜 번호, RFC 2131의 DHCP
@@ -68,7 +68,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 
 void put_be16(uint8_t* p, uint16_t v) {
@@ -107,15 +107,15 @@ uint16_t internet_checksum(const uint8_t* data, uint64_t len) {
 }
 
 bool send_frame(uint64_t length) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_send_frame;
     req.regs[0] = length;
     req.page_count = 1;
     req.pages[0].vaddr = reinterpret_cast<uint64_t>(g_tx_scratch);
     req.pages[0].length = k_page_size;
-    req.pages[0].mode = uapi::transfer_mode::copy;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_virtio_net_handle, reinterpret_cast<uint64_t>(&req),
+    req.pages[0].mode = MC_TRANSFER_COPY;
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_virtio_net_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     return reply.regs[0] == 0;
 }
@@ -123,10 +123,10 @@ bool send_frame(uint64_t length) {
 // out_buf는 최소 k_max_frame_size바이트. 반환: 길이(0=이번 시도에
 // 아무것도 안 옴).
 uint64_t recv_frame(uint8_t* out_buf) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_recv_frame;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_virtio_net_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_virtio_net_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     if (reply.regs[0] != 0 || reply.page_count != 1) {
         return 0;
@@ -143,10 +143,10 @@ uint64_t recv_frame(uint8_t* out_buf) {
 }
 
 uint64_t get_mac(uint8_t out_mac[6]) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_get_mac;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_virtio_net_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_virtio_net_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
     __builtin_memcpy(out_mac, &reply.regs[0], 6);
     return 0;
@@ -271,7 +271,7 @@ void run_dhcp_roundtrip_test() {
 
 extern "C" [[noreturn]] void _start(const void*) {
     run_dhcp_roundtrip_test();
-    do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+    do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     for (;;) {
         asm volatile("pause");
     }

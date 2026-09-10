@@ -15,7 +15,7 @@
 // I/O 포트로 알려진 패턴을 한 섹터에 쓰고 다시 읽어 내용이 일치하는지
 // 확인한다 — 이 시점엔 initrun의 부트 목적(cpio 아카이브에서 서비스
 // 바이너리를 읽는 것)이 이미 끝나 있어, 어느 섹터에 써도 안전하다.
-#include <uapi.hpp>
+#include <mc/syscall.h>
 
 namespace kernsrv::drivers::virtio_blk {
 
@@ -87,7 +87,7 @@ uint64_t cstr_len(const char* s) {
     return n;
 }
 void debug_log(const char* msg) {
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(msg), cstr_len(msg), 0);
 }
 void debug_log_hex(const char* prefix, uint64_t value) {
     char buf[96];
@@ -106,7 +106,7 @@ void debug_log_hex(const char* prefix, uint64_t value) {
         }
     }
     buf[i++] = '\n';
-    do_syscall(uapi::k_syscall_debug_log, reinterpret_cast<uint64_t>(buf), i, 0);
+    do_syscall(MC_SYSCALL_DEBUG_LOG, reinterpret_cast<uint64_t>(buf), i, 0);
 }
 
 void out8(uint16_t port, uint8_t v) { asm volatile("outb %0, %1" : : "a"(v), "Nd"(port)); }
@@ -240,37 +240,37 @@ bool do_request(uint16_t io_base, uint8_t* dma_virt, uint64_t dma_phys,
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void*) {
-    uapi::message req{};
+    mc_message req{};
     req.label = k_op_register_driver;
     req.regs[0] = k_match_mode_vendor_device;
     req.regs[1] = k_virtio_vendor_device;
     req.regs[2] = 0;
-    uapi::message reply{};
-    do_syscall(uapi::k_syscall_ipc_call, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_devmgr_handle, reinterpret_cast<uint64_t>(&req),
                reinterpret_cast<uint64_t>(&reply));
 
     if (reply.regs[0] != k_status_ok || (reply.regs[3] & k_is_io_bit) == 0) {
         debug_log("[virtio-blk] no I/O-BAR virtio-blk device registered by devmgr\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     auto io_base = static_cast<uint16_t>(reply.regs[1]);
     debug_log_hex("[virtio-blk] io_base=", io_base);
 
-    do_syscall(uapi::k_syscall_io_activate, io_base, 0x20, 0);
+    do_syscall(MC_SYSCALL_IO_ACTIVATE, io_base, 0x20, 0);
 
-    uapi::dma_buffer_result dma{};
-    uint64_t alloc_err = do_syscall(uapi::k_syscall_alloc_dma_buffer,
+    mc_dma_buffer_result dma{};
+    uint64_t alloc_err = do_syscall(MC_SYSCALL_ALLOC_DMA_BUFFER,
                                      reinterpret_cast<uint64_t>(&dma), k_dma_buffer_order, 0);
     if (alloc_err != 0) {
         debug_log("[virtio-blk] alloc_dma_buffer failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     auto* dma_virt = reinterpret_cast<uint8_t*>(dma.virt_addr);
 
     vring_layout layout;
     if (!init(io_base, dma_virt, dma.phys_addr, layout)) {
         debug_log("[virtio-blk] init failed\n");
-        do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+        do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     }
     debug_log("[virtio-blk] init ok\n");
 
@@ -306,8 +306,8 @@ extern "C" [[noreturn]] void _start(const void*) {
         debug_log("[virtio-blk] write/read roundtrip ok=0\n");
     }
 
-    do_syscall(uapi::k_syscall_io_deactivate, 0, 0, 0);
-    do_syscall(uapi::k_syscall_thread_exit, 0, 0, 0);
+    do_syscall(MC_SYSCALL_IO_DEACTIVATE, 0, 0, 0);
+    do_syscall(MC_SYSCALL_THREAD_EXIT, 0, 0, 0);
     for (;;) {
         asm volatile("pause");
     }
