@@ -85,6 +85,7 @@ def main(argv):
     services = []
     depends = {}
     trusted = set()
+    linux_abi_stack = set()
     for arg in argv[2:]:
         if arg.startswith("--service="):
             spec = arg[len("--service="):]
@@ -102,6 +103,16 @@ def main(argv):
             depends[name] = dep
         elif arg.startswith("--trusted="):
             trusted.add(arg[len("--trusted="):])
+        elif arg.startswith("--linux-abi-stack="):
+            # M31(real-libc-syscall-layer.md §M31) — --trusted=와 같은
+            # 패턴. musl로 링크된 서비스(musl-hello 등)는 musl의
+            # crt_arch.h(`_start`)가 Linux ABI 초기 스택(argc/argv/
+            # envp/auxv)을 요구한다(M28, ADR-183) — 이 커널의 기존
+            # 서비스들(이 서비스도 포함해 전부 initrun이 스폰)은 전혀
+            # 이 관례를 안 쓰므로, 이 키가 있는 서비스만 initrun의
+            # 스폰 루프(init/initrun/main.cpp::spawn_visit)가
+            # linux_abi_stack=true로 스폰한다.
+            linux_abi_stack.add(arg[len("--linux-abi-stack="):])
         else:
             print(f"알 수 없는 인자: {arg}", file=sys.stderr)
             return 1
@@ -117,6 +128,8 @@ def main(argv):
             ini_text += f"depends={depends[name]}\n"
         if name in trusted:
             ini_text += "trusted=1\n"
+        if name in linux_abi_stack:
+            ini_text += "linux_abi_stack=1\n"
         ini_name = f"lib/{index:03d}-{name}.ini".encode("utf-8")
         chunks.append(_cpio_entry(ini_name, ini_text.encode("utf-8")))
 

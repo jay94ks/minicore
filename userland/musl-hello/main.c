@@ -9,7 +9,16 @@
 // free()하는 왕복 + errno가 실제로 TLS 경로(M28의 arch_prctl/
 // FS_BASE)를 거쳐 읽고 쓰인다는 것을 잘못된 fd로 write()를 호출해
 // 확인한다(errno가 EBADF로 설정돼야 한다).
+// M31(real-libc-syscall-layer.md §M31): 진짜 musl stdio(fopen/
+// fread/fclose, 재구현이 아니라 musl 소스 자체)로 VFS의 실제
+// 파일을 열어 읽고, printf로 그 내용을 stdout에 찍어 기대값과
+// 일치함을 확인한다. "test.txt"는 procsrv의 기존 자기테스트
+// (run_vfs_roundtrip_test, servers/procsrv/main.cpp)가 이미 만들어
+// 둔 파일("hello vfs", 9바이트)을 재사용한다 — musl-hello가 vfs
+// 하나에만 의존해도(servers/CMakeLists.txt --depends=musl-hello:vfs)
+// initrun의 스폰 순서상 procsrv가 이미 그 파일을 써 둔 뒤다.
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -44,6 +53,23 @@ int main(void) {
     int errno_ok = (bad_write == -1 && errno == EBADF);
     write_str(errno_ok ? "musl errno ok=1\n" : "musl errno ok=0\n");
 
+    // M31 — 진짜 musl stdio(fopen/fread/fclose)로 VFS의 실제 파일을
+    // 읽고 printf로 확인한다.
+    FILE* f = fopen("test.txt", "r");
+    int fopen_ok = (f != NULL);
+    write_str(fopen_ok ? "musl fopen ok=1\n" : "musl fopen ok=0\n");
+
+    if (fopen_ok) {
+        char content[32] = {0};
+        size_t n = fread(content, 1, sizeof(content) - 1, f);
+        content[n] = '\0';
+        int content_ok = (n == 9 && memcmp(content, "hello vfs", 9) == 0);
+        write_str(content_ok ? "musl fread content ok=1\n" : "musl fread content ok=0\n");
+        printf("musl printf read: %s (%zu bytes)\n", content, n);
+        fclose(f);
+    }
+
+    fflush(stdout);
     _exit(0);
     return 0;
 }

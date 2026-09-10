@@ -1077,20 +1077,15 @@ void spawn_preempt_demo_processes() {
         kern::klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
     }
 
-    // M28(real-libc-syscall-layer.md §M28) — 위 두 데모와 같은 자리에
-    // musl로 실제로 링크된 최초의 프로그램을 심어 둔다(init/
-    // initrun/CMakeLists.txt가 initrd에 함께 담는다). linux_abi_stack=true
-    // 만 다르다 — musl의 crt_arch.h(`_start`)가 이 관례로 %rsp를
-    // 읽는다(process_ops.cpp::build_process 참고).
-    auto musl_hello = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "musl_hello");
-    kern::klog::printf("[musl-hello] find musl_hello ok=%u\n", musl_hello.is_ok());
-    if (musl_hello.is_ok()) {
-        auto err = kern::arch::x86_64::process_spawn(
-            musl_hello.value().data, musl_hello.value().size, nullptr, 0,
-            /*grant_trusted=*/false, /*create_endpoint=*/false, nullptr, 0,
-            unused_endpoint_handle, unused_thread_handle, /*linux_abi_stack=*/true);
-        kern::klog::printf("[musl-hello] spawn err=%u\n", static_cast<uint32_t>(err));
-    }
+    // M28은 musl-hello를 여기(부트 초기, VFS가 존재하기 전)에 직접
+    // 심었었다 — M31(real-libc-syscall-layer.md §M31)이 VFS 파일
+    // I/O를 요구하면서 더 이상 여기서 스폰할 수 없어졌다(이 시점엔
+    // VFS 서비스 자체가 아직 존재하지 않는다, initrun이 나중에
+    // 스폰한다). musl-hello는 이제 servers/CMakeLists.txt의 일반
+    // 서비스(--depends=musl-hello:vfs, --linux-abi-stack=musl-hello)
+    // 로 옮겨져, initrun이 다른 서비스들과 같은 방식으로 스폰하고
+    // VFS 핸들을 물려준다 — docs/done/real-libc-syscall-layer-m31.md
+    // 참고.
 }
 
 [[noreturn]] void demo_sched() {

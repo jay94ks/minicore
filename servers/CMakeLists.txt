@@ -29,7 +29,12 @@ add_subdirectory(login)
 # vfs/cfgsrv/shell 셋 다에 의존해(로그인 성공 시 셸에 OP_START를
 # 보내려면 그 핸들이 필요) login은 console/ps2/procsrv 전부에
 # 의존하므로 전체 순서는 memfs→devmgr→ps2→console→usb→virtio-blk→
-# virtio-net→fat32→ext4→vfs→cfgsrv→netsrv→shell→procsrv→login.
+# virtio-net→fat32→ext4→vfs→cfgsrv→netsrv→shell→procsrv→login→
+# musl-hello. musl-hello는 M31(real-libc-syscall-layer.md §M31)이
+# vfs 의존을 추가한 것 — --linux-abi-stack=(mkbootdisk.py 신규,
+# tools/mkbootdisk.py 참고)로 표시된 유일한 서비스라 initrun이
+# musl의 crt_arch.h가 요구하는 Linux ABI 초기 스택으로 스폰한다
+# (다른 모든 서비스는 이 커널의 기존 arg0 관례를 그대로 쓴다).
 if(MINICORE_ARCH STREQUAL "x86_64")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -53,6 +58,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=shell=$<TARGET_FILE:minicore_shell_elf>
               --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
               --service=login=$<TARGET_FILE:minicore_login_elf>
+              --service=musl-hello=$<TARGET_FILE:minicore_musl_hello_elf>
               --depends=vfs:memfs,fat32,ext4
               --depends=cfgsrv:vfs
               --depends=netsrv:virtio-net
@@ -64,6 +70,8 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=fat32:devmgr
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
+              --depends=musl-hello:vfs
+              --linux-abi-stack=musl-hello
               --trusted=devmgr
               --trusted=ps2
               --trusted=usb
@@ -79,8 +87,9 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               minicore_drv_virtio_blk_elf minicore_drv_virtio_net_elf
               minicore_fat32_elf minicore_ext4_elf
               minicore_drv_console_elf minicore_login_elf
+              minicore_musl_hello_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})

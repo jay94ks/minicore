@@ -182,6 +182,25 @@
 #     무시되지 않고 반드시 "[syscall_shim] unimplemented n=" 로그를
 #     남긴 뒤 -ENOSYS를 반환한다(musl은 이 실패를 무시하고 계속
 #     진행하도록 설계돼 있어 크래시하지 않는다).
+#   M31 (real-libc-syscall-layer.md §M31, kernel-memory.md ADR-183): 파일
+#     I/O syscall(SYS_open/openat/read/readv/close/writev, VFS/FS
+#     프로토콜은 이미 있는 libmc의 mc_vfs_open/mc_fs_read를 그대로
+#     재사용)+진짜 musl stdio(fopen/fread/fclose/printf, 재구현이
+#     아니라 musl 소스 자체)를 musl-hello가 처음 실전에 쓴다.
+#     musl-hello를 부트 초기(VFS가 아직 없는 시점)에서 initrun이
+#     관리하는 15번째 서비스(--depends=musl-hello:vfs,
+#     --linux-abi-stack=musl-hello, servers/CMakeLists.txt)로
+#     옮겼다 — VFS를 거쳐 procsrv의 기존 자기테스트
+#     (run_vfs_roundtrip_test)가 이미 써 둔 "test.txt"("hello vfs")
+#     를 진짜 fopen/fread로 열어 읽고 printf로 확인한다("musl fopen
+#     ok=1"/"musl fread content ok=1"/"musl printf read: hello vfs
+#     (9 bytes)"). SYS_lseek/SYS_fstat/SYS_ioctl은 스텁(항상 실패 —
+#     이 순차 읽기 테스트는 요구하지 않는다, SYS_ioctl 실패는 musl
+#     stdio가 stdout을 완전 버퍼링으로 판정하는 데 필요). vfprintf.c
+#     (printf의 %f/%e/%g 등)가 SysV 관례대로 double을 XMM0로
+#     반환해 SSE가 필요해졌다 — 이 파일 하나만 SSE를 켠다(M9~M11b가
+#     이미 완성한 유저 스레드별 FPU/SSE 컨텍스트 스위칭 덕분에
+#     안전하다).
 #   M30 (real-libc-syscall-layer.md §M30, kernel-memory.md ADR-183):
 #     musl 자신의 진짜 malloc(lite_malloc.c, 순수 SYS_mmap 기반 범프
 #     할당자)이 M26의 손으로 짠 mem_shim.c를 완전히 대체한다.
@@ -369,11 +388,13 @@ declare -a EXPECTED=(
   "[procsrv] m27 wait exit_code ok=1"
   "[procsrv] m27 kill ok=1"
   "[procsrv] reparent mechanism ok=1"
-  "[musl-hello] spawn err=0"
   "hello from real musl"
   "musl malloc ok=1"
   "musl malloc content ok=1"
   "musl errno ok=1"
+  "musl fopen ok=1"
+  "musl fread content ok=1"
+  "musl printf read: hello vfs (9 bytes)"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

@@ -329,6 +329,20 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
         req.grant_trusted = true;
     }
 
+    // M31(real-libc-syscall-layer.md §M31, ADR-183) — lib/*.ini의
+    // linux_abi_stack=1 키(tools/mkbootdisk.py --linux-abi-stack=)로
+    // 표시된 서비스만 Linux ABI 초기 스택(argc/argv/envp/auxv, M28)을
+    // 받는다 — musl로 링크된 서비스(musl-hello 등)의 crt_arch.h가
+    // 이 관례로 %rsp를 읽는다. 위 argv_blob(마커)는 그 경우 그냥
+    // 무시된다(crt_arch.h의 asm이 진입 즉시 %rsp를 %rdi에 덮어쓴다) —
+    // 같은 자리, 같은 이유(trusted와 대칭).
+    req.linux_abi_stack = 0;
+    auto linux_abi_stack_val = ini::find_value(data, size, "linux_abi_stack");
+    if (linux_abi_stack_val.is_ok() &&
+        span_equals(linux_abi_stack_val.value().data(), linux_abi_stack_val.value().size(), "1")) {
+        req.linux_abi_stack = 1;
+    }
+
     // M14/M15 — devmgr는 일반 마커 대신 devmgr_argv(ACPI RSDP 물리주소
     // + 부트 디바이스 BDF)를 argv로 받아야 한다(servers/devmgr/main.cpp
     // 상단 주석). ctx는 spawn_visit이 끝나도 살아 있는

@@ -261,4 +261,11 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   발견해, `SYS_brk`를 항상 실패시켜 완전히 분리된 `SYS_mmap` 전용
   영역으로 우회시켰다(ADR-204, 양쪽 소스 모두 무수정).
   musl-hello가 malloc+free 왕복과 errno==EBADF까지 QEMU로 확인.
-  **M31(파일 I/O syscall)부터 정적 링킹 기반으로 진행 중**이다.
+  M31(완료): 파일 I/O syscall(SYS_open/openat/read/readv/close/
+  writev, 새 `libmc` `mc_fs_read` 단발 읽기)+진짜 musl stdio
+  (fopen/fread/fclose/printf, 재구현이 아니라 musl 소스 자체)를
+  musl-hello가 처음 실전에 씀 — VFS 핸들이 필요해 musl-hello를
+  커널 직접 스폰에서 initrun의 15번째 정식 서비스로 재배치했다
+  (새 `mkbootdisk.py --linux-abi-stack=` ini 키, ADR-205).
+  **M32(fork/execve/wait4 실왕복)부터 정적 링킹 기반으로 진행
+  중**이다.

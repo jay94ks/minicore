@@ -13,3 +13,23 @@ void __lock(volatile int* l) {
 void __unlock(volatile int* l) {
     (void)l;
 }
+
+// M31(real-libc-syscall-layer.md §M31) — musl stdio(FLOCK/FUNLOCK,
+// src/internal/stdio_impl.h)의 같은 이유 대체. 이 프로젝트가 만드는
+// 모든 FILE*(stdout/stderr, __fdopen이 여는 파일)는 항상 `.lock=-1`
+// (libc.threaded가 false인 단일 스레드 기본값)이라 FLOCK/FUNLOCK
+// 매크로 자신이 이 함수들을 실제로는 절대 호출하지 않는다 — 그래도
+// 컴파일된 코드가 심볼을 참조하므로(런타임에 안 타는 분기라도
+// 링크는 필요하다) 존재해야 한다. 원본(src/thread/__lockfile.c)은
+// __pthread_self/a_cas/__futexwait/a_swap/__wake를 요구하는데,
+// 실행되지 않을 코드를 위해 그 의존성을 끌어올 이유가 없다.
+#include <stdio.h>
+
+int __lockfile(FILE* f) {
+    (void)f;
+    return 0;
+}
+
+void __unlockfile(FILE* f) {
+    (void)f;
+}

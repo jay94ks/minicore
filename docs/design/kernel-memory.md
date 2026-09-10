@@ -1463,3 +1463,59 @@
   - 향후 다른 musl 컴포넌트가 `SYS_brk`의 진짜 절대주소 관례를
     필요로 하게 되면(이번 라운드에는 없었다) 이 "항상 실패" 정책을
     재검토해야 한다 — 그 시점까지는 유효한 단순화로 남긴다.
+
+## ADR-205. M31 실행 중 발견: musl-hello를 VFS 의존 서비스로 재배치(새 `linux_abi_stack` ini 키) + printf의 SSE 요구 + `_XOPEN_SOURCE=700` 필요
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M31 실행 중 발견)
+- **배경**: M31의 목표(진짜 musl stdio로 VFS 파일을 읽고 printf로
+  확인)는 musl-hello가 VFS 핸들을 가져야만 달성 가능하다. 그런데
+  M28~M30에서 musl-hello는 커널이 부트 극초반(VFS 자체가 존재하기
+  전, M21 preempt 데모와 같은 자리)에 직접 스폰하는 프로세스였다 —
+  이 자리에서는 어떤 IPC 핸들도 물려받을 방법이 없다.
+- **결정**:
+  1. musl-hello를 `kernel_main.cpp`의 커널 직접 스폰에서
+     `servers/CMakeLists.txt`의 15번째 **일반 서비스**로 옮긴다 —
+     `--depends=musl-hello:vfs`로 다른 서비스(procsrv/login 등)와
+     같은 방식으로 VFS 프록시 핸들을 상속받는다.
+  2. musl-hello만 M28의 Linux ABI 초기 스택(`linux_abi_stack`)이
+     필요하다는 것을 표현하기 위해 `tools/mkbootdisk.py`에 새
+     `--linux-abi-stack=<이름>`(기존 `--trusted=`와 대칭)을 추가해
+     `lib/*.ini`에 `linux_abi_stack=1`을 쓰고,
+     `init/initrun/main.cpp::spawn_visit()`가 이 키를 읽어
+     `mc_process_spawn_request::linux_abi_stack`을 켠다 — 다른
+     14개 서비스는 이 키가 없어 기존 arg0 관례를 그대로 쓴다(회귀
+     없음, 이름 기반 하드코딩 분기가 아니라 데이터 기반 설정이라
+     `trusted=`와 정확히 같은 패턴).
+  3. musl의 `vfprintf.c`(printf의 `%f`/`%e`/`%g` 부동소수점 서식)가
+     SysV x86_64 관례대로 `double`을 XMM0로 반환하는 코드를
+     생성한다 — `-mno-sse`(다른 모든 musl 소스와 공통)로는 컴파일이
+     안 된다. 이 파일(과 그것이 끌어오는 `frexpl`/`scalbn`/
+     `__fpclassifyl`/`__signbitl`)만 `-msse -msse2`로 덮어쓴다
+     (CMake 소스별 COMPILE_OPTIONS, "뒤에 오는 플래그가 이긴다"는
+     기존 `-w` 오버라이드와 같은 메커니즘). 이 커널이 M9~M11b에서
+     이미 완성한 유저 스레드별 FPU/SSE 컨텍스트 스위칭(lazy XSAVE
+     포함) 덕분에, musl-hello가 SSE를 처음 쓰는 순간 `#NM` 경로가
+     자동으로 그 스레드를 등록해 안전하다 — 새 배선이 필요 없다.
+  4. `include/unistd.h`의 `long syscall(long, ...);` 선언은
+     `_GNU_SOURCE||_BSD_SOURCE` 뒤에서만 노출되는데,
+     `src/internal/syscall.h`가 이미 `#define syscall(...) ...`
+     매크로를 정의해 둔 상태에서 그 선언이 보이면(매크로가 선언
+     줄의 `syscall` 토큰까지 치환해) 컴파일 에러가 난다
+     (`__stdio_seek.c`가 `stdio_impl.h` 다음에 `<unistd.h>`를
+     include하는 순서에서 실제로 겪음). musl 자신의 `Makefile`이
+     항상 쓰는 `-D_XOPEN_SOURCE=700`(그 자체로는 `_GNU_SOURCE`/
+     `_BSD_SOURCE` 가드를 열지 않는다)을 `minicore_libc`에도 그대로
+     맞추면 이 충돌 자체가 나지 않는다 — musl을 무수정으로 쓰려면
+     musl 자신이 스스로를 컴파일할 때 쓰는 플래그를 그대로 맞춰야
+     한다는 것을 보여 준 사례다.
+- **영향**:
+  - `docs/design/repo-layout.md`류 문서가 서비스 목록을 언급한다면
+    15번째로 musl-hello가 추가됨을 반영해야 한다(이 ADR 자체가
+    그 갱신을 겸한다).
+  - 향후 다른 musl 링크 프로그램을 추가할 때, VFS 등 IPC 의존이
+    필요하면 같은 패턴(`--depends=<이름>:<서비스>`+필요시
+    `--linux-abi-stack=<이름>`)을 그대로 재사용한다.
+  - `-D_XOPEN_SOURCE=700`은 앞으로 추가되는 모든 musl 소스 파일에
+    이미 적용돼 있다(타깃 전체 `PRIVATE` 정의) — 새 파일을 추가할
+    때 이 문제를 다시 겪지 않는다.

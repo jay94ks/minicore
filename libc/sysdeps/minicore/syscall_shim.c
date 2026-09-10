@@ -14,20 +14,88 @@
 // 그 사실을 debug_log로 남긴다 — 조용히 무시하거나 잘못된 값을
 // 돌려주지 않는다(추후 디버깅을 위해, real-libc-syscall-layer.md
 // "검증 방법" 참고).
+#include <mc/fs_client.h>
 #include <mc/syscall.h>
+#include <mc/vfs_client.h>
+#include <sys/uio.h>
 
+#define SYS_open 2
 #define SYS_write 1
+#define SYS_close 3
+#define SYS_fstat 5
+#define SYS_lseek 8
 #define SYS_mmap 9
+#define SYS_ioctl 16
+#define SYS_readv 19
+#define SYS_writev 20
 #define SYS_munmap 11
 #define SYS_brk 12
 #define SYS_exit 60
+#define SYS_read 0
 #define SYS_arch_prctl 158
 #define SYS_exit_group 231
+#define SYS_openat 257
 
 #define ARCH_SET_FS 0x1002
 
 #define MC_EBADF (-9)
+#define MC_ENOENT (-2)
+#define MC_ENOTTY (-25)
 #define MC_ENOSYS (-38)
+
+// M31(real-libc-syscall-layer.md §M31, ADR-183) — VFS로 연 파일의
+// fd(int)↔{fs_handle, open_file_id} 대응표. fd 0/1/2는 이 표에
+// 들어오지 않는다(stdin/stdout/stderr는 기존 SYS_write 경로,
+// mc_debug_log로 처리 — VFS와 무관). 이 프로젝트에 아직 진짜
+// "fd 진실 공급원"이 없다(procsrv.md §3.6, OPEN-64에서 이미 범위
+// 밖으로 남겨 둔 부분)는 것과 같은 정신으로, 이 표는 **이
+// 프로세스 하나만** 아는 로컬 상태다 — fork() 시 상속되지 않는다
+// (이 라운드는 fork+파일 공유를 다루지 않는다, M32 이후 대상).
+#define MC_MAX_OPEN_FILES 8
+static struct {
+    int in_use;
+    uint32_t fs_handle;
+    uint64_t open_file_id;
+} g_open_files[MC_MAX_OPEN_FILES];
+
+// VFS 클라이언트 핸들 — musl-hello가 depends=vfs로 initrun에게서
+// 물려받는다(servers/CMakeLists.txt, --depends=musl-hello:vfs).
+// create_endpoint=true가 항상 handle 1을 먼저 차지하므로(ADR-152의
+// 고정 순서), 상속된 첫 핸들은 handle 2가 된다 — 다른 모든 서비스
+// (procsrv/login 등)가 vfs를 받을 때와 같은 관례.
+#define MC_VFS_HANDLE 2
+
+static long open_common(const char* path) {
+    int slot = -1;
+    for (int i = 0; i < MC_MAX_OPEN_FILES; ++i) {
+        if (!g_open_files[i].in_use) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return MC_ENOENT;  // 표가 가득 찼다 — 이 라운드 예산(8개)을 넘음.
+    }
+    uint64_t open_file_id = 0;
+    uint32_t fs_handle = 0;
+    uint64_t status = mc_vfs_open(MC_VFS_HANDLE, path, /*identity=*/0, &open_file_id, &fs_handle);
+    if (status != MC_FS_STATUS_OK || fs_handle == 0) {
+        return MC_ENOENT;
+    }
+    g_open_files[slot].in_use = 1;
+    g_open_files[slot].fs_handle = fs_handle;
+    g_open_files[slot].open_file_id = open_file_id;
+    return slot + 3;  // fd 0/1/2는 예약.
+}
+
+static long read_common(long fd, void* buf, unsigned long count) {
+    if (fd < 3 || fd - 3 >= MC_MAX_OPEN_FILES || !g_open_files[fd - 3].in_use) {
+        return MC_EBADF;
+    }
+    uint64_t n = mc_fs_read(g_open_files[fd - 3].fs_handle, g_open_files[fd - 3].open_file_id,
+                             (uint8_t*)buf, count);
+    return (long)n;
+}
 
 static void log_unimplemented(long n) {
     char buf[64];
@@ -115,6 +183,89 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
         case SYS_munmap: {
             mc_munmap((uint64_t)a, (uint64_t)b);
             return 0;
+        }
+        // M31(real-libc-syscall-layer.md §M31) — 파일 I/O. open_common/
+        // read_common(위)이 VFS 프로토콜 클라이언트(libmc의
+        // mc_vfs_open/mc_fs_read, M13~M20이 이미 만들어 둔 것)를
+        // 그대로 부른다 — 이 파일 자신은 POSIX 인자(dirfd/flags/
+        // iovec 등)를 그 함수들이 받는 형태로 번역만 한다(ADR-183
+        // §결정4).
+        case SYS_open: {
+            const char* path = (const char*)(uintptr_t)a;
+            return open_common(path);
+        }
+        case SYS_openat: {
+            // b=path — a(dirfd)는 무시한다(이 라운드는 AT_FDCWD류
+            // 상대 경로 해석을 다루지 않는다, VFS 경로는 항상
+            // 절대경로로 취급).
+            const char* path = (const char*)(uintptr_t)b;
+            return open_common(path);
+        }
+        case SYS_read: {
+            return read_common(a, (void*)(uintptr_t)b, (unsigned long)c);
+        }
+        case SYS_readv: {
+            struct iovec* iov = (struct iovec*)(uintptr_t)b;
+            long iovcnt = c;
+            long total = 0;
+            for (long i = 0; i < iovcnt; ++i) {
+                if (iov[i].iov_len == 0) {
+                    continue;
+                }
+                long got = read_common(a, iov[i].iov_base, iov[i].iov_len);
+                if (got < 0) {
+                    return total > 0 ? total : got;
+                }
+                total += got;
+                if ((unsigned long)got < iov[i].iov_len) {
+                    break;  // 부분 읽기 또는 EOF — readv 관례상 더 시도하지 않는다.
+                }
+            }
+            return total;
+        }
+        case SYS_close: {
+            long fd = a;
+            if (fd >= 3 && fd - 3 < MC_MAX_OPEN_FILES) {
+                g_open_files[fd - 3].in_use = 0;
+            }
+            return 0;
+        }
+        case SYS_lseek:
+            // 이 프로젝트의 fs-protocol.md에는 아직 "커서를 임의
+            // 위치로 옮기는" 오퍼레이션이 없다(읽기는 항상 서버
+            // 쪽 커서를 순차 전진만 시킨다, M23의 fd 상속 테스트가
+            // 이미 이 전제로 검증됐다) — 알려진 단순화로 항상
+            // 실패시킨다(musl의 순차 fread/fclose 경로는 seek를
+            // 요구하지 않는다).
+            return MC_ENOSYS;
+        case SYS_fstat:
+            // 스텁 — 이 라운드는 파일 크기/타입 조회가 필요 없다
+            // (순차 fread만 검증). 항상 실패시킨다.
+            return MC_ENOSYS;
+        case SYS_ioctl: {
+            // 스텁 — "isatty 판별용"(계획 텍스트). TIOCGWINSZ를
+            // 항상 실패시켜(진짜 터미널이 아니다) musl의 stdio가
+            // stdout을 완전 버퍼링 모드로 두게 만든다(__stdout_write.c
+            // 참고) — 그 외 ioctl 요청도 전부 실패.
+            return MC_ENOTTY;
+        }
+        case SYS_writev: {
+            long fd = a;
+            if (fd != 1 && fd != 2) {
+                return MC_EBADF;  // VFS 쓰기는 이 라운드 범위 밖(읽기만 검증).
+            }
+            struct iovec* iov = (struct iovec*)(uintptr_t)b;
+            long iovcnt = c;
+            long total = 0;
+            for (long i = 0; i < iovcnt; ++i) {
+                unsigned long len = iov[i].iov_len;
+                if (len > MC_MAX_DEBUG_LOG_BYTES) {
+                    len = MC_MAX_DEBUG_LOG_BYTES;  // mc_debug_log 자신의 한 번 호출 한도.
+                }
+                mc_debug_log((const char*)iov[i].iov_base, len);
+                total += (long)len;
+            }
+            return total;
         }
         default:
             log_unimplemented(n);

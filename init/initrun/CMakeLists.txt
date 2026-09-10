@@ -73,11 +73,9 @@ add_custom_command(
             initrun=$<TARGET_FILE:minicore_initrun_elf>
             preempt_busy=$<TARGET_FILE:minicore_preempt_busy_elf>
             preempt_counter=$<TARGET_FILE:minicore_preempt_counter_elf>
-            musl_hello=$<TARGET_FILE:minicore_musl_hello_elf>
     DEPENDS minicore_initrun_elf minicore_preempt_busy_elf minicore_preempt_counter_elf
-            minicore_musl_hello_elf
             ${CMAKE_SOURCE_DIR}/tools/mkinitrd.py
-    COMMENT "Packaging initrd.img (MCPACK v1) from initrun.elf + M21 preempt demo binaries + M28 musl-hello"
+    COMMENT "Packaging initrd.img (MCPACK v1) from initrun.elf + M21 preempt demo binaries"
     VERBATIM
 )
 add_custom_target(minicore_initrd_image DEPENDS ${MINICORE_INITRD_IMAGE})

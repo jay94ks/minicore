@@ -41,6 +41,31 @@ uint64_t mc_fs_read_all(uint32_t fs_handle, uint64_t open_file_id, uint8_t* out_
     return total;
 }
 
+uint64_t mc_fs_read(uint32_t fs_handle, uint64_t open_file_id, uint8_t* out_buf, uint64_t count) {
+    uint64_t want = count;
+    if (want > MC_PAGE_SIZE) {
+        want = MC_PAGE_SIZE;
+    }
+    mc_message req;
+    mc_zero_bytes(&req, sizeof(req));
+    req.label = MC_FS_OP_READ;
+    req.regs[0] = open_file_id;
+    req.regs[1] = want;
+
+    mc_message reply;
+    mc_zero_bytes(&reply, sizeof(reply));
+    mc_ipc_call(fs_handle, &req, &reply);
+    if (reply.regs[1] != MC_FS_STATUS_OK || reply.page_count != 1) {
+        return 0;
+    }
+    uint64_t n = reply.regs[0];
+    const uint8_t* src = (const uint8_t*)(uintptr_t)reply.pages[0].vaddr;
+    for (uint64_t i = 0; i < n; ++i) {
+        out_buf[i] = src[i];
+    }
+    return n;
+}
+
 uint64_t mc_fs_list(uint32_t fs_handle, uint8_t* out_names_blob, uint64_t out_cap,
                      uint32_t* out_count) {
     mc_message req;

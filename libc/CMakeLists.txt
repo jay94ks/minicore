@@ -153,9 +153,86 @@ add_library(minicore_libc STATIC
     ${MUSL_PATCHED_ROOT}/src/mman/munmap.c
     sysdeps/minicore/lock_shim.c
     sysdeps/minicore/malloc_shim.c
+
+    # M31(real-libc-syscall-layer.md §M31, ADR-183) — musl 자신의
+    # 진짜 stdio(fopen/fread/fclose+printf, 재구현이 아니라 musl
+    # 소스 자체). 읽기 경로(fopen/__fdopen/__fmodeflags, fread/
+    # __stdio_read/__toread/__uflow, fclose/__stdio_close/
+    # __stdio_seek)+출력 경로(stdout/stderr/stdin, __stdout_write/
+    # __stdio_write/__towrite/__overflow, printf/vfprintf)+공통
+    # 인프라(ofl/ofl_add, __stdio_exit — exit()가 이미 참조하는
+    # weak dummy를 이제 진짜로 덮어쓴다).
+    ${MUSL_PATCHED_ROOT}/src/stdio/fopen.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__fdopen.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__fmodeflags.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/fread.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__stdio_read.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__toread.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__uflow.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/fclose.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__stdio_close.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__stdio_seek.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__stdio_exit.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/ofl.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/ofl_add.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/stdout.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/stderr.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/stdin.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__stdout_write.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__stdio_write.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__towrite.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/__overflow.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/printf.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/vfprintf.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/fflush.c
+    ${MUSL_PATCHED_ROOT}/src/stdio/fwrite.c
+    ${MUSL_PATCHED_ROOT}/src/unistd/lseek.c
+
+    # M31 — vfprintf.c(printf_core)의 나머지 링크 의존성. 이 라운드의
+    # 실제 사용(%s/%zu류 정수·문자열 서식)은 이 중 대부분을 런타임에
+    # 타지 않지만(예: 부동소수점 서식·와이드 문자), vfprintf.c는
+    # 모든 서식 지정자를 한 파일에 같이 담고 있어 링크 시점에는
+    # 전부 필요하다.
+    ${MUSL_PATCHED_ROOT}/src/ctype/isdigit.c
+    ${MUSL_PATCHED_ROOT}/src/ctype/__ctype_get_mb_cur_max.c
+    ${MUSL_PATCHED_ROOT}/src/errno/strerror.c
+    ${MUSL_PATCHED_ROOT}/src/locale/__lctrans.c
+    ${MUSL_PATCHED_ROOT}/src/string/strnlen.c
+    ${MUSL_PATCHED_ROOT}/src/multibyte/wctomb.c
+    ${MUSL_PATCHED_ROOT}/src/multibyte/wcrtomb.c
+    ${MUSL_PATCHED_ROOT}/src/math/frexpl.c
+    ${MUSL_PATCHED_ROOT}/src/math/scalbn.c
+    ${MUSL_PATCHED_ROOT}/src/math/__fpclassifyl.c
+    ${MUSL_PATCHED_ROOT}/src/math/__signbitl.c
 )
 add_dependencies(minicore_libc minicore_libc_musl_alltypes minicore_libc_musl_syscall_bits
                   minicore_libc_musl_patched)
+
+# M31(real-libc-syscall-layer.md §M31) — musl 자신의 Makefile이
+# 항상 쓰는 플래그(third_party/musl/Makefile CFLAGS_ALL)를 그대로
+# 맞춘다. 이게 없으면 include/unistd.h의 `long syscall(long, ...);`
+# 선언(_GNU_SOURCE||_BSD_SOURCE 뒤에서만 노출)이 안 보여야 하는데,
+# src/internal/syscall.h가 이미 `#define syscall(...) ...` 매크로를
+# 정의해 둔 상태에서 그 선언 줄의 `syscall` 토큰이 매크로로 치환돼
+# 깨진 선언이 되는 것을 실제로 겪었다(__stdio_seek.c가 stdio_impl.h
+# 다음에 <unistd.h>를 include) — _XOPEN_SOURCE=700만으로는 그 가드를
+# 열지 않아 애초에 이 충돌이 안 난다(2026-09-10).
+target_compile_definitions(minicore_libc PRIVATE _XOPEN_SOURCE=700)
+
+# vfprintf.c(M31, printf의 %f/%e/%g 부동소수점 서식)는 double 반환값을
+# SysV x86_64 관례대로 XMM0로 돌려받는 코드를 생성한다 — 이 파일
+# 하나만 SSE를 켠다(나머지 musl 소스는 계속 -mno-sse, 아래 참고).
+# 이 커널이 이미 M9~M11b에서 완성한 유저 스레드별 FPU/SSE 컨텍스트
+# 스위칭(lazy XSAVE 포함) 덕분에 안전하다 — musl-hello도 평범한 유저
+# 스레드이므로 처음 SSE를 쓰는 순간 자동으로 #NM 경로를 타 등록된다.
+set_source_files_properties(
+    ${MUSL_PATCHED_ROOT}/src/stdio/vfprintf.c
+    ${MUSL_PATCHED_ROOT}/src/math/frexpl.c
+    ${MUSL_PATCHED_ROOT}/src/math/scalbn.c
+    ${MUSL_PATCHED_ROOT}/src/math/__fpclassifyl.c
+    ${MUSL_PATCHED_ROOT}/src/math/__signbitl.c
+    PROPERTIES COMPILE_OPTIONS "-msse;-msse2"
+)
 
 # musl 자신의 Makefile이 쓰는 것과 같은 include 경로 목록.
 # src/include·src/internal(weak_alias 등)은 minicore_libc 자신의
