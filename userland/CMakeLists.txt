@@ -22,3 +22,7 @@ add_subdirectory(svcmgr-ctl-test)
 # user-service-manager.md §M43 — 계정별 유저 서비스 위임(ADR-218)
 # grant 검증용 최소 테스트 프로그램.
 add_subdirectory(user-service-delegate-test)
+
+# docs/plan/musl-userland-porting.md §M51 — 익명 파이프+dup2() 검증용
+# 실제 musl 프로그램.
+add_subdirectory(pipe-test)

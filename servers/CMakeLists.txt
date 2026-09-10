@@ -6,6 +6,7 @@ add_subdirectory(netsrv)
 add_subdirectory(devmgr)
 add_subdirectory(drivers)
 add_subdirectory(cfgsrv)
+add_subdirectory(pipesrv)
 add_subdirectory(login)
 add_subdirectory(svcmgr)
 
@@ -64,11 +65,16 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=ext4=$<TARGET_FILE:minicore_ext4_elf>
               --service=vfs=$<TARGET_FILE:minicore_vfs_elf>
               --service=cfgsrv=$<TARGET_FILE:minicore_cfgsrv_elf>
+              --service=pipesrv=$<TARGET_FILE:minicore_pipesrv_elf>
               --service=netsrv=$<TARGET_FILE:minicore_netsrv_elf>
               --service=shell=$<TARGET_FILE:minicore_shell_elf>
               --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
               --service=login=$<TARGET_FILE:minicore_login_elf>
               --service=musl-hello=$<TARGET_FILE:minicore_musl_hello_elf>
+              # docs/plan/musl-userland-porting.md §M51 — 익명 파이프+
+              # dup2() 검증용 실제 musl 프로그램. pipesrv(위)+procsrv
+              # 둘 다 핸들이 필요하다.
+              --service=pipe-test=$<TARGET_FILE:minicore_pipe_test_elf>
               --service=user-service-delegate-test=$<TARGET_FILE:minicore_user_service_delegate_test_elf>
               --service=svcmgr=$<TARGET_FILE:minicore_svcmgr_elf>
               --service=svcmgr-ctl-test=$<TARGET_FILE:minicore_svcmgr_ctl_test_elf>
@@ -118,6 +124,14 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
               --depends=musl-hello:vfs,procsrv
+              # pipe-test는 vfs를 실제로 쓰지 않지만, syscall_shim.c의
+              # MC_PROCSRV_HANDLE(=3)이 musl-hello와 똑같이 "vfs가
+              # 먼저 오는" 순서를 하드코딩 전제로 삼고 있어(모든 musl
+              # 프로그램이 공유하는 단일 syscall_shim.c 빌드이므로
+              # 프로그램마다 다른 handle 번호를 못 쓴다) vfs를 그대로
+              # 첫 의존으로 둔다 — 실제 사용은 procsrv(fork/wait)+
+              # pipesrv(pipe)뿐이다.
+              --depends=pipe-test:vfs,procsrv,pipesrv
               --depends=user-service-delegate-test:cfgsrv
               --depends=svcmgr:procsrv,cfgsrv
               # M42(user-service-manager.md §M42) — "새 컨트롤
@@ -126,6 +140,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               # 뒤에 스폰되고 svcmgr/cfgsrv 둘 다에 핸들이 필요하다.
               --depends=svcmgr-ctl-test:svcmgr,cfgsrv
               --linux-abi-stack=musl-hello
+              --linux-abi-stack=pipe-test
               --trusted=devmgr
               --trusted=ps2
               --trusted=usb
@@ -136,17 +151,19 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --trusted=console
               --trusted=cfgsrv
       DEPENDS minicore_memfs_elf minicore_vfs_elf minicore_cfgsrv_elf
+              minicore_pipesrv_elf
               minicore_netsrv_elf minicore_shell_elf minicore_procsrv_elf
               minicore_devmgr_elf minicore_drv_ps2_elf minicore_drv_usb_elf
               minicore_drv_virtio_blk_elf minicore_drv_virtio_net_elf
               minicore_fat32_elf minicore_ext4_elf
               minicore_drv_console_elf minicore_login_elf
               minicore_musl_hello_elf
+              minicore_pipe_test_elf
               minicore_user_service_delegate_test_elf
               minicore_svcmgr_elf
               minicore_svcmgr_ctl_test_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+pipesrv+netsrv+shell+procsrv+login+musl-hello+pipe-test+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})

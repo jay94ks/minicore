@@ -556,8 +556,32 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   전제 자체가 M29(ADR-203)에서 이미 무효화돼 있었다 — 그래서 M39를
   그대로 되살리지 않고, 정적 링킹 전제로 다시 설계한 새 계획
   [docs/plan/musl-userland-porting.md](docs/plan/musl-userland-porting.md)
-  (M51 파이프+dup2 ~ M55 job control 최소, 스트레치)를 세웠다 —
-  **아직 착수 전**. BusyBox(sh+coreutils 단일 정적 바이너리)를
-  `third_party/`에 새 submodule로 추가해 M20/M26/M39가 세 번 미룬
-  "실제 포팅된 셸/coreutils로 로그인 후 셸 대체"를 이번에 달성하는
-  것이 목표다.
+  (M51 파이프+dup2 ~ M55 job control 최소, 스트레치)를 세웠다.
+  BusyBox(sh+coreutils 단일 정적 바이너리)를 `third_party/`에 새
+  submodule로 추가해 M20/M26/M39가 세 번 미룬 "실제 포팅된
+  셸/coreutils로 로그인 후 셸 대체"를 이번에 달성하는 것이 목표다.
+  **M51(완료)**(결과는
+  [docs/done/musl-userland-porting-m51.md](docs/done/musl-userland-porting-m51.md),
+  [ADR-220](docs/design/foundations.md) 참고): 익명 파이프
+  (`pipe()`/`pipe2()`)+`dup2()` — 새 커널 프리미티브가 아니라
+  ADR-183과 같은 전략(커널을 확장하지 않고 유저랜드 서버+syscall
+  우회로 해결)으로, 새 서버 `servers/pipesrv`(procsrv/cfgsrv와 같은
+  단일 요청-응답 루프, 절대 회신을 미루지 않는다)를 만들고
+  `libc/sysdeps/minicore/syscall_shim.c`가 파이프가 비었거나
+  가득 찼을 때 `mc_yield()`+재시도로 블로킹을 흉내낸다(`mc_wait()`
+  가 이미 쓰는 것과 같은 요령, OPEN-67과 같은 이유). id는
+  프로토콜-레벨 정수+참조 카운트(read_refcount/write_refcount) —
+  `fork()`/`dup2()`로 같은 id를 여러 프로세스(또는 한 프로세스의
+  fd 슬롯 여러 개)가 들고 있을 수 있는데 pipesrv는 이 복제를 스스로
+  관찰할 수 없어, `syscall_shim.c`가 그 시점마다 명시적으로
+  `op_dup`을 불러 참조 카운트를 알려주는 계약으로 풀었다. 새 실제
+  musl 프로그램 `userland/pipe-test`가 (1) 같은 프로세스 안에서
+  write→close→read→EOF (2) `fork()`로 파이프 양끝을 나눠 가진 뒤
+  부모가 쓰고 자식이 읽는 왕복 (3) `dup2()`로 파이프 읽기 쪽을
+  fd 0(stdin)에 덮어씌운 뒤 직접 읽기 — 세 시나리오를 확인했다.
+  실행 중 발견: x86_64가 레거시 `SYS_pipe`(22)도 실제로 갖고 있어서
+  (i386 전용이라고 잘못 가정했었다) musl의 `pipe()`가 계획이 미리
+  준비해 둔 `SYS_pipe2`(293)가 아니라 `SYS_pipe`로 왔다 — 처음엔
+  그대로 `-ENOSYS`로 떨어졌고, 둘 다 같은 핸들러로 처리하도록
+  케이스를 합쳐 해결했다. 다음은 M52(BusyBox submodule 추가+정적
+  링크 빌드)다.

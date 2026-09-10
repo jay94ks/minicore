@@ -749,3 +749,65 @@
     숨길지(예: 프로토콜 클라이언트 함수의 시그니처 선언만 숨길지,
     아예 그 헤더 파일 전체를 안 보이게 할지)의 세부는 실행 착수
     시점에 확정한다.
+
+## ADR-220. 익명 파이프(M51): 새 커널 프리미티브 대신 전용 서버+재시도 폴링으로 구현 — ADR-183과 같은 전략의 pipe/dup2 적용
+
+- **상태**: 확정 (2026-09-10~11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M51 실행).
+- **결정**:
+  1. `pipe()`/`pipe2()`/`dup2()`를 커널에 새 오브젝트 종류나 새
+     syscall로 추가하지 않는다 — ADR-183 §결정2가 이미 확립한 전략
+     ("커널을 확장하지 않고 musl의 syscall 진입점을 패치해
+     유저랜드로 우회")을 그대로 이어, 새 전용 서버
+     `servers/pipesrv`(libk+libmc만, procsrv/cfgsrv/svcmgr와 같은
+     순수 minicore 네이티브 서버)를 만들고 `libc/sysdeps/minicore/
+     syscall_shim.c`가 그 클라이언트(`mc/pipesrv_client.h`)를 부르는
+     것으로 대체한다.
+  2. **pipesrv는 절대 회신을 미루지 않는다** — procsrv/cfgsrv와
+     완전히 같은 "단일 요청-응답 루프" 모양이다(OPEN-67이 이미
+     지적한 것과 같은 근본 이유: 이 커널의 `sys_reply`는 스레드당
+     한 슬롯(ADR-216이 재진입 한 단계까지는 감당하게 했지만, 여러
+     독립된 대기자를 임의 순서로 깨우는 일반적인 경우는 여전히
+     지원하지 않는다)이라, 서버가 "지금 회신 못 함, 나중에 조건이
+     맞으면 회신"을 하려면 멀티스레드+임의 순서 재개라는 훨씬 큰
+     기계장치가 필요하다). 대신 파이프가 비었으면(read) 또는
+     가득 찼으면(write) 즉시 `MC_PIPE_STATUS_WOULD_BLOCK`을 돌려주고,
+     **호출자**(syscall_shim.c)가 `mc_yield()`+재시도로 블로킹을
+     흉내낸다 — `mc_wait()`(procsrv 클라이언트, OPEN-67)가 이미 쓰는
+     것과 정확히 같은 패턴을 파이프에도 그대로 적용한 것뿐이다.
+  3. **id는 프로토콜-레벨 정수이지 커널 핸들이 아니다**
+     (registry-decisions.md ADR-169 §결정4와 같은 정신) — 읽기 쪽/
+     쓰기 쪽 각각 참조 카운트(`read_refcount`/`write_refcount`)를
+     둔다. `fork()`/`dup2()`로 같은 id를 여러 프로세스(또는 한
+     프로세스의 fd 슬롯 여러 개)가 들고 있을 수 있는데, pipesrv는
+     이런 복제를 스스로 관찰할 방법이 전혀 없다(`fork()`는 이
+     서버가 전혀 모르는 사이에 호출자의 주소공간을 통째로 COW
+     복제할 뿐이다) — 그래서 호출자가 그 시점마다 명시적으로
+     `op_dup`을 불러 참조 카운트를 알려줘야 한다는 계약으로
+     풀었다. 참조 카운트가 0이 되는 쪽이 "그 끝이 진짜로 닫혔다"는
+     뜻이다 — 쓰기 쪽이 0이면 read는 WOULD_BLOCK 대신 진짜 EOF
+     (status=OK, len=0)를, 읽기 쪽이 0이면 write는
+     `MC_PIPE_STATUS_BROKEN_PIPE`를 돌려준다.
+  4. 파이프당 고정 4096바이트 원형 버퍼 하나, 동시에 열 수 있는
+     파이프 최대 8개(YAGNI — 계획 문서가 이미 이렇게 단순화하기로
+     정했다).
+- **근거**: 이 프로젝트는 이미 "새 기능은 커널을 확장하지 말고
+  기존 IPC 프리미티브 위의 유저랜드 서버로 푼다"는 원칙을 반복해서
+  선택해 왔다(ADR-183의 syscall 우회, ADR-196 §결정7의 "새 종료/
+  저장 메커니즘을 만들지 않는다" 등). 파이프도 본질적으로 "바이트를
+  버퍼링하고 읽기/쓰기 커서를 관리하는" IPC 그 자체이므로, 이미
+  있는 Call/Reply 왕복과 이미 검증된 "폴링+양보" 요령(procsrv의
+  OP_WAIT)을 그대로 재사용하는 것이 새 블로킹 커널 프리미티브를
+  발명하는 것보다 훨씬 작고 안전한 변경이다.
+- **영향**: `mc/pipesrv_protocol.h`(신규, ADR-195 마크업)+
+  `mc/pipesrv_client.h`/`.c`(신규)+`servers/pipesrv`(신규)+
+  `libc/sysdeps/minicore/syscall_shim.c`(`SYS_pipe`/`SYS_pipe2`/
+  `SYS_dup2`/`SYS_read`/`SYS_write`/`SYS_close`/`SYS_fork` 확장).
+  실행 중 발견: x86_64가 실제로는 레거시 `SYS_pipe`(22)도 갖고
+  있어서(i386 전용이 아니었다) musl의 `pipe.c`가 `SYS_pipe2`(293)
+  대신 `SYS_pipe`로 온다는 것을 처음엔 놓쳤다 — 둘 다 같은 핸들러로
+  처리하도록 고쳤다. 이 파이프 fd 표(`g_pipe_fds[]`)는 fd 0/1/2도
+  `dup2()`로 덮어씌울 수 있어야 해서 기존 VFS 파일 표(`g_open_files[]`,
+  "fd-3" 오프셋 관례)와 달리 fd 번호로 직접 인덱싱한다 — 새 fd를
+  할당할 때(open()/pipe2()) 두 표 모두와 충돌하지 않는지 확인하는
+  `fd_is_free()`를 새로 두었다.

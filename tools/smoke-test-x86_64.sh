@@ -387,6 +387,33 @@
 #     스레드를 추가하며 g_runtime이 처음으로 두 스레드(메인 IPC
 #     루프+이 스레드)에서 동시에 건드려질 수 있게 됐다 — M42까지는
 #     단일 스레드라 락이 필요 없었다, 스핀락(libk) 추가로 해결.
+#   M51 (docs/plan/musl-userland-porting.md §M51): 익명 파이프
+#     (pipe()/pipe2())+dup2(). 새 서버 servers/pipesrv — 절대 회신을
+#     미루지 않는 단일 요청-응답 루프(procsrv/cfgsrv와 같은 모양)
+#     이고, 블로킹은 호출자(libc/sysdeps/minicore/syscall_shim.c)가
+#     mc_yield()+재시도로 흉내낸다(mc_wait()가 이미 쓰는 것과 같은
+#     요령, OPEN-67과 같은 이유 — 서버 자신이 회신을 붙들고 있으면
+#     다른 클라이언트를 전혀 처리할 수 없어진다). 새 실제 musl
+#     프로그램 userland/pipe-test가 세 가지를 확인한다: (1) 같은
+#     프로세스 안에서 write→close(쓰기 쪽)→read가 정확한 바이트를
+#     받고 그다음 read가 진짜 EOF(0)를 반환("[pipe-test]
+#     single-process write/read/eof ok=1") (2) fork()로 파이프
+#     양끝을 부모/자식이 나눠 가진 뒤(각자 안 쓰는 쪽을 닫는 표준
+#     관례) 부모가 쓰고 자식이 읽는 왕복("[pipe-test] fork pipe
+#     roundtrip ok=1") (3) dup2()로 파이프 읽기 쪽을 fd 0(stdin)에
+#     덮어씌운 뒤 fd 0을 직접 읽어도 파이프 데이터를 받음
+#     ("[pipe-test] dup2 stdin ok=1"), 마지막으로 종합 결과
+#     ("[pipe-test] all ok=1"). 실행 중 발견: x86_64가 실제로는
+#     `SYS_pipe`(22, 레거시 단일 syscall)도 갖고 있다는 것 — musl의
+#     `pipe.c`가 `#ifdef SYS_pipe`를 참으로 평가해 `pipe()`가
+#     `SYS_pipe2`(293, 계획 문서가 미리 준비해 둔 번호)가 아니라
+#     `SYS_pipe`로 오는 바람에 처음엔 그대로 -ENOSYS로 떨어졌다 —
+#     둘 다 처리하도록 케이스를 합쳤다. fork()로 같은 파이프 id를
+#     여러 프로세스(또는 dup2()로 같은 프로세스의 fd 슬롯 여러 개)
+#     가 들고 있을 수 있어, pipesrv가 참조 카운트(read_refcount/
+#     write_refcount)로 관리하고 syscall_shim.c가 fork()/dup2()
+#     시점마다 명시적으로 op_dup을 불러 알려 준다(pipesrv 자신은
+#     fork()가 일어난 사실을 관찰할 수 없다).
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -628,6 +655,10 @@ declare -a EXPECTED=(
   "musl pthread_create ok=1"
   "musl pthread_join ok=1"
   "musl pthread mutex counter ok=1"
+  "[pipe-test] single-process write/read/eof ok=1"
+  "[pipe-test] fork pipe roundtrip ok=1"
+  "[pipe-test] dup2 stdin ok=1"
+  "[pipe-test] all ok=1"
   "[svcmgr] self_register ok=1"
   "[svcmgr] adopt_orphans ok=1"
   "[svcmgr] services table open ok=1"

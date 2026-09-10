@@ -15,6 +15,8 @@
 // 돌려주지 않는다(추후 디버깅을 위해, real-libc-syscall-layer.md
 // "검증 방법" 참고).
 #include <mc/fs_client.h>
+#include <mc/pipesrv_client.h>
+#include <mc/pipesrv_protocol.h>
 #include <mc/procsrv_client.h>
 #include <mc/procsrv_protocol.h>
 #include <mc/syscall.h>
@@ -54,6 +56,18 @@
 #define SYS_sched_yield 24  // mc_yield() -> MC_SYSCALL_YIELD(syscall.h 주석 참고)로 우회.
 // M37(real-libc-syscall-layer.md §M37, ADR-187) — pthread 최소 구현.
 #define SYS_futex 202
+// docs/plan/musl-userland-porting.md §M51 — 익명 파이프+fd 복제.
+// 값은 실제 Linux x86_64 syscall 번호(third_party/musl/arch/x86_64/
+// bits/syscall.h.in) 그대로다 — musl의 pipe()/pipe2()/dup2()가 이
+// 번호로 syscall()을 부른다. 실행 중 발견: x86_64는 SYS_pipe(22,
+// 레거시 단일 syscall)도 실제로 갖고 있어(i386에만 있는 게 아니었다)
+// third_party/musl/src/unistd/pipe.c의 `#ifdef SYS_pipe` 분기가
+// 참이 된다 — pipe()는 SYS_pipe2가 아니라 SYS_pipe로 온다(pipe2()
+// 자신은 flag!=0일 때만 SYS_pipe2를 쓴다). 그래서 둘 다 처리해야
+// 한다.
+#define SYS_pipe 22
+#define SYS_dup2 33
+#define SYS_pipe2 293
 
 #define ARCH_SET_FS 0x1002
 
@@ -63,6 +77,7 @@
 #define MC_ENOTTY (-25)
 #define MC_ENOSYS (-38)
 #define MC_EAGAIN (-11)
+#define MC_EPIPE (-32)
 
 // M32 — musl-hello가 depends=vfs,procsrv로 initrun에게서 물려받는다
 // (servers/CMakeLists.txt, --depends=musl-hello:vfs,procsrv). handle
@@ -70,6 +85,12 @@
 // procsrv는 handle 3이다(ADR-152의 고정 순서 — MC_VFS_HANDLE 주석과
 // 같은 관례).
 #define MC_PROCSRV_HANDLE 3
+
+// docs/plan/musl-userland-porting.md §M51 — pipe-test는 vfs를 실제로
+// 쓰지 않지만 위 MC_PROCSRV_HANDLE(=3)과 같은 이유로 vfs를 첫 의존
+// 자리에 그대로 둔다(servers/CMakeLists.txt --depends=pipe-test:vfs,
+// procsrv,pipesrv) — 그래서 pipesrv는 세 번째 상속 핸들인 4다.
+#define MC_PIPESRV_HANDLE 4
 
 // M36(real-libc-syscall-layer.md §M36) — musl의 실제 struct k_sigaction
 // (third_party/musl/arch/x86_64/ksigaction.h)과 바이트 단위로 맞춰야
@@ -106,6 +127,36 @@ static struct {
     uint64_t open_file_id;
 } g_open_files[MC_MAX_OPEN_FILES];
 
+// docs/plan/musl-userland-porting.md §M51 — 파이프 fd(int)↔pipesrv
+// id 대응표. 이 표는 fd 번호로 직접 인덱싱한다(0/1/2도 dup2()로
+// 덮어씌워질 수 있어야 하므로 g_open_files처럼 "3부터" 오프셋을
+// 두지 않는다). g_open_files와 달리 fork() 시 **내용은** COW로
+// 그대로 복제된다(이 프로세스의 평범한 BSS 변수라서) — 다만
+// pipesrv 자신은 fork()가 일어난 사실을 전혀 모르므로, 자식 쪽에서
+// 이 표에 남아 있는 모든 파이프 id에 대해 명시적으로
+// mc_pipe_dup()을 불러 참조 카운트를 알려줘야 한다(SYS_fork 처리
+// 참고) — 그렇게 하지 않으면 부모/자식 중 한쪽이 close()할 때
+// 다른 쪽이 아직 쓰고 있는 파이프를 서버가 조로 끝난 것으로
+// 취급해 버린다.
+#define MC_MAX_FDS 16
+static struct {
+    int in_use;
+    uint64_t pipe_id;
+} g_pipe_fds[MC_MAX_FDS];
+
+static int fd_is_free(int fd) {
+    if (fd < 0 || fd >= MC_MAX_FDS) {
+        return 0;
+    }
+    if (g_pipe_fds[fd].in_use) {
+        return 0;
+    }
+    if (fd >= 3 && fd - 3 < MC_MAX_OPEN_FILES && g_open_files[fd - 3].in_use) {
+        return 0;
+    }
+    return 1;
+}
+
 // VFS 클라이언트 핸들 — musl-hello가 depends=vfs로 initrun에게서
 // 물려받는다(servers/CMakeLists.txt, --depends=musl-hello:vfs).
 // create_endpoint=true가 항상 handle 1을 먼저 차지하므로(ADR-152의
@@ -114,14 +165,18 @@ static struct {
 #define MC_VFS_HANDLE 2
 
 static long open_common(const char* path) {
-    int slot = -1;
+    int fd = -1;
     for (int i = 0; i < MC_MAX_OPEN_FILES; ++i) {
-        if (!g_open_files[i].in_use) {
-            slot = i;
+        // docs/plan/musl-userland-porting.md §M51 — fd_is_free()로
+        // g_pipe_fds와도 겹치지 않는지 확인한다(이전엔 g_open_files
+        // 안에서만 빈 슬롯을 찾아, 그 fd 번호를 이미 파이프가 쓰고
+        // 있어도 몰랐다).
+        if (fd_is_free(i + 3)) {
+            fd = i + 3;
             break;
         }
     }
-    if (slot < 0) {
+    if (fd < 0) {
         return MC_ENOENT;  // 표가 가득 찼다 — 이 라운드 예산(8개)을 넘음.
     }
     uint64_t open_file_id = 0;
@@ -130,10 +185,10 @@ static long open_common(const char* path) {
     if (status != MC_FS_STATUS_OK || fs_handle == 0) {
         return MC_ENOENT;
     }
-    g_open_files[slot].in_use = 1;
-    g_open_files[slot].fs_handle = fs_handle;
-    g_open_files[slot].open_file_id = open_file_id;
-    return slot + 3;  // fd 0/1/2는 예약.
+    g_open_files[fd - 3].in_use = 1;
+    g_open_files[fd - 3].fs_handle = fs_handle;
+    g_open_files[fd - 3].open_file_id = open_file_id;
+    return fd;  // fd 0/1/2는 예약.
 }
 
 // M32 — SYS_execve. musl execve(path, argv, envp)는 이 셋을 그대로
@@ -168,13 +223,64 @@ static long exec_common(const char* path) {
     return -(long)err;
 }
 
+// docs/plan/musl-userland-porting.md §M51 — 파이프가 비어 있고
+// 쓰기 쪽이 아직 열려 있으면(MC_PIPE_STATUS_WOULD_BLOCK) mc_yield()
+// 후 재시도한다 — mc_wait()(procsrv 클라이언트)가 이미 쓰는 것과
+// 같은 "진짜 블로킹 대신 폴링+양보" 요령(OPEN-67과 같은 이유,
+// pipesrv도 단일 요청-응답 루프다).
+static long pipe_read_retry(uint64_t pipe_id, void* buf, unsigned long count) {
+    for (;;) {
+        uint64_t got = 0;
+        uint32_t status = mc_pipe_read(MC_PIPESRV_HANDLE, pipe_id, count, buf, &got);
+        if (status == MC_PIPE_STATUS_OK) {
+            return (long)got;  // got==0이면 진짜 EOF.
+        }
+        if (status == MC_PIPE_STATUS_WOULD_BLOCK) {
+            mc_yield();
+            continue;
+        }
+        return MC_EBADF;
+    }
+}
+
 static long read_common(long fd, void* buf, unsigned long count) {
+    if (fd >= 0 && fd < MC_MAX_FDS && g_pipe_fds[fd].in_use) {
+        return pipe_read_retry(g_pipe_fds[fd].pipe_id, buf, count);
+    }
     if (fd < 3 || fd - 3 >= MC_MAX_OPEN_FILES || !g_open_files[fd - 3].in_use) {
         return MC_EBADF;
     }
     uint64_t n = mc_fs_read(g_open_files[fd - 3].fs_handle, g_open_files[fd - 3].open_file_id,
                              (uint8_t*)buf, count);
     return (long)n;
+}
+
+// write() 쪽 대응 — 가득 찼으면(WOULD_BLOCK) 재시도, 읽기 쪽이 전부
+// 닫혔으면(BROKEN_PIPE) 즉시 EPIPE. 전체 count를 다 쓸 때까지
+// 반복한다(일반 blocking fd의 write()가 보통 기대받는 동작 —
+// 상위 musl stdio가 짧은 쓰기를 스스로 재시도하지 않는 경로가
+// 있어서 여기서 끝까지 책임진다).
+static long pipe_write_retry(uint64_t pipe_id, const void* buf, unsigned long count) {
+    unsigned long total = 0;
+    const uint8_t* p = (const uint8_t*)buf;
+    while (total < count) {
+        uint64_t written = 0;
+        uint32_t status =
+            mc_pipe_write(MC_PIPESRV_HANDLE, pipe_id, p + total, count - total, &written);
+        if (status == MC_PIPE_STATUS_OK) {
+            total += written;
+            continue;
+        }
+        if (status == MC_PIPE_STATUS_WOULD_BLOCK) {
+            mc_yield();
+            continue;
+        }
+        if (status == MC_PIPE_STATUS_BROKEN_PIPE) {
+            return total > 0 ? (long)total : MC_EPIPE;
+        }
+        return MC_EBADF;
+    }
+    return (long)total;
 }
 
 static void log_unimplemented(long n) {
@@ -213,6 +319,12 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             long fd = a;
             const char* buf = (const char*)(unsigned long)b;
             unsigned long count = (unsigned long)c;
+            // docs/plan/musl-userland-porting.md §M51 — dup2()로 fd
+            // 0/1/2가 파이프로 덮어씌워졌을 수 있으니 debug_log
+            // 폴백보다 먼저 확인한다.
+            if (fd >= 0 && fd < MC_MAX_FDS && g_pipe_fds[fd].in_use) {
+                return pipe_write_retry(g_pipe_fds[fd].pipe_id, buf, count);
+            }
             if (fd != 1 && fd != 2) {
                 return MC_EBADF;
             }
@@ -221,6 +333,86 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             }
             mc_debug_log(buf, count);
             return (long)count;
+        }
+        case SYS_pipe:
+        case SYS_pipe2: {
+            // docs/plan/musl-userland-porting.md §M51. a=int[2](출력),
+            // b=flags(SYS_pipe로 왔으면 b는 안 쓰인다/무의미) —
+            // O_CLOEXEC/O_NONBLOCK은 이 라운드 범위 밖이라 무시한다
+            // (YAGNI — execve()가 아직 fd를 전혀 물려주지 않으므로
+            // CLOEXEC는 의미가 없고, 논블로킹 파이프도 이 라운드의
+            // 검증 시나리오엔 필요 없다).
+            int* pipefd = (int*)(unsigned long)a;
+            uint64_t read_id = 0;
+            uint64_t write_id = 0;
+            if (!mc_pipe_create(MC_PIPESRV_HANDLE, &read_id, &write_id)) {
+                return MC_ENOSYS;
+            }
+            int rfd = -1;
+            for (int fd = 3; fd < MC_MAX_FDS; ++fd) {
+                if (fd_is_free(fd)) {
+                    rfd = fd;
+                    break;
+                }
+            }
+            if (rfd < 0) {
+                mc_pipe_close(MC_PIPESRV_HANDLE, read_id);
+                mc_pipe_close(MC_PIPESRV_HANDLE, write_id);
+                return MC_ENOSYS;
+            }
+            g_pipe_fds[rfd].in_use = 1;
+            g_pipe_fds[rfd].pipe_id = read_id;
+            int wfd = -1;
+            for (int fd = 3; fd < MC_MAX_FDS; ++fd) {
+                if (fd_is_free(fd)) {
+                    wfd = fd;
+                    break;
+                }
+            }
+            if (wfd < 0) {
+                mc_pipe_close(MC_PIPESRV_HANDLE, read_id);
+                mc_pipe_close(MC_PIPESRV_HANDLE, write_id);
+                g_pipe_fds[rfd].in_use = 0;
+                return MC_ENOSYS;
+            }
+            g_pipe_fds[wfd].in_use = 1;
+            g_pipe_fds[wfd].pipe_id = write_id;
+            pipefd[0] = rfd;
+            pipefd[1] = wfd;
+            return 0;
+        }
+        case SYS_dup2: {
+            // docs/plan/musl-userland-porting.md §M51 — 이 라운드는
+            // 파이프 fd만 dup2 대상으로 지원한다(계획 문서의 목표가
+            // "파이프 한쪽 끝을 stdin/stdout에 덮어씌운다"까지다 —
+            // VFS 파일 fd의 dup2는 이번 범위 밖).
+            long oldfd = a;
+            long newfd = b;
+            if (oldfd < 0 || oldfd >= MC_MAX_FDS || !g_pipe_fds[oldfd].in_use) {
+                return MC_EBADF;
+            }
+            if (newfd < 0 || newfd >= MC_MAX_FDS) {
+                return MC_EBADF;
+            }
+            if (oldfd == newfd) {
+                return newfd;
+            }
+            if (g_pipe_fds[newfd].in_use) {
+                mc_pipe_close(MC_PIPESRV_HANDLE, g_pipe_fds[newfd].pipe_id);
+                g_pipe_fds[newfd].in_use = 0;
+            } else if (newfd >= 3 && newfd - 3 < MC_MAX_OPEN_FILES &&
+                       g_open_files[newfd - 3].in_use) {
+                // VFS 쪽엔 아직 close 오퍼레이션이 없다(fs-protocol,
+                // OPEN-70) — 로컬 슬롯만 비운다.
+                g_open_files[newfd - 3].in_use = 0;
+            }
+            uint64_t id = g_pipe_fds[oldfd].pipe_id;
+            if (mc_pipe_dup(MC_PIPESRV_HANDLE, id) != MC_PIPE_STATUS_OK) {
+                return MC_EBADF;
+            }
+            g_pipe_fds[newfd].in_use = 1;
+            g_pipe_fds[newfd].pipe_id = id;
+            return newfd;
         }
         case SYS_exit_group:
             // M32(real-libc-syscall-layer.md §M32) — 이 프로세스가
@@ -329,6 +521,11 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
         }
         case SYS_close: {
             long fd = a;
+            if (fd >= 0 && fd < MC_MAX_FDS && g_pipe_fds[fd].in_use) {
+                mc_pipe_close(MC_PIPESRV_HANDLE, g_pipe_fds[fd].pipe_id);
+                g_pipe_fds[fd].in_use = 0;
+                return 0;
+            }
             if (fd >= 3 && fd - 3 < MC_MAX_OPEN_FILES) {
                 g_open_files[fd - 3].in_use = 0;
             }
@@ -376,8 +573,25 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
         // §결정4) — mc/procsrv_client.h(libmc)가 그 로직을 갖고 있고
         // 여기는 Linux syscall 인자를 그 함수들의 인자로 옮기기만
         // 한다.
-        case SYS_fork:
-            return mc_fork(MC_PROCSRV_HANDLE);
+        case SYS_fork: {
+            long ret = mc_fork(MC_PROCSRV_HANDLE);
+            if (ret == 0) {
+                // docs/plan/musl-userland-porting.md §M51 — 자식이다.
+                // g_pipe_fds는 이 프로세스의 평범한 BSS라 COW로 그대로
+                // 복제됐지만, pipesrv는 이 fork()가 일어난 사실을
+                // 전혀 모른다(g_pipe_fds 선언부 주석 참고) — 살아있는
+                // 파이프 fd마다 명시적으로 op_dup을 불러 참조 카운트를
+                // 맞춘다. 이걸 빠뜨리면 부모/자식 중 한쪽이 먼저
+                // close()할 때 서버가 그 파이프를 완전히 닫힌 것으로
+                // 착각해 다른 쪽의 왕복이 끊긴다.
+                for (int fd = 0; fd < MC_MAX_FDS; ++fd) {
+                    if (g_pipe_fds[fd].in_use) {
+                        mc_pipe_dup(MC_PIPESRV_HANDLE, g_pipe_fds[fd].pipe_id);
+                    }
+                }
+            }
+            return ret;
+        }
         case SYS_getpid:
             return (long)mc_getpid(MC_PROCSRV_HANDLE);
         case SYS_execve: {
