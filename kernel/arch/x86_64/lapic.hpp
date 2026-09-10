@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // base_phys는 acpi.hpp가 MADT(또는 Local APIC Address Override 엔트리)
 // 에서 얻은 LAPIC MMIO 물리주소(기본값 0xFEE00000, Intel SDM Vol.3
@@ -51,7 +51,7 @@ void lapic_send_fixed_ipi(uint32_t target_apic_id, uint8_t vector);
 // 마일스톤 범위 밖(docs/design/open-items.md 참고).
 void lapic_start_periodic_timer(uint8_t vector, uint32_t initial_count);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // idt.cpp(interrupt_dispatch)가 부르는 EOI — extern "C"로 벡터 라우팅과
 // 실제 드라이버 사이의 최소 결합만 남긴다(scheduler.cpp의

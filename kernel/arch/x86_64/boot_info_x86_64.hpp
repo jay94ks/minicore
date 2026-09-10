@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // Multiboot2 부트로더가 EAX에 넣는 매직 값(boot.md §1.1). PVH 등 다른
 // 경로로 진입했다면(ADR-114) 이 값과 일치하지 않는다.
@@ -47,4 +47,4 @@ boot::boot_info build_numa_boot_info(const madt_result& madt, const srat_slit_re
                                       const boot::memory_region** out_regions,
                                       const uint32_t** out_cpu_node_map);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

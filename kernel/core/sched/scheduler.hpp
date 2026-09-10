@@ -62,7 +62,7 @@ kern::object::thread* create_kernel_thread(void (*entry)(), kern::object::priori
                                       uint32_t preferred_node);
 
 // M8(kernel-bootstrap.md, boot.md §4) — 유저모드로 진입할 스레드를
-// 만든다. entry_rip/user_rsp/arg0은 이미 space(호출자가 arch_x86_64::
+// 만든다. entry_rip/user_rsp/arg0은 이미 space(호출자가 kern::arch::x86_64::
 // create_address_space_root + map_page 등으로 다 구성해 둔 것)의
 // 유저 영역 가상주소다 — 이 함수 자신은 매핑을 전혀 하지 않는다(ADR-002
 // HAL 경계: kernel/core/sched는 page_table을 모른다). 이 스레드가 처음

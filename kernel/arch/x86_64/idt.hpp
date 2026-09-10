@@ -18,7 +18,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // isr_stubs.S가 채우는 하드웨어 스택 프레임 그대로의 레이아웃 — 순서는
 // isr_common(같은 파일)의 push 순서를 반대로 읆은 것과 정확히 같다.
@@ -60,4 +60,4 @@ inline constexpr uint8_t k_vector_timer = 0x40;
 // 상태(IDT)만 다룬다.
 void init_idt();
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

@@ -7,11 +7,11 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 inline constexpr uint16_t k_sel_code64 = 0x18;
 inline constexpr uint16_t k_sel_data64 = 0x20;
 inline constexpr uint16_t k_sel_user_data64 = 0x28;
 inline constexpr uint16_t k_sel_user_code64 = 0x30;
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

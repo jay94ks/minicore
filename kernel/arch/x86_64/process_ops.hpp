@@ -16,7 +16,7 @@ namespace kern::object {
 class handle_table;  // core/object/handle_table.hpp — 전방 선언만 필요(ADR-002와 같은 정신, tss.hpp의 thread 전방 선언과 동일한 관례).
 }
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 enum class process_spawn_error : uint32_t {
     ok = 0,
@@ -123,7 +123,7 @@ process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_vi
 // sys_io_activate/sys_io_deactivate(ADR-154, OPEN-58 해소) — 호출한
 // 스레드 자신의 활성 I/O 포트 범위(kern::object::thread::io_port_base/count)
 // 를 설정/해제하고, 지금 실행 중인 스레드이므로 TSS IOPB에도 즉시
-// 반영한다(arch_x86_64::sync_io_permission을 직접 부른다 — 다음
+// 반영한다(kern::arch::x86_64::sync_io_permission을 직접 부른다 — 다음
 // 컨텍스트 스위치까지 기다리지 않는다). trusted 프로세스만 쓸 수
 // 있다(alloc_dma_buffer/map_phys와 같은 이유 — I/O 포트 직접 접근도
 // 격리를 우회하는 능력이다).
@@ -140,4 +140,4 @@ process_spawn_error io_deactivate();
 // 이상을 요청하면 out_of_memory.
 process_spawn_error brk(int64_t increment, uint64_t& out_old_top);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

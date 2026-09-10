@@ -3,7 +3,7 @@
 
 #include <mm/phys_map.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -372,4 +372,4 @@ bool find_and_parse_srat_slit(uint64_t arch_data_addr, const madt_result& madt,
     return true;
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

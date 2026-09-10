@@ -15,7 +15,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 constexpr uint32_t k_max_madt_cpus = 64;  // kern::mm::k_max_cpus와 동일한 골격 상한.
 
@@ -95,4 +95,4 @@ struct mcfg_result {
 // 제공한다).
 bool find_and_parse_mcfg(uint64_t arch_data_addr, mcfg_result& out);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

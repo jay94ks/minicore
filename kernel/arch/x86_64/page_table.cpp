@@ -14,7 +14,7 @@ extern uint64_t low_pd[512];    // boot.S — low_pdpt[0]이 가리키는 PD. en
                                  // 채워져 있다(각 2MiB 거대 페이지, 합쳐서 [0,8MiB) 항등 매핑).
 }
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -118,7 +118,7 @@ result<uint64_t, map_error> create_address_space_root() {
     constexpr uint32_t k_physmap_pml4_index =
         static_cast<uint32_t>((arch_mm::k_physmap_base >> 39) & 0x1FFull);
     constexpr uint32_t k_kernel_image_pml4_index =
-        static_cast<uint32_t>((arch_x86_64::k_kernel_virt_offset >> 39) & 0x1FFull);
+        static_cast<uint32_t>((kern::arch::x86_64::k_kernel_virt_offset >> 39) & 0x1FFull);
 
     table[k_physmap_pml4_index] = pml4[k_physmap_pml4_index];
     table[k_kernel_image_pml4_index] = pml4[k_kernel_image_pml4_index];
@@ -266,7 +266,7 @@ page_query_result query_page(uint64_t pml4_phys, uint64_t virt) {
     return page_query_result{true, entry & k_pte_addr_mask, perm};
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // M13(system-servers-bringup.md §M13) — kernel/core/ipc가 서로 다른
 // 유저 주소공간에 있는 두 스레드 사이에서 IPC 메시지 구조체 자체를
@@ -279,7 +279,7 @@ page_query_result query_page(uint64_t pml4_phys, uint64_t virt) {
 // 직접 정의는 여기(arch)가 담당한다. query_page()를 그대로 감쌀 뿐이다.
 extern "C" bool arch_translate_user_page(uint64_t page_table_root, uint64_t vaddr,
                                           uint64_t* out_phys) {
-    auto q = arch_x86_64::query_page(page_table_root, vaddr);
+    auto q = kern::arch::x86_64::query_page(page_table_root, vaddr);
     if (!q.present) {
         return false;
     }
@@ -296,16 +296,16 @@ extern "C" bool arch_translate_user_page(uint64_t page_table_root, uint64_t vadd
 // 직접 다룬다(여긴 페이지테이블 조작만).
 extern "C" bool arch_map_ipc_page_readonly(uint64_t page_table_root, uint64_t vaddr,
                                             uint64_t phys) {
-    auto mapped = arch_x86_64::map_page(page_table_root, vaddr, phys, arch_x86_64::page_perm::user);
+    auto mapped = kern::arch::x86_64::map_page(page_table_root, vaddr, phys, kern::arch::x86_64::page_perm::user);
     return mapped.is_ok();
 }
 
 extern "C" bool arch_unmap_ipc_page(uint64_t page_table_root, uint64_t vaddr) {
-    auto unmapped = arch_x86_64::unmap_page(page_table_root, vaddr);
+    auto unmapped = kern::arch::x86_64::unmap_page(page_table_root, vaddr);
     return unmapped.is_ok();
 }
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
     auto new_root = create_address_space_root();
@@ -388,4 +388,4 @@ result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
     return result<uint64_t, map_error>::ok(dst_pml4_phys);
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

@@ -7,7 +7,7 @@
 
 #include <mm/phys_map.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -100,8 +100,8 @@ void append_owned_regions(uint32_t& region_count, const boot::boot_info& info) {
     // 목록이 이 type 값을 그대로 걸러낸다).
     if (region_count < k_max_memory_regions) {
         boot::memory_region& r = g_memory_regions[region_count++];
-        r.base = arch_x86_64::k_ap_trampoline_phys;
-        r.length = arch_x86_64::k_ap_trampoline_size;
+        r.base = kern::arch::x86_64::k_ap_trampoline_phys;
+        r.length = kern::arch::x86_64::k_ap_trampoline_size;
         r.type = boot::k_region_kernel_image;
         r.node_id = 0;
     }
@@ -324,4 +324,4 @@ boot::boot_info build_numa_boot_info(const madt_result& madt, const srat_slit_re
     return info;
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

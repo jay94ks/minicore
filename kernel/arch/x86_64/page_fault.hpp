@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // 실제 판단/복사 로직 — 어느 주소공간(pml4_phys)에서 벌어진 폴트인지를
 // 명시적으로 받는다(스케줄러 상태를 전혀 건드리지 않는다). idt.cpp가
@@ -31,4 +31,4 @@ bool try_handle_cow_write_fault_for(uint64_t pml4_phys, uint64_t fault_addr, uin
 // 라면 애초에 COW 대상 주소공간이 없으므로 false.
 bool try_handle_cow_write_fault(uint64_t fault_addr, uint64_t error_code);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

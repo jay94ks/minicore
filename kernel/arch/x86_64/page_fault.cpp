@@ -9,7 +9,7 @@
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -87,4 +87,4 @@ bool try_handle_cow_write_fault(uint64_t fault_addr, uint64_t error_code) {
     return try_handle_cow_write_fault_for(t->owner_space->page_table_root, fault_addr, error_code);
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

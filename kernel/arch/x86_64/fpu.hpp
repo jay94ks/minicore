@@ -7,7 +7,7 @@
 // idt.cpp가 벡터 7로 라우팅)에서 일어난다.
 #pragma once
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // 부팅 극초기(BSP)와 각 AP 진입 시(ap_main) 반드시 호출해야 한다 —
 // CR0/CR4/XCR0은 코어별 상태라 코어마다 각자 설정해야 한다. CPUID로
@@ -22,7 +22,7 @@ namespace arch_x86_64 {
 // 실행해 `#UD`가 난다.
 void init_fpu();
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // idt.cpp(interrupt_dispatch)가 `#NM`(벡터 7) 발생 시 부르는 진입점 —
 // extern "C"라 네임스페이스 밖에 둔다(idt.cpp의 다른 벡터 핸들러

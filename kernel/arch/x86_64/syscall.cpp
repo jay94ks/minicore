@@ -46,7 +46,7 @@ void wrmsr(uint32_t msr, uint64_t value) {
 
 extern "C" void syscall_entry();
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 void install_syscall_entry() {
     wrmsr(k_msr_efer, rdmsr(k_msr_efer) | k_efer_sce);
@@ -69,7 +69,7 @@ void install_syscall_entry() {
     wrmsr(k_msr_fmask, 0x600);
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // saved_regs(M12, ADR-142) — syscall_entry.S가 %r8로 넘긴다. push 역순
 // 배열: [0]=r15,[1]=r14,[2]=r13,[3]=r12,[4]=rbp,[5]=rbx,[6]=rflags,
@@ -120,12 +120,12 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         case uapi::k_syscall_process_spawn: {
             auto* req = reinterpret_cast<uapi::process_spawn_request*>(a1);
             if (req == nullptr || req->elf_data == 0) {
-                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
             if (req->inherited_handle_count > uapi::k_max_spawn_inherited_handles) {
-                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
-            auto err = arch_x86_64::process_spawn(
+            auto err = kern::arch::x86_64::process_spawn(
                 reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
                 req->grant_trusted, req->create_endpoint, req->inherited_handles,
@@ -134,7 +134,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_fork: {
-            return arch_x86_64::fork_current(/*rip=*/saved_regs[7], /*rflags=*/saved_regs[6],
+            return kern::arch::x86_64::fork_current(/*rip=*/saved_regs[7], /*rflags=*/saved_regs[6],
                                               /*user_rsp=*/saved_regs[8], /*rbx=*/saved_regs[5],
                                               /*rbp=*/saved_regs[4], /*r12=*/saved_regs[3],
                                               /*r13=*/saved_regs[2], /*r14=*/saved_regs[1],
@@ -143,11 +143,11 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         case uapi::k_syscall_exec: {
             const auto* req = reinterpret_cast<const uapi::exec_request*>(a1);
             if (req == nullptr || req->elf_data == 0) {
-                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
             // 성공하면 이 호출은 반환하지 않는다(process_ops.hpp 참고) —
             // 실패했을 때만 아래로 떨어진다.
-            auto err = arch_x86_64::exec_current(
+            auto err = kern::arch::x86_64::exec_current(
                 reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
                 reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size);
             return static_cast<uint64_t>(err);
@@ -158,12 +158,12 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         case uapi::k_syscall_alloc_dma_buffer: {
             auto* out = reinterpret_cast<uapi::dma_buffer_result*>(a1);
             if (out == nullptr) {
-                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
             uint64_t virt = 0;
             uint64_t phys = 0;
-            auto err = arch_x86_64::alloc_dma_buffer(static_cast<uint32_t>(a2), virt, phys);
-            if (err == arch_x86_64::process_spawn_error::ok) {
+            auto err = kern::arch::x86_64::alloc_dma_buffer(static_cast<uint32_t>(a2), virt, phys);
+            if (err == kern::arch::x86_64::process_spawn_error::ok) {
                 out->virt_addr = virt;
                 out->phys_addr = phys;
             }
@@ -189,37 +189,37 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         case uapi::k_syscall_map_phys: {
             auto* req = reinterpret_cast<uapi::map_phys_request*>(a1);
             if (req == nullptr) {
-                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
             uint64_t virt = 0;
-            auto err = arch_x86_64::map_phys(req->phys_addr, req->size, virt);
-            if (err == arch_x86_64::process_spawn_error::ok) {
+            auto err = kern::arch::x86_64::map_phys(req->phys_addr, req->size, virt);
+            if (err == kern::arch::x86_64::process_spawn_error::ok) {
                 req->out_virt_addr = virt;
             }
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_io_activate: {
-            auto err = arch_x86_64::io_activate(static_cast<uint16_t>(a1), static_cast<uint16_t>(a2));
+            auto err = kern::arch::x86_64::io_activate(static_cast<uint16_t>(a1), static_cast<uint16_t>(a2));
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_io_deactivate: {
-            auto err = arch_x86_64::io_deactivate();
+            auto err = kern::arch::x86_64::io_deactivate();
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_process_kill: {
             kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
-                return static_cast<uint64_t>(arch_x86_64::process_kill_error::invalid_handle);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_kill_error::invalid_handle);
             }
-            auto err = arch_x86_64::process_kill(*self->handles, static_cast<uint32_t>(a1));
+            auto err = kern::arch::x86_64::process_kill(*self->handles, static_cast<uint32_t>(a1));
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_brk: {
             auto* req = reinterpret_cast<uapi::brk_request*>(a1);
             if (req == nullptr) {
-                return static_cast<uint64_t>(arch_x86_64::process_spawn_error::invalid_argument);
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
             }
-            auto err = arch_x86_64::brk(req->increment, req->out_old_top);
+            auto err = kern::arch::x86_64::brk(req->increment, req->out_old_top);
             return static_cast<uint64_t>(err);
         }
         default:

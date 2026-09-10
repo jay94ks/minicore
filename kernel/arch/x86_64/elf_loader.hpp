@@ -8,7 +8,7 @@
 
 #include <libk/result.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 enum class elf_error : uint32_t {
     bad_magic,
@@ -28,4 +28,4 @@ enum class elf_error : uint32_t {
 result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data,
                                       uint64_t elf_size);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

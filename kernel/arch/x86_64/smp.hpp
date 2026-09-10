@@ -6,7 +6,7 @@
 
 #include "acpi.hpp"
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // ap_trampoline.S가 가정하는 물리주소(같은 값으로 반드시 동기화 —
 // ap_trampoline.S 상단 주석의 AP_TRAMPOLINE_BASE). SIPI 벡터 필드가
@@ -35,7 +35,7 @@ void set_cpu_node_map(const madt_result& madt, const srat_slit_result& srat);
 // M1~M9 단일 코어 경로는 관찰 가능한 차이가 없다.
 void broadcast_tlb_shootdown(uint64_t vaddr);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // idt.cpp(interrupt_dispatch)가 IPI 벡터에서 부르는 진입점.
 extern "C" void smp_handle_tlb_shootdown_ipi();

@@ -621,7 +621,7 @@
   | `initrd`(`kernel/core/initrd/mcpack.*`) | `kern::initrd`(최상위) | M44 실행 시점에 확정 — `kern::boot`를 새로 만들지 않기로 했으므로(위 `boot` 행) 그 하위에 둘 이유도 없다. `initrd` 사용은 순수 커널 내부(`kernel_main.cpp`, `mcpack.*`)로 확인됨 |
   | `klog`(`kernel/core/klog.cpp`, `kernel/arch/x86_64/klog_uart.cpp`) | `kern::klog` | |
   | `uapi`(`kernel/include/uapi.hpp`) | **`kern::proto`** | 이 예외 규칙이 정확히 겨냥하는 대상 — syscall ABI/메시지 레이아웃, 유저랜드와 공유 |
-  | (없음 — 현재 `arch_x86_64` 소속) `kernel/arch/x86_64/process_ops.*`의 fork/exec/spawn/kill 의미론 | `kern::proc`(신설) | 사용자 예시가 `kern::arch`의 형제로 `kern::proc`을 들었으므로 새로 만든다 — 다만 지금 구현이 arch 코드 안에 있어(레지스터 수준 fork), "arch 독립 인터페이스는 `kern::proc`, 레지스터 세부는 `kern::arch::x86_64`"로 실제로 나누는 건 이 리네임과는 별개인 ADR-002 경계 정리 작업이다. 이 ADR은 이름 자리만 만든다 |
+  | `kernel/arch/x86_64/process_ops.*`의 fork/exec/spawn/kill 의미론 | **`kern::arch::x86_64`에 그대로 유지(분리 안 함)** | M46 실행 시점에 확정 — 레지스터 수준 컨텍스트 조작과 fork/exec 개념이 한 파일에 강하게 얽혀 있어 분리 비용이 순수 리네임의 범위를 넘는다고 판단했다([done](../done/namespace-refactor-m46.md)). `kern::proc`은 만들지 않는다 — 실제로 arch 독립 인터페이스 분리 설계가 나오는 시점에 재검토 |
   | `libk_detail`(`libk/include/libk/*.hpp`) | 이 ADR 범위 밖(위 §결정5) — 제안: `libk::__internals__` | |
   | `servers/*`의 각 서버(현재 전부 무네임스페이스, 파일 내부 익명 네임스페이스만 존재) | `kernsrv::<서버명>` — `procsrv`/`vfs`/`devmgr`/`cfgsrv`/`login`/`netsrv`/`fs::memfs`/`fs::fat32`/`fs::ext4`/`drivers::ps2`/`drivers::usb`/`drivers::console`/`drivers::virtio_blk`/`drivers::virtio_net`/`svcmgr`(계획 단계, [user-service-manager.md](../plan/user-service-manager.md)) | 서버 내부 세분화(`kernsrv::fs::memfs`류)는 이 표에서 제안하는 것일 뿐 강제 아님(§결정3) |
   | (아직 없음) 서버 내부의 순수 C++ 프로토콜/와이어 포맷 코드 — 예: netsrv의 이더넷/IP/UDP 헤더 구조체(M25) | `kernsrv::proto` | `libmc`가 정본인 프로토콜(procsrv/fs 등, ADR-132)은 C 헤더라 이 규칙 대상이 아니다 — `kernsrv::proto`는 libmc로 노출되지 않는, 서버 내부 전용 C++ 프로토콜 포맷 코드 자리다 |

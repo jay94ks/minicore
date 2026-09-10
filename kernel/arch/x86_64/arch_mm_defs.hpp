@@ -14,7 +14,7 @@
 
 namespace arch_mm {
 
-constexpr uint64_t k_physmap_base = arch_x86_64::k_physmap_base;
-constexpr uint64_t k_physmap_size = arch_x86_64::k_physmap_size;
+constexpr uint64_t k_physmap_base = kern::arch::x86_64::k_physmap_base;
+constexpr uint64_t k_physmap_size = kern::arch::x86_64::k_physmap_size;
 
 }  // namespace arch_mm

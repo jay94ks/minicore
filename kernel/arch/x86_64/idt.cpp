@@ -28,7 +28,7 @@ extern "C" void arch_x86_64_handle_nm_trap();
 // 자신이 처리한다(lapic.hpp 참고).
 extern "C" void lapic_eoi();
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -149,23 +149,23 @@ void print_backtrace_from(uint64_t start_fp) {
 
 }  // namespace
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // isr_common(isr_stubs.S)이 부르는 C++ 쪽 — extern "C"라 arch_x86_64
 // 네임스페이스 밖에 둔다(idt.cpp 자신만 쓰는 내부 심벌이라 헤더에는
 // 선언하지 않는다).
-extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
-    if (frame->vector == arch_x86_64::k_vector_ipi_tlb_shootdown) {
+extern "C" void interrupt_dispatch(kern::arch::x86_64::interrupt_frame* frame) {
+    if (frame->vector == kern::arch::x86_64::k_vector_ipi_tlb_shootdown) {
         smp_handle_tlb_shootdown_ipi();
         return;
     }
-    if (frame->vector == arch_x86_64::k_vector_spurious) {
+    if (frame->vector == kern::arch::x86_64::k_vector_spurious) {
         // Intel SDM Vol.3 §11.9 — 스퓨리어스 벡터는 EOI를 보내지 않는다
         // (진짜 인터럽트가 아니었다는 신호이므로 큐에 남길 것이 없다).
         kern::klog::printf("[idt] spurious interrupt (vector 0xFF) — ignored\n");
         return;
     }
-    if (frame->vector == arch_x86_64::k_vector_timer) {
+    if (frame->vector == kern::arch::x86_64::k_vector_timer) {
         // M21(ADR-176) — EOI를 **먼저** 보낸다. kern::sched::on_timer_tick()이
         // 내부적으로 kern::sched::yield()를 호출하면 arch_context_switch가 이
         // 인터럽트의 스택 프레임을 통째로 "다른 스레드의 콜스택 아래"에
@@ -180,30 +180,30 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
         kern::sched::on_timer_tick();
         return;
     }
-    if (frame->vector == arch_x86_64::k_vector_nm) {
+    if (frame->vector == kern::arch::x86_64::k_vector_nm) {
         // M11b(ADR-133) — M10이 마련해 둔 자리를 이제 실제로 채운다.
         arch_x86_64_handle_nm_trap();
         return;
     }
-    if (frame->vector == arch_x86_64::k_vector_page_fault) {
+    if (frame->vector == kern::arch::x86_64::k_vector_page_fault) {
         // M12(ADR-016) — CR2(폴트 가상주소)는 #PF 진입 시점 값을 그대로
         // 읽어야 한다(뒤이은 다른 코드가 CR2를 건드리기 전에 이 함수가
         // 즉시 호출되므로 안전하다). COW로 처리됐으면(true) 그대로
         // 리턴 — iretq가 같은 명령을 재실행한다.
         uint64_t cr2;
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
-        if (arch_x86_64::try_handle_cow_write_fault(cr2, frame->error_code)) {
+        if (kern::arch::x86_64::try_handle_cow_write_fault(cr2, frame->error_code)) {
             return;
         }
         // COW 대상이 아니었다 — 진짜 폴트. M10의 catch-all로 떨어진다.
-        arch_x86_64::diagnose_and_halt(*frame);
+        kern::arch::x86_64::diagnose_and_halt(*frame);
     }
 
     // 나머지 전부(0~31의 다른 예외 + 아직 안 쓰는 벡터) — catch-all.
-    arch_x86_64::diagnose_and_halt(*frame);
+    kern::arch::x86_64::diagnose_and_halt(*frame);
 }
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 void init_idt() {
     disable_legacy_pic();
@@ -218,4 +218,4 @@ void init_idt() {
     asm volatile("lidt %0" : : "m"(ptr));
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

@@ -15,7 +15,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 constexpr uint64_t k_physmap_base = 0xFFFF800000000000ull;
 constexpr uint64_t k_physmap_size = 512ull * 1024 * 1024 * 1024;  // 512GiB
@@ -35,4 +35,4 @@ inline uint64_t image_virt_to_phys(const void* image_addr) {
     return reinterpret_cast<uint64_t>(image_addr) - k_kernel_virt_offset;
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

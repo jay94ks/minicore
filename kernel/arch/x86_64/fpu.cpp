@@ -10,7 +10,7 @@
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -133,19 +133,19 @@ void init_fpu() {
                  has_avx, g_use_xsave, g_fpu_area_size);
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 extern "C" void arch_x86_64_handle_nm_trap() {
     // #NM 핸들러의 첫 일 — TS를 클리어해 이 명령이 재실행될 때
     // 다시 트랩하지 않게 한다(ADR-133 §결정2-1).
     uint64_t cr0;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~arch_x86_64::k_cr0_ts;
+    cr0 &= ~kern::arch::x86_64::k_cr0_ts;
     asm volatile("mov %0, %%cr0" : : "r"(cr0));
 
-    uint32_t apic_id = arch_x86_64::lapic_id();
+    uint32_t apic_id = kern::arch::x86_64::lapic_id();
     kern::object::thread* current = kern::sched::current();
-    kern::object::thread*& owner = arch_x86_64::g_fpu_owner_by_apic_id[apic_id];
+    kern::object::thread*& owner = kern::arch::x86_64::g_fpu_owner_by_apic_id[apic_id];
 
     if (owner == current) {
         // 마지막으로 이 코어에서 FPU를 쓴 게 바로 지금 스레드고, 그
@@ -159,17 +159,17 @@ extern "C" void arch_x86_64_handle_nm_trap() {
     }
 
     if (owner != nullptr) {
-        arch_x86_64::save_fpu_state(owner->fpu_save_area);
+        kern::arch::x86_64::save_fpu_state(owner->fpu_save_area);
     }
     if (current != nullptr) {
-        arch_x86_64::restore_fpu_state(current->fpu_save_area);
+        kern::arch::x86_64::restore_fpu_state(current->fpu_save_area);
     }
     owner = current;
     kern::klog::printf("[fpu] #NM apic_id=%u owner_changed=1\n", apic_id);
 }
 
 extern "C" void arch_fpu_thread_exiting(kern::object::thread* t) {
-    for (kern::object::thread*& owner : arch_x86_64::g_fpu_owner_by_apic_id) {
+    for (kern::object::thread*& owner : kern::arch::x86_64::g_fpu_owner_by_apic_id) {
         if (owner == t) {
             owner = nullptr;
         }

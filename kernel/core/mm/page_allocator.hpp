@@ -115,7 +115,7 @@ void set_node_distance(uint32_t node_count, const uint8_t* distance);
 // M12(system-servers-bringup.md §M12, ADR-016) — fork()의 COW(Copy-on-
 // Write) 지원. order-0(4KiB) 프레임 단위로만 추적한다 — COW는 항상
 // 페이지 단위 매핑을 다루므로 더 큰 order를 추적할 필요가 없다(order>0
-// 블록은 절대 이 API를 거치지 않는다, arch_x86_64::clone_address_space_cow
+// 블록은 절대 이 API를 거치지 않는다, kern::arch::x86_64::clone_address_space_cow
 // 참고).
 //
 // 값의 의미: 0 = "공유되지 않음"(정상적으로 alloc_pages가 막 내준 새

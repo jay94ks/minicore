@@ -24,7 +24,7 @@
 // 것이므로).
 extern "C" [[noreturn]] void enter_usermode(uint64_t rip, uint64_t rsp, uint64_t arg0);
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -555,4 +555,4 @@ process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
     return process_spawn_error::ok;
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

@@ -30,7 +30,7 @@ extern "C" uint32_t g_ap_boot_cpu_index = 0;
 // arch_idle_halt()와 똑같이 hlt 루프로 충분하다.
 extern "C" [[noreturn]] void arch_idle_halt();
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -161,18 +161,18 @@ void broadcast_tlb_shootdown(uint64_t vaddr) {
     }
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 extern "C" void smp_handle_tlb_shootdown_ipi() {
-    uint64_t vaddr = arch_x86_64::g_shootdown_target_vaddr;
+    uint64_t vaddr = kern::arch::x86_64::g_shootdown_target_vaddr;
     asm volatile("invlpg (%0)" : : "r"(vaddr) : "memory");
-    arch_x86_64::g_shootdown_pending.fetch_add_relaxed(static_cast<uint32_t>(-1));
+    kern::arch::x86_64::g_shootdown_pending.fetch_add_relaxed(static_cast<uint32_t>(-1));
     lapic_eoi();
 }
 
 extern "C" uint32_t arch_current_node_id() {
-    uint32_t apic_id = arch_x86_64::lapic_id();
-    return arch_x86_64::g_apic_id_to_node[apic_id];
+    uint32_t apic_id = kern::arch::x86_64::lapic_id();
+    return kern::arch::x86_64::g_apic_id_to_node[apic_id];
 }
 
 extern "C" void ap_main(uint32_t cpu_index) {
@@ -183,7 +183,7 @@ extern "C" void ap_main(uint32_t cpu_index) {
     // 못 찾아 #GP→트리플폴트로 죽는다 — 실제로 QEMU에서 이 순서
     // 실수를 재현·확인했다). init_idt()는 같은 결과를 다시 계산할
     // 뿐이라 여러 코어가 반복 호출해도 안전하다(멱등).
-    arch_x86_64::init_idt();
+    kern::arch::x86_64::init_idt();
 
     // M11b(ADR-133) — CR0/CR4/XCR0은 코어별 레지스터라 이 AP도 자기
     // 몫으로 다시 설정해야 한다(안 하면 이 코어에서 FXSAVE/XSAVE가
@@ -192,16 +192,16 @@ extern "C" void ap_main(uint32_t cpu_index) {
     // (M10/M11 done 보고 — AP는 협조적 스케줄러에 참여하지 않는다),
     // `#NM`은 IDT를 공유하는 어떤 코어에서든 원리적으로 발생할 수
     // 있어 미리 갖춰 둔다.
-    arch_x86_64::init_fpu();
+    kern::arch::x86_64::init_fpu();
 
-    arch_x86_64::lapic_enable_this_core();
+    kern::arch::x86_64::lapic_enable_this_core();
     // M21(ADR-176) — 일부러 lapic_start_periodic_timer()를 여기서
     // 부르지 않는다(lapic.hpp 그 함수 주석 참고) — AP는 run_queue에
     // 참여하지 않아, 이 코어에서 타이머가 울려도 kern::sched::on_timer_tick()
     // 이 건드릴 g_current는 BSP의 것뿐이다.
-    uint32_t apic_id = arch_x86_64::lapic_id();
+    uint32_t apic_id = kern::arch::x86_64::lapic_id();
     kern::klog::printf("[smp] AP apic_id=%u online cpu_index=%u\n", apic_id, cpu_index);
-    arch_x86_64::g_online_count.fetch_add_relaxed(1);
+    kern::arch::x86_64::g_online_count.fetch_add_relaxed(1);
 
     // ap_trampoline.S가 진입 내내 인터럽트를 켜지 않았다(cli 상태 그대로
     // 여기까지 왔다) — IF=0인 채로 hlt하면 나중에 TLB shootdown IPI가

@@ -35,16 +35,16 @@ constexpr uint64_t k_huge_page = 1ull << 7;  // PDPT 엔트리의 PS 비트(1GiB
 constexpr uint64_t k_no_execute = 1ull << 63;
 
 // docs/spec/virtual-memory-layout.md §2 표. PML4/PDPT 인덱스는
-// arch_x86_64::k_physmap_base/k_kernel_virt_offset(memory_layout.hpp,
+// kern::arch::x86_64::k_physmap_base/k_kernel_virt_offset(memory_layout.hpp,
 // 이 파일과 kernel/arch/x86_64/boot_info_x86_64.cpp가 공유하는 단일
 // 소스)에서 컴파일 타임에 역산한다 — 매직 넘버로 따로 적어두면
 // 상수가 바뀔 때 조용히 어긋날 수 있다.
 constexpr uint32_t k_physmap_pml4_index =
-    static_cast<uint32_t>((arch_x86_64::k_physmap_base >> 39) & 0x1FFull);
+    static_cast<uint32_t>((kern::arch::x86_64::k_physmap_base >> 39) & 0x1FFull);
 constexpr uint32_t k_kernel_image_pml4_index =
-    static_cast<uint32_t>((arch_x86_64::k_kernel_virt_offset >> 39) & 0x1FFull);
+    static_cast<uint32_t>((kern::arch::x86_64::k_kernel_virt_offset >> 39) & 0x1FFull);
 constexpr uint32_t k_kernel_image_pdpt_index =
-    static_cast<uint32_t>((arch_x86_64::k_kernel_virt_offset >> 30) & 0x1FFull);
+    static_cast<uint32_t>((kern::arch::x86_64::k_kernel_virt_offset >> 30) & 0x1FFull);
 
 // 커널 스택 영역(0xFFFFFFFF00000000, PDPT 인덱스 508~509)은 슬롯 할당
 // 알고리즘이 정해지는 M5 이전까지 페이지테이블 엔트리를 만들지 않는다 —
@@ -77,7 +77,7 @@ BOOT_TEXT void map_image_range(const char* virt_start, const char* virt_end, uin
                     ~(k_page_size - 1);
 
     for (uint64_t virt = start; virt < end; virt += k_page_size) {
-        uint64_t phys = virt - arch_x86_64::k_kernel_virt_offset;
+        uint64_t phys = virt - kern::arch::x86_64::k_kernel_virt_offset;
         uint64_t pt_index = (phys / k_page_size) % 512;
         image_pt[pt_index] = phys | flags;
     }

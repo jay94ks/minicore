@@ -3,8 +3,8 @@
 // 참고.
 #pragma once
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 void install_syscall_entry();
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

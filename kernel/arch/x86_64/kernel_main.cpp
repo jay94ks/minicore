@@ -83,8 +83,8 @@ void dump_pool_stats(const char* tag) {
 // 메모리 어피니티가 있으면 kern::mm::init() 자체가 그 실제 범위로 초기화되기
 // 때문이다(demo_mm 참고).
 struct acpi_topology {
-    arch_x86_64::madt_result madt;
-    arch_x86_64::srat_slit_result srat;
+    kern::arch::x86_64::madt_result madt;
+    kern::arch::x86_64::srat_slit_result srat;
     bool srat_ok;
 };
 
@@ -94,7 +94,7 @@ struct acpi_topology {
 // 자신의 EBDA/BIOS ROM 스캔 폴백이 실제로 타는 경로다.
 uint64_t dump_real_boot_info() {
     const boot::memory_region* regions = nullptr;
-    boot::boot_info info = arch_x86_64::build_boot_info(mb2_magic, mb2_info_addr, &regions);
+    boot::boot_info info = kern::arch::x86_64::build_boot_info(mb2_magic, mb2_info_addr, &regions);
     // ADR-174 — UEFI 경로는 Multiboot2 태그가 아예 없다(mb2_magic이
     // 항상 0). efi_stub이 EFI_CONFIGURATION_TABLE에서 직접 찾은 ACPI
     // RSDP 물리주소를 여기서 그대로 채택한다.
@@ -113,7 +113,7 @@ uint64_t dump_real_boot_info() {
 // M12(ADR-147) — demo_acpi_lapic()이 채우고 setup_initrun_process()가
 // 읽는다(부트 디바이스 BAR 배정에 ECAM 베이스가 필요, g_ipc_table 등
 // 다른 부트스트랩 전역과 같은 관례).
-arch_x86_64::mcfg_result g_mcfg{};
+kern::arch::x86_64::mcfg_result g_mcfg{};
 
 // ADR-174 — setup_initrun_process()가 initrun에게 넘길 boot_info를
 // 지금까지 항상 run_boot_info_self_test()의 고정값(arch_data_addr=0)
@@ -130,7 +130,7 @@ uint64_t g_real_arch_data_addr = 0;
 
 acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     acpi_topology s{};
-    bool madt_ok = arch_x86_64::find_and_parse_madt(real_arch_data_addr, s.madt);
+    bool madt_ok = kern::arch::x86_64::find_and_parse_madt(real_arch_data_addr, s.madt);
     kern::klog::printf("[acpi] madt_ok=%u cpu_count=%u lapic_base=0x%lx\n", madt_ok, s.madt.cpu_count,
                  static_cast<unsigned long>(s.madt.lapic_base_phys));
     for (uint32_t i = 0; i < s.madt.cpu_count; ++i) {
@@ -138,8 +138,8 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     }
 
     constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
-    arch_x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
-    kern::klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
+    kern::arch::x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
+    kern::klog::printf("[smp] BSP apic_id=%u\n", kern::arch::x86_64::lapic_id());
 
     // M21(general-purpose-completion.md §M21, ADR-176) — BSP에서만
     // 선점 타이머를 켠다(lapic.hpp::lapic_start_periodic_timer 주석 —
@@ -148,13 +148,13 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     // 으로 "데모가 합리적인 시간 안에 여러 번 선점됨"을 확인한 값일 뿐,
     // 실제 마이크로초 단위를 보장하지 않는다.
     constexpr uint32_t k_timer_initial_count = 0x200000;
-    arch_x86_64::lapic_start_periodic_timer(arch_x86_64::k_vector_timer, k_timer_initial_count);
+    kern::arch::x86_64::lapic_start_periodic_timer(kern::arch::x86_64::k_vector_timer, k_timer_initial_count);
 
     // M12(ADR-147) — initrun의 임베디드 virtio-blk 클라이언트가 필요로
     // 하는 ECAM 베이스를 여기서 미리 확인해 둔다(부팅 초기 진단 —
     // 실제 사용은 initrun에게 이 값을 넘겨야 할 때, 아래 §M12 계속
     // 참고).
-    bool mcfg_ok = arch_x86_64::find_and_parse_mcfg(real_arch_data_addr, g_mcfg);
+    bool mcfg_ok = kern::arch::x86_64::find_and_parse_mcfg(real_arch_data_addr, g_mcfg);
     kern::klog::printf("[acpi] mcfg_ok=%u ecam_base=0x%lx\n", mcfg_ok,
                  static_cast<unsigned long>(g_mcfg.ecam_base_phys));
 
@@ -164,10 +164,10 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     // 루프는 cpu_count=1이라 아무 것도 더 하지 않는다).
     if (!madt_ok) {
         s.madt.cpu_count = 1;
-        s.madt.apic_ids[0] = arch_x86_64::lapic_id();
+        s.madt.apic_ids[0] = kern::arch::x86_64::lapic_id();
     }
 
-    s.srat_ok = arch_x86_64::find_and_parse_srat_slit(real_arch_data_addr, s.madt, s.srat);
+    s.srat_ok = kern::arch::x86_64::find_and_parse_srat_slit(real_arch_data_addr, s.madt, s.srat);
     kern::klog::printf("[numa] srat_ok=%u node_count=%u mem_affinity_count=%u\n", s.srat_ok,
                  s.srat.node_count, s.srat.mem_affinity_count);
     for (uint32_t i = 0; i < s.madt.cpu_count; ++i) {
@@ -198,10 +198,10 @@ void demo_mm(const acpi_topology& acpi) {
     boot::boot_info info{};
     if (acpi.srat_ok && acpi.srat.mem_affinity_count > 0) {
         const uint32_t* cpu_node_map = nullptr;
-        info = arch_x86_64::build_numa_boot_info(acpi.madt, acpi.srat, &regions, &cpu_node_map);
+        info = kern::arch::x86_64::build_numa_boot_info(acpi.madt, acpi.srat, &regions, &cpu_node_map);
         boot::dump("numa", info, regions);
     } else {
-        info = arch_x86_64::run_boot_info_self_test(&regions);
+        info = kern::arch::x86_64::run_boot_info_self_test(&regions);
         boot::dump("selftest", info, regions);
     }
 
@@ -287,7 +287,7 @@ void demo_frame_refcount() {
 // 를 호출해 "복사가 필요한 경우"와 "그냥 권한만 다시 켜면 되는 경우"
 // 둘 다를 실제로 실행해 본다.
 void demo_cow_clone() {
-    auto parent = arch_x86_64::create_address_space_root();
+    auto parent = kern::arch::x86_64::create_address_space_root();
     if (!parent.is_ok()) {
         kern::klog::printf("[cow] create parent failed\n");
         return;
@@ -305,48 +305,48 @@ void demo_cow_clone() {
     // (커널/physmap)과 겹치지 않는, create_address_space_root가 빈
     // 채로 남겨 둔 유저 영역.
     constexpr uint64_t k_test_virt = 1ull << 39;
-    arch_x86_64::map_page(parent_pml4, k_test_virt, phys,
-                          arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
+    kern::arch::x86_64::map_page(parent_pml4, k_test_virt, phys,
+                          kern::arch::x86_64::page_perm::write | kern::arch::x86_64::page_perm::user);
 
-    auto child = arch_x86_64::clone_address_space_cow(parent_pml4);
+    auto child = kern::arch::x86_64::clone_address_space_cow(parent_pml4);
     if (!child.is_ok()) {
         kern::klog::printf("[cow] clone failed\n");
         return;
     }
     uint64_t child_pml4 = child.value();
 
-    auto q_parent = arch_x86_64::query_page(parent_pml4, k_test_virt);
-    auto q_child = arch_x86_64::query_page(child_pml4, k_test_virt);
+    auto q_parent = kern::arch::x86_64::query_page(parent_pml4, k_test_virt);
+    auto q_child = kern::arch::x86_64::query_page(child_pml4, k_test_virt);
     kern::klog::printf(
         "[cow] after clone: parent_write=%u parent_cow=%u child_write=%u child_cow=%u "
         "same_phys=%u refcount=%u (expect 0,1,0,1,1,1)\n",
-        arch_x86_64::has_perm(q_parent.perm, arch_x86_64::page_perm::write),
-        arch_x86_64::has_perm(q_parent.perm, arch_x86_64::page_perm::cow),
-        arch_x86_64::has_perm(q_child.perm, arch_x86_64::page_perm::write),
-        arch_x86_64::has_perm(q_child.perm, arch_x86_64::page_perm::cow),
+        kern::arch::x86_64::has_perm(q_parent.perm, kern::arch::x86_64::page_perm::write),
+        kern::arch::x86_64::has_perm(q_parent.perm, kern::arch::x86_64::page_perm::cow),
+        kern::arch::x86_64::has_perm(q_child.perm, kern::arch::x86_64::page_perm::write),
+        kern::arch::x86_64::has_perm(q_child.perm, kern::arch::x86_64::page_perm::cow),
         static_cast<unsigned>(q_child.phys == phys), kern::mm::frame_ref_count(phys));
 
     // 자식이 먼저 쓴다 — 부모가 아직 남아 있으니(refcount>0) 새
     // 프레임으로 복사돼야 한다.
     constexpr uint64_t k_pf_present = 1, k_pf_write = 2;
     bool handled_child =
-        arch_x86_64::try_handle_cow_write_fault_for(child_pml4, k_test_virt, k_pf_present | k_pf_write);
-    auto q_child_after = arch_x86_64::query_page(child_pml4, k_test_virt);
+        kern::arch::x86_64::try_handle_cow_write_fault_for(child_pml4, k_test_virt, k_pf_present | k_pf_write);
+    auto q_child_after = kern::arch::x86_64::query_page(child_pml4, k_test_virt);
     kern::klog::printf(
         "[cow] child write fault: handled=%u child_write_after=%u child_phys_changed=%u "
         "refcount_after=%u (expect 1,1,1,0)\n",
-        handled_child, arch_x86_64::has_perm(q_child_after.perm, arch_x86_64::page_perm::write),
+        handled_child, kern::arch::x86_64::has_perm(q_child_after.perm, kern::arch::x86_64::page_perm::write),
         static_cast<unsigned>(q_child_after.phys != phys), kern::mm::frame_ref_count(phys));
 
     // 이제 부모가 쓴다 — 자식이 이미 떨어져 나갔으니(refcount==0) 복사
     // 없이 그냥 쓰기 권한만 다시 켜지는 fast-path를 타야 한다.
-    bool handled_parent = arch_x86_64::try_handle_cow_write_fault_for(
+    bool handled_parent = kern::arch::x86_64::try_handle_cow_write_fault_for(
         parent_pml4, k_test_virt, k_pf_present | k_pf_write);
-    auto q_parent_after = arch_x86_64::query_page(parent_pml4, k_test_virt);
+    auto q_parent_after = kern::arch::x86_64::query_page(parent_pml4, k_test_virt);
     kern::klog::printf(
         "[cow] parent write fault: handled=%u parent_write_after=%u parent_phys_same=%u "
         "(expect 1,1,1)\n",
-        handled_parent, arch_x86_64::has_perm(q_parent_after.perm, arch_x86_64::page_perm::write),
+        handled_parent, kern::arch::x86_64::has_perm(q_parent_after.perm, kern::arch::x86_64::page_perm::write),
         static_cast<unsigned>(q_parent_after.phys == phys));
 }
 
@@ -427,7 +427,7 @@ void demo_object_model() {
 }
 
 void demo_page_table() {
-    auto root = arch_x86_64::create_address_space_root();
+    auto root = kern::arch::x86_64::create_address_space_root();
     kern::klog::printf("[pgtbl] create_address_space_root ok=%u\n", root.is_ok());
     if (!root.is_ok()) {
         return;
@@ -442,33 +442,33 @@ void demo_page_table() {
 
     constexpr uint64_t k_demo_virt = 0x0000700000000000ull;  // 유저 영역(하위 절반) 임의 주소
 
-    auto map_result = arch_x86_64::map_page(
+    auto map_result = kern::arch::x86_64::map_page(
         as_root, k_demo_virt, backing_page.value(),
-        arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
+        kern::arch::x86_64::page_perm::write | kern::arch::x86_64::page_perm::user);
     kern::klog::printf("[pgtbl] map_page ok=%u\n", map_result.is_ok());
 
-    arch_x86_64::page_query_result q1 = arch_x86_64::query_page(as_root, k_demo_virt);
+    kern::arch::x86_64::page_query_result q1 = kern::arch::x86_64::query_page(as_root, k_demo_virt);
     kern::klog::printf("[pgtbl] query after map: present=%u phys=0x%lx write=%u user=%u exec=%u\n",
                  q1.present, static_cast<unsigned long>(q1.phys),
-                 arch_x86_64::has_perm(q1.perm, arch_x86_64::page_perm::write),
-                 arch_x86_64::has_perm(q1.perm, arch_x86_64::page_perm::user),
-                 arch_x86_64::has_perm(q1.perm, arch_x86_64::page_perm::exec));
+                 kern::arch::x86_64::has_perm(q1.perm, kern::arch::x86_64::page_perm::write),
+                 kern::arch::x86_64::has_perm(q1.perm, kern::arch::x86_64::page_perm::user),
+                 kern::arch::x86_64::has_perm(q1.perm, kern::arch::x86_64::page_perm::exec));
 
     // 다시 매핑하면 already_mapped여야 한다.
-    auto remap_result = arch_x86_64::map_page(as_root, k_demo_virt, backing_page.value(),
-                                               arch_x86_64::page_perm::user);
+    auto remap_result = kern::arch::x86_64::map_page(as_root, k_demo_virt, backing_page.value(),
+                                               kern::arch::x86_64::page_perm::user);
     kern::klog::printf("[pgtbl] remap same addr: is_err=%u (expect 1, already_mapped)\n",
                  remap_result.is_err());
 
     // read-only로 낮춘다(COW clone이 실제로 구현될 때 쓸 프리미티브,
     // page_table.hpp 상단 주석 참고).
-    arch_x86_64::protect_page(as_root, k_demo_virt, arch_x86_64::page_perm::user);
-    arch_x86_64::page_query_result q2 = arch_x86_64::query_page(as_root, k_demo_virt);
+    kern::arch::x86_64::protect_page(as_root, k_demo_virt, kern::arch::x86_64::page_perm::user);
+    kern::arch::x86_64::page_query_result q2 = kern::arch::x86_64::query_page(as_root, k_demo_virt);
     kern::klog::printf("[pgtbl] query after protect(read-only): write=%u (expect 0)\n",
-                 arch_x86_64::has_perm(q2.perm, arch_x86_64::page_perm::write));
+                 kern::arch::x86_64::has_perm(q2.perm, kern::arch::x86_64::page_perm::write));
 
-    arch_x86_64::unmap_page(as_root, k_demo_virt);
-    arch_x86_64::page_query_result q3 = arch_x86_64::query_page(as_root, k_demo_virt);
+    kern::arch::x86_64::unmap_page(as_root, k_demo_virt);
+    kern::arch::x86_64::page_query_result q3 = kern::arch::x86_64::query_page(as_root, k_demo_virt);
     kern::klog::printf("[pgtbl] query after unmap: present=%u (expect 0)\n", q3.present);
 }
 
@@ -895,7 +895,7 @@ kern::object::thread* setup_initrun_process() {
 
     // 4) 새 주소공간 — ADR-074: initrun은 무조건 trusted=true(시스템의
     //    유일한 최초 신뢰 루트, boot.md §4 3단계).
-    auto root = arch_x86_64::create_address_space_root();
+    auto root = kern::arch::x86_64::create_address_space_root();
     if (!root.is_ok()) {
         return nullptr;
     }
@@ -909,7 +909,7 @@ kern::object::thread* setup_initrun_process() {
     space->trusted = true;
     space->page_table_root = pml4_phys;
 
-    auto load_result = arch_x86_64::load_elf(pml4_phys, entry.value().data, entry.value().size);
+    auto load_result = kern::arch::x86_64::load_elf(pml4_phys, entry.value().data, entry.value().size);
     kern::klog::printf("[initrun] load_elf ok=%u entry=0x%lx\n", load_result.is_ok(),
                  static_cast<unsigned long>(load_result.is_ok() ? load_result.value() : 0));
     if (!load_result.is_ok()) {
@@ -926,9 +926,9 @@ kern::object::thread* setup_initrun_process() {
             return nullptr;
         }
         uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * kern::mm::k_page_size;
-        auto mapped = arch_x86_64::map_page(
+        auto mapped = kern::arch::x86_64::map_page(
             pml4_phys, vaddr, page.value(),
-            arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
+            kern::arch::x86_64::page_perm::write | kern::arch::x86_64::page_perm::user);
         if (!mapped.is_ok()) {
             return nullptr;
         }
@@ -945,7 +945,7 @@ kern::object::thread* setup_initrun_process() {
         return nullptr;
     }
     const boot::memory_region* bi_regions = nullptr;
-    boot::boot_info bi = arch_x86_64::run_boot_info_self_test(&bi_regions);
+    boot::boot_info bi = kern::arch::x86_64::run_boot_info_self_test(&bi_regions);
     // ADR-174 — arch_data_addr만큼은 self-test 고정값(항상 0)이 아니라
     // 실제로 감지된 값을 쓴다(devmgr의 ACPI/MCFG 파싱이 이 값을 그대로
     // 물려받는다, init/initrun/main.cpp 상단 주석 참고) — 나머지
@@ -978,7 +978,7 @@ kern::object::thread* setup_initrun_process() {
     // (스레드별 IOPB, "필요한 순간에만 활성화"라는 ADR-154 §결정 그대로).
     if (bi.boot_device.valid != 0) {
         auto bar =
-            arch_x86_64::assign_virtio_blk_bar(g_mcfg.ecam_base_phys, bi.boot_device.pci_bus,
+            kern::arch::x86_64::assign_virtio_blk_bar(g_mcfg.ecam_base_phys, bi.boot_device.pci_bus,
                                                 bi.boot_device.pci_device,
                                                 bi.boot_device.pci_function);
         kern::klog::printf("[pci] assign_virtio_blk_bar ok=%u vendor=0x%x device=0x%x io_base=0x%x\n",
@@ -993,8 +993,8 @@ kern::object::thread* setup_initrun_process() {
     __builtin_memset(bi_virt, 0, kern::mm::k_page_size);
     __builtin_memcpy(bi_virt, &bi, sizeof(bi));
     auto bi_mapped =
-        arch_x86_64::map_page(pml4_phys, k_boot_info_user_vaddr, bi_page.value(),
-                               arch_x86_64::page_perm::user);  // write 비트 없음 = 읽기전용.
+        kern::arch::x86_64::map_page(pml4_phys, k_boot_info_user_vaddr, bi_page.value(),
+                               kern::arch::x86_64::page_perm::user);  // write 비트 없음 = 읽기전용.
     if (!bi_mapped.is_ok()) {
         return nullptr;
     }
@@ -1017,8 +1017,8 @@ kern::object::thread* setup_initrun_process() {
         uint64_t copy_len = remaining < kern::mm::k_page_size ? remaining : kern::mm::k_page_size;
         __builtin_memset(virt, 0, kern::mm::k_page_size);
         __builtin_memcpy(virt, entry.value().data + offset, copy_len);
-        auto mapped = arch_x86_64::map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset,
-                                             page.value(), arch_x86_64::page_perm::user);
+        auto mapped = kern::arch::x86_64::map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset,
+                                             page.value(), kern::arch::x86_64::page_perm::user);
         if (!mapped.is_ok()) {
             return nullptr;
         }
@@ -1031,8 +1031,8 @@ kern::object::thread* setup_initrun_process() {
     auto* self_info = static_cast<uapi::m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
     self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
     self_info->elf_size = self_elf_size;
-    auto info_mapped = arch_x86_64::map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr,
-                                              info_page.value(), arch_x86_64::page_perm::user);
+    auto info_mapped = kern::arch::x86_64::map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr,
+                                              info_page.value(), kern::arch::x86_64::page_perm::user);
     if (!info_mapped.is_ok()) {
         return nullptr;
     }
@@ -1059,7 +1059,7 @@ void spawn_preempt_demo_processes() {
     auto busy = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_busy");
     kern::klog::printf("[preempt-demo] find preempt_busy ok=%u\n", busy.is_ok());
     if (busy.is_ok()) {
-        auto err = arch_x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
+        auto err = kern::arch::x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
                                                /*grant_trusted=*/false, /*create_endpoint=*/false,
                                                nullptr, 0, unused_endpoint_handle,
                                                unused_thread_handle);
@@ -1069,7 +1069,7 @@ void spawn_preempt_demo_processes() {
     auto counter = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_counter");
     kern::klog::printf("[preempt-demo] find preempt_counter ok=%u\n", counter.is_ok());
     if (counter.is_ok()) {
-        auto err = arch_x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
+        auto err = kern::arch::x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
                                                0, /*grant_trusted=*/false,
                                                /*create_endpoint=*/false, nullptr, 0,
                                                unused_endpoint_handle, unused_thread_handle);
@@ -1079,12 +1079,12 @@ void spawn_preempt_demo_processes() {
 
 [[noreturn]] void demo_sched() {
     kern::sched::init();
-    arch_x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
+    kern::arch::x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
     // M12(ADR-143) — usermode.S가 M8 시점에 이미 "TSS는 ring3→ring0
     // 방향에만 필요하다"고 정확히 지적해 뒀던 그 방향이, 유저 스레드의
     // 실제 예외(#PF 등)로 지금 처음 필요해졌다 — 첫 유저 스레드가 뜨기
     // 전에 반드시 먼저 있어야 한다.
-    arch_x86_64::init_tss();
+    kern::arch::x86_64::init_tss();
 
     kern::object::thread* a =
         kern::sched::create_kernel_thread(&thread_a_entry, kern::object::priority_band::kernel, 0);
@@ -1199,12 +1199,12 @@ extern "C" [[noreturn]] void kernel_main() {
 
     // M10(smp-fpu-bringup.md, ADR-055) — IDT를 가장 먼저 건다. 이후의
     // 모든 예외(원인 불명 정지 포함)가 catch-all로 진단 가능해진다.
-    arch_x86_64::init_idt();
+    kern::arch::x86_64::init_idt();
 
     // M9(ADR-127) — 첫 arch_context_switch(=첫 FXSAVE/FXRSTOR, demo_sched()
     // 안에서 발생)보다 반드시 먼저 호출해야 한다. CR4.OSFXSR 없이
     // FXSAVE/FXRSTOR를 실행하면 #UD.
-    arch_x86_64::init_fpu();
+    kern::arch::x86_64::init_fpu();
 
     uint64_t real_arch_data_addr = dump_real_boot_info();
     g_real_arch_data_addr = real_arch_data_addr;
@@ -1213,7 +1213,7 @@ extern "C" [[noreturn]] void kernel_main() {
     // M11(ADR-036/053) — kern::sched::init()/demo_sched()보다 반드시 먼저다:
     // scheduler.cpp의 work-stealing이 arch_current_node_id()로 "지금
     // 코어가 속한 노드"를 물어보는데, 이 표를 먼저 채워 둬야 한다.
-    arch_x86_64::set_cpu_node_map(acpi.madt, acpi.srat);
+    kern::arch::x86_64::set_cpu_node_map(acpi.madt, acpi.srat);
 
     demo_mm(acpi);
     demo_frame_refcount();
@@ -1221,8 +1221,8 @@ extern "C" [[noreturn]] void kernel_main() {
 
     // M10(ADR-055) — kern::mm::init()이 끝난 뒤에야 AP 커널 스택을 확보할 수
     // 있다(bring_up_aps가 kern::mm::alloc_pages를 쓴다).
-    arch_x86_64::bring_up_aps(acpi.madt);
-    kern::klog::printf("[smp] online_cpu_count=%u\n", arch_x86_64::online_cpu_count());
+    kern::arch::x86_64::bring_up_aps(acpi.madt);
+    kern::klog::printf("[smp] online_cpu_count=%u\n", kern::arch::x86_64::online_cpu_count());
 
     demo_object_model();
     demo_page_table();

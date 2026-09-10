@@ -7,7 +7,7 @@
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -156,4 +156,4 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
     return result<uint64_t, elf_error>::ok(eh.e_entry);
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

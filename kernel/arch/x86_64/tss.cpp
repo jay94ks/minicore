@@ -10,7 +10,7 @@
 #include <mm/phys_map.hpp>
 #include <object/kernel_objects.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -163,18 +163,18 @@ void sync_exception_stack(const kern::object::thread& t) {
     }
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
 // kernel/core/sched/scheduler.cpp가 컨텍스트 스위치마다 부르는 훅
 // (ADR-002 HAL 경계 — core는 이 파일을 include하지 않고 이 시그니처만
 // extern "C"로 안다).
 extern "C" void arch_sync_io_permission(const kern::object::thread& next) {
-    arch_x86_64::sync_io_permission(next);
+    kern::arch::x86_64::sync_io_permission(next);
 }
 
 // M21(ADR-177) — tss.hpp::sync_exception_stack() 참고. scheduler.cpp가
 // arch_sync_io_permission과 같은 자리(컨텍스트 스위치 4곳)에서 함께
 // 부른다.
 extern "C" void arch_sync_exception_stack(const kern::object::thread& next) {
-    arch_x86_64::sync_exception_stack(next);
+    kern::arch::x86_64::sync_exception_stack(next);
 }

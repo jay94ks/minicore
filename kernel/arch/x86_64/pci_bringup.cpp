@@ -4,7 +4,7 @@
 
 #include <mm/phys_map.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -92,4 +92,4 @@ pci_bar_result assign_virtio_blk_bar(uint64_t ecam_base, uint32_t bus, uint32_t 
     return result;
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

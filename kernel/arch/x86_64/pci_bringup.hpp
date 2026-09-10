@@ -14,7 +14,7 @@
 
 #include <cstdint>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 struct pci_bar_result {
     bool ok;
@@ -30,4 +30,4 @@ struct pci_bar_result {
 pci_bar_result assign_virtio_blk_bar(uint64_t ecam_base, uint32_t bus, uint32_t device,
                                       uint32_t function);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

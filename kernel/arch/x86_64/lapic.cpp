@@ -6,7 +6,7 @@
 #include <klog.hpp>
 #include <mm/phys_map.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 namespace {
 
@@ -144,6 +144,6 @@ void lapic_start_periodic_timer(uint8_t vector, uint32_t initial_count) {
     reg(k_reg_timer_initial_count) = initial_count;
 }
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
 
-extern "C" void lapic_eoi() { arch_x86_64::eoi(); }
+extern "C" void lapic_eoi() { kern::arch::x86_64::eoi(); }

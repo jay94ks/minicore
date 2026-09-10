@@ -17,7 +17,7 @@
 
 #include <libk/result.hpp>
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 enum class map_error : uint32_t {
     out_of_memory,
@@ -80,4 +80,4 @@ page_query_result query_page(uint64_t pml4_phys, uint64_t virt);
 // page_fault.cpp가 담당한다.
 result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64

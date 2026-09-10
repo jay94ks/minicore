@@ -17,7 +17,7 @@ namespace kern::object {
 struct thread;  // kernel_objects.hpp(core) — 전방 선언만 필요(ADR-002와 같은 정신, 헤더 의존 최소화).
 }
 
-namespace arch_x86_64 {
+namespace kern::arch::x86_64 {
 
 // GDT를 TSS 디스크립터(셀렉터 0x38)를 포함한 확장판으로 다시 구성하고
 // LTR로 적재한다. kern::mm::init() 이후, 첫 유저 스레드가 뜨기 전에 호출해야
@@ -61,4 +61,4 @@ void sync_io_permission(const kern::object::thread& t);
 // sync_syscall_kernel_rsp()와 똑같이 그 경우는 그냥 건드리지 않는다.
 void sync_exception_stack(const kern::object::thread& t);
 
-}  // namespace arch_x86_64
+}  // namespace kern::arch::x86_64
