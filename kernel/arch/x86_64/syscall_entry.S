@@ -10,9 +10,15 @@
  *   같은 이유로 R10을 대신 쓴다), RAX = 반환값.
  *
  * SYSCALL은 스택을 바꿔주지 않는다(RSP가 유저 스택 그대로) — 이 스텁이
- * 직접 커널 스택으로 전환한다. g_syscall_kernel_rsp는 "지금 이 순간
+ * 직접 커널 스택으로 전환한다. g_syscall_kernel_rsp[]는 코어마다 하나씩
+ * (M34, real-libc-syscall-layer.md §M34, ADR-185) "지금 이 코어에서
  * 실행 중인 스레드"의 커널 스택 top을 가리킨다 — scheduler.cpp가 그
- * 스레드로 전환할 때마다(sync_syscall_kernel_rsp) 미리 맞춰 둔다.
+ * 스레드로 전환할 때마다(sync_syscall_kernel_rsp) 그 코어 자신의
+ * 슬롯을 미리 맞춰 둔다. swapgs로 "지금 이 코어"의 슬롯을 찾는다 —
+ * install_syscall_entry()(syscall.cpp)가 코어마다 IA32_KERNEL_GS_BASE
+ * MSR에 자기 슬롯의 주소를 심어 둔 덕분에, swapgs 한 번으로 GS_BASE가
+ * 그 주소가 되고 `%gs:0`이 곧 그 슬롯의 값이다 — 여러 코어가 동시에
+ * SYSCALL로 들어와도 서로의 슬롯을 절대 건드리지 않는다.
  *
  * M8은 유저 RSP도 전역 스크래치(g_syscall_saved_user_rsp)에 저장했다 —
  * 유저 스레드가 하나뿐이고 그 스레드의 IPC Call도 도중에 다른 유저
@@ -42,14 +48,24 @@
 .balign 8
 .global g_syscall_kernel_rsp
 g_syscall_kernel_rsp:
-    .skip 8
+    /* kern::mm::k_max_cpus(page_allocator.hpp)와 같은 값(64) — 코어당
+     * 8바이트 슬롯 하나. C++ 쪽은 이 심볼을 `uint64_t g_syscall_kernel_rsp[64]`
+     * 로 선언해 인덱스로 접근한다(scheduler.cpp::sync_syscall_kernel_rsp). */
+    .skip 8*64
 
 .section .text
 .global syscall_entry
 .type syscall_entry, @function
 syscall_entry:
+    /* M34(ADR-185) — swapgs로 GS_BASE를 이 코어의 g_syscall_kernel_rsp[]
+     * 슬롯 주소(install_syscall_entry()가 IA32_KERNEL_GS_BASE에 미리
+     * 심어 둔 값)로 바꾼 뒤 `%gs:0`으로 그 슬롯의 값(커널 스택 top)을
+     * 읽고, 곧바로 다시 swapgs로 유저의 원래 GS_BASE를 되돌린다 — 이
+     * 함수의 나머지는 %gs를 전혀 쓰지 않는다. */
+    swapgs
     movq %rsp, %r9                    /* 유저 RSP를 레지스터에 임시 보관 */
-    movq g_syscall_kernel_rsp(%rip), %rsp
+    movq %gs:0, %rsp
+    swapgs
 
     pushq %r9     /* 유저 RSP — 이 스레드 전용 스택 위, block()을 거쳐도 함께 보존됨 */
     pushq %rcx    /* SYSCALL이 넣어 준 유저 복귀 RIP */

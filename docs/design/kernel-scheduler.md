@@ -985,6 +985,105 @@
   진짜 마이크로초). `timer_source_interface`(ADR-191)는 여전히
   M34 착수 시점에 만든다 — 이 ADR이 그 순서를 재확인한다.
 
+## ADR-209. M34 완성: 진짜 멀티코어 선점형 스케줄러 — 코어별 `g_current`+AP의 유저 밴드 참여, 그리고 실제로 겪은 세 가지 잠재 버그
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M34 실행 중 확정)
+- **배경**: ADR-185의 전략(코어별 `g_current`+AP의 유저 run_queue
+  참여+각 코어가 자기 로컬 LAPIC 타이머로 독립 선점)을 실제로
+  구현한다.
+- **결정**:
+  1. `g_current`(scheduler.cpp)를 `g_current[kern::mm::k_max_cpus]`
+     배열로 바꾼다. `arch_current_cpu_index()`(신규, smp.cpp —
+     `arch_current_node_id()`와 완전히 같은 HAL 경계 패턴, apic_id→
+     0-기반 코어 인덱스 역참조표)로 색인한다.
+  2. `pick_next_with_stealing()`은 **커널 밴드를 BSP(cpu_index==0)
+     만 본다** — AP는 유저 밴드에만 참여한다(ADR-185 §결정2가 명시한
+     대상 그대로). M21~M33의 커널 밴드 데모 스레드들은 멀티코어
+     동시 실행을 한 번도 검증한 적이 없어, 이 라운드의 목표(유저
+     스레드가 AP에서 실제로 돈다)와 무관한 위험을 새로 만들 이유가
+     없다고 판단했다.
+  3. AP 전용 진입점 `kern::sched::start_ap()`(신규) — `mark_multicore_ready()`
+     /`wait_for_multicore_ready()`(신규)로 BSP의 단일 스레드 부트스트랩
+     (`kern::sched::init()`+모든 `create_kernel_thread()` 호출)이 끝날
+     때까지 기다린 뒤(그 전에는 run_queue가 안전하지 않다), `start()`
+     와 달리 아직 유저 스레드가 하나도 없어도 PANIC하지 않고
+     `arch_wait_for_interrupt()`(신규, idle.S — 단발 HLT, 자기 LAPIC
+     타이머로 다시 깬다)로 재시도한다.
+  4. AP도 자기 몫의 `install_syscall_entry()`/`lapic_start_periodic_timer()`
+     /`init_tss()`를 호출한다(init_idt()/init_fpu()와 같은 "코어별
+     상태는 코어마다 다시 설정" 패턴) — 아래 "실행 중 발견"의 (2),(3).
+  5. `spawn_preempt_demo_processes()`가 `online_cpu_count()`쌍의
+     busy+counter를 스폰한다(코어당 최소 하나 — 그래야 모든 AP가
+     실제로 뽑아 갈 유저 스레드가 있다).
+- **실행 중 발견 — 진짜 버그 3건**(전부 "지금까지 BSP 하나만
+  실행했다"는 전제가 깨지는 순간에만 드러나는 종류):
+  1. **`libk::irq_safe<Lock>`의 진짜 데이터 경합**(가장 근본적).
+     `state_`(저장된 RFLAGS)가 **락 인스턴스 하나에 필드 하나**뿐인데,
+     예전 `lock()`은 뮤텍스를 잡기 **전에** 거기 자기 코어의 irq
+     상태를 써 넣었다 — 이 락이 정말로 여러 코어에서 동시에 다투기
+     전(M21~M33은 BSP 하나만 `run_queue::lock`/`klog::g_log_lock`을
+     만졌다)에는 절대 겹칠 수 없어 드러나지 않던 경합이다. M34가
+     `run_queue::lock`을 처음으로 진짜 멀티코어 경합에 노출시키자, 두
+     코어가 거의 동시에 `state_`를 덮어써 한 코어가 IF=1이어야 할
+     자리에 IF=0을 복원해 다시는 타이머로 깨어나지 못하고 멈추는
+     것을 실제로 겪었다(SMP 스모크 테스트가 뽑는 fpu 데모 완료 로그
+     이후로 아무 로그도 더 안 나오는 정지로 드러났다 — 최대 90초를
+     기다려도 회복되지 않음을 확인). **고침**([irq_safe.hpp](../../libs/k/include/k/irq_safe.hpp)):
+     뮤텍스를 먼저 잡고(스핀 중엔 인터럽트를 끄지 않는다 — 아직
+     아무것도 소유하지 않아 이 코어가 그 사이 선점돼도 위험하지
+     않다), 그 다음에야 이 코어의 irq 상태를 `state_`에 저장한다 —
+     이 시점부터는 이 락을 배타적으로 소유한 코어만 그 필드를
+     건드리므로 더 이상 경합이 없다. `unlock()`도 대칭적으로 뮤텍스를
+     놓기 전에 `state_`를 지역변수로 복사해 둔다.
+  2. **SYSCALL 진입의 `g_syscall_kernel_rsp` 전역 하나 공유**
+     (M12/ADR-141이 만든 전역, syscall_entry.S가 raw asm으로 직접
+     읽는다 — 이 하나가 실제로 다중 코어에서 동시에 SYSCALL로 들어올
+     수 있게 된 첫 순간이다). **고침**: 코어마다 슬롯 하나
+     (`g_syscall_kernel_rsp[k_max_cpus]`)로 바꾸고, `install_syscall_entry()`
+     가 코어마다 `IA32_KERNEL_GS_BASE`에 자기 슬롯 주소를 심어 둔다 —
+     `syscall_entry`가 진입 즉시 `swapgs`로 GS_BASE를 그 주소로
+     바꾸고 `%gs:0`으로 자기 슬롯만 읽은 뒤 곧바로 `swapgs`로
+     되돌린다(이 함수의 나머지는 `%gs`를 전혀 쓰지 않는다 — 유저
+     GS_BASE는 이 프로젝트가 애초에 아무 용도로도 쓰지 않으므로,
+     이 두 swapgs가 "밖에서 보면 아무 변화 없음"을 보장한다).
+  3. **TSS/GDT는 실제 하드웨어 요구사항상 코어마다 하나씩 있어야
+     한다** — TR 레지스터가 가리키는 TSS를 두 코어가 동시에 같은
+     메모리로 공유할 수 없다(ring3→ring0 전환마다 CPU가 "지금 이
+     코어의" TR이 가리키는 TSS에서 RSP0를 직접 읽는다). M21~M33은
+     BSP 하나만 유저모드를 실행해 이 사실이 드러나지 않았다 — AP가
+     자기 몫의 `init_tss()`를 부른 적이 없어 TR이 리셋 기본값(무효)
+     그대로였고, AP에서 유저 스레드가 처음 인터럽트(특히 이제 실제로
+     켜지는 자기 LAPIC 타이머 틱, M33)로 강제 전환되는 순간 TSS를
+     못 찾아 그 코어가 죽었다(트리플 폴트로 보이는 조용한 정지 —
+     "AP가 첫 유저 스레드를 골랐다"는 로그 이후 그 코어 쪽에서 아무
+     로그도 더 안 나오는 증상으로 드러났다, 위 (1)을 고친 뒤에도
+     여전히 재현돼 별개의 원인임을 확인했다). **고침**([tss.cpp](../../kernel/arch/x86_64/tss.cpp)):
+     `g_tss`/`g_gdt`를 코어별 배열로 바꾼다 — 각 코어가 자기만의
+     사설 GDT+TSS를 갖고 자기 자신에게만 LTR한다(셀렉터 값 0x38은
+     모든 코어에서 동일하지만 서로 다른 물리 테이블을 가리킨다).
+     `sync_io_permission`/`sync_exception_stack`도 `arch_current_cpu_index()`
+     로 자기 코어의 슬롯만 건드리게 고쳤다.
+- **영향**:
+  - [ADR-136](kernel-memory.md)의 락 목록에 `run_queue::lock`/
+    `klog::g_log_lock`이 이제 **진짜로** 여러 코어에서 동시에 다툰다는
+    사실을 반영해야 한다 — 두 락 다 `irq_safe<spinlock>`이라 위 (1)의
+    수정으로 이미 정확하다(추가 조치 불필요), 다만 "이론상 경합
+    가능"이 "실제로 상시 경합"으로 바뀌었다는 사실 자체는 그 문서의
+    표에 각주로 남긴다.
+  - ADR-136이 이미 열어 둔 **`handle_table`은 자체 락이 없다**는 결여
+    는 이 ADR로 해소되지 않는다 — 지금 이 라운드가 실제로 exercise
+    하는 시나리오(busy/counter, IPC 없음)는 이 경로를 건드리지
+    않는다. 진짜 다중 코어 IPC 동시 접근(예: 한 코어의 sys_call이
+    다른 코어에서 지금 막 실행 중인 프로세스의 handle_table에
+    `create_proxy`로 쓰는 경로)은 여전히 미검증 상태로 남는다 —
+    M37(pthread, 진짜 스레드 병렬성)이나 이후 실사용에서 재검토
+    대상(OPEN 항목으로 별도 등록).
+  - `timer_source_interface`(ADR-191)는 여전히 만들지 않았다(ADR-208
+    §결정5의 판단을 그대로 유지) — AP가 이제 진짜로 자기 주기
+    타이머를 켜므로 다음 라운드(aarch64 이식 등 새 타이머 백엔드가
+    실제로 필요해지는 시점)에 다시 검토한다.
+
 ## ADR-186. 완전한 signal 전달: `pending_signals` 비트마스크 + return-to-user 트램폴린 주입
 
 - **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)

@@ -296,4 +296,25 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   발견해, 진짜 나눗셈으로 고쳐야 OPEN-62가 완전히 해소됨을
   확인했다. ADR-191이 예정한 `timer_source_interface` 추상화는
   소비자가 BSP 하나뿐인 이 시점엔 조기 추상화라 판단해 M34(진짜
-  멀티코어 선점)로 미뤘다. 다음은 M34다.
+  멀티코어 선점)로 미뤘다.
+  **M34(완료)**(결과는
+  [docs/done/real-libc-syscall-layer-m34.md](docs/done/real-libc-syscall-layer-m34.md),
+  [ADR-209](docs/design/kernel-scheduler.md) 참고, OPEN-63 해소):
+  진짜 멀티코어 선점형 스케줄러 — `g_current`를 코어별 배열로 바꾸고,
+  AP가 유저 밴드에서 직접 유저 스레드를 뽑아 실행하며(커널 밴드
+  데모는 BSP만, 멀티코어 검증 이력이 없어 의도적으로 제외), 각
+  코어가 자기 LAPIC 타이머로 독립 선점한다. 실행 중 BSP 하나만
+  유저모드를 실행하던 시절엔 절대 드러날 수 없었던 진짜 멀티코어
+  버그 3건을 QEMU로 연달아 재현·수정했다: (1) `libk::irq_safe<Lock>`
+  이 뮤텍스를 잡기 **전에** 공유 필드에 irq 상태를 저장하던 순서
+  버그(run_queue.lock이 처음 실제 경합에 들어가며 두 코어가 서로의
+  저장값을 덮어써 한 코어가 다시는 깨어나지 못함), (2) SYSCALL
+  진입이 읽는 커널 스택 포인터가 전역 하나뿐이었음(swapgs+
+  IA32_KERNEL_GS_BASE로 코어별 슬롯 분리), (3) TSS/GDT가 전역
+  하나뿐이었음(x86_64는 코어마다 별도 TSS가 필요 — AP에서 유저
+  스레드가 첫 타이머 인터럽트를 받는 순간 TSS를 못 찾아 트리플
+  폴트로 조용히 멈췄다, 코어별 사설 GDT+TSS로 분리해 고침).
+  `timer_source_interface`(ADR-191)는 여전히 미뤘고, `handle_table`
+  무동기화(ADR-136, M11부터 이미 지적)도 이번 라운드는 해소하지
+  않았다(OPEN-68 신규 등록 — busy/counter 데모가 IPC를 안 써서
+  이 경로를 안 건드림). 다음은 M35(musl locale)다.

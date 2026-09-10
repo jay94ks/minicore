@@ -1075,30 +1075,43 @@ kern::object::thread* setup_initrun_process() {
 // 전혀 없는(create_endpoint=false, inherited_handle_count=0) 완전히
 // 독립된 프로세스라 kern::sched::current()(지금은 아직 스케줄러 시작 전이라
 // nullptr)를 건드리지 않는 process_spawn() 경로만 탄다.
-void spawn_preempt_demo_processes() {
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — pair_count는
+// bring_up_aps() 이후의 online_cpu_count()다(kernel_main() 호출부
+// 참고) — 코어마다 적어도 하나씩 busy+counter 쌍이 있어야, AP도
+// run_queue의 유저 밴드에서 실제로 뽑아 실행할 대상이 생긴다(코어
+// 수보다 적으면 AP 중 일부는 그냥 할 일이 없어 하는 것과 똑같이
+// 보여 "AP에서 실제로 돈다"를 증명하지 못한다). 모두 preferred_node
+// =0에 몰리지만(process_spawn이 아직 노드를 고르지 않는다) 이
+// 커널은 노드가 아니라 **코어**가 run_queue에서 먼저 온 순서로
+// 집어가므로(pick_next_with_stealing) 무해하다 — 같은 노드 안의
+// 여러 코어가 하나의 큐를 자연스럽게 나눠 갖는다.
+void spawn_preempt_demo_processes(uint32_t pair_count) {
     uint64_t initrd_size = static_cast<uint64_t>(g_embedded_initrd_end - g_embedded_initrd_start);
     uint32_t unused_endpoint_handle = 0;
     uint32_t unused_thread_handle = 0;
 
     auto busy = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_busy");
-    kern::klog::printf("[preempt-demo] find preempt_busy ok=%u\n", busy.is_ok());
-    if (busy.is_ok()) {
-        auto err = kern::arch::x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
-                                               /*grant_trusted=*/false, /*create_endpoint=*/false,
-                                               nullptr, 0, unused_endpoint_handle,
-                                               unused_thread_handle, /*linux_abi_stack=*/false);
-        kern::klog::printf("[preempt-demo] spawn busy err=%u\n", static_cast<uint32_t>(err));
-    }
-
     auto counter = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_counter");
-    kern::klog::printf("[preempt-demo] find preempt_counter ok=%u\n", counter.is_ok());
-    if (counter.is_ok()) {
-        auto err = kern::arch::x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
-                                               0, /*grant_trusted=*/false,
-                                               /*create_endpoint=*/false, nullptr, 0,
-                                               unused_endpoint_handle, unused_thread_handle,
-                                               /*linux_abi_stack=*/false);
-        kern::klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
+    kern::klog::printf("[preempt-demo] find preempt_busy ok=%u preempt_counter ok=%u pair_count=%u\n",
+                 busy.is_ok(), counter.is_ok(), pair_count);
+
+    for (uint32_t i = 0; i < pair_count; ++i) {
+        if (busy.is_ok()) {
+            auto err = kern::arch::x86_64::process_spawn(
+                busy.value().data, busy.value().size, nullptr, 0,
+                /*grant_trusted=*/false, /*create_endpoint=*/false, nullptr, 0,
+                unused_endpoint_handle, unused_thread_handle, /*linux_abi_stack=*/false);
+            kern::klog::printf("[preempt-demo] spawn busy[%u] err=%u\n", i,
+                         static_cast<uint32_t>(err));
+        }
+        if (counter.is_ok()) {
+            auto err = kern::arch::x86_64::process_spawn(
+                counter.value().data, counter.value().size, nullptr, 0,
+                /*grant_trusted=*/false, /*create_endpoint=*/false, nullptr, 0,
+                unused_endpoint_handle, unused_thread_handle, /*linux_abi_stack=*/false);
+            kern::klog::printf("[preempt-demo] spawn counter[%u] err=%u\n", i,
+                         static_cast<uint32_t>(err));
+        }
     }
 
     // M28은 musl-hello를 여기(부트 초기, VFS가 존재하기 전)에 직접
@@ -1112,9 +1125,18 @@ void spawn_preempt_demo_processes() {
     // 참고.
 }
 
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — scheduler.cpp가 정본
+// 선언을 갖는 코어별 슬롯 배열(extern "C"라 심볼은 하나뿐이다,
+// smp.cpp의 같은 재선언과 같은 이유).
+extern "C" uint64_t g_syscall_kernel_rsp[64];
+
 [[noreturn]] void demo_sched() {
     kern::sched::init();
-    kern::arch::x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
+    // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
+    // M34부터는 BSP 자신의 g_syscall_kernel_rsp[] 슬롯(인덱스 0 —
+    // bring_up_aps()가 BSP를 항상 cpu_index=0으로 등록한다) 주소도
+    // IA32_KERNEL_GS_BASE에 함께 심는다(syscall_entry.S의 swapgs).
+    kern::arch::x86_64::install_syscall_entry(reinterpret_cast<uint64_t>(&g_syscall_kernel_rsp[0]));
     // M12(ADR-143) — usermode.S가 M8 시점에 이미 "TSS는 ring3→ring0
     // 방향에만 필요하다"고 정확히 지적해 뒀던 그 방향이, 유저 스레드의
     // 실제 예외(#PF 등)로 지금 처음 필요해졌다 — 첫 유저 스레드가 뜨기
@@ -1178,7 +1200,7 @@ void spawn_preempt_demo_processes() {
     }
     kern::klog::printf("[initrun] setup_initrun_process ok=%u\n", initrun != nullptr);
 
-    spawn_preempt_demo_processes();
+    spawn_preempt_demo_processes(kern::arch::x86_64::online_cpu_count());
 
     if (a != nullptr) {
         kern::sched::enqueue(*a);
@@ -1219,6 +1241,15 @@ void spawn_preempt_demo_processes() {
     if (initrun != nullptr) {
         kern::sched::enqueue(*initrun);
     }
+
+    // M34(real-libc-syscall-layer.md §M34, ADR-185) — 위 create_kernel_thread
+    // 호출들과 enqueue()가 전부 끝났다(run_queue가 이제 안전하다) —
+    // bring_up_aps()의 순차 기동 루프 안에서 이미 온라인되어
+    // wait_for_multicore_ready()로 대기 중인 AP들에게 "이제 유저
+    // 밴드에 참여해도 된다"는 신호를 보낸다. BSP 자신의 start()
+    // 호출보다 반드시 먼저다 — start()는 [[noreturn]]이라 그 뒤로는
+    // 이 함수가 실행될 기회 자체가 없다.
+    kern::sched::mark_multicore_ready();
 
     // 여기서부터는 절대 돌아오지 않는다 — 이후로는 위 스레드들 사이의
     // yield()/sys_call/sys_recv/sys_reply/sys_notify/sys_wait/SYSCALL로만

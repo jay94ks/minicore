@@ -28,6 +28,7 @@ constexpr uint32_t k_msr_efer = 0xC0000080;
 constexpr uint32_t k_msr_star = 0xC0000081;
 constexpr uint32_t k_msr_lstar = 0xC0000082;
 constexpr uint32_t k_msr_fmask = 0xC0000084;
+constexpr uint32_t k_msr_kernel_gs_base = 0xC0000102;  // M34(ADR-185) — swapgs 대상.
 constexpr uint64_t k_efer_sce = 1ull << 0;
 
 uint64_t rdmsr(uint32_t msr) {
@@ -49,8 +50,16 @@ extern "C" void syscall_entry();
 
 namespace kern::arch::x86_64 {
 
-void install_syscall_entry() {
+void install_syscall_entry(uint64_t kernel_gs_base_slot) {
     wrmsr(k_msr_efer, rdmsr(k_msr_efer) | k_efer_sce);
+
+    // M34(real-libc-syscall-layer.md §M34, ADR-185) — 이 코어 전용
+    // g_syscall_kernel_rsp[] 슬롯의 주소를 심어 둔다. syscall_entry
+    // 진입 시 swapgs가 이 값을 GS_BASE로 끌어오므로, 그 뒤 `%gs:0`은
+    // 항상 "지금 이 코어"의 슬롯을 정확히 가리킨다 — 여러 코어가
+    // 동시에 SYSCALL로 들어와도 서로의 슬롯을 절대 건드리지 않는다
+    // (M21~M33까지는 코어가 BSP 하나뿐이라 이 구분이 필요 없었다).
+    wrmsr(k_msr_kernel_gs_base, kernel_gs_base_slot);
 
     // STAR[63:48]/[47:32] — boot.S의 GDT 배치(gdt_selectors.hpp)에 맞춘
     // 값. SYSCALL: CS=STAR[47:32](k_sel_code64=0x18), SS=+8(0x20=커널

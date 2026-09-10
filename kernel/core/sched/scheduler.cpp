@@ -5,6 +5,7 @@
 #include <new>
 
 #include <klog.hpp>
+#include <k/atomic.hpp>
 #include <k/irq_safe.hpp>  // scoped_lock
 #include <k/panic.hpp>
 
@@ -37,11 +38,25 @@ extern "C" [[noreturn]] void arch_user_thread_trampoline();
 // 없다(ADR-002 HAL 경계) — arch 계층이 제공한다(idle.S).
 extern "C" [[noreturn]] void arch_idle_halt();
 
+// M34(real-libc-syscall-layer.md §M34) — arch_idle_halt()와 달리
+// **한 번 돌아온다**(단발 HLT — 아무 인터럽트든 오면 그 즉시 리턴).
+// start_ap()/wait_for_multicore_ready()가 "아직 할 일이 없다"를
+// 표현하는 데 쓴다 — 자기 LAPIC 타이머(M33)가 주기적으로 깨워 주므로
+// busy-spin 없이 재시도할 수 있다.
+extern "C" void arch_wait_for_interrupt();
+
 // M11(ADR-036/053) — "지금 이 코드를 실행 중인 코어가 속한 NUMA 노드
 // 번호". arch 계층(x86_64: smp.cpp)이 LAPIC ID를 읽어 SRAT가 준 표를
 // 찾아본다 — kernel/core/sched는 APIC/LAPIC의 존재를 몰라도 된다
 // (ADR-002 HAL 경계, arch_context_switch와 같은 관례).
 extern "C" uint32_t arch_current_node_id();
+
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — "지금 이 코드를
+// 실행 중인 코어의 0-기반 인덱스"(BSP=0, 이후 AP가 온라인된 순서대로
+// 1,2,3,...). g_current[]/g_syscall_kernel_rsp[]를 코어별로 정확히
+// 찾아가는 데 쓴다 — arch_current_node_id()와 완전히 같은 HAL 경계
+// 이유로 arch 계층(x86_64: smp.cpp)이 제공한다.
+extern "C" uint32_t arch_current_cpu_index();
 
 // M11b(ADR-133 §결정3) — 영구 종료하는 스레드가 어느 코어의 FPU
 // 소유자였다면 그 기록을 지운다. kernel/core/sched는 "FPU 소유자"라는
@@ -77,12 +92,20 @@ namespace {
 
 run_queue* g_run_queues = nullptr;
 uint32_t g_node_count = 0;
-kern::object::thread* g_current = nullptr;
 
-// start() 호출 시점의 kernel_main 실행 흐름을 "버리는" 곳 — 다시 읽지
-// 않는다. arch_context_switch는 첫 인자로 반드시 유효한 쓰기 위치를
-// 요구하므로 자리만 마련해 둔다.
-uint64_t g_bootstrap_discard_rsp = 0;
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — 코어마다 하나
+// (page_allocator.hpp::k_max_cpus 상한, M10부터 이미 쓰던 골격
+// 상한을 재사용). M21~M33까지는 BSP 하나뿐이라 단일 변수로 충분했다.
+kern::object::thread* g_current[kern::mm::k_max_cpus] = {};
+
+// start()/start_ap() 호출 시점의 (kernel_main 또는 ap_main) 실행
+// 흐름을 "버리는" 곳 — 다시 읽지 않는다. arch_context_switch는 첫
+// 인자로 반드시 유효한 쓰기 위치를 요구하므로 자리만 마련해 둔다.
+// M34 전에는 전역 하나였지만, 이제 BSP/AP가 동시에 각자의 start*()를
+// 부를 수 있어(비록 서로 다른 실제 콜스택이라 값 자체가 겹칠 일은
+// 없지만) 코어별로 분리해 둔다 — 방어적 조치, exit()의 discard_rsp
+// (이미 로컬 변수)와 같은 정신.
+uint64_t g_bootstrap_discard_rsp[kern::mm::k_max_cpus] = {};
 
 // M8 — next가 유저 스레드(owner_space가 있음)면 그 주소공간의 PML4로
 // CR3를 전환해야 한다. 커널 스레드는 owner_space == nullptr이라 항상
@@ -92,15 +115,17 @@ uint64_t next_pml4_phys(const kern::object::thread& next) {
     return next.owner_space != nullptr ? next.owner_space->page_table_root : 0;
 }
 
-// M12(ADR-141) — syscall_entry.S가 쓰는 전역 스크래치를, 지금 스위치해
-// 들어가려는 스레드 전용 값으로 맞춰 둔다. 커널 스레드는 애초에 SYSCALL로
-// 들어올 일이 없으니 건드리지 않는다(next_pml4_phys의 "커널 스레드는
-// 0" 패턴과 같은 정신).
-extern "C" uint64_t g_syscall_kernel_rsp;
+// M12(ADR-141)가 도입한 전역 스크래치. M34(ADR-185)부터 코어마다
+// 하나씩이다(syscall_entry.S가 swapgs+`%gs:0`으로 "지금 이 코어"의
+// 슬롯만 정확히 찾아간다 — install_syscall_entry()가 코어마다
+// IA32_KERNEL_GS_BASE에 자기 슬롯 주소를 심어 두는 덕분). 커널
+// 스레드는 애초에 SYSCALL로 들어올 일이 없으니 건드리지 않는다
+// (next_pml4_phys의 "커널 스레드는 0" 패턴과 같은 정신).
+extern "C" uint64_t g_syscall_kernel_rsp[kern::mm::k_max_cpus];
 
 void sync_syscall_kernel_rsp(const kern::object::thread& next) {
     if (next.owner_space != nullptr) {
-        g_syscall_kernel_rsp = next.syscall_kernel_rsp;
+        g_syscall_kernel_rsp[arch_current_cpu_index()] = next.syscall_kernel_rsp;
     }
 }
 
@@ -181,13 +206,23 @@ kern::object::thread* try_pick_band(run_queue& rq, bool kernel_band) {
 // ADR-014("커널 밴드는 항상 유저 밴드보다 우선")를 노드 경계에도
 // 그대로 적용한다. 그다음에야 (3) 내 노드의 유저 밴드 (4) 다른
 // 노드의 유저 밴드(스틸).
+//
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — 커널 밴드는 BSP
+// (cpu_index==0)만 본다. AP는 이 run_queue의 **유저 밴드**에만
+// 참여한다(ADR-185 §결정2가 명시한 대상) — 지금까지(M21~M33) BSP
+// 단일 코어만 실행한다는 전제로 짜인 커널 밴드 데모 스레드들
+// (thread_a/b, thread_fpu_*, IPC 데모 등)은 멀티코어 동시 실행을
+// 한 번도 검증한 적이 없어, AP에 열어 주는 것은 이 라운드의 목표
+// (유저 스레드가 AP에서 실제로 돈다)와 무관한 위험을 새로 만든다.
 kern::object::thread* pick_next_with_stealing() {
     uint32_t my_node = arch_current_node_id() % g_node_count;
 
-    for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
-        uint32_t node = (my_node + attempt) % g_node_count;
-        if (kern::object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/true)) {
-            return t;
+    if (arch_current_cpu_index() == 0) {
+        for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
+            uint32_t node = (my_node + attempt) % g_node_count;
+            if (kern::object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/true)) {
+                return t;
+            }
         }
     }
     for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
@@ -468,24 +503,74 @@ void start() {
     // M1~M8은 노드 1개(ADR-035) — 그때는 항상 노드 0이었다. M11부터는
     // 실제로 여러 노드가 있을 수 있어 pick_next_with_stealing()이
     // "이 코어의 노드"를 먼저 보고, 비어 있으면 다른 노드를 훔쳐본다
-    // (ADR-053).
+    // (ADR-053). BSP만 부른다(kernel_main.cpp::demo_sched() 끝) — AP는
+    // start_ap()를 쓴다(아래).
+    uint32_t my_cpu = arch_current_cpu_index();
     kern::object::thread* next = pick_next_alive();
     if (next == nullptr) {
         LIBK_PANIC("kern::sched::start: no runnable thread");
     }
 
-    g_current = next;
+    g_current[my_cpu] = next;
     reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
     arch_sync_exception_stack(*next);
     arch_sync_fs_base(*next);
-    arch_context_switch(&g_bootstrap_discard_rsp, next->context_rsp, next_pml4_phys(*next));
+    arch_context_switch(&g_bootstrap_discard_rsp[my_cpu], next->context_rsp, next_pml4_phys(*next));
+    __builtin_unreachable();
+}
+
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — BSP의 단일 스레드
+// 부트스트랩(kern::sched::init()+demo_sched()의 create_kernel_thread
+// 호출들)이 전부 끝났다는 신호. 그 전에는 g_run_queues 자체가
+// 초기화 전이거나(init() 전) 아직 아무 스레드도 없어(AP가 그 사이에
+// run_queue를 만지면 위험하다) — mark_multicore_ready()가 이 신호를
+// 켠 뒤에야 AP가 안전하게 run_queue에 참여할 수 있다.
+atomic<uint32_t> g_multicore_ready{0};
+
+void mark_multicore_ready() { g_multicore_ready.store_release(1); }
+
+void wait_for_multicore_ready() {
+    while (g_multicore_ready.load_acquire() == 0) {
+        arch_wait_for_interrupt();
+    }
+}
+
+// M34 — AP 전용 진입점. start()와 달리 "아직 아무 유저 스레드도 없을
+// 수 있다"(AP가 bring_up_aps()의 순차 기동 루프 안에서 이미 온라인
+// 신호를 보낸 뒤, BSP가 자기 부트스트랩을 마치고 실제로 유저 스레드
+// (initrun 등)를 만들어 enqueue하기까지는 시간이 걸린다)는 것을
+// 전제해, 없으면 PANIC이 아니라 인터럽트(자기 LAPIC 타이머 틱 포함)
+// 로 깰 때마다 다시 시도한다. pick_next_alive()가 내부적으로
+// pick_next_with_stealing()을 거치므로 이 코어가 cpu_index==0이
+// 아닌 한(AP는 항상 그렇다) 유저 밴드만 본다(위 pick_next_with_stealing
+// 주석 참고).
+[[noreturn]] void start_ap() {
+    wait_for_multicore_ready();
+
+    uint32_t my_cpu = arch_current_cpu_index();
+    kern::object::thread* next = pick_next_alive();
+    while (next == nullptr) {
+        arch_wait_for_interrupt();
+        next = pick_next_alive();
+    }
+
+    kern::klog::printf("[sched] cpu%u start_ap picked first user thread\n", my_cpu);
+
+    g_current[my_cpu] = next;
+    reset_preempt_budget(*next);
+    sync_syscall_kernel_rsp(*next);
+    arch_sync_io_permission(*next);
+    arch_sync_exception_stack(*next);
+    arch_sync_fs_base(*next);
+    arch_context_switch(&g_bootstrap_discard_rsp[my_cpu], next->context_rsp, next_pml4_phys(*next));
     __builtin_unreachable();
 }
 
 void yield() {
-    kern::object::thread* prev = g_current;
+    uint32_t my_cpu = arch_current_cpu_index();
+    kern::object::thread* prev = g_current[my_cpu];
 
     // prev를 먼저 다시 enqueue한 뒤에 고른다(이전에는 순서가
     // 반대였다) — 그래야 "커널 밴드에 나 말고 아무도 없다"는 상황에서
@@ -527,7 +612,7 @@ void yield() {
         return;
     }
 
-    g_current = next;
+    g_current[my_cpu] = next;
     reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
@@ -539,7 +624,8 @@ void yield() {
 }
 
 void block() {
-    kern::object::thread* prev = g_current;
+    uint32_t my_cpu = arch_current_cpu_index();
+    kern::object::thread* prev = g_current[my_cpu];
 
     kern::object::thread* next = pick_next_alive();
     if (next == nullptr) {
@@ -550,7 +636,7 @@ void block() {
     // sys_call/sys_recv)가 prev를 이미 다른 대기열(endpoint의
     // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
     // kern::sched::enqueue()할 책임을 진다.
-    g_current = next;
+    g_current[my_cpu] = next;
     reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
     arch_sync_io_permission(*next);
@@ -560,13 +646,15 @@ void block() {
 }
 
 [[noreturn]] void exit() {
-    // prev(이전 g_current) 자체의 context_rsp는 이 함수 안에서 다시
-    // 쓸 일이 없다 — block()과 달리 아무도 저장/복원하지 않는다
+    uint32_t my_cpu = arch_current_cpu_index();
+
+    // prev(이전 g_current[my_cpu]) 자체의 context_rsp는 이 함수 안에서
+    // 다시 쓸 일이 없다 — block()과 달리 아무도 저장/복원하지 않는다
     // (scheduler.hpp exit() 주석: 다시 스케줄되지 않음이 핵심 보장).
     // 다만 포인터 값 자체는 arch_fpu_thread_exiting()에 넘겨야 한다
     // (M11b, ADR-133 §결정3) — 이 스레드를 아직 "FPU 소유자"로 기억하고
     // 있는 코어가 있다면 끊어진 스레드를 계속 가리키지 않도록 지운다.
-    kern::object::thread* prev = g_current;
+    kern::object::thread* prev = g_current[my_cpu];
     arch_fpu_thread_exiting(prev);
 
     kern::object::thread* next = pick_next_alive();
@@ -577,7 +665,7 @@ void block() {
         arch_idle_halt();
     }
 
-    g_current = next;
+    g_current[my_cpu] = next;
     reset_preempt_budget(*next);
     // prev를 다시 enqueue하지 않는다 — block()과 같은 메커니즘이지만,
     // block()과 달리 그 무엇도 나중에 prev를 깨우지 않는다(어떤 대기열
@@ -591,17 +679,20 @@ void block() {
     __builtin_unreachable();
 }
 
-kern::object::thread* current() { return g_current; }
+kern::object::thread* current() { return g_current[arch_current_cpu_index()]; }
 
 void request_kill(kern::object::thread& t) { t.kill_requested = true; }
 
 // M21(ADR-176) — idt.cpp가 EOI를 먼저 보낸 뒤 부른다(scheduler.hpp의
-// on_timer_tick() 선언 주석 참고). g_current가 nullptr일 수 있는
-// 유일한 시점은 kern::sched::start()가 아직 호출되기 전인데, 그때는 IDT가
-// 걸려 있어도 LAPIC 타이머 자체를 아직 켜지 않았으므로(kernel_main.cpp
-// 호출 순서) 실제로는 일어나지 않는다 — 그래도 방어적으로 확인한다.
+// on_timer_tick() 선언 주석 참고). g_current[this_cpu]가 nullptr일 수
+// 있는 시점은 (a) BSP의 kern::sched::start()가 아직 호출되기 전(IDT는
+// 걸려 있어도 LAPIC 타이머 자체를 아직 켜지 않았으므로 실제로는
+// 일어나지 않는다) — (b) M34부터는 **AP가 start_ap()로 아직 첫
+// 유저 스레드를 고르기 전**에도 자기 LAPIC 타이머는 이미 돌고 있어
+// 실제로 일어난다(wait_for_multicore_ready()/재시도 루프가 hlt로
+// 깨는 바로 그 틱). 두 경우 다 방어적으로 그냥 무시한다.
 void on_timer_tick() {
-    kern::object::thread* cur = g_current;
+    kern::object::thread* cur = g_current[arch_current_cpu_index()];
     if (cur == nullptr) {
         return;
     }

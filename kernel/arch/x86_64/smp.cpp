@@ -4,6 +4,8 @@
 #include "fpu.hpp"
 #include "idt.hpp"
 #include "lapic.hpp"
+#include "syscall.hpp"
+#include "tss.hpp"
 
 #include <cstdint>
 
@@ -26,10 +28,18 @@ extern const uint8_t ap_trampoline_end[];
 extern "C" uint64_t g_ap_boot_stack_top = 0;
 extern "C" uint32_t g_ap_boot_cpu_index = 0;
 
-// idle.S(M8, ADR-124) — AP도 온라인 신호를 보낸 뒤 이 코어를 멈춘다.
-// M10은 AP에게 스케줄러/타이머를 주지 않으므로(계획 §범위 밖) BSP의
-// arch_idle_halt()와 똑같이 hlt 루프로 충분하다.
+// idle.S(M8, ADR-124) — M10~M33까지는 AP가 온라인 신호를 보낸 뒤
+// 이 코어를 그냥 멈췄다(스케줄러/타이머를 주지 않았다). M34부터는
+// kern::sched::start_ap()로 대체된다(아래 ap_main() 끝) — 이 선언은
+// 더 이상 여기서 쓰지 않지만, 다른 정지 경로가 남아 있을 가능성에
+// 대비해 지우지 않는다.
 extern "C" [[noreturn]] void arch_idle_halt();
+
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — scheduler.cpp의
+// g_syscall_kernel_rsp[]를 여기서도 참조한다(install_syscall_entry()
+// 호출에 이 코어의 슬롯 주소를 넘겨야 한다). 정본 선언은
+// scheduler.cpp에 있다 — extern "C"라 심볼 자체는 하나뿐이다.
+extern "C" uint64_t g_syscall_kernel_rsp[64];
 
 namespace kern::arch::x86_64 {
 
@@ -62,6 +72,12 @@ constexpr uint64_t k_sipi_timeout_iterations = 50'000'000ull;
 // 아직 안 불렸으면 전부 0(토폴로지 정보 없음 폴백).
 uint8_t g_apic_id_to_node[256] = {};
 
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — apic_id로 색인한
+// "0-기반 코어 인덱스"(BSP=0, AP는 온라인된 순서대로 1,2,3,...) —
+// g_apic_id_to_node와 완전히 같은 정신(256=APIC ID 전체 공간). BSP
+// 자신을 포함해 bring_up_aps()가 매 코어를 온라인시킬 때마다 채운다.
+uint8_t g_apic_id_to_cpu_index[256] = {};
+
 }  // namespace
 
 void bring_up_aps(const madt_result& madt) {
@@ -69,6 +85,7 @@ void bring_up_aps(const madt_result& madt) {
     g_cpus[0].apic_id = bsp_apic_id;
     g_cpus[0].online = true;
     g_cpu_count = 1;
+    g_apic_id_to_cpu_index[bsp_apic_id] = 0;
 
     // 트램폴린 바이트는 매 부팅마다 항상 같은 내용이라 한 번만 복사한다
     // — 모든 AP가 같은 코드를 실행한다.
@@ -94,6 +111,10 @@ void bring_up_aps(const madt_result& madt) {
         uint32_t cpu_index = g_cpu_count;
         g_ap_boot_stack_top = stack_top;
         g_ap_boot_cpu_index = cpu_index;
+        // M34 — SIPI를 보내기 **전에** 채운다: 이 AP가 실행을 시작하는
+        // 즉시(ap_main()) arch_current_cpu_index()를 부를 수 있어야
+        // 한다.
+        g_apic_id_to_cpu_index[apic_id] = static_cast<uint8_t>(cpu_index);
 
         uint32_t before = g_online_count.load_acquire();
         lapic_send_init_sipi_sipi(apic_id, k_ap_trampoline_phys);
@@ -176,6 +197,11 @@ extern "C" uint32_t arch_current_node_id() {
     return kern::arch::x86_64::g_apic_id_to_node[apic_id];
 }
 
+extern "C" uint32_t arch_current_cpu_index() {
+    uint32_t apic_id = kern::arch::x86_64::lapic_id();
+    return kern::arch::x86_64::g_apic_id_to_cpu_index[apic_id];
+}
+
 extern "C" void ap_main(uint32_t cpu_index) {
     // IDTR은 코어별 상태다 — BSP의 init_idt()가 채운 g_idt는 이미
     // 전역(공유 메모리)이지만, lidt 자체는 이 코어에서 다시 실행해야
@@ -195,6 +221,17 @@ extern "C" void ap_main(uint32_t cpu_index) {
     // 있어 미리 갖춰 둔다.
     kern::arch::x86_64::init_fpu();
 
+    // M34(real-libc-syscall-layer.md §M34, ADR-185) 실행 중 발견한 진짜
+    // 버그: TSS는 실제 하드웨어 요구사항상 코어마다 하나씩 있어야
+    // 한다(tss.cpp::init_tss_for_this_core() 주석 참고) — 이 호출이
+    // 빠져 있으면 이 AP의 TR이 계속 무효 상태로 남아, 이 코어가 유저
+    // 모드로 진입한 뒤 첫 인터럽트/예외(특히 M33이 이제 실제로 켜는
+    // 자기 LAPIC 타이머 틱)에서 RSP0를 찾지 못해 죽는다(트리플 폴트로
+    // 보이는 조용한 정지 — 실제로 QEMU에서 겪었다). init_idt()/
+    // init_fpu()와 같은 이유로 멱등이라 여러 코어가 각자 반복 호출해도
+    // 안전하다(각자 자기 슬롯만 건드린다).
+    kern::arch::x86_64::init_tss();
+
     kern::arch::x86_64::lapic_enable_this_core();
 
     // M33(real-libc-syscall-layer.md §M33, ADR-184 §결정1) — 이 AP도
@@ -202,17 +239,22 @@ extern "C" void ap_main(uint32_t cpu_index) {
     // find_and_parse_hpet/hpet_init을 부팅 극초반 한 번만 마쳐 뒀고
     // (kernel_main.cpp::demo_acpi_lapic()) HPET MMIO는 코어 공용이라
     // 이 AP는 hpet_available()로 그 결정을 그대로 물려받는다 — 다시
-    // 초기화할 필요가 없다. 계산된 initial_count는 로그로만 남긴다 —
-    // M21(ADR-176)이 이미 정한 대로 AP는 아직 자기 주기 타이머를
-    // 실제로 켜지 않는다(lapic_start_periodic_timer() 미호출, 아래
-    // 주석) — 그건 AP가 run_queue에 참여하는 M34(ADR-185)의 몫이다.
+    // 초기화할 필요가 없다.
     uint32_t ap_calibrated_initial_count =
         kern::arch::x86_64::calibrate_lapic_timer(kern::sched::k_timer_tick_period_us);
 
-    // M21(ADR-176) — 일부러 lapic_start_periodic_timer()를 여기서
-    // 부르지 않는다(lapic.hpp 그 함수 주석 참고) — AP는 run_queue에
-    // 참여하지 않아, 이 코어에서 타이머가 울려도 kern::sched::on_timer_tick()
-    // 이 건드릴 g_current는 BSP의 것뿐이다.
+    // M34(real-libc-syscall-layer.md §M34, ADR-185) — 이제 이 AP도
+    // (1) 자기 SYSCALL MSR을 설정하고(install_syscall_entry() — 코어별
+    // g_syscall_kernel_rsp[] 슬롯 주소를 IA32_KERNEL_GS_BASE에 심는다,
+    // 안 하면 이 코어에서 SYSCALL이 LSTAR=0으로 즉시 죽는다) (2) 자기
+    // 주기 타이머를 실제로 켠다(M21~M33은 "AP는 아직 run_queue에
+    // 참여하지 않는다"며 이 호출을 일부러 생략했었다 — 이제부터는
+    // 참여한다).
+    kern::arch::x86_64::install_syscall_entry(
+        reinterpret_cast<uint64_t>(&g_syscall_kernel_rsp[cpu_index]));
+    kern::arch::x86_64::lapic_start_periodic_timer(kern::arch::x86_64::k_vector_timer,
+                                                    ap_calibrated_initial_count);
+
     uint32_t apic_id = kern::arch::x86_64::lapic_id();
     kern::klog::printf("[smp] AP apic_id=%u online cpu_index=%u calibrated_initial_count=%u\n",
                  apic_id, cpu_index, ap_calibrated_initial_count);
@@ -221,9 +263,10 @@ extern "C" void ap_main(uint32_t cpu_index) {
     // ap_trampoline.S가 진입 내내 인터럽트를 켜지 않았다(cli 상태 그대로
     // 여기까지 왔다) — IF=0인 채로 hlt하면 나중에 TLB shootdown IPI가
     // 와도 이 코어가 절대 깨어나지 못한다(고정 벡터 인터럽트는 IF=1일
-    // 때만 전달된다, NMI/SMI/INIT과 다름). arch_idle_halt() 자체는
-    // BSP(M8, kern::sched::exit())도 공유하는 arch 훅이라 여기서 건드리지
-    // 않고, AP 전용으로 호출 직전에 켠다.
+    // 때만 전달된다, NMI/SMI/INIT과 다름). 이제 이 AP 자신의 주기
+    // 타이머도 이미 돌고 있으므로, kern::sched::start_ap()가
+    // wait_for_multicore_ready()로 대기하는 동안 이 sti가 그 hlt를
+    // 실제로 깨울 수 있다.
     asm volatile("sti");
-    arch_idle_halt();
+    kern::sched::start_ap();
 }

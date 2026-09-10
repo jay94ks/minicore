@@ -13,3 +13,17 @@ arch_idle_halt:
 1:
     hlt
     jmp 1b
+
+/*
+ * arch_wait_for_interrupt() — M34(real-libc-syscall-layer.md §M34).
+ * arch_idle_halt()와 달리 [[noreturn]]이 아니다 — 딱 한 번 HLT하고
+ * (어떤 인터럽트든 오면 그 즉시) 호출자에게 돌아온다. kern::sched::
+ * start_ap()/wait_for_multicore_ready()가 "아직 실행할 유저 스레드가
+ * 없다"를 표현하는 데 쓴다 — 이 코어 자신의 LAPIC 타이머(M33)가
+ * 주기적으로 이 HLT를 깨워 주므로 busy-spin이 아니다.
+ */
+.global arch_wait_for_interrupt
+.type arch_wait_for_interrupt, @function
+arch_wait_for_interrupt:
+    hlt
+    ret

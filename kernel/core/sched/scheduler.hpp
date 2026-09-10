@@ -105,8 +105,29 @@ void enqueue(kern::object::thread& t);
 
 // run_queue에서 스레드를 하나 뽑아 그리로 실행을 넘긴다. 이 함수
 // 호출자에게는 절대 돌아오지 않는다 — 그 뒤로는 스케줄된 스레드들
-// 사이의 yield()로만 제어가 옮겨간다.
+// 사이의 yield()로만 제어가 옮겨간다. BSP 전용(kernel_main.cpp::
+// demo_sched() 끝) — AP는 아래 start_ap()를 쓴다.
 [[noreturn]] void start();
+
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — BSP가 자기 단일
+// 스레드 부트스트랩(init()+create_kernel_thread() 호출들)을 전부
+// 마치고 자신의 start()를 부르기 직전에 딱 한 번 호출한다. 그 전에는
+// run_queue가 아직 안전하지 않아(초기화 중이거나 스레드가 하나도
+// 없어) AP가 참여하면 안 된다.
+void mark_multicore_ready();
+
+// AP가 자기 하드웨어 부트스트랩(lapic_enable_this_core/calibrate_lapic_timer/
+// install_syscall_entry 등, smp.cpp::ap_main())을 마친 뒤 부른다 —
+// mark_multicore_ready()가 불릴 때까지 자기 LAPIC 타이머 인터럽트로
+// 깨는 hlt를 반복한다(busy-spin 아님).
+void wait_for_multicore_ready();
+
+// AP 전용 진입점 — start()와 같은 역할이지만 (a) 먼저
+// wait_for_multicore_ready()로 대기하고, (b) 유저 밴드에만 참여하며
+// (커널 밴드 데모 스레드는 멀티코어 동시 실행을 검증한 적이 없다),
+// (c) 아직 유저 스레드가 하나도 없으면(BSP가 만들기 전) PANIC이
+// 아니라 인터럽트로 깰 때마다 재시도한다.
+[[noreturn]] void start_ap();
 
 // 현재 스레드를 run_queue 뒤에 다시 넣고(§3 라운드로빈) 다음 스레드로
 // 전환한다. 전환할 다른 스레드가 없으면(자기 자신만 runnable) 그냥

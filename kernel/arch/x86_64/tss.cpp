@@ -50,22 +50,40 @@ struct __attribute__((packed)) tss_with_iopb {
     uint8_t iopb[8193];
 };
 
-tss_with_iopb g_tss;
+// M34(real-libc-syscall-layer.md §M34, ADR-185) 실행 중 발견한 진짜
+// 버그: TSS는 실제 x86_64 하드웨어 요구사항상 **코어마다 하나씩**
+// 있어야 한다(TR 레지스터가 가리키는 TSS를 두 코어가 동시에 같은
+// 메모리로 공유할 수 없다 — ring3→ring0 전환마다 CPU가 "지금 이
+// 코어의" TR이 가리키는 TSS에서 RSP0를 직접 읽는다). M21~M33까지는
+// BSP 하나만 유저모드를 실행해 이 사실이 드러나지 않았다 — AP가
+// 자기 몫의 init_tss()를 부른 적이 없어 TR이 리셋 기본값(무효)
+// 그대로였고, AP에서 유저 스레드를 처음 예외/인터럽트(특히 M33이
+// 이제 실제로 켜는 자기 LAPIC 타이머 틱)로 강제 전환시키는 순간
+// TSS를 못 찾아 그 코어가 죽었다(트리플 폴트로 보이는 조용한 정지 —
+// "[sched] cpu%u start_ap picked first user thread" 이후 그 코어가
+// 도는 유저 스레드 쪽에서 아무 로그도 더 안 나오는 증상으로 실제로
+// 드러났다). 고침: g_tss/g_gdt를 코어별 배열로 바꾼다 — 각 코어가
+// **자기만의** GDT+TSS를 갖고 자기 자신에게만 LTR한다(0x38 셀렉터
+// 값은 모든 코어에서 똑같지만, 서로 다른 사설 테이블을 가리킨다).
+constexpr uint32_t k_max_cpus = kern::mm::k_max_cpus;
+
+tss_with_iopb g_tss[k_max_cpus];
 
 // M14(ADR-154) — 지금 IOPB에 실제로 프로그램된 범위(스레드가 아니라
 // "IOPB의 현재 상태"를 기억한다 — sync_io_permission이 diff를 계산할
 // 유일한 기준). 부팅 시점(아직 아무 스레드도 활성화하지 않음)에는
 // 둘 다 0 — init_tss()가 이미 전체를 0xFF(거부)로 채워 두므로 "범위
-// 없음" 상태와 정확히 일치한다.
-uint16_t g_current_io_base = 0;
-uint16_t g_current_io_count = 0;
+// 없음" 상태와 정확히 일치한다. M34부터 코어별로 독립 추적한다
+// (g_tss와 같은 이유).
+uint16_t g_current_io_base[k_max_cpus] = {};
+uint16_t g_current_io_count[k_max_cpus] = {};
 
-void set_io_range(uint16_t io_base, uint16_t count, bool allow) {
+void set_io_range(uint32_t cpu_index, uint16_t io_base, uint16_t count, bool allow) {
     for (uint32_t port = io_base; port < static_cast<uint32_t>(io_base) + count; ++port) {
         if (allow) {
-            g_tss.iopb[port / 8] &= static_cast<uint8_t>(~(1u << (port % 8)));
+            g_tss[cpu_index].iopb[port / 8] &= static_cast<uint8_t>(~(1u << (port % 8)));
         } else {
-            g_tss.iopb[port / 8] |= static_cast<uint8_t>(1u << (port % 8));
+            g_tss[cpu_index].iopb[port / 8] |= static_cast<uint8_t>(1u << (port % 8));
         }
     }
 }
@@ -78,7 +96,13 @@ void set_io_range(uint16_t io_base, uint16_t count, bool allow) {
 // 유효하다(어차피 CPU는 셀렉터 재로드 시점에만 GDT를 다시 읽으므로,
 // 지금 당장 셀렉터 레지스터들을 재로드할 필요조차 없다 — TSS만
 // 새로 LTR한다).
-uint64_t g_gdt[9] = {
+// M34 — 코어마다 자기만의 사설 GDT 사본(같은 고정 7개 항목 + 자기
+// TSS 디스크립터). 셀렉터 값(0x38 등)은 모든 코어에서 동일하다 —
+// 서로 다른 물리 테이블을 가리킬 뿐이다.
+using gdt_array = uint64_t[9];
+gdt_array g_gdt[k_max_cpus];
+
+constexpr gdt_array k_gdt_template = {
     0x0000000000000000ull,  // 0x00: null
     0x00CF9A000000FFFFull,  // 0x08: code32
     0x00CF92000000FFFFull,  // 0x10: data32
@@ -108,7 +132,14 @@ constexpr uint32_t k_exception_stack_order = 2;  // 16KiB
 
 }  // namespace
 
-void init_tss() {
+// M34(real-libc-syscall-layer.md §M34, ADR-185) — arch_current_cpu_index()
+// (smp.cpp)와 완전히 같은 HAL 경계 이유로 여기서도 최소 선언만 가져와
+// 쓴다(scheduler.cpp의 같은 extern "C" 선언과 동일한 패턴).
+extern "C" uint32_t arch_current_cpu_index();
+
+namespace {
+
+void init_tss_for_this_core(uint32_t cpu_index) {
     auto stack_page = kern::mm::alloc_pages(k_exception_stack_order, 0);
     if (!stack_page.is_ok()) {
         LIBK_PANIC("init_tss: 예외 전용 스택(RSP0) 확보 실패");
@@ -116,11 +147,12 @@ void init_tss() {
     auto* stack_base = static_cast<uint8_t*>(kern::mm::phys_to_virt(stack_page.value()));
     uint64_t stack_top = reinterpret_cast<uint64_t>(stack_base) +
                           (static_cast<uint64_t>(kern::mm::k_page_size) << k_exception_stack_order);
-    g_tss.tss.rsp0 = stack_top;
-    g_tss.tss.iomap_base = sizeof(tss_struct);  // IOPB가 TSS 바로 뒤에서 시작.
-    __builtin_memset(g_tss.iopb, 0xFF, sizeof(g_tss.iopb));  // 기본: 모든 포트 접근 거부.
+    tss_with_iopb& tss = g_tss[cpu_index];
+    tss.tss.rsp0 = stack_top;
+    tss.tss.iomap_base = sizeof(tss_struct);  // IOPB가 TSS 바로 뒤에서 시작.
+    __builtin_memset(tss.iopb, 0xFF, sizeof(tss.iopb));  // 기본: 모든 포트 접근 거부.
 
-    uint64_t tss_base = reinterpret_cast<uint64_t>(&g_tss);
+    uint64_t tss_base = reinterpret_cast<uint64_t>(&tss);
     uint64_t limit = sizeof(tss_with_iopb) - 1;
 
     // Intel SDM Vol.3 §8.2.3 Figure 8-4 — 64비트 TSS 디스크립터(16바이트).
@@ -129,37 +161,44 @@ void init_tss() {
                    (((limit >> 16) & 0xFull) << 48) | (((tss_base >> 24) & 0xFFull) << 56);
     uint64_t high = (tss_base >> 32) & 0xFFFFFFFFull;
 
-    g_gdt[7] = low;
-    g_gdt[8] = high;
+    gdt_array& gdt = g_gdt[cpu_index];
+    __builtin_memcpy(gdt, k_gdt_template, sizeof(gdt_array));
+    gdt[7] = low;
+    gdt[8] = high;
 
     gdt_pointer ptr{};
-    ptr.limit = static_cast<uint16_t>(sizeof(g_gdt) - 1);
-    ptr.base = reinterpret_cast<uint64_t>(g_gdt);
+    ptr.limit = static_cast<uint16_t>(sizeof(gdt_array) - 1);
+    ptr.base = reinterpret_cast<uint64_t>(gdt);
     asm volatile("lgdt %0" : : "m"(ptr));
 
     constexpr uint16_t k_sel_tss = 0x38;
     asm volatile("ltr %w0" : : "r"(k_sel_tss));
 }
 
+}  // namespace
+
+void init_tss() { init_tss_for_this_core(arch_current_cpu_index()); }
+
 void sync_io_permission(const kern::object::thread& t) {
+    uint32_t cpu = arch_current_cpu_index();
     uint16_t new_base = static_cast<uint16_t>(t.io_port_base);
     uint16_t new_count = static_cast<uint16_t>(t.io_port_count);
-    if (new_base == g_current_io_base && new_count == g_current_io_count) {
+    if (new_base == g_current_io_base[cpu] && new_count == g_current_io_count[cpu]) {
         return;  // 이미 이 범위로 프로그램돼 있다 — 아무 것도 하지 않는다.
     }
-    if (g_current_io_count > 0) {
-        set_io_range(g_current_io_base, g_current_io_count, /*allow=*/false);
+    if (g_current_io_count[cpu] > 0) {
+        set_io_range(cpu, g_current_io_base[cpu], g_current_io_count[cpu], /*allow=*/false);
     }
     if (new_count > 0) {
-        set_io_range(new_base, new_count, /*allow=*/true);
+        set_io_range(cpu, new_base, new_count, /*allow=*/true);
     }
-    g_current_io_base = new_base;
-    g_current_io_count = new_count;
+    g_current_io_base[cpu] = new_base;
+    g_current_io_count[cpu] = new_count;
 }
 
 void sync_exception_stack(const kern::object::thread& t) {
     if (t.owner_space != nullptr) {
-        g_tss.tss.rsp0 = t.syscall_kernel_rsp;
+        g_tss[arch_current_cpu_index()].tss.rsp0 = t.syscall_kernel_rsp;
     }
 }
 
