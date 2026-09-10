@@ -10,6 +10,17 @@
 
 #include <stdint.h>
 
+// M40(user-service-manager.md §M40) 실행 중 발견 — 이 파일의 함수는
+// .c로 구현돼 C 링크 심벌을 낸다. C++ 소비자(servers/svcmgr 등)가
+// extern "C" 없이 이 헤더를 include하면 C++ 이름 맹글링으로 링크가
+// 깨진다 — 지금까지는 C++ 서버들이 이 계층의 함수를 직접 호출한
+// 적이 없어(procsrv 자신은 이 프로토콜을 IPC로 직접 구현하지,
+// 클라이언트로서 부르지 않는다 — musl의 syscall_shim.c(C)가 유일한
+// 기존 소비자였다) 드러나지 않았을 뿐이다.
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // 이 프로세스가 procsrv에게서 받은 자신의 pid(최초 호출 시
 // self_register로 얻어 커널에 캐시한다, 이후 호출은 IPC 없이 그
 // 캐시를 그대로 돌려준다 — getpid()는 POSIX상 실패하지 않는 가벼운
@@ -75,3 +86,15 @@ uint32_t mc_wait(uint32_t procsrv_handle, uint32_t target_pid, int32_t* out_exit
 // procsrv가 모르는 pid라 조용히 무시되므로(handle_proc_exit_report의
 // find_process 실패 분기) 호출해도 안전하다.
 void mc_process_exit_report(uint32_t procsrv_handle, uint32_t pid, int32_t exit_code);
+
+// M40(user-service-manager.md §M40, ADR-192 §결정3/ADR-196 §결정5) —
+// svcmgr가 자기 pid를 확정한 뒤 딱 한 번 부른다. M27이
+// parent_pid=k_parent_none으로 잠정 등록해 둔 initrun의 고아들
+// (커널 서버 전부)을 svcmgr_pid로 재부모화한다. 반환값은
+// 실제로 재부모화된 프로세스 수(MC_PROC_STATUS_OK가 아니면 0 —
+// 이 op은 실패 경로가 없어 항상 OK다).
+uint32_t mc_adopt_orphans(uint32_t procsrv_handle, uint32_t svcmgr_pid);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif

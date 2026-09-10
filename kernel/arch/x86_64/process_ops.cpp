@@ -373,8 +373,19 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
 
         kern::object::thread* caller = kern::sched::current();
         if (caller != nullptr && caller->handles != nullptr) {
-            auto proxy = handles->create_proxy(owner.value(), kern::object::k_right_can_send,
-                                                *caller->handles, 0, false);
+            // M40(user-service-manager.md §M40, ADR-193) — 원래
+            // CAN_SEND만 줬다(자식 endpoint에 Call을 거는 wait-target
+            // 패턴, M22, procsrv.cpp::run_process_lifecycle_test
+            // 참고). ADR-193의 준비완료 신호는 방향이 반대다 — 자식이
+            // 자기 handle 1(owning, CAN_SEND|CAN_RECV 둘 다 있음)로
+            // Call을 보내고, **스폰한 쪽이 이 프록시로 sys_ipc_recv**
+            // 해야 한다 — CAN_RECV가 없으면 그 경로가 막힌다. 기존
+            // CAN_SEND 용도(부모가 자식에게 먼저 말 거는 wait-target
+            // 패턴)를 없애지 않고 추가만 한다 — 하나의 프록시로 양쪽
+            // 방향 다 쓸 수 있게.
+            auto proxy = handles->create_proxy(
+                owner.value(), kern::object::k_right_can_send | kern::object::k_right_can_recv,
+                *caller->handles, 0, false);
             if (proxy.is_ok()) {
                 out_endpoint_proxy_handle = proxy.value();
             }

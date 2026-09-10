@@ -33,6 +33,17 @@
 // @wire-op label=14 name=fork_register request="uint32 caller_pid" reply="uint32 status; uint32 new_pid"
 #define MC_PROC_OP_FORK_REGISTER 14u
 
+// M40(user-service-manager.md §M40, docs/design/boot-and-drivers.md
+// ADR-192 §결정3/ADR-196 §결정5) — initrun이 사라지는 시점에 svcmgr가
+// 부른다. M27이 잠정적으로 parent_pid=k_parent_none으로 등록해 둔
+// initrun의 고아들(커널 서버 전부)을 caller_pid(=svcmgr 자신의 pid,
+// self-asserted — 다른 op들과 같은 ADR-201 모델)로 재부모화한다.
+// svcmgr 자신도 이 시점에는 parent_pid=k_parent_none으로 등록돼
+// 있으므로(자신도 initrun이 스폰), caller_pid==svcmgr_pid인 항목은
+// 재부모화 대상에서 제외한다(자기 자신을 자기 부모로 만들지 않음).
+// @wire-op label=15 name=adopt_orphans request="uint32 caller_pid" reply="uint32 status; uint32 adopted_count"
+#define MC_PROC_OP_ADOPT_ORPHANS 15u
+
 // wait/kill/self_register/fork_register 응답 regs[0].
 #define MC_PROC_STATUS_OK 0u
 #define MC_PROC_STATUS_NOT_FOUND 1u

@@ -11,3 +11,6 @@ add_subdirectory(musl-hello)
 # real-libc-syscall-layer.md §M32 — musl-hello가 fork()+execve()로
 # 실행 이미지를 바꿔 넣을 "다른" 바이너리.
 add_subdirectory(musl-exec-target)
+
+# user-service-manager.md §M40 — svcmgr가 스폰할 하드코딩된 데모 유닛.
+add_subdirectory(svcmgr-demo-unit)

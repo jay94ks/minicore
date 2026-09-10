@@ -234,6 +234,27 @@
 #     musl 원본(진짜 futex 기반)으로 되돌렸다 — 두 pthread의
 #     pthread_exit()이 거의 동시에 끝나며 실제로 스레드 목록 락을
 #     다툴 수 있어서다.
+#   M40 (user-service-manager.md §M40, boot-and-drivers.md ADR-214):
+#     유저 서비스 관리자 데몬(servers/svcmgr) — initrun이 모든 커널
+#     서버를 기동한 뒤 --service= 목록의 마지막 항목으로 spawn한다.
+#     svcmgr가 procsrv에 자기 pid를 등록하고("[svcmgr] self_register
+#     ok=1") M27이 parent_pid=k_parent_none으로 잠정 등록해 둔 고아들
+#     (실행 중 발견: 실제로는 procsrv 자신뿐이었다 — 다른 커널
+#     서버는 아무도 procsrv에 self_register하지 않아서, procsrv가
+#     자기 자신을 pid=1로 무조건 등록하도록 바꿔 최소한 하나의 실제
+#     대상을 만들었다)을 자신에게 재부모화한다("[svcmgr] adopt_orphans
+#     ok=1"). 하드코딩된 데모 유닛 하나(userland/svcmgr-demo-unit)를
+#     spawn하고("[svcmgr] demo unit spawn ok=1"), ADR-193의 준비완료
+#     신호(spawn 시점 전용 endpoint의 Call/Reply, 방향은 M22의 wait
+#     회수와 반대 — 자식이 Call, 부모가 Recv+즉시 Reply)를 받을 때까지
+#     블록했다가 받으면 통과한다("[svcmgr] demo unit ready ok=1"). 실행
+#     중 진짜 버그 발견: 처음엔 svcmgr의 --depends=에 커널 서버 15개를
+#     전부 나열했다가 (1) MC_MAX_SPAWN_INHERITED_HANDLES(=4)를 넘는
+#     이름은 핸들을 못 받고 (2) initrun의 depends= 파싱 버퍼(96바이트)
+#     보다 그 문자열이 길어 파싱 자체가 통째로 실패해 procsrv 핸들도
+#     못 받았다 — svcmgr가 스폰 순서("--service= 목록의 마지막"으로
+#     이미 충족)와 핸들 상속(별개 메커니즘)을 혼동한 것이었다.
+#     depends=svcmgr:procsrv 하나로 줄여 해결했다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -475,6 +496,10 @@ declare -a EXPECTED=(
   "musl pthread_create ok=1"
   "musl pthread_join ok=1"
   "musl pthread mutex counter ok=1"
+  "[svcmgr] self_register ok=1"
+  "[svcmgr] adopt_orphans ok=1"
+  "[svcmgr] demo unit spawn ok=1"
+  "[svcmgr] demo unit ready ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

@@ -135,3 +135,17 @@ void mc_process_exit_report(uint32_t procsrv_handle, uint32_t pid, int32_t exit_
     mc_zero_bytes(&reply, sizeof(reply));
     mc_ipc_call(procsrv_handle, &req, &reply);
 }
+
+uint32_t mc_adopt_orphans(uint32_t procsrv_handle, uint32_t svcmgr_pid) {
+    mc_message req;
+    mc_zero_bytes(&req, sizeof(req));
+    req.label = MC_PROC_OP_ADOPT_ORPHANS;
+    req.regs[0] = svcmgr_pid;
+    mc_message reply;
+    mc_zero_bytes(&reply, sizeof(reply));
+    mc_ipc_call(procsrv_handle, &req, &reply);
+    if (reply.regs[0] != MC_PROC_STATUS_OK) {
+        return 0;
+    }
+    return (uint32_t)reply.regs[1];
+}

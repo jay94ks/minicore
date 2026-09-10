@@ -1956,3 +1956,92 @@
     label 값**이다 — 각 서버 프로토콜의 label 네임스페이스
     (`proc_op`, `fs_op` 등)와 충돌하지 않도록 `libmc` 헤더(단일
     출처, ADR-132/183)에서 한 곳에 정의한다.
+
+## ADR-214. M40 완성: `servers/svcmgr` 골격 — 재부모화 실제 트리거+준비완료 신호 실동작, 그 과정에서 발견한 진짜 버그 4건
+
+- **상태**: 확정 (2026-09-10, [user-service-manager.md](../plan/user-service-manager.md)
+  M40 실행 중 확정)
+- **배경**: ADR-192 §결정2/3+ADR-196+ADR-193의 계획을 실제로
+  구현한다. M40의 좁은 목표(하드코딩된 데모 유닛 하나로 준비완료
+  패턴 자체를 증명 + 재부모화 대상을 실제 svcmgr로 교체) 자체는
+  계획 그대로 완성했지만, 실행 중 계획이 예상하지 못한 진짜 버그
+  4건을 발견·수정했다 — 전부 "처음 실제로 이 경로를 쓰는 소비자가
+  나타나서야 드러난" 종류다(M32의 fs_base 버그, M34의 멀티코어
+  버그 3건과 같은 패턴).
+- **결정**:
+  1. **재부모화 실제 트리거**(ADR-192 §결정3) — svcmgr가 부팅 시
+     procsrv에 `self_register`로 자기 pid를 얻은 뒤, 새 procsrv
+     wire op `adopt_orphans`(label=15, `mc/procsrv_protocol.h`)로
+     "지금까지 parent_pid=k_parent_none인 모든 프로세스를 내게
+     재부모화해 달라"고 요청한다. `reparent_children()`(M27이 이미
+     만들어 둔 일반 함수)에 `exclude_pid` 매개변수를 추가해 svcmgr
+     자신(역시 initrun의 고아로 등록돼 있다)을 재부모화 대상에서
+     제외한다 — 자기 자신을 자기 부모로 만들면 트리 루트 불변식이
+     깨진다.
+  2. **준비완료 신호 실동작**(ADR-193) — `libs/mc/include/mc/
+     lifecycle_client.h`(신규)의 `mc_signal_ready()`(자식이 자기
+     handle 1로 label=0 Call)/`mc_wait_ready()`(부모가 그 프록시로
+     Recv+즉시 Reply)가 처음 실제로 쓰였다. 하드코딩된 데모 유닛
+     하나(`userland/svcmgr-demo-unit`, libk+libmc만 링크한 순수
+     네이티브 실행파일 — musl 불필요)를 svcmgr가 자신의 컴파일
+     시점 데이터로 심어(`tools/bin2c.py`, procsrv의 musl-exec-target
+     임베딩과 같은 패턴) VFS 없이 곧바로 `sys_process_spawn`한다.
+  3. `servers/svcmgr`는 ADR-196 §결정1대로 libk+libmc만 링크한다 —
+     initrun이 `--service=` 목록의 **마지막 항목**으로 spawn한다.
+     M42가 실제 컨트롤 프로토콜을 채우기 전까지는 자기 own endpoint
+     위에서 무한히 recv/reply만 반복한다(어떤 오퍼레이션도 아직
+     처리하지 않는다 — ADR-192 §결정3의 "프로세스 트리 영구 루트"
+     라는 자리만 지킨다).
+- **실행 중 발견 1 — spawn 시점 endpoint 프록시가 CAN_SEND만 있었다**:
+  `process_spawn(create_endpoint=true)`가 스폰한 쪽에게 주는
+  `out_endpoint_proxy_handle`은 M22 때부터 `k_right_can_send`만
+  부여했다(부모가 자식에게 먼저 Call을 거는 wait-target 패턴만
+  가정했기 때문). ADR-193의 준비완료 신호는 방향이 반대다(자식이
+  Call, **부모가 Recv**) — `k_right_can_recv`가 없으면 이 방향
+  자체가 막힌다. `kernel/arch/x86_64/process_ops.cpp`에서
+  `k_right_can_send | k_right_can_recv` 둘 다 주도록 고쳤다(기존
+  wait-target 패턴은 그대로 계속 동작한다 — 권한을 추가만 했다).
+- **실행 중 발견 2 — `mc/*_client.h`에 `extern "C"`가 하나도 없었다**:
+  `vfs_client.h`/`fs_client.h`/`console_client.h`/`ps2_client.h`/
+  `procsrv_client.h`(전부 .c로 구현된 C 링크 심벌을 선언하는
+  헤더)가 `extern "C"` 가드 없이 존재했다 — C++ 소비자가 이
+  헤더를 include하면 이름 맹글링으로 링크가 깨진다. 지금까지 아무
+  C++ 서버도 이 계층의 함수를 직접 호출한 적이 없어(각자 자체
+  syscall 트램폴린만 쓰거나 구조체/상수만 참조) 드러나지 않았을
+  뿐이다 — svcmgr(C++)가 `mc_getpid`/`mc_adopt_orphans`를 직접
+  부르며 처음 걸렸다. 다섯 헤더 전부에 `#ifdef __cplusplus
+  extern "C" { ... }`를 추가했다(새로 만든 `lifecycle_client.h`도
+  처음부터 포함).
+- **실행 중 발견 3 — `--depends=`에 이름을 많이 나열하면 조용히
+  전부 무시될 수 있다**: 처음엔 ADR-196 §결정1의 "의존관계는 기존
+  커널 서버 전체"를 문자 그대로 15개 서비스 이름을 `--depends=`에
+  나열했다. 두 가지가 겹쳐 실패했다: (1) `MC_MAX_SPAWN_INHERITED_HANDLES`
+  (=4)를 넘는 이름은 애초에 핸들을 못 받는다(오류 없이 조용히
+  무시) (2) `init/initrun/main.cpp`의 depends= 파싱 버퍼
+  (`char deps_buf[96]`)보다 그 문자열이 길어(15개 이름+콤마
+  >100자) `copy_span_to_cstr`가 실패해 **depends= 전체가 통째로
+  무시돼 procsrv 핸들조차 못 받았다** — svcmgr의 `self_register`가
+  존재하지 않는 핸들로 IPC를 걸어 즉시 실패하는 것으로 드러났다.
+  실제로는 순서 보장(이미 `--service=` 목록에서 마지막 줄이라는
+  사실 자체로 충족, `--depends=`와 무관)과 핸들 상속(별개 메커니즘,
+  실제 필요한 건 procsrv 하나뿐)을 혼동한 것이었다 —
+  `--depends=svcmgr:procsrv` 하나로 줄여 해결했다.
+- **실행 중 발견 4 — procsrv 자신도 procsrv를 몰랐다**: M40의
+  검증 목표("커널 서버들의 parent_pid가 svcmgr로 바뀜")를 확인하려
+  했으나, VFS/devmgr/cfgsrv 등 어떤 커널 서버도 procsrv에
+  `self_register`한 적이 없다는 것을 실행 중 발견했다(procsrv 자신의
+  pid=1 등록조차 self-test 전용 코드 경로에만 있었다) — 즉 실제
+  부팅 경로에서는 재부모화할 진짜 대상이 하나도 없었다. procsrv가
+  `_start()` 맨 앞에서 **무조건**(자기테스트 성공 여부와 무관하게)
+  자기 자신을 pid=1로 등록하도록 고쳐, 최소한 하나의 관찰 가능한
+  재부모화 대상을 만들었다 — Unix의 pid 1 관례와 같은 정신이다.
+- **영향**: M41(cfgsrv 기반 유닛 레지스트리)이 svcmgr의 procsrv
+  핸들 자리(현재 handle 2 고정)에 cfgsrv 핸들을 추가로 받아야
+  한다 — `--depends=svcmgr:procsrv,cfgsrv`로 확장하면 되고, 이번
+  발견(발견 3) 덕분에 그 정도 길이는 96바이트 버퍼에 안전하게
+  들어간다는 것을 미리 안다. M43(계정별 인스턴스)이 언급한 "커널
+  서버들이 procsrv를 모른다"는 사실(발견 4)은 svcmgr가 관리하는
+  "유저 서비스"에는 영향이 적다(유저 서비스는 애초에 procsrv의
+  fork/exec 경로를 거쳐 spawn될 가능성이 높아 self_register가
+  자연히 일어난다) — 커널 서버 자체를 procsrv에 등록시키는 것은
+  이 계획의 범위 밖으로 남긴다.

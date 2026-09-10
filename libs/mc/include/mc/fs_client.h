@@ -6,6 +6,12 @@
 
 #include <stdint.h>
 
+// M40 실행 중 발견(vfs_client.h의 같은 주석 참고) — C++ 소비자를
+// 위한 extern "C".
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // EOF까지(또는 out_cap에 닿을 때까지) 순차적으로 읽어 out_buf에
 // 이어 담는다(memfs의 읽기 커서가 자동으로 전진한다, fs-protocol.md
 // v3 §2.3). 반환값은 실제로 읽은 총 바이트 수.
@@ -26,3 +32,7 @@ uint64_t mc_fs_read(uint32_t fs_handle, uint64_t open_file_id, uint8_t* out_buf,
 // 채운다.
 uint64_t mc_fs_list(uint32_t fs_handle, uint8_t* out_names_blob, uint64_t out_cap,
                      uint32_t* out_count);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif

@@ -201,14 +201,37 @@ bool insert_process_entry(uint32_t pid, uint32_t parent_pid, uint32_t thread_han
 
 // ADR-192 §결정3의 재부모화 메커니즘 — 대상(to_parent_pid)을
 // 매개변수로 받는 일반 함수. M27은 실제 initrun 종료 트리거와
-// 연결하지 않는다(아래 done 보고 참고) — run_reparenting_mechanism_test()
-// 가 합성 pid로 메커니즘 자체만 증명한다.
-void reparent_children(uint32_t from_parent_pid, uint32_t to_parent_pid) {
+// 연결하지 않았다(아래 done 보고 참고) —
+// run_reparenting_mechanism_test()가 합성 pid로 메커니즘 자체만
+// 증명했다. M40(user-service-manager.md §M40)이 실제 트리거
+// (handle_proc_adopt_orphans, svcmgr가 부른다)를 추가하며
+// exclude_pid도 추가했다 — svcmgr 자신도 initrun의 고아라 이
+// 호출 시점엔 parent_pid==from_parent_pid(k_parent_none)이지만,
+// 자기 자신을 자기 부모로 만들면 안 된다(트리 루트는 부모가
+// 없어야 정상). 반환값(재부모화된 개수)은 M40의 adopt_orphans
+// 응답에 쓴다.
+uint32_t reparent_children(uint32_t from_parent_pid, uint32_t to_parent_pid,
+                            uint32_t exclude_pid = 0) {
+    uint32_t count = 0;
     for (auto& p : g_processes) {
-        if (p.pid != 0 && p.parent_pid == from_parent_pid) {
+        if (p.pid != 0 && p.pid != exclude_pid && p.parent_pid == from_parent_pid) {
             p.parent_pid = to_parent_pid;
+            ++count;
         }
     }
+    return count;
+}
+
+// M40(user-service-manager.md §M40, ADR-192 §결정3/ADR-196 §결정5) —
+// svcmgr가 자기 pid를 self_register로 확정한 뒤 부른다. M27이
+// 잠정 처리해 둔 "initrun의 고아는 parent_pid=k_parent_none"을
+// 실제 대상(svcmgr)으로 교체하는 진짜 트리거다. caller_pid는
+// 다른 op들과 같은 self-asserted 모델(ADR-201)이다.
+void handle_proc_adopt_orphans(const mc_message& in, mc_message& out) {
+    uint32_t svcmgr_pid = static_cast<uint32_t>(in.regs[0]);
+    uint32_t adopted = reparent_children(k_parent_none, svcmgr_pid, /*exclude_pid=*/svcmgr_pid);
+    out.regs[0] = MC_PROC_STATUS_OK;
+    out.regs[1] = adopted;
 }
 
 // OPEN-54 해소 — 정확한 regs[] 배치(mc/procsrv_protocol.h의 @wire-op
@@ -1560,6 +1583,18 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
         quiet_exit();  // sys_fork+sys_exec으로 만들어진 사본.
     }
 
+    // M40(user-service-manager.md §M40, ADR-192 §결정3) — procsrv
+    // 자기 자신을 pid=1로 무조건 등록한다(예전엔
+    // run_general_process_table_test() 안에서 자기테스트에 성공했을
+    // 때만 등록됐다 — 그마저도 procsrv 자신의 재실행 사본에서만
+    // 의미 있었지, 진짜 부팅 경로에는 아무 커널 서버도 procsrv에
+    // self_register하지 않아 svcmgr의 adopt_orphans가 재부모화할
+    // 실제 대상이 하나도 없었다는 것을 실행 중 발견했다 — VFS/devmgr/
+    // cfgsrv 등은 지금도 procsrv를 전혀 모른다). procsrv 자신을
+    // Unix의 pid 1과 같은 자리로 등록해 두면, 최소한 이 하나는 항상
+    // 관찰 가능한 재부모화 대상이 된다.
+    insert_process_entry(k_procsrv_self_pid, k_parent_none, /*thread_handle=*/0);
+
     const auto* self_info =
         reinterpret_cast<const mc_m12_self_info*>(MC_M12_SELF_INFO_USER_VADDR);
 
@@ -1647,6 +1682,8 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
                 handle_proc_self_register(out);
             } else if (in.label == MC_PROC_OP_FORK_REGISTER) {
                 handle_proc_fork_register(in, out);
+            } else if (in.label == MC_PROC_OP_ADOPT_ORPHANS) {
+                handle_proc_adopt_orphans(in, out);
             }
         }
         do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);

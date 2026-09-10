@@ -418,4 +418,37 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   로 바로 넘어가기로 정했다. real-libc-syscall-layer.md는 이제
   M27~M38(완료)+M39(스킵)로 마무리됐다 — 다음은
   [docs/plan/user-service-manager.md](docs/plan/user-service-manager.md)
-  M40(`servers/svcmgr` 골격+재부모화 완성)이다.
+  M40(`servers/svcmgr` 골격+재부모화 완성)부터 시작했다.
+  **M40(완료)**(결과는
+  [docs/done/user-service-manager-m40.md](docs/done/user-service-manager-m40.md),
+  [ADR-214](docs/design/boot-and-drivers.md) 참고): 새 서버
+  `servers/svcmgr`(libk+libmc만 링크, initrun이 `--service=` 목록의
+  마지막 항목으로 spawn) — procsrv 새 wire op `adopt_orphans`
+  (재부모화 실제 트리거, M27이 잠정 처리해 둔 `parent_pid=
+  k_parent_none`을 실제 svcmgr pid로 교체)+`mc/lifecycle_client.h`
+  (신규, `mc_signal_ready`/`mc_wait_ready`, ADR-193의 준비완료
+  신호를 처음 실제로 구현)+하드코딩된 데모 유닛 하나
+  (`userland/svcmgr-demo-unit`, VFS 없이 svcmgr가 자신의 컴파일
+  시점 데이터로 직접 spawn). 계획(ADR-192/193/196) 자체의 방향은
+  안 바뀌었지만, 처음 이 경로를 쓰는 소비자가 나타나며 진짜 버그
+  4건을 발견했다: (1) `create_endpoint=true`가 주는 프록시 핸들이
+  M22부터 CAN_SEND만 있어(부모→자식 방향만 가정) 준비완료 신호
+  (방향이 반대 — 자식→부모)를 못 받음 — CAN_RECV를 추가(기존 경로는
+  그대로 유지), (2) `mc/vfs_client.h`/`fs_client.h`/`console_client.h`/
+  `ps2_client.h`/`procsrv_client.h` 다섯 헤더 전부에 `extern "C"`
+  가드가 없어, 이 계층의 함수를 처음 직접 호출한 C++ 소비자
+  (svcmgr)의 링크가 이름 맹글링으로 깨짐 — 다섯 헤더 전부(+신규
+  `lifecycle_client.h`)에 추가, (3) `--depends=`에 커널 서버 15개를
+  전부 나열했다가 `MC_MAX_SPAWN_INHERITED_HANDLES`(=4)와 initrun의
+  depends= 파싱 버퍼(96바이트)를 동시에 넘어 **핸들 상속 전체가
+  조용히 무시**됨(procsrv 핸들조차 못 받아 self_register가 즉시
+  실패) — 스폰 순서 보장(`--service=` 목록에서 마지막 줄이라는
+  사실 자체로 이미 충족, `depends=`와 무관)과 핸들 상속(별개
+  메커니즘, 실제 필요한 건 procsrv 하나)을 혼동한 것이었다 —
+  `--depends=svcmgr:procsrv` 하나로 줄여 해결, (4) 실제 부팅
+  경로에서는 어떤 커널 서버도 procsrv에 self_register한 적이 없어
+  (procsrv 자신의 pid=1 등록조차 self-test 전용이었다) 재부모화를
+  관찰할 실제 대상이 하나도 없었음 — procsrv가 `_start()` 맨 앞에서
+  무조건 자기 자신을 pid=1로 등록하도록 고쳐 최소 하나의 관찰
+  가능한 대상을 만들었다. 다음은 M41(cfgsrv 기반 유닛 레지스트리)
+  이다.

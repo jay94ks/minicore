@@ -7,6 +7,7 @@ add_subdirectory(devmgr)
 add_subdirectory(drivers)
 add_subdirectory(cfgsrv)
 add_subdirectory(login)
+add_subdirectory(svcmgr)
 
 # 부트 디스크(bootdisk.img) 조립 — M13(system-servers-bringup.md)부터
 # memfs/vfs/procsrv 세 서비스를 함께 담는다(M12는 procsrv 하나만이라
@@ -68,6 +69,28 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
               --service=login=$<TARGET_FILE:minicore_login_elf>
               --service=musl-hello=$<TARGET_FILE:minicore_musl_hello_elf>
+              --service=svcmgr=$<TARGET_FILE:minicore_svcmgr_elf>
+              # user-service-manager.md §M40, ADR-192 §결정2 — svcmgr가
+              # "모든 커널 서버 기동 후 마지막으로" 스폰되는 보장은
+              # --service= 목록에서 이게 **가장 마지막 줄**이라는
+              # 사실 자체에서 나온다(init/initrun/main.cpp::spawn_visit
+              # 이 cpio 아카이브 순서 그대로 스폰한다, tools/mkbootdisk.py
+              # 는 --service= 인자 순서를 그대로 archive에 옮길 뿐 별도
+              # 정렬을 하지 않는다) — --depends=는 이 순서를 강제하지
+              # 않는다(핸들 상속에만 쓰인다, 아래 실행 중 발견 참고).
+              # svcmgr의 --depends=는 procsrv 하나만 둔다 — 처음엔
+              # ADR-196 §결정1의 "의존관계는 기존 커널 서버 전체"라는
+              # 문구를 문자 그대로 커널 서버 15개를 다 나열했다가 두
+              # 가지를 실제로 겪었다: (1) MC_MAX_SPAWN_INHERITED_HANDLES
+              # (=4)를 넘는 이름은 애초에 핸들을 못 받는다(조용히
+              # 무시됨, 오류 아님) (2) initrun의 depends= 파싱 버퍼
+              # (char deps_buf[96], init/initrun/main.cpp)보다 그 문자열이
+              # 길어(15개 이름+콤마=110자 이상) copy_span_to_cstr가 그
+              # 자리에서 실패해 depends= 전체가 통째로 무시돼(procsrv
+              # 핸들조차 못 받음) svcmgr의 self_register가 엉뚱한
+              # (존재하지 않는) 핸들로 IPC를 걸어 즉시 실패했다 — 실제
+              # 필요한 건 순서 보장(이미 위 --service= 위치로 충족)이
+              # 아니라 핸들 하나(procsrv)뿐이었다.
               --depends=vfs:memfs,fat32,ext4
               --depends=cfgsrv:vfs
               --depends=netsrv:virtio-net
@@ -80,6 +103,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
               --depends=musl-hello:vfs,procsrv
+              --depends=svcmgr:procsrv
               --linux-abi-stack=musl-hello
               --trusted=devmgr
               --trusted=ps2
@@ -97,8 +121,9 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               minicore_fat32_elf minicore_ext4_elf
               minicore_drv_console_elf minicore_login_elf
               minicore_musl_hello_elf
+              minicore_svcmgr_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello+svcmgr"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})
