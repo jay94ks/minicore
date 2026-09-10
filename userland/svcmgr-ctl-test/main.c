@@ -121,4 +121,44 @@ void mc_main(const void* argv_or_null) {
     }
     debug_log(found_svc_c ? "[svcmgr-ctl-test] cfgsrv sees svc-c ok=1\n"
                            : "[svcmgr-ctl-test] cfgsrv sees svc-c ok=0\n");
+
+    // M43(user-service-manager.md §M43, docs/design/boot-and-drivers.md
+    // ADR-219) — 계정별 유저 서비스 인스턴스 검증. login이 test/root
+    // 둘 다 로그인시켰고 user-service-delegate-test가 둘 다 위임을
+    // 등록해 뒀으니(servers/CMakeLists.txt의 순서가 보장), svcmgr의
+    // 로그인 감시 스레드가 "svc-u"(per_account 템플릿) 인스턴스를
+    // 계정마다 하나씩 spawn했어야 한다. 그 스레드는 svcmgr의 메인
+    // IPC 루프와 별개로 돌아 정확한 완료 시점을 모르므로, 짧게
+    // 재시도한다(procsrv의 기존 폴링 자기테스트와 같은 요령).
+    uint32_t test_thread_handle = 0;
+    uint32_t root_thread_handle = 0;
+    int test_running = 0;
+    int root_running = 0;
+    for (int attempt = 0; attempt < 64 && !(test_running && root_running); ++attempt) {
+        if (!test_running) {
+            status = call_by_name(MC_SVCMGR_OP_STATUS, "svc-u@test", &reply);
+            if (status == MC_SVCMGR_STATUS_OK && reply.regs[1] == 1) {
+                test_running = 1;
+                test_thread_handle = (uint32_t)reply.regs[2];
+            }
+        }
+        if (!root_running) {
+            status = call_by_name(MC_SVCMGR_OP_STATUS, "svc-u@root", &reply);
+            if (status == MC_SVCMGR_STATUS_OK && reply.regs[1] == 1) {
+                root_running = 1;
+                root_thread_handle = (uint32_t)reply.regs[2];
+            }
+        }
+        if (!(test_running && root_running)) {
+            mc_yield();
+        }
+    }
+    debug_log(test_running ? "[svcmgr-ctl-test] status svc-u@test running=1\n"
+                            : "[svcmgr-ctl-test] status svc-u@test running=0\n");
+    debug_log(root_running ? "[svcmgr-ctl-test] status svc-u@root running=1\n"
+                           : "[svcmgr-ctl-test] status svc-u@root running=0\n");
+    int distinct_instances =
+        test_running && root_running && test_thread_handle != root_thread_handle;
+    debug_log(distinct_instances ? "[svcmgr-ctl-test] per-account instances distinct=1\n"
+                                  : "[svcmgr-ctl-test] per-account instances distinct=0\n");
 }

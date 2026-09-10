@@ -41,6 +41,18 @@ typedef struct {
 typedef struct {
     uint32_t src_handle;
     uint32_t rights_mask;
+
+    // M43(user-service-manager.md, ADR-217) — 스폰 시점 캐패빌리티
+    // 주입(mc_process_spawn_request::inherited_handles) 경로에서만
+    // 쓰인다(kernel/arch/x86_64/process_ops.cpp). has_badge_override가
+    // false(기본, 기존 호출자 전부)면 원본 핸들의 badge를 그대로
+    // 물려받는다 — kernel_objects.hpp::handle_table::create_proxy가
+    // 이미 지원하던 것을 처음으로 유저랜드에 노출했을 뿐이다.
+    // 런타임 IPC 핸들 위임(mc_message.handles[])에는 아직 연결하지
+    // 않았다(kernel/core/ipc/endpoint.cpp::deliver_message은 여전히
+    // 오버라이드 없음으로 하드코딩 — YAGNI, 필요해지면 확장).
+    uint64_t badge_override;
+    uint8_t has_badge_override;  // bool.
 } mc_handle_transfer;
 
 typedef struct {

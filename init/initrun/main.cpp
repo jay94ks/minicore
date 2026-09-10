@@ -23,6 +23,7 @@
 #include "virtio_blk.hpp"
 
 #include <boot_info.hpp>
+#include <mc/procsrv_protocol.h>
 #include <mc/syscall.h>
 
 namespace {
@@ -396,6 +397,20 @@ void spawn_visit(void* ctx_raw, const char* name, const uint8_t* data, uint64_t 
                         if (dep_handle != 0) {
                             req.inherited_handles[count].src_handle = dep_handle;
                             req.inherited_handles[count].rights_mask = MC_RIGHT_CAN_SEND;
+                            // M43(user-service-manager.md, ADR-217) — svcmgr가
+                            // procsrv에게 새 민감한 오퍼레이션(계정 위임
+                            // 확인 후 그 계정 몫으로 spawn, ADR-218)을 걸 때
+                            // procsrv가 "진짜 svcmgr"임을 판정할 수 있어야
+                            // 한다. 이 조합(svcmgr이 procsrv 핸들을 받는
+                            // 경우) 하나만 하드코딩된 예약 badge를 쓴다 —
+                            // 일반 --depends= 문법을 확장하지 않는다(YAGNI,
+                            // 이 조합 하나만 필요).
+                            if (cstr_equals(service_name, "svcmgr") &&
+                                cstr_equals(dep_name, "procsrv")) {
+                                req.inherited_handles[count].badge_override =
+                                    MC_PROCSRV_SERVICE_DELEGATION_BADGE;
+                                req.inherited_handles[count].has_badge_override = 1;
+                            }
                             ++count;
                         }
                     }

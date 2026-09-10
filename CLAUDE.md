@@ -513,6 +513,39 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   새 페이지폴트 — `handle_register`가 nested cfgsrv 호출 뒤까지
   들고 있던 IPC 수신 매핑 포인터가 이미 해제된 뒤였음(기존
   ADR-161 규칙을 svcmgr 코드가 어긴 것) — 수신 즉시 구조체 전체를
-  로컬로 복사하도록 수정. user-service-manager.md는 이제
-  M40~M42(완료)+M43(계정별 유저 서비스 인스턴스, 계획 자신이
-  스트레치로 표시)만 남았다.
+  로컬로 복사하도록 수정.
+  **M43(완료, 스트레치)**(결과는
+  [docs/done/user-service-manager-m43.md](docs/done/user-service-manager-m43.md),
+  [ADR-217/218/219](docs/design/security-model.md) 참고): 계정별
+  유저 서비스 인스턴스(systemd `user@.service` 대응). 사용자가
+  방향을 명시했다 — 시스템 전역 설치 유저 서비스는 태생적 권한
+  그대로(M40~M42와 동일), 계정 전용 서비스만 그 계정이 등록한
+  **영구 위임**이 있어야(자가서비스로 등록·철회, 새 오퍼레이션
+  없이 cfgsrv의 기존 set_value/delete_value 재사용) 로그인 시점에
+  그 계정 몫으로 인스턴스화된다. svcmgr가 로그인 감시 백그라운드
+  스레드(M37 `mc_thread_create` 첫 실사용)를 만들어 procsrv의 새
+  오퍼레이션(`op_poll_login_event`/`op_spawn_delegated_unit`)을
+  폴링하고, 컨트롤 프로토콜 주소 지정을 `"유닛@계정"`으로 확장했다.
+  실행 중 발견한 진짜 버그/설계 오류 3건: (1) svcmgr가 procsrv에게
+  이 민감한 새 오퍼레이션을 걸 때 "진짜 svcmgr"임을 증명할
+  위조 불가능한 방법이 없었다(기존 오퍼레이션은 전부 자기주장 pid
+  모델) — badge(ipc.md가 이미 설계해 뒀지만 M6~M42 내내 아무도
+  실제로 쓴 적이 없던 필드)를 처음으로 스폰 시점 캐패빌리티 주입에
+  연결했는데(ADR-217, svcmgr+procsrv 조합 전용 하드코딩 예약 badge),
+  그 과정에서 `sys_recv`의 badge 반환값 자체가 M6부터 raw syscall
+  계층에서 항상 버려지고 있었다는 것도 처음 발견해
+  `kernel/arch/x86_64/syscall.cpp`에 out-포인터를 추가했다, (2)
+  계정별 위임 테이블을 처음엔 `@global/system/service-delegates/
+  <계정명>`에 두려 했으나, cfgsrv의 `normalize_path`/`schema_matches`
+  가 `@global/...` 경로의 스키마를 항상 문자열 "global" 자체로
+  고정 취급해 caller_uid!=0인 계정의 CREATE_TABLE이 절대 통과할
+  수 없다는 것을 발견했다(uid=0/root만 `@global/*` 아래에 테이블을
+  만들 수 있다는 의도된 설계) — 자가서비스 grant가 성립하려면 그
+  계정 자신의 스키마(`@<계정명>/system/service-delegate`)로 옮겨야
+  했다, (3) 로그인 감시 스레드 추가로 svcmgr가 처음으로 멀티스레드가
+  돼 `g_runtime`을 두 스레드가 동시에 건드릴 수 있게 됐다 —
+  스핀락(libk) 신설로 해결. OPEN-71(위임 기간 모드는 permanent
+  하나뿐)/OPEN-72(스폰된 프로세스가 실제 커널/badge 수준의 계정
+  신원을 안 받음)/OPEN-73(ADR-193 준비완료 핸드셰이크 미연결) 신규
+  등록. **user-service-manager.md는 이제 M40~M43 전부 완료됐다** —
+  이 계획에는 더 이상 다음 마일스톤이 없다.

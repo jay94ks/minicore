@@ -4,10 +4,10 @@
 
 | label | name | request | reply | source |
 |---|---|---|---|---|
-| 1 | list | (없음) | uint32 status; uint32 count | svcmgr_protocol.h:28 |
-| 2 | status | char name[32] | uint32 status; uint8 running; uint32 thread_handle | svcmgr_protocol.h:30 |
-| 3 | start | char name[32] | uint32 status | svcmgr_protocol.h:32 |
-| 4 | stop | char name[32] | uint32 status | svcmgr_protocol.h:34 |
-| 5 | restart | char name[32] | uint32 status | svcmgr_protocol.h:36 |
-| 6 | register | mc_svcmgr_service_unit unit (pages[0]) | uint32 status | svcmgr_protocol.h:38 |
-| 7 | unregister | char name[32] | uint32 status | svcmgr_protocol.h:40 |
+| 1 | list | (없음) | uint32 status; uint32 count | svcmgr_protocol.h:46 |
+| 2 | status | char name[32] | uint32 status; uint8 running; uint32 thread_handle | svcmgr_protocol.h:48 |
+| 3 | start | char name[32] | uint32 status | svcmgr_protocol.h:50 |
+| 4 | stop | char name[32] | uint32 status | svcmgr_protocol.h:52 |
+| 5 | restart | char name[32] | uint32 status | svcmgr_protocol.h:54 |
+| 6 | register | mc_svcmgr_service_unit unit (pages[0]) | uint32 status | svcmgr_protocol.h:56 |
+| 7 | unregister | char name[32] | uint32 status | svcmgr_protocol.h:58 |

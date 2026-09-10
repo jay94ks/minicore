@@ -40,6 +40,7 @@
 #include <mc/syscall.h>
 
 #include "musl_exec_target_blob.h"
+#include "user_service_unit_blob.h"
 
 namespace kernsrv::procsrv {
 
@@ -375,12 +376,49 @@ void start_session_once() {
     debug_log(msg, cstr_len(msg));
 }
 
+// M43(user-service-manager.md §M43, docs/design/security-model.md
+// ADR-218 §결정6) — 로그인 성공마다 채워지는 작은 원형 큐. svcmgr가
+// 백그라운드 스레드로 폴링한다(op_poll_login_event) — procsrv는
+// 단일 요청-응답 루프라(OPEN-67) 진짜 블로킹을 못 해 비블로킹
+// 폴링 모델을 그대로 재사용한다.
+constexpr uint32_t k_max_login_events = 8;
+struct login_event {
+    uint32_t uid;
+    char username[8];
+};
+login_event g_login_events[k_max_login_events];
+uint32_t g_login_event_head = 0;
+uint32_t g_login_event_count = 0;
+
+void push_login_event(const account& acc) {
+    if (g_login_event_count >= k_max_login_events) {
+        return;  // 큐 가득 참 — 드묾(YAGNI), 이 이벤트는 버린다.
+    }
+    uint32_t idx = (g_login_event_head + g_login_event_count) % k_max_login_events;
+    g_login_events[idx].uid = acc.uid;
+    for (uint64_t i = 0; i < sizeof(acc.username); ++i) {
+        g_login_events[idx].username[i] = acc.username[i];
+    }
+    ++g_login_event_count;
+}
+
+bool pop_login_event(login_event& out) {
+    if (g_login_event_count == 0) {
+        return false;
+    }
+    out = g_login_events[g_login_event_head];
+    g_login_event_head = (g_login_event_head + 1) % k_max_login_events;
+    --g_login_event_count;
+    return true;
+}
+
 void handle_login(const mc_message& in, mc_message& out) {
     for (const account& acc : g_accounts) {
         if (bytes_equal(&in.regs[0], acc.username, sizeof(acc.username)) &&
             bytes_equal(&in.regs[1], acc.password, sizeof(acc.password))) {
             out.regs[0] = k_login_status_ok;
             start_session_once();
+            push_login_event(acc);
             return;
         }
     }
@@ -1552,6 +1590,112 @@ void run_cfgsrv_roundtrip_test() {
     debug_log(msg4, cstr_len(msg4));
 }
 
+// M43(user-service-manager.md §M43, docs/design/security-model.md
+// ADR-218) — su/sudo(ADR-093)의 @global/system/delegates와는 분리된,
+// "내 몫의 유저 서비스만" 좁게 위임하는 별도 테이블
+// @global/system/service-delegates/<계정명>. 키는 항상 "svcmgr"
+// 하나뿐이고, 값은 {u64 granted_at, u8 mode}뿐이다(mode=0=permanent
+// 만 v1 지원, ADR-218 §3). 자가서비스 grant/revoke는 그 계정 자신이
+// cfgsrv set_value/delete_value를 직접 불러 하므로(§결정2) procsrv
+// 에는 조회만 있다.
+// 실행 중 발견(2026-09-10) — 처음엔 "@global/system/service-delegates/
+// <계정명>"으로 뒀지만, cfgsrv::normalize_path/schema_matches가
+// "@global/..." 경로의 스키마를 항상 "global" 문자열 자체로 고정
+// 취급해(계정명과 무관), CREATE_TABLE이 caller_uid!=0인 계정에게는
+// **절대** 통과하지 않는다(uid=0/root만 @global/* 아래에 테이블을
+// 만들 수 있다 — 의도된 동작이다, cfgsrv의 기존 "@계정/..." 개인
+// 스키마와 겹치지 않게 하는 설계). 계정 자신이 grant를 자가서비스로
+// 할 수 있어야 하므로(ADR-218 §결정2), 그 계정 **자신의** 스키마
+// (@<계정명>/...)로 옮겼다 — schema_matches가 caller_username과
+// 정확히 일치하는 스키마만 비-root CREATE_TABLE을 허용한다.
+bool check_service_delegation(const account& target) {
+    if (target.is_guest || target.is_jail) {
+        return false;  // ADR-218 §5 — guest/jail은 이 위임도 무효.
+    }
+    char path[64] = {};
+    path[0] = '@';
+    uint64_t name_len = cstr_len(target.username);
+    for (uint64_t i = 0; i < name_len && i < sizeof(path) - 1; ++i) {
+        path[1 + i] = target.username[i];
+    }
+    uint64_t p = 1 + name_len;
+    const char* suffix = "/system/service-delegate";
+    for (uint64_t i = 0; suffix[i] != '\0' && p + i < sizeof(path) - 1; ++i) {
+        path[p + i] = suffix[i];
+    }
+    p += cstr_len(suffix);
+    path[p] = '\0';
+
+    uint64_t table_id = 0;
+    if (reg_open_or_create(k_reg_op_open_table, 0, "root", path, table_id) != k_reg_err_ok) {
+        return false;  // 위임 테이블 자체가 없음 — 위임 없음.
+    }
+    uint8_t entry[16] = {};
+    uint64_t got_len = 0;
+    if (reg_get_string(0, table_id, "svcmgr", reinterpret_cast<char*>(entry), sizeof(entry),
+                        got_len) != k_reg_err_ok ||
+        got_len < 9) {
+        return false;  // 위임 항목 없음.
+    }
+    uint8_t mode = entry[8];  // {u64 granted_at, u8 mode} 레이아웃.
+    return mode == 0;  // permanent(0)만 v1.
+}
+
+// ADR-218 §결정6 — svcmgr 전용, 비블로킹 폴링.
+void handle_proc_poll_login_event(mc_message& out) {
+    login_event ev{};
+    if (!pop_login_event(ev)) {
+        out.regs[0] = MC_PROC_STATUS_NOT_FOUND;
+        return;
+    }
+    out.regs[0] = MC_PROC_STATUS_OK;
+    out.regs[1] = ev.uid;
+    uint64_t packed = 0;
+    for (uint64_t i = 0; i < sizeof(ev.username); ++i) {
+        packed |= static_cast<uint64_t>(static_cast<uint8_t>(ev.username[i])) << (8 * i);
+    }
+    out.regs[2] = packed;
+}
+
+// ADR-217/218 — caller_badge는 메인 루프가 sys_recv의 badge 출력
+// 인자로 실제로 받아 넘겨준 값이다(자기주장이 아니다). 이 값이
+// MC_PROCSRV_SERVICE_DELEGATION_BADGE와 정확히 일치해야만(=이
+// 핸들이 initrun이 svcmgr 스폰 시점에 스탬핑해 준 바로 그 것) 나머지
+// 확인(계정 존재+위임)으로 넘어간다 — 그 외 caller_badge는 즉시 거부.
+void handle_proc_spawn_delegated_unit(const mc_message& in, mc_message& out, uint64_t caller_badge) {
+    if (caller_badge != MC_PROCSRV_SERVICE_DELEGATION_BADGE) {
+        out.regs[0] = MC_PROC_STATUS_PERMISSION_DENIED;
+        return;
+    }
+    char username[9] = {};
+    uint64_t packed = in.regs[0];
+    for (uint64_t i = 0; i < 8; ++i) {
+        username[i] = static_cast<char>((packed >> (8 * i)) & 0xFF);
+    }
+    const account* target = find_account_by_username(username);
+    if (target == nullptr || !check_service_delegation(*target)) {
+        out.regs[0] = MC_PROC_STATUS_PERMISSION_DENIED;
+        return;
+    }
+
+    // svcmgr가 regs로 넘긴 elf_data 포인터는 svcmgr **자신의**
+    // 주소공간을 가리켜 여기서 그대로 역참조할 수 없다(서로 다른
+    // 프로세스) — procsrv 자신이 같은 ELF를 컴파일 시점 데이터로
+    // 심어 둔 것을 대신 쓴다(servers/procsrv/CMakeLists.txt).
+    // ADR-193의 준비완료 핸드셰이크는 연결하지 않는다(OPEN-73,
+    // mc/procsrv_protocol.h 주석 참고) — create_endpoint=false.
+    mc_process_spawn_request req{};
+    req.elf_data = reinterpret_cast<uint64_t>(g_user_service_unit_elf);
+    req.elf_size = g_user_service_unit_elf_len;
+    uint64_t err = do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&req), 0, 0);
+    if (err != 0) {
+        out.regs[0] = MC_PROC_STATUS_NOT_FOUND;
+        return;
+    }
+    out.regs[0] = MC_PROC_STATUS_OK;
+    out.regs[1] = req.out_thread_handle;
+}
+
 }  // namespace
 
 extern "C" [[noreturn]] void _start(const void* argv_or_null) {
@@ -1663,8 +1807,13 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     init_accounts();
     for (;;) {
         mc_message in{};
+        uint64_t caller_badge = 0;
+        // M43(ADR-217) — a3에 out-포인터를 넘겨 badge를 실제로 받는다
+        // (지금까지는 항상 0을 넘겨 버려 왔다, kernel/arch/x86_64/
+        // syscall.cpp 참고).
         uint64_t recv_err = do_syscall(MC_SYSCALL_IPC_RECV, k_own_endpoint_handle,
-                                        reinterpret_cast<uint64_t>(&in), 0);
+                                        reinterpret_cast<uint64_t>(&in),
+                                        reinterpret_cast<uint64_t>(&caller_badge));
         mc_message out{};
         if (recv_err == 0) {
             out.label = in.label;
@@ -1682,6 +1831,10 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
                 handle_proc_self_register(out);
             } else if (in.label == MC_PROC_OP_FORK_REGISTER) {
                 handle_proc_fork_register(in, out);
+            } else if (in.label == MC_PROC_OP_POLL_LOGIN_EVENT) {
+                handle_proc_poll_login_event(out);
+            } else if (in.label == MC_PROC_OP_SPAWN_DELEGATED_UNIT) {
+                handle_proc_spawn_delegated_unit(in, out, caller_badge);
             } else if (in.label == MC_PROC_OP_ADOPT_ORPHANS) {
                 handle_proc_adopt_orphans(in, out);
             }

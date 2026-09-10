@@ -69,8 +69,18 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=procsrv=$<TARGET_FILE:minicore_procsrv_elf>
               --service=login=$<TARGET_FILE:minicore_login_elf>
               --service=musl-hello=$<TARGET_FILE:minicore_musl_hello_elf>
+              --service=user-service-delegate-test=$<TARGET_FILE:minicore_user_service_delegate_test_elf>
               --service=svcmgr=$<TARGET_FILE:minicore_svcmgr_elf>
               --service=svcmgr-ctl-test=$<TARGET_FILE:minicore_svcmgr_ctl_test_elf>
+              # user-service-manager.md §M43 — 계정별 유저 서비스
+              # 위임(ADR-218) grant 검증용 최소 프로그램. login이
+              # test/root 두 계정을 로그인시킨 뒤(그 로그인 이벤트가
+              # procsrv의 큐에 쌓인다), svcmgr의 로그인 감시 스레드가
+              # 그 이벤트들을 실제로 소비하기 **전에**(svcmgr 자신이
+              # 아직 부팅 중이라 아직 소비를 시작하지 않았다) 이
+              # 프로그램이 두 계정의 위임을 등록해 둔다 — musl-hello
+              # 뒤·svcmgr 앞이라는 순서 자체가 이 타이밍을 보장한다
+              # (userland/user-service-delegate-test/main.c 참고).
               # user-service-manager.md §M40, ADR-192 §결정2 — svcmgr가
               # "모든 커널 서버 기동 후 마지막으로" 스폰되는 보장은
               # --service= 목록에서 이게 **가장 마지막 줄**이라는
@@ -108,6 +118,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
               --depends=musl-hello:vfs,procsrv
+              --depends=user-service-delegate-test:cfgsrv
               --depends=svcmgr:procsrv,cfgsrv
               # M42(user-service-manager.md §M42) — "새 컨트롤
               # 클라이언트"(계획 문서가 착수 시점에 확정하라고 남긴
@@ -131,10 +142,11 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               minicore_fat32_elf minicore_ext4_elf
               minicore_drv_console_elf minicore_login_elf
               minicore_musl_hello_elf
+              minicore_user_service_delegate_test_elf
               minicore_svcmgr_elf
               minicore_svcmgr_ctl_test_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello+svcmgr+svcmgr-ctl-test"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello+user-service-delegate-test+svcmgr+svcmgr-ctl-test"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})

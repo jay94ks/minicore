@@ -344,6 +344,49 @@
 #     mc/cfgsrv_client.c가 이미 쓰고 있던 관례(nested 호출 전에 값을
 #     자기 정적 버퍼로 복사)를 그대로 따라 수신 즉시 구조체 전체를
 #     로컬로 복사하도록 고쳤다.
+#   M43 (user-service-manager.md §M43, security-model.md ADR-217/218,
+#     boot-and-drivers.md ADR-219): 계정별 유저 서비스 인스턴스
+#     (systemd user@.service 대응). 시스템 전역 유닛은 M40~M42와
+#     동일(svcmgr 태생적 권한)하고, 계정 전용 유닛(scope=per_account,
+#     자기테스트 템플릿 "svc-u")만 그 계정이 등록한 영구 위임이
+#     있어야 로그인 시점에 인스턴스화된다. 새 유저랜드 프로그램
+#     userland/user-service-delegate-test가 "test"/"root" 두 계정을
+#     대신해 자가서비스로 위임을 등록하고("[user-service-delegate-test]
+#     grant test ok=1" → "grant root ok=1"), servers/login이 두
+#     계정을 순서대로 로그인시켜("[login] auth ok=1" →
+#     "[login] second account (root) login ok=1") svcmgr의 로그인
+#     감시 스레드(M37 mc_thread_create, 이 서버의 첫 멀티스레드
+#     사용)가 그 이벤트를 받아("[svcmgr] login event account=test" →
+#     "[svcmgr] login event account=root") 계정마다 독립된 "svc-u"
+#     인스턴스를 spawn한다("[svcmgr] per_account spawn ok name=svc-u
+#     account=test" → "account=root"). svcmgr-ctl-test가 컨트롤
+#     프로토콜의 "유닛명@계정명" 주소 지정으로 두 인스턴스의 상태를
+#     확인하고("[svcmgr-ctl-test] status svc-u@test running=1" →
+#     "status svc-u@root running=1") kernel thread 핸들이 서로 다름을
+#     확인해 진짜 독립된 프로세스임을 증명한다
+#     ("[svcmgr-ctl-test] per-account instances distinct=1").
+#     실행 중 진짜 버그 3건 발견: (1) `thread::ipc.reply_target`이
+#     스레드당 슬롯 하나뿐이라 svcmgr가 procsrv에게 새 민감한
+#     오퍼레이션(계정 위임 확인 후 spawn)을 걸 때 "진짜 svcmgr"임을
+#     증명할 위조 불가능한 방법이 없었다 — badge(ipc.md가 이미
+#     설계해 뒀지만 지금까지 아무도 실제로 세팅해 쓴 적이 없던
+#     필드)를 처음으로 스폰 시점 캐패빌리티 주입에 연결해(ADR-217)
+#     init/initrun/main.cpp가 svcmgr+procsrv 조합 전용으로 예약
+#     badge를 스탬핑하고 procsrv가 그 값을 확인하도록 했다 — 이
+#     과정에서 sys_recv의 badge 반환값 자체가 M6~M42 내내 raw
+#     syscall 계층에서 버려지고 있었다는 것도 처음 발견해
+#     kernel/arch/x86_64/syscall.cpp에 out-포인터를 추가했다.
+#     (2) 계정별 위임 테이블을 처음엔 "@global/system/service-delegates/
+#     <계정명>"에 두려 했으나, cfgsrv의 normalize_path/schema_matches
+#     가 "@global/..." 경로의 스키마를 항상 문자열 "global" 자체로
+#     고정 취급해 caller_uid!=0인 계정의 CREATE_TABLE이 절대 통과할
+#     수 없다는 것을 실행 중 발견했다(uid=0/root만 @global/* 아래에
+#     테이블을 만들 수 있다는 의도된 설계) — 자가서비스 grant가
+#     성립하려면 그 계정 자신의 스키마(@<계정명>/system/
+#     service-delegate)로 옮겨야 했다. (3) svcmgr의 로그인 감시
+#     스레드를 추가하며 g_runtime이 처음으로 두 스레드(메인 IPC
+#     루프+이 스레드)에서 동시에 건드려질 수 있게 됐다 — M42까지는
+#     단일 스레드라 락이 필요 없었다, 스핀락(libk) 추가로 해결.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -599,6 +642,17 @@ declare -a EXPECTED=(
   "[svcmgr-ctl-test] status svc-a running again=1"
   "[svcmgr-ctl-test] register svc-c ok=1"
   "[svcmgr-ctl-test] cfgsrv sees svc-c ok=1"
+  "[user-service-delegate-test] grant test ok=1"
+  "[user-service-delegate-test] grant root ok=1"
+  "[login] second account (root) login ok=1"
+  "[svcmgr] login watcher thread ok=1"
+  "[svcmgr] login event account=test"
+  "[svcmgr] login event account=root"
+  "[svcmgr] per_account spawn ok name=svc-u account=test"
+  "[svcmgr] per_account spawn ok name=svc-u account=root"
+  "[svcmgr-ctl-test] status svc-u@test running=1"
+  "[svcmgr-ctl-test] status svc-u@root running=1"
+  "[svcmgr-ctl-test] per-account instances distinct=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

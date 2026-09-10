@@ -405,8 +405,14 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
         // 부분 실패(예: 호출자가 이미 닫힌 핸들을 넘김)는 이 항목만
         // 건너뛴다 — deliver_message의 handles[] 처리와 같은 정신
         // (objects.md §4 3단계).
+        // M43(user-service-manager.md, ADR-217) — badge_override를 이제
+        // 그대로 전달한다(지금까지는 항상 0/false로 하드코딩돼 있었다).
+        // 기존 호출자는 has_badge_override=false(0 초기화)라 동작이
+        // 안 바뀐다.
         caller->handles->create_proxy(inherited_handles[i].src_handle,
-                                       inherited_handles[i].rights_mask, *handles, 0, false);
+                                       inherited_handles[i].rights_mask, *handles,
+                                       inherited_handles[i].badge_override,
+                                       inherited_handles[i].has_badge_override != 0);
     }
 
     kern::object::thread* t =

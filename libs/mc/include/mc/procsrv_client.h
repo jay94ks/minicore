@@ -95,6 +95,25 @@ void mc_process_exit_report(uint32_t procsrv_handle, uint32_t pid, int32_t exit_
 // 이 op은 실패 경로가 없어 항상 OK다).
 uint32_t mc_adopt_orphans(uint32_t procsrv_handle, uint32_t svcmgr_pid);
 
+// M43(user-service-manager.md §M43, docs/design/security-model.md
+// ADR-218) — svcmgr가 백그라운드 스레드에서 반복 호출한다(비블로킹
+// 폴링, procsrv가 단일 요청-응답 루프라 OPEN-67과 같은 이유로 진짜
+// 블로킹을 못 한다). 대기 중인 로그인 이벤트가 있으면 true를 반환하고
+// *out_uid/*out_username_packed를 채운다 — 없으면 false(에러 아님).
+uint8_t mc_poll_login_event(uint32_t procsrv_handle, uint32_t* out_uid,
+                             uint64_t* out_username_packed);
+
+// M43 — ADR-217의 badge(이 핸들이 initrun의 svcmgr+procsrv 조합
+// 전용 하드코딩 특수 케이스로 실제로 스탬핑해 준 것)로 procsrv가
+// "진짜 svcmgr"임을 판정한 뒤, username_packed 계정에게 유효한
+// 서비스 위임(ADR-218)이 있으면 그 계정 몫으로 procsrv 자신이
+// 컴파일 시점에 심어 둔 데모 ELF를 spawn한다(elf_data/elf_size는
+// 요청에 싣지 않는다 — svcmgr의 포인터는 procsrv의 주소공간에서
+// 무의미하다). ADR-193의 준비완료 핸드셰이크는 연결하지 않는다
+// (OPEN-73). 성공하면 MC_PROC_STATUS_OK와 *out_thread_handle을 채운다.
+uint32_t mc_spawn_delegated_unit(uint32_t procsrv_handle, uint64_t username_packed,
+                                  uint32_t* out_thread_handle);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

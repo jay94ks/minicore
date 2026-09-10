@@ -117,6 +117,15 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             }
             auto result =
                 kern::ipc::sys_recv(*self->handles, static_cast<kern::object::handle>(a1), *msg_out);
+            // M43(user-service-manager.md, ADR-217) — a3(선택, 0=미사용)에
+            // badge를 받을 uint64_t 출력 포인터를 넘기면 채워 준다. 지금까지
+            // (M6~M42) 어떤 호출자도 sys_recv의 badge 반환값을 실제로
+            // 받아 본 적이 없었다 — result<uint64_t,...>가 이미 badge를
+            // 계산해 뒀지만 여기서 항상 버려졌다. 새 out-포인터 인자를
+            // 추가한 것뿐, 기존 호출자(a3=0)의 동작은 전혀 안 바뀐다.
+            if (result.is_ok() && a3 != 0) {
+                *reinterpret_cast<uint64_t*>(a3) = result.value();
+            }
             return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
         case MC_SYSCALL_IPC_REPLY: {

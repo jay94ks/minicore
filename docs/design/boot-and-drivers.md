@@ -2045,3 +2045,61 @@
   fork/exec 경로를 거쳐 spawn될 가능성이 높아 self_register가
   자연히 일어난다) — 커널 서버 자체를 procsrv에 등록시키는 것은
   이 계획의 범위 밖으로 남긴다.
+
+## ADR-219. M43: svcmgr 확장 — 유닛 scope(system/per_account)+로그인 감시 백그라운드 스레드+`유닛@계정` 주소 지정
+
+- **상태**: 확정 (2026-09-10), user-service-manager.md §M43.
+- **결정**:
+  1. `mc_svcmgr_service_unit`(`mc/svcmgr_protocol.h`, ADR-197)에
+     `uint8_t scope` 필드를 추가한다 — `0=system`(기본, M40~M42가
+     이미 구현한 그대로: 부팅 시 즉시 시작, svcmgr 자신의 태생적
+     권한으로 구동, 계정과 무관) / `1=per_account`(신규: **템플릿**
+     일 뿐이다 — 부팅 시 시작하지 않는다, systemd의 `user@.service`
+     와 같은 정신).
+  2. svcmgr가 두 번째 스레드를 만든다(M37의 `mc_thread_create`,
+     M42까지는 단일 스레드였다 — 이번이 이 서버의 첫 멀티스레드
+     사용). 이 스레드는 `op_poll_login_event`(ADR-218)를 짧은
+     `mc_yield()` 간격으로 반복 호출한다(procsrv가 진짜 블로킹을
+     못 하므로 — 같은 이유의 폴링을 `spawn_unit_and_wait_ready`가
+     아니라 별도 스레드에 둔 이유는, 메인 스레드는 여전히 컨트롤
+     프로토콜(M42)에 온전히 반응해야 하기 때문이다 — M42가 이미
+     증명한 "메인 IPC 루프를 막지 않는다"는 제약을 그대로 지킨다).
+     새 로그인 uid를 받으면, `scope=per_account`인 유닛 전부에 대해
+     `op_spawn_delegated_unit`(ADR-218)을 시도한다 — 위임이 없으면
+     그 계정에 대해서만 조용히 스킵한다(로그 남김, 에러 아님).
+  3. **런타임 상태 키를 (유닛명, 계정명) 페어로 확장한다** —
+     `runtime_unit.name`은 그대로 유닛 정의 이름이고, 새 필드
+     `account[32]`(빈 문자열="system scope, 계정 무관")를 추가해
+     같은 유닛 이름이 계정마다 독립된 슬롯을 갖게 한다(systemd의
+     `unit@instance` 개념과 같다).
+  4. **컨트롤 프로토콜 주소 지정**: `op_status`/`op_start`/`op_stop`/
+     `op_restart`가 받는 `pages[0]` 이름 문자열에 `"<유닛명>@<계정명>"`
+     형식(예: `"backup@test"`)을 허용한다 — `@`가 없으면 기존처럼
+     system-scope 유닛(계정="")으로 취급해 M40~M42의 기존 동작·와이어
+     포맷을 그대로 보존한다(하위 호환, 새 필드/새 오퍼레이션 없이
+     기존 문자열 파싱만 확장). `op_register`/`op_unregister`도 같은
+     규칙이지만, per_account 유닛은 **템플릿을 등록**하는 것이라
+     `@계정`을 붙이지 않는다(등록은 항상 유닛명만, 인스턴스화는
+     로그인 시점에 자동으로 일어난다).
+- **근거**: 사용자가 명시한 두 계층("시스템 전역 설치 서비스는
+  태생적 권한", "계정 전용 서비스는 영구 위임+철회")을 그대로
+  구조화했다. 새 스레드를 쓰는 이유는 procsrv의 비블로킹 폴링
+  한계(OPEN-67)를 M42가 이미 증명한 "메인 루프를 막지 않는다"는
+  제약과 동시에 만족시키는 유일한 방법이기 때문이다 — M37이 만든
+  `mc_thread_create`가 마침 이 용도에 정확히 맞아떨어진다(둘 다
+  같은 `owner_space`/`handle_table`을 공유하므로 `g_runtime`을
+  락 없이 공유해도 되는지는 실행 시 재검토 대상 — 사실 두 스레드가
+  동시에 `g_runtime`을 건드릴 수 있어 락이 필요하다, 아래 실행 중
+  발견 참고).
+- **영향**:
+  - `libs/mc/include/mc/svcmgr_protocol.h`에 `scope` 필드+
+    `MC_SVCMGR_SCOPE_SYSTEM`/`MC_SVCMGR_SCOPE_PER_ACCOUNT` 상수 추가,
+    `docs/spec/generated/svcmgr-wire.md` 재생성.
+  - `servers/svcmgr/main.cpp`: 로그인 감시 스레드 신설, `runtime_unit`
+    에 `account[32]` 추가, `g_runtime` 접근에 스핀락 추가(위 실행
+    시 재검토가 실제로 필요했다 — 아래 done 보고 참고), 이름 파싱에
+    `@계정` 분리 로직 추가.
+  - 검증: 계정 두 개(`test`/`root`, `servers/procsrv/main.cpp`의
+    기존 self-test 계정)가 각각 로그인해 같은 이름의 per_account
+    유닛이 계정마다 독립된 프로세스로(공유 없이) 뜨는 것을 QEMU로
+    확인한다(계획 원문의 검증 목표 그대로).

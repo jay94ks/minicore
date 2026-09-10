@@ -210,6 +210,16 @@ extern "C" [[noreturn]] void _start(const void*) {
             // M18(security-model.md ADR-167) — 로그인 성공 이후
             // su/sudo 정책 확인 경로를 검증한다(위임 승인/거부 양쪽).
             run_su_tests();
+            // M43(user-service-manager.md §M43, docs/design/
+            // security-model.md ADR-218) — 계정별 유저 서비스
+            // 인스턴스 검증은 계정이 최소 두 개 로그인해야 증명된다
+            // (계획 원문의 검증 목표). 위의 자동 로그인은 "test"
+            // 하나뿐이었으니 여기서 "root"로도 한 번 더 로그인해
+            // procsrv의 로그인 이벤트 큐(handle_login::push_login_event)
+            // 를 두 번째로 채운다.
+            bool second_login_ok = try_login("root", 4, "root1234", 8);
+            debug_log(second_login_ok ? "[login] second account (root) login ok=1\n"
+                                       : "[login] second account (root) login ok=0\n");
             break;
         }
         console_print_str("Login incorrect\n");

@@ -149,3 +149,41 @@ uint32_t mc_adopt_orphans(uint32_t procsrv_handle, uint32_t svcmgr_pid) {
     }
     return (uint32_t)reply.regs[1];
 }
+
+uint8_t mc_poll_login_event(uint32_t procsrv_handle, uint32_t* out_uid,
+                             uint64_t* out_username_packed) {
+    mc_message req;
+    mc_zero_bytes(&req, sizeof(req));
+    req.label = MC_PROC_OP_POLL_LOGIN_EVENT;
+    mc_message reply;
+    mc_zero_bytes(&reply, sizeof(reply));
+    mc_ipc_call(procsrv_handle, &req, &reply);
+    if (reply.regs[0] != MC_PROC_STATUS_OK) {
+        return 0;
+    }
+    if (out_uid != 0) {
+        *out_uid = (uint32_t)reply.regs[1];
+    }
+    if (out_username_packed != 0) {
+        *out_username_packed = reply.regs[2];
+    }
+    return 1;
+}
+
+uint32_t mc_spawn_delegated_unit(uint32_t procsrv_handle, uint64_t username_packed,
+                                  uint32_t* out_thread_handle) {
+    mc_message req;
+    mc_zero_bytes(&req, sizeof(req));
+    req.label = MC_PROC_OP_SPAWN_DELEGATED_UNIT;
+    req.regs[0] = username_packed;
+    mc_message reply;
+    mc_zero_bytes(&reply, sizeof(reply));
+    mc_ipc_call(procsrv_handle, &req, &reply);
+    if (reply.regs[0] != MC_PROC_STATUS_OK) {
+        return (uint32_t)reply.regs[0];
+    }
+    if (out_thread_handle != 0) {
+        *out_thread_handle = (uint32_t)reply.regs[1];
+    }
+    return MC_PROC_STATUS_OK;
+}

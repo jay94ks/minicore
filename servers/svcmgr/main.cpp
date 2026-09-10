@@ -22,9 +22,12 @@
 // 쓴다 — 새 종료/저장 메커니즘을 만들지 않는다(ADR-196 §결정7
 // 근거 그대로). svcmgr는 별도로 권한을 검사하지 않는다(cfgsrv
 // 자신의 ADR-062 권한 검사에 그대로 의존, ADR-197 §결정3).
+#include <k/spinlock.hpp>
+
 #include <mc/cfgsrv_client.h>
 #include <mc/lifecycle_client.h>
 #include <mc/procsrv_client.h>
+#include <mc/procsrv_protocol.h>
 #include <mc/svcmgr_protocol.h>
 #include <mc/syscall.h>
 #include <mc/util.h>
@@ -97,26 +100,36 @@ bool blob_contains_name(const char* haystack, uint64_t haystack_len, const char*
 // 핸들로 직접 sys_process_kill을 걸 수 있어야 하므로, ADR-178/M22
 // 패턴을 그대로 재사용한다). 부팅 시 load_units()가 읽은 유닛들과
 // op_register로 나중에 추가된 유닛들이 여기 다 들어간다.
+// M43(user-service-manager.md §M43, ADR-219) — account=""(빈 문자열)이면
+// system-scope 인스턴스(M40~M42와 완전히 같다). account!=""이면
+// per_account 유닛의 그 계정 몫 인스턴스다 — 같은 유닛 이름이 계정마다
+// 독립된 슬롯을 갖는다(systemd의 unit@instance와 같은 정신).
 struct runtime_unit {
     bool used = false;
     char name[32] = {};
+    char account[32] = {};
     bool running = false;
     uint32_t thread_handle = 0;  // k_right_can_signal(=k_right_can_kill) 보유, running일 때만 유효.
 };
 
 runtime_unit g_runtime[k_max_units];
 
-runtime_unit* find_runtime(const char* name) {
+// M43 — g_runtime은 이제 메인 스레드(컨트롤 프로토콜 dispatch)와
+// 로그인 감시 스레드(아래 login_watcher_entry) 둘 다가 건드린다 —
+// M42까지는 단일 스레드라 락이 필요 없었다.
+spinlock g_runtime_lock;
+
+runtime_unit* find_runtime_locked(const char* name, const char* account) {
     for (auto& u : g_runtime) {
-        if (u.used && cstr_equals(u.name, name)) {
+        if (u.used && cstr_equals(u.name, name) && cstr_equals(u.account, account)) {
             return &u;
         }
     }
     return nullptr;
 }
 
-runtime_unit* alloc_runtime(const char* name) {
-    runtime_unit* existing = find_runtime(name);
+runtime_unit* alloc_runtime_locked(const char* name, const char* account) {
+    runtime_unit* existing = find_runtime_locked(name, account);
     if (existing != nullptr) {
         return existing;
     }
@@ -125,12 +138,43 @@ runtime_unit* alloc_runtime(const char* name) {
             u.used = true;
             mc_zero_bytes(u.name, sizeof(u.name));
             mc_pack_bytes(u.name, sizeof(u.name), name, mc_cstr_len(name));
+            mc_zero_bytes(u.account, sizeof(u.account));
+            mc_pack_bytes(u.account, sizeof(u.account), account, mc_cstr_len(account));
             u.running = false;
             u.thread_handle = 0;
             return &u;
         }
     }
     return nullptr;
+}
+
+// "<유닛명>@<계정명>" 또는 "<유닛명>"(system-scope, account="")을
+// 분리한다(ADR-219 §결정4) — out_name/out_account 둘 다 32바이트.
+void split_name_account(const char* combined, char* out_name, char* out_account) {
+    mc_zero_bytes(out_name, 32);
+    mc_zero_bytes(out_account, 32);
+    uint64_t at = 0;
+    bool found_at = false;
+    for (uint64_t i = 0; combined[i] != '\0' && i < 63; ++i) {
+        if (combined[i] == '@') {
+            at = i;
+            found_at = true;
+            break;
+        }
+    }
+    if (!found_at) {
+        mc_pack_bytes(out_name, 32, combined, mc_cstr_len(combined));
+        return;
+    }
+    uint64_t name_len = at < 31 ? at : 31;
+    for (uint64_t i = 0; i < name_len; ++i) {
+        out_name[i] = combined[i];
+    }
+    uint64_t acct_len = mc_cstr_len(combined + at + 1);
+    uint64_t copy_len = acct_len < 31 ? acct_len : 31;
+    for (uint64_t i = 0; i < copy_len; ++i) {
+        out_account[i] = combined[at + 1 + i];
+    }
 }
 
 // 데모 유닛 하나를 spawn하고 준비완료까지 기다린다(파일 상단 주석
@@ -202,7 +246,18 @@ uint32_t load_units(uint64_t table_id, mc_svcmgr_service_unit* units) {
 // 있게 한다.
 void start_units_in_order(mc_svcmgr_service_unit* units, uint32_t count) {
     bool started[k_max_units] = {};
-    for (uint32_t remaining = count; remaining > 0;) {
+    uint32_t remaining = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (units[i].scope == MC_SVCMGR_SCOPE_PER_ACCOUNT) {
+            // ADR-219 §결정1/2 — per_account 유닛은 템플릿일 뿐이다.
+            // enabled/depends_on을 무시하고 부팅 시 시작하지 않는다
+            // (login_watcher_entry가 로그인 시점에만 인스턴스화한다).
+            started[i] = true;
+            continue;
+        }
+        ++remaining;
+    }
+    while (remaining > 0) {
         bool progressed = false;
         for (uint32_t i = 0; i < count; ++i) {
             if (started[i] || !units[i].enabled) {
@@ -230,11 +285,13 @@ void start_units_in_order(mc_svcmgr_service_unit* units, uint32_t count) {
             debug_log("\n");
             uint32_t thread_handle = 0;
             bool ok = spawn_unit_and_wait_ready(thread_handle);
-            runtime_unit* rt = alloc_runtime(units[i].name);
+            g_runtime_lock.lock();
+            runtime_unit* rt = alloc_runtime_locked(units[i].name, "");
             if (rt != nullptr) {
                 rt->running = ok;
                 rt->thread_handle = thread_handle;
             }
+            g_runtime_lock.unlock();
             started[i] = true;
             progressed = true;
             --remaining;
@@ -243,6 +300,66 @@ void start_units_in_order(mc_svcmgr_service_unit* units, uint32_t count) {
             // 순환(또는 없는 의존)에 걸린 나머지 — 스킵하고 멈춘다.
             debug_log("[svcmgr] unit start cycle_or_missing_dep remaining>0\n");
             break;
+        }
+    }
+}
+
+// M43(ADR-219 §결정2) — svcmgr가 아는 유닛 템플릿 전체(부팅 시
+// load_units가 채운 것 그대로) — login_watcher_entry가 로그인 시점에
+// scope=PER_ACCOUNT인 것만 훑는다. 부팅 후에는 읽기만 하므로(새
+// 유닛은 op_register로 g_runtime에는 들어가지만 이 배열은 갱신하지
+// 않는다 — per_account 템플릿의 op_register 확장은 이번 라운드
+// 범위 밖) 별도 락이 필요 없다.
+mc_svcmgr_service_unit g_units[k_max_units];
+uint32_t g_unit_count = 0;
+
+// M43 — svcmgr의 첫 멀티스레드 사용(M37의 mc_thread_create). procsrv
+// 는 단일 요청-응답 루프라 진짜 블로킹을 못 해(OPEN-67) svcmgr가
+// 직접 폴링해야 한다 — 이 스레드가 메인 스레드의 컨트롤 프로토콜
+// 처리(M42)를 막지 않도록 별도 스레드에 둔다.
+[[noreturn]] void login_watcher_entry(const void*) {
+    for (;;) {
+        uint32_t uid = 0;
+        uint64_t username_packed = 0;
+        if (mc_poll_login_event(k_procsrv_handle, &uid, &username_packed) == 0) {
+            mc_yield();
+            continue;
+        }
+        char username[9] = {};
+        for (uint64_t i = 0; i < 8; ++i) {
+            username[i] = static_cast<char>((username_packed >> (8 * i)) & 0xFF);
+        }
+        debug_log("[svcmgr] login event account=");
+        debug_log_n(username, mc_cstr_len(username));
+        debug_log("\n");
+        for (uint32_t i = 0; i < g_unit_count; ++i) {
+            if (g_units[i].scope != MC_SVCMGR_SCOPE_PER_ACCOUNT) {
+                continue;
+            }
+            uint32_t thread_handle = 0;
+            uint32_t status = mc_spawn_delegated_unit(k_procsrv_handle, username_packed, &thread_handle);
+            if (status != MC_PROC_STATUS_OK) {
+                // 위임 없음/guest,jail 대상 — 조용히 스킵한다(ADR-218
+                // §결정6 — 에러가 아니다).
+                debug_log("[svcmgr] per_account spawn skip name=");
+                debug_log_n(g_units[i].name, mc_cstr_len(g_units[i].name));
+                debug_log(" account=");
+                debug_log_n(username, mc_cstr_len(username));
+                debug_log("\n");
+                continue;
+            }
+            g_runtime_lock.lock();
+            runtime_unit* rt = alloc_runtime_locked(g_units[i].name, username);
+            if (rt != nullptr) {
+                rt->running = true;
+                rt->thread_handle = thread_handle;
+            }
+            g_runtime_lock.unlock();
+            debug_log("[svcmgr] per_account spawn ok name=");
+            debug_log_n(g_units[i].name, mc_cstr_len(g_units[i].name));
+            debug_log(" account=");
+            debug_log_n(username, mc_cstr_len(username));
+            debug_log("\n");
         }
     }
 }
@@ -261,20 +378,36 @@ void handle_list(mc_message& out) {
     mc_zero_bytes(g_list_blob, sizeof(g_list_blob));
     uint64_t off = 0;
     uint32_t count = 0;
+    g_runtime_lock.lock();
     for (auto& u : g_runtime) {
         if (!u.used) {
             continue;
         }
-        uint64_t len = mc_cstr_len(u.name);
-        if (off + len + 1 >= sizeof(g_list_blob)) {
+        // M43(ADR-219 §결정4) — 계정 인스턴스는 "이름@계정"으로 낸다.
+        char combined[65];
+        mc_zero_bytes(combined, sizeof(combined));
+        uint64_t name_len = mc_cstr_len(u.name);
+        for (uint64_t i = 0; i < name_len; ++i) {
+            combined[i] = u.name[i];
+        }
+        uint64_t total_len = name_len;
+        if (u.account[0] != '\0') {
+            combined[total_len++] = '@';
+            uint64_t acct_len = mc_cstr_len(u.account);
+            for (uint64_t i = 0; i < acct_len; ++i) {
+                combined[total_len++] = u.account[i];
+            }
+        }
+        if (off + total_len + 1 >= sizeof(g_list_blob)) {
             break;
         }
-        for (uint64_t i = 0; i < len; ++i) {
-            g_list_blob[off++] = u.name[i];
+        for (uint64_t i = 0; i < total_len; ++i) {
+            g_list_blob[off++] = combined[i];
         }
         g_list_blob[off++] = '\0';
         ++count;
     }
+    g_runtime_lock.unlock();
     out.page_count = 1;
     out.pages[0].vaddr = reinterpret_cast<uint64_t>(g_list_blob);
     out.pages[0].length = sizeof(g_list_blob);
@@ -283,33 +416,57 @@ void handle_list(mc_message& out) {
     out.regs[1] = count;
 }
 
+// pages[0]의 "<유닛명>@<계정명>" 또는 "<유닛명>"(system-scope)
+// 문자열을 읽어 분리한다(ADR-219 §결정4) — status/start/stop/restart
+// 공용.
+void read_name_account(const mc_message& in, char* out_name, char* out_account) {
+    char combined[64];
+    mc_zero_bytes(combined, sizeof(combined));
+    const char* src = reinterpret_cast<const char*>(in.pages[0].vaddr);
+    for (uint64_t i = 0; i < sizeof(combined) - 1 && src[i] != '\0'; ++i) {
+        combined[i] = src[i];
+    }
+    split_name_account(combined, out_name, out_account);
+}
+
 void handle_status(const mc_message& in, mc_message& out) {
     char name[32];
-    mc_zero_bytes(name, sizeof(name));
-    const char* src = reinterpret_cast<const char*>(in.pages[0].vaddr);
-    for (uint64_t i = 0; i < sizeof(name) - 1 && src[i] != '\0'; ++i) {
-        name[i] = src[i];
-    }
-    runtime_unit* u = find_runtime(name);
-    if (u == nullptr) {
+    char account[32];
+    read_name_account(in, name, account);
+    g_runtime_lock.lock();
+    runtime_unit* u = find_runtime_locked(name, account);
+    bool running = u != nullptr && u->running;
+    uint32_t thread_handle = u != nullptr ? u->thread_handle : 0;
+    bool found = u != nullptr;
+    g_runtime_lock.unlock();
+    if (!found) {
         out.regs[0] = MC_SVCMGR_STATUS_NOT_FOUND;
         return;
     }
     out.regs[0] = MC_SVCMGR_STATUS_OK;
-    out.regs[1] = u->running ? 1 : 0;
-    out.regs[2] = u->thread_handle;
+    out.regs[1] = running ? 1 : 0;
+    out.regs[2] = thread_handle;
 }
 
 void handle_start(const mc_message& in, mc_message& out) {
     char name[32];
-    mc_zero_bytes(name, sizeof(name));
-    const char* src = reinterpret_cast<const char*>(in.pages[0].vaddr);
-    for (uint64_t i = 0; i < sizeof(name) - 1 && src[i] != '\0'; ++i) {
-        name[i] = src[i];
-    }
-    runtime_unit* u = find_runtime(name);
-    if (u != nullptr && u->running) {
+    char account[32];
+    read_name_account(in, name, account);
+    g_runtime_lock.lock();
+    runtime_unit* existing = find_runtime_locked(name, account);
+    bool already_running = existing != nullptr && existing->running;
+    g_runtime_lock.unlock();
+    if (already_running) {
         out.regs[0] = MC_SVCMGR_STATUS_ALREADY_RUNNING;
+        return;
+    }
+    // system-scope만 svcmgr 자신의 태생적 권한으로 직접 spawn한다
+    // (M40~M42와 동일). per_account 인스턴스는 op_start로 직접
+    // (재)시작하지 않는다 — 로그인 시점에만 위임 확인을 거쳐
+    // 인스턴스화된다(ADR-218/219) — account가 비어 있지 않으면
+    // 여기서 다루지 않는다.
+    if (account[0] != '\0') {
+        out.regs[0] = MC_SVCMGR_STATUS_NOT_FOUND;
         return;
     }
     uint32_t thread_handle = 0;
@@ -317,32 +474,35 @@ void handle_start(const mc_message& in, mc_message& out) {
         out.regs[0] = MC_SVCMGR_STATUS_NOT_FOUND;
         return;
     }
-    runtime_unit* rt = alloc_runtime(name);
-    if (rt == nullptr) {
-        out.regs[0] = MC_SVCMGR_STATUS_NOT_FOUND;
-        return;
+    g_runtime_lock.lock();
+    runtime_unit* rt = alloc_runtime_locked(name, account);
+    if (rt != nullptr) {
+        rt->running = true;
+        rt->thread_handle = thread_handle;
     }
-    rt->running = true;
-    rt->thread_handle = thread_handle;
-    out.regs[0] = MC_SVCMGR_STATUS_OK;
+    g_runtime_lock.unlock();
+    out.regs[0] = (rt != nullptr) ? MC_SVCMGR_STATUS_OK : MC_SVCMGR_STATUS_NOT_FOUND;
 }
 
 // op_stop — 기존 sys_process_kill(ADR-178)을 그대로 쓴다(ADR-196
-// §결정7 근거 — 새 종료 메커니즘을 만들지 않는다).
+// §결정7 근거 — 새 종료 메커니즘을 만들지 않는다). system/per_account
+// 인스턴스 둘 다 이 경로로 정지할 수 있다(kill은 대상을 가리지
+// 않는다).
 void handle_stop(const mc_message& in, mc_message& out) {
     char name[32];
-    mc_zero_bytes(name, sizeof(name));
-    const char* src = reinterpret_cast<const char*>(in.pages[0].vaddr);
-    for (uint64_t i = 0; i < sizeof(name) - 1 && src[i] != '\0'; ++i) {
-        name[i] = src[i];
-    }
-    runtime_unit* u = find_runtime(name);
+    char account[32];
+    read_name_account(in, name, account);
+    g_runtime_lock.lock();
+    runtime_unit* u = find_runtime_locked(name, account);
     if (u == nullptr || !u->running) {
+        g_runtime_lock.unlock();
         out.regs[0] = MC_SVCMGR_STATUS_NOT_RUNNING;
         return;
     }
-    do_syscall(MC_SYSCALL_PROCESS_KILL, u->thread_handle, 0, 0);
+    uint32_t thread_handle = u->thread_handle;
     u->running = false;
+    g_runtime_lock.unlock();
+    do_syscall(MC_SYSCALL_PROCESS_KILL, thread_handle, 0, 0);
     out.regs[0] = MC_SVCMGR_STATUS_OK;
 }
 
@@ -373,7 +533,12 @@ void handle_register(const mc_message& in, mc_message& out) {
         out.regs[0] = MC_SVCMGR_STATUS_NOT_FOUND;
         return;
     }
-    alloc_runtime(unit.name);  // status/start가 바로 찾을 수 있게(아직 실행 중은 아님).
+    // status/start가 바로 찾을 수 있게(아직 실행 중은 아님) — account=""
+    // (system scope와 같은 자리, per_account 템플릿은 로그인 시점에야
+    // 실제 계정 슬롯이 생긴다).
+    g_runtime_lock.lock();
+    alloc_runtime_locked(unit.name, "");
+    g_runtime_lock.unlock();
     out.regs[0] = MC_SVCMGR_STATUS_OK;
 }
 
@@ -428,13 +593,21 @@ extern "C" [[noreturn]] void _start(const void*) {
         unit_b.depends_on_count = 1;
         mc_pack_bytes(unit_b.depends_on[0], sizeof(unit_b.depends_on[0]), "svc-a", 5);
         mc_reg_set_binary(k_cfgsrv_handle, 0, table_id, "svc-b", &unit_b, sizeof(unit_b));
+
+        // M43(user-service-manager.md §M43, ADR-219) — per_account
+        // 자기테스트 템플릿 하나("svc-u"). 계정별 서비스 위임
+        // (ADR-218)이 있는 계정이 로그인할 때만 인스턴스화된다 —
+        // enabled/depends_on은 이 scope에서 무시된다.
+        mc_svcmgr_service_unit unit_u{};
+        mc_pack_bytes(unit_u.name, sizeof(unit_u.name), "svc-u", 5);
+        unit_u.scope = MC_SVCMGR_SCOPE_PER_ACCOUNT;
+        mc_reg_set_binary(k_cfgsrv_handle, 0, table_id, "svc-u", &unit_u, sizeof(unit_u));
         debug_log("[svcmgr] self-test units registered ok=1\n");
     }
 
-    mc_svcmgr_service_unit units[k_max_units];
-    uint32_t unit_count = load_units(table_id, units);
-    debug_log(unit_count > 0 ? "[svcmgr] load_units ok=1\n" : "[svcmgr] load_units ok=0\n");
-    start_units_in_order(units, unit_count);
+    g_unit_count = load_units(table_id, g_units);
+    debug_log(g_unit_count > 0 ? "[svcmgr] load_units ok=1\n" : "[svcmgr] load_units ok=0\n");
+    start_units_in_order(g_units, g_unit_count);
 
     // M41 — delete_value로 svc-b를 지우고 다시 목록을 읽어 실제로
     // 빠졌는지 확인한다("재부팅" 부분은 범위 밖, M41 done 참고).
@@ -448,9 +621,27 @@ extern "C" [[noreturn]] void _start(const void*) {
     uint64_t count_after = 0;
     uint64_t list_err = mc_reg_list_values(k_cfgsrv_handle, 0, table_id, names_after,
                                             sizeof(names_after), &count_after);
-    bool delete_ok = (list_err == MC_REG_ERR_OK) && (count_after == 1) &&
+    // M43 — svc-u(per_account 템플릿)가 테이블에 추가되며 남는 개수가
+    // 1(svc-a)에서 2(svc-a, svc-u)로 늘었다.
+    bool delete_ok = (list_err == MC_REG_ERR_OK) && (count_after == 2) &&
                       !blob_contains_name(names_after, sizeof(names_after), "svc-b");
     debug_log(delete_ok ? "[svcmgr] delete_value svc-b ok=1\n" : "[svcmgr] delete_value svc-b ok=0\n");
+
+    // M43(ADR-219) — 로그인 감시 백그라운드 스레드(M37 mc_thread_create,
+    // 이 서버의 첫 멀티스레드 사용). owner_space/handle_table을 그대로
+    // 공유하므로(fork처럼 복제하지 않는다) k_procsrv_handle 등 이미
+    // 열린 핸들을 그대로 쓸 수 있다.
+    {
+        static _Alignas(16) uint8_t watcher_stack[16384];
+        uint64_t stack_top = reinterpret_cast<uint64_t>(watcher_stack) + sizeof(watcher_stack);
+        stack_top &= ~0xFULL;
+        uint64_t watcher_tid = 0;
+        uint64_t watcher_err =
+            mc_thread_create(reinterpret_cast<uint64_t>(&login_watcher_entry), stack_top, 0, 0, 0,
+                              &watcher_tid);
+        debug_log(watcher_err == 0 ? "[svcmgr] login watcher thread ok=1\n"
+                                    : "[svcmgr] login watcher thread ok=0\n");
+    }
 
     // ADR-192 §결정3 — 프로세스 트리의 영구 루트는 이 데몬이다.
     // M42 — 이제 own endpoint 위에서 실제 컨트롤 프로토콜을

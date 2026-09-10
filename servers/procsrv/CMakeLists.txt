@@ -30,11 +30,34 @@ add_custom_command(
 )
 add_custom_target(minicore_procsrv_musl_exec_target_blob DEPENDS ${MUSL_EXEC_TARGET_BLOB_H})
 
+# M43(user-service-manager.md §M43) — op_spawn_delegated_unit(ADR-218)이
+# 스폰할 ELF. svcmgr가 IPC regs로 넘긴 포인터는 svcmgr **자신의**
+# 주소공간을 가리켜 procsrv가 그대로 역참조할 수 없다(서로 다른
+# 프로세스) — 위 musl-exec-target과 같은 이유로, procsrv 자신이
+# userland/svcmgr-demo-unit의 같은 ELF를 컴파일 시점 데이터로
+# 직접 심어 둔다(exec_path는 여전히 범위 밖이라 system-scope 유닛과
+# 같은 데모 ELF 하나만 쓴다, M41/M42와 같은 제약).
+set(USER_SERVICE_UNIT_BLOB_H ${CMAKE_CURRENT_BINARY_DIR}/generated/user_service_unit_blob.h)
+add_custom_command(
+    OUTPUT ${USER_SERVICE_UNIT_BLOB_H}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/bin2c.py
+            $<TARGET_FILE:minicore_svcmgr_demo_unit_elf>
+            ${USER_SERVICE_UNIT_BLOB_H}
+            g_user_service_unit_elf
+    DEPENDS minicore_svcmgr_demo_unit_elf
+            ${CMAKE_SOURCE_DIR}/tools/bin2c.py
+    COMMENT "Generating user-service-unit ELF blob header (tools/bin2c.py)"
+    VERBATIM
+)
+add_custom_target(minicore_procsrv_user_service_unit_blob DEPENDS ${USER_SERVICE_UNIT_BLOB_H})
+
 add_executable(minicore_procsrv_elf
     main.cpp
 )
 
-add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob)
+add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob
+                  minicore_procsrv_user_service_unit_blob)
 
 target_include_directories(minicore_procsrv_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/mc/include

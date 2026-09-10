@@ -51,5 +51,40 @@
 // M32 — self_register/fork_register 전용(g_processes[k_max_processes=64]
 // 가 가득 찼을 때). wait/kill에는 나오지 않는다.
 #define MC_PROC_STATUS_TABLE_FULL 3u
+// M43 — spawn_delegated_unit 전용(위임 없음/guest·jail 대상/badge
+// 불일치). poll_login_event 전용(큐가 비었음)에도 NOT_FOUND를 그대로
+// 재사용한다.
+#define MC_PROC_STATUS_PERMISSION_DENIED 4u
+
+// M43(user-service-manager.md, docs/design/security-model.md ADR-217) —
+// svcmgr가 받는 procsrv 핸들에만 스폰 시점에 이 badge가 스탬핑된다
+// (init/initrun/main.cpp의 svcmgr+procsrv 조합 전용 하드코딩 특수
+// 케이스). 0은 "오버라이드 없음"(대다수 --depends=)과 구분되어야
+// 하므로 0이 아닌 값을 쓴다 — 값 자체엔 의미가 없다, procsrv가
+// op_spawn_delegated_unit에서 이 정확한 값과 일치하는지만 확인한다.
+#define MC_PROCSRV_SERVICE_DELEGATION_BADGE 1ull
+
+// M43 — svcmgr가 로그인 이벤트를 폴링한다(ADR-218 §결정6, ADR-219).
+// procsrv는 단일 요청-응답 루프라(OPEN-67) 진짜 블로킹을 못 해
+// 비블로킹 폴링이다 — 큐가 비었으면 status=NOT_FOUND.
+// @wire-op label=16 name=poll_login_event request=none reply="uint32 status; uint32 uid; uint64 username_packed"
+#define MC_PROC_OP_POLL_LOGIN_EVENT 16u
+
+// M43 — svcmgr가 계정별 유저 서비스 유닛을 그 계정 몫으로 spawn한다.
+// 호출자는 반드시 MC_PROCSRV_SERVICE_DELEGATION_BADGE를 가진 badge로
+// 불러야 한다(그 외 badge는 즉시 PERMISSION_DENIED, ADR-217) —
+// 그 뒤 `@global/system/service-delegates/<username_packed>`(ADR-218)
+// 에 유효한 위임이 있는지 확인한다. elf_data/elf_size는 요청에
+// 실리지 않는다 — svcmgr가 넘긴 포인터는 svcmgr 자신의 주소공간을
+// 가리켜 procsrv가 역참조할 수 없으므로, procsrv가 같은 데모 ELF를
+// 자신의 컴파일 시점 데이터로 직접 심어 둔 것을 쓴다(exec_path는
+// 여전히 범위 밖 — M41/M42와 같은 제약). ADR-193의 준비완료
+// 핸드셰이크(create_endpoint)는 이번 라운드에 연결하지 않는다 —
+// 그 프록시 핸들은 procsrv 자신의 테이블에 생기므로 svcmgr에게
+// 넘기려면 sys_reply의 handles[] 위임(ADR-151)까지 얹어야 해서
+// 범위를 넘는다(YAGNI, exec_path처럼 이번 라운드가 명시적으로
+// 미루는 것 중 하나 — 신규 **OPEN-73**).
+// @wire-op label=17 name=spawn_delegated_unit request="uint64 username_packed" reply="uint32 status; uint32 out_thread_handle"
+#define MC_PROC_OP_SPAWN_DELEGATED_UNIT 17u
 
 #endif  // MC_PROCSRV_PROTOCOL_H

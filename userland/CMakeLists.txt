@@ -18,3 +18,7 @@ add_subdirectory(svcmgr-demo-unit)
 # user-service-manager.md §M42 — svcmgr 컨트롤 프로토콜 검증용
 # 최소 테스트 프로그램.
 add_subdirectory(svcmgr-ctl-test)
+
+# user-service-manager.md §M43 — 계정별 유저 서비스 위임(ADR-218)
+# grant 검증용 최소 테스트 프로그램.
+add_subdirectory(user-service-delegate-test)

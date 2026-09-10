@@ -282,3 +282,18 @@ cfgsrv 서브시스템(스키마·테이블 주소 체계, 권한 모델, 비밀
   OPEN-70(fs-protocol close 부재)은 VFS를 쓰는 모든 서버에 영향을
   주는 더 큰 항목이라, 다음에 파일을 자주 열고 닫는 소비자가
   생기면 다시 마주칠 가능성이 높다.
+
+M43(user-service-manager.md §M43)이 이 서브시스템에 새 테이블을
+하나 더 추가했다 — 계정별 유저 서비스 위임
+`@<계정명>/system/service-delegate`(su/sudo의 `@global/system/
+delegates/<계정>`과는 목적이 다른 별도 테이블, 스키마 결정 근거는
+[security-model.md](security-model.md) ADR-218 참고). 이 테이블은
+`@global/...`이 아니라 그 계정 **자신의** 스키마 아래 있다는 점이
+`@global/system/services`(ADR-197)와의 핵심 차이다 — cfgsrv의
+`normalize_path`/`schema_matches`가 `@global/...`의 스키마를 항상
+"global" 문자열로 고정 취급해 비-root 계정의 `CREATE_TABLE`을
+그 아래에서 절대 통과시키지 않는다는 것을 M43 실행 중 처음
+발견했다(그 전까지 `@global/*` 아래 테이블은 전부 uid=0/root가
+만든 것뿐이라 이 제약이 드러날 기회가 없었다) — 계정 자신이
+자가서비스로 grant/revoke하려면 그 계정 자신의 스키마를 써야
+한다.

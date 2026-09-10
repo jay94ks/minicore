@@ -1518,6 +1518,175 @@ ADR-011/023)만으로 표현한다.
   스폰한 프로세스 사이에서만 동작"이라는 ADR-201의 실제 구현 각주는
   이 ADR로 낡았다 — procsrv.md에 이 ADR을 가리키는 각주를 추가한다.
 
+## ADR-217. 스폰 시점 상속 핸들의 badge 오버라이드 — svcmgr↔procsrv 전용 예약 badge로 "진짜 svcmgr" 판정 가능하게 함
+
+- **상태**: 확정 (2026-09-10), user-service-manager.md §M43 착수 시점.
+- **문제**: M43은 procsrv에 새로 민감한 오퍼레이션(계정별 유저
+  서비스 위임 위임 확인 후 그 계정 몫으로 프로세스를 spawn, ADR-218)
+  을 추가해야 한다. 이 오퍼레이션은 반드시 svcmgr만 부를 수 있어야
+  한다 — 누구나 부를 수 있으면 "위임을 등록한 계정이면 누구든
+  그 계정으로 프로세스를 띄울 수 있는" 권한 상승 구멍이 된다. 그런데
+  procsrv의 기존 오퍼레이션들(`op_wait`/`op_kill`/`adopt_orphans`
+  등, ADR-201/OPEN-67)은 전부 **호출자가 자기 pid를 메시지 필드로
+  스스로 주장**하는 모델이라 위조 가능하다 — `handle_proc_self_register`
+  는 심지어 누가 부르든 그냥 새 pid를 내주고, `handle_proc_adopt_orphans`
+  도 넘어온 `caller_pid`를 그대로 믿는다. 이 자기주장 모델을 그대로
+  이 새 오퍼레이션에 재사용하면, 아무 프로세스나 "나는 svcmgr다"라고
+  주장하는 메시지 하나로 임의 계정의 신원을 빌려 쓸 수 있게 된다 —
+  adopt_orphans(그저 부기용 필드를 바꿀 뿐)보다 훨씬 심각한 위험이다.
+- **결정**:
+  1. `ipc.md`/`objects.md`가 이미 설계해 둔 **badge**(엔드포인트
+     프록시 발급 시 정해지는, 서버가 호출자를 구분하는 값 — `sys_call`
+     의 `resolve_endpoint`가 커널에서 읽어 서버에 넘겨주므로 호출자가
+     조작할 수 없다)를 처음으로 스폰 시점 캐패빌리티 주입(ADR-152,
+     `--depends=`)에 연결한다. `kern::object::handle_table::create_proxy`
+     는 이미 `badge_override`/`has_badge_override` 파라미터를 받는데
+     (`kernel/core/object/handle_table.hpp`), 지금까지 이 프로젝트의
+     모든 호출부(런타임 `handles[]` 위임, 스폰 시점 `inherited_handles`
+     주입 둘 다)가 `0, false`(오버라이드 없음)로 하드코딩해 와서 이
+     기능이 한 번도 실제로 쓰이지 않았다.
+  2. `mc_handle_transfer`(`libs/mc/include/mc/syscall.h`)에
+     `uint64_t badge_override`/`uint8_t has_badge_override` 두 필드를
+     추가한다. `kernel/arch/x86_64/process_ops.cpp`의 스폰 시점
+     `inherited_handles` 주입 루프가 이제 이 필드를 그대로
+     `create_proxy`에 전달한다(런타임 `mc_message.handles[]` 경로,
+     `kernel/core/ipc/endpoint.cpp::deliver_message`는 여전히
+     `0, false`로 하드코딩 — 이 ADR의 범위는 스폰 경로 하나뿐이다,
+     YAGNI).
+  3. **일반 메커니즘을 만들지 않는다** — `mkbootdisk.py`/initrun의
+     `depends=` 문법에 "이 의존성엔 이 badge를 써라" 같은 새 문법을
+     추가하지 않는다. 대신 `init/initrun/main.cpp`의 스폰 로직에
+     "spawn 대상 서비스명이 `svcmgr`이고 주입 중인 의존성 이름이
+     `procsrv`이면 `k_service_delegation_badge`(=1)를 오버라이드로
+     쓴다"는 **하드코딩된 특수 케이스** 하나만 추가한다 — 지금 이
+     하나의 조합만 실제로 필요하고, 다른 서비스가 나중에 같은
+     보장을 필요로 하면 그때 이 특수 케이스를 일반화한다(ADR-183
+     §결정4/ADR-196 §결정7과 같은 "이미 있는 것을 넓히지, 새 걸
+     만들지 않는다"는 절제 원칙).
+  4. procsrv는 `MC_PROC_OP_SPAWN_DELEGATED_UNIT`(ADR-218)을 처리할 때
+     `resolve_endpoint`가 이미 넘겨주는 badge를 확인해
+     `badge == k_service_delegation_badge`가 아니면 즉시 거부한다 —
+     이제 이 오퍼레이션에 한해서는 **자기주장이 아니라 커널이 실제로
+     스탬핑한 값**으로 "호출자가 svcmgr다"를 판정한다.
+- **근거**: badge는 이 프로젝트가 이미 설계해 둔, 위조 불가능한
+  호출자 식별 메커니즘이다(ipc.md §3 — "badge는... 서버가 '누가
+  호출했는지' 구분하는 용도"). 지금까지 아무도 이 필드를 실제로
+  세팅해 쓴 적이 없었을 뿐이다 — 새 신원 검증 체계를 발명하는 게
+  아니라 이미 있는 것을 처음으로 연결하는 것이다. OPEN-67이 지적한
+  "procsrv 오퍼레이션 전반의 자기주장 문제"를 전부 해소하지는
+  않지만(그건 여전히 훨씬 큰 별도 작업), M43이 새로 추가하는 **이
+  한 오퍼레이션만큼은** 실제 권한 상승 벡터가 되지 않도록 좁게
+  막는다.
+- **영향**:
+  - `libs/mc/include/mc/syscall.h::mc_handle_transfer`에 필드 2개
+    추가.
+  - `kernel/arch/x86_64/process_ops.cpp`의 스폰 시점 `inherited_handles`
+    주입 루프가 `create_proxy`에 이 필드들을 전달.
+  - `init/initrun/main.cpp`에 `svcmgr`+`procsrv` 조합 전용 하드코딩
+    상수(`k_service_delegation_badge`) 특수 케이스 추가.
+  - OPEN-67은 여전히 열려 있다(이 ADR은 그 문제의 아주 좁은 한
+    조각만 해결한다) — `open-items.md`에 이 사실을 각주로 남긴다.
+
+## ADR-218. 유저 서비스 위임 — su/sudo(ADR-093)와 분리된, "내 몫의 유저 서비스만" 좁게 위임하는 별도 레지스트리
+
+- **상태**: 확정 (2026-09-10), user-service-manager.md §M43.
+- **문제**: M43(계정별 유저 서비스 인스턴스, systemd `user@.service`
+  대응)은 svcmgr가 로그인한 계정을 대신해 그 계정 몫의 서비스
+  인스턴스를 spawn해야 한다. 사용자가 명시한 요구사항: 시스템
+  전역으로 설치된 유저 서비스는 svcmgr 자신의 태생적 권한으로 계속
+  구동되고(M40~M42가 이미 이렇게 동작한다 — 변경 없음), **계정별
+  전용 서비스만** 그 계정이 **영구 위임을 등록했다가 철회할 수
+  있는** 방식으로, 그 계정 자신의 권한 범위 안에서만 동작해야 한다.
+- **결정**:
+  1. **ADR-093의 `@global/system/delegates/<계정>`을 재사용하지
+     않는다** — su/sudo의 위임은 "임의 명령을 그 계정으로 실행"
+     (ADR-092)이라는 훨씬 넓은 권한이고, M43이 필요로 하는 건 "내가
+     등록한 유저 서비스 유닛들만 그 계정 몫으로 spawn"이라는 훨씬
+     좁은 권한이다. 넓은 메커니즘을 좁게 쓰는 대신, 목적이 다른
+     새 테이블을 둔다 — `@<계정명>/system/service-delegate`
+     (owner_uid=그 계정 자신, ADR-062 그대로 — **주의**:
+     `@global/system/...`이 아니라 그 계정 자신의 스키마 아래다.
+     cfgsrv의 `normalize_path`/`schema_matches`(servers/cfgsrv/
+     main.cpp)가 `@global/...` 경로의 스키마를 항상 문자열 "global"
+     자체로 고정 취급해, `caller_uid != 0`인 계정은 그 아래에
+     `CREATE_TABLE`을 절대 통과시킬 수 없다는 것을 실행 중 발견했다
+     — 자가서비스 grant(§결정2)가 성립하려면 계정 자신의 스키마를
+     써야 한다). 키는 항상 `"svcmgr"`(고정 문자열 하나뿐 — ADR-093처럼
+     "누구에게 위임"이 여러 대상일 필요가 없다, svcmgr 딱 하나만 이
+     권한을 쓴다), 값은:
+     ```cpp
+     struct service_delegation_entry {
+         uint64_t granted_at;  // ADR-095와 같은 관례.
+         uint8_t mode;         // 0=permanent만 v1 지원(아래 §3).
+     };
+     ```
+  2. **자가서비스(self-service) grant/revoke — 새 오퍼레이션을
+     만들지 않는다**: 그 계정 자신의 세션 프로세스가 (자신이 소유한
+     테이블이므로 cfgsrv의 기존 권한 검사를 그대로 통과하며) cfgsrv의
+     기존 `set_value`/`delete_value`(ADR-060~064)를 직접 호출해
+     자기 위임 항목을 쓰거나 지운다. ADR-093 §영향이 이미 "위임
+     철회는 `delete_value`로 충분하다"고 정해 둔 것과 완전히 같은
+     원칙이다.
+  3. **v1은 영구(permanent) 모드 하나만 지원한다** — ADR-096이
+     su/sudo 위임에 정의한 세 모드(계정 기본값/명시적 기간/영구)
+     중 이 새 테이블에는 영구만 구현한다(YAGNI — 사용자가 명시적으로
+     "영구히 기록되었다가 철회될 수 있으면"이라고만 요구했다). TTL/
+     기본값 모드가 필요해지면 그때 ADR-096과 같은 구조로 확장한다
+     → 신규 **OPEN-71**.
+  4. **취소는 미래의 신규 spawn만 막는다** — ADR-094의 원칙("승인
+     타임아웃/취소는 이미 생성된 프로세스에 소급 적용되지 않는다")
+     을 그대로 이 위임에도 적용한다. `delete_value`로 위임 항목이
+     사라진 뒤, svcmgr가 그 계정 몫의 유닛을 **새로** spawn하려 할
+     때만 거부된다 — 이미 떠 있는 인스턴스는 정상 종료까지 계속
+     실행된다(강제 종료하는 별도 절차를 만들지 않는다, ADR-094와
+     같은 근거).
+  5. **guest/jail 계정은 이 위임도 무효다** — ADR-093 §7과 같은
+     원칙("guest/jail은 무엇을 보유하고 있든 넘을 수 없는 상한선")
+     을 그대로 적용한다. procsrv는 대상 계정이 guest 또는 jail이면
+     이 테이블에 항목이 있어도 무시하고 spawn을 거부한다.
+  6. procsrv에 새 오퍼레이션 2개(`libs/mc/include/mc/procsrv_protocol.h`,
+     ADR-195 마크업 방법론):
+     - `op_poll_login_event`(label=16) — 로그인 성공마다
+       `handle_login`이 채우는 작은 원형 큐(8개, YAGNI)에서 하나를
+       비블로킹으로 꺼낸다(OPEN-67과 같은 "procsrv는 단일
+       요청-응답 루프라 진짜 블로킹을 못 한다"는 이유로 폴링 모델을
+       그대로 재사용 — svcmgr 쪽에서 백그라운드 스레드로 반복
+       호출한다, ADR-219). 큐가 비었으면 `NOT_FOUND`.
+     - `op_spawn_delegated_unit`(label=17) — ADR-217의 badge로
+       호출자가 svcmgr임을 확인한 뒤, 대상 계정명으로
+       `@<계정>/system/service-delegate`를 조회해 유효한
+       (영구, non-guest/jail) 위임이 있으면 그 계정 몫으로 새
+       프로세스를 spawn한다(§7 참고). 없으면 거부.
+  7. **스폰된 프로세스에 실제 신원을 부여하지 않는다 — 명시적
+     한계**: 이 프로젝트의 uid/신원 모델은 procsrv 자신의
+     부기(`account`/`process_entry` 테이블) 수준에 머물러 있고,
+     커널은 uid 개념이 전혀 없다(`mc_process_spawn_request`에 uid
+     필드가 없다 — M18/M20이 이미 로그인 세션 스폰을 셸 1개
+     공유+OP_START 신호로 좁혀 둔 것과 같은 이유의 연장). 이
+     오퍼레이션이 만드는 프로세스는 커널 관점에서 평범한 프로세스일
+     뿐이고, "그 계정 소유"라는 사실은 procsrv/svcmgr의 부기(runtime
+     상태)에만 존재한다 — 이 프로세스가 나중에 cfgsrv 등을 호출할 때
+     실제로 그 계정의 badge를 제시하게 만드는 것(ADR-084 §4가 로그인
+     세션에 대해 이미 설계해 둔 것과 같은 일)은 이번 라운드에
+     하지 않는다 → 신규 **OPEN-72**(OPEN-60/67과 연결된, 더 넓은
+     "이 시스템의 신원 모델을 실제 커널/배지 수준으로 완성하기"
+     작업의 한 조각).
+- **근거**: 사용자가 명시적으로 두 계층을 구분했다(시스템 전역
+  설치 서비스=태생적 권한 그대로, 계정별 전용 서비스=영구+철회
+  가능 위임). ADR-093을 그대로 재사용하지 않은 이유는 최소 권한
+  원칙 — su/sudo 위임은 "임의 명령"까지 허용하는데, 계정이 실제로
+  주고 싶은 건 "내 유저 서비스만 대신 띄워도 된다"는 훨씬 좁은
+  권한이다. 두 개념을 하나의 테이블로 섞으면 나중에 "이 위임이
+  su용인지 서비스용인지" 구분이 사라져 실수로 더 넓은 권한을 주는
+  사고가 생기기 쉽다.
+- **영향**:
+  - [registry-decisions.md](registry-decisions.md)에 이 테이블
+    스키마를 반영한다(ADR-219와 함께).
+  - `docs/design/open-items.md`에 OPEN-71/72 신규 등록.
+  - `docs/spec/generated/procsrv-wire.md`를
+    `tools/gen-wire-docs.py`로 재생성한다(op_poll_login_event/
+    op_spawn_delegated_unit 추가).
+
 ## 아직 정하지 않은 것
 
 - **OPEN-42**(범위 좁혀짐, ADR-194로 명령 단위는 해결): 위임의
