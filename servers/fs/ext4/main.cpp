@@ -22,6 +22,8 @@
 //     fat32와 같은 전제), 파일 하나당 최대 1페이지(4096바이트).
 #include <uapi.hpp>
 
+namespace kernsrv::fs::ext4 {
+
 namespace {
 
 constexpr uint32_t k_devmgr_handle = 2;  // depends=devmgr.
@@ -565,3 +567,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::fs::ext4

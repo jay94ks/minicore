@@ -15,6 +15,8 @@
 // 별도 마일스톤급 작업이다.
 #include <uapi.hpp>
 
+namespace kernsrv::drivers::usb {
+
 namespace {
 
 constexpr uint32_t k_devmgr_handle = 2;  // depends=devmgr(lib/*.ini) — initrun이 물려준 프록시.
@@ -183,3 +185,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         asm volatile("pause");
     }
 }
+
+}  // namespace kernsrv::drivers::usb

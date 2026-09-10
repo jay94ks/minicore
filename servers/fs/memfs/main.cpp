@@ -8,6 +8,8 @@
 // (vfs를 거치지 않고) memfs의 endpoint에 직접 건다.
 #include <uapi.hpp>
 
+namespace kernsrv::fs::memfs {
+
 namespace {
 
 // sys_process_spawn(create_endpoint=true)가 항상 handle 1에 이
@@ -266,3 +268,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::fs::memfs

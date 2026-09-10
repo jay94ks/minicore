@@ -14,6 +14,8 @@
 // servers/netsrv 소관, ADR-002/006/008과 같은 계층 분리 정신).
 #include <uapi.hpp>
 
+namespace kernsrv::drivers::virtio_net {
+
 namespace {
 
 constexpr uint32_t k_devmgr_handle = 2;    // depends=devmgr(lib/*.ini).
@@ -442,3 +444,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::drivers::virtio_net

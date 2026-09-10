@@ -17,6 +17,8 @@
 // 아니면 어떤 FS 서버에도 전달하지 않고 GUEST_DENIED로 즉시 응답한다.
 #include <uapi.hpp>
 
+namespace kernsrv::vfs {
+
 namespace {
 
 // sys_process_spawn(create_endpoint=true, ADR-152)이 handle 1에 이
@@ -161,3 +163,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::vfs

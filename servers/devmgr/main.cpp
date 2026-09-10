@@ -37,6 +37,8 @@
 //      제외한다(부트 디바이스 제외와 같은 정신).
 #include <uapi.hpp>
 
+namespace kernsrv::devmgr {
+
 namespace {
 
 constexpr uint32_t k_own_endpoint_handle = 1;
@@ -572,3 +574,5 @@ extern "C" [[noreturn]] void _start(const void* argv) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::devmgr

@@ -15,6 +15,8 @@
 // 받아 처리한다, security-model.md ADR-165 §결정4).
 #include <uapi.hpp>
 
+namespace kernsrv::drivers::ps2 {
+
 namespace {
 
 constexpr uint16_t k_port_data = 0x60;
@@ -196,3 +198,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::drivers::ps2

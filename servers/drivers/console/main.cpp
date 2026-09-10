@@ -13,6 +13,8 @@
 // 필요).
 #include <uapi.hpp>
 
+namespace kernsrv::drivers::console {
+
 namespace {
 
 constexpr uint32_t k_own_endpoint_handle = 1;
@@ -148,3 +150,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::drivers::console

@@ -38,6 +38,8 @@
 // self-exec 판별 관례를 확장한 것, 이 파일 상단 argv 규약 참고).
 #include <uapi.hpp>
 
+namespace kernsrv::procsrv {
+
 namespace {
 
 // sys_process_spawn(create_endpoint=true)이 handle 1을 이 프로세스의
@@ -1233,3 +1235,5 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::procsrv

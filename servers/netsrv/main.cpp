@@ -18,6 +18,8 @@
 // 않는 이유).
 #include <uapi.hpp>
 
+namespace kernsrv::netsrv {
+
 namespace {
 
 constexpr uint32_t k_virtio_net_handle = 2;  // depends=virtio-net(lib/*.ini).
@@ -262,3 +264,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         asm volatile("pause");
     }
 }
+
+}  // namespace kernsrv::netsrv

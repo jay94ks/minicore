@@ -17,6 +17,8 @@
 // 바이너리를 읽는 것)이 이미 끝나 있어, 어느 섹터에 써도 안전하다.
 #include <uapi.hpp>
 
+namespace kernsrv::drivers::virtio_blk {
+
 namespace {
 
 constexpr uint32_t k_devmgr_handle = 2;  // depends=devmgr(lib/*.ini).
@@ -310,3 +312,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         asm volatile("pause");
     }
 }
+
+}  // namespace kernsrv::drivers::virtio_blk

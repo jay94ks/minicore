@@ -17,6 +17,8 @@
 // 목표로 이미 명시해 뒀다).
 #include <uapi.hpp>
 
+namespace kernsrv::login {
+
 namespace {
 
 // sys_process_spawn(create_endpoint=true)이 handle 1을 채운다 —
@@ -224,3 +226,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         asm volatile("pause");
     }
 }
+
+}  // namespace kernsrv::login

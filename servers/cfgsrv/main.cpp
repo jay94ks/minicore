@@ -26,6 +26,8 @@
 //     syscall이 아직 없다).
 #include <uapi.hpp>
 
+namespace kernsrv::cfgsrv {
+
 namespace {
 
 // sys_process_spawn(create_endpoint=true)가 handle 1을 이 프로세스의
@@ -1013,3 +1015,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::cfgsrv

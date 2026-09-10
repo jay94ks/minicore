@@ -16,6 +16,8 @@
 //     v2 §2.3의 pages[] 슬롯 예산).
 #include <uapi.hpp>
 
+namespace kernsrv::fs::fat32 {
+
 namespace {
 
 constexpr uint32_t k_devmgr_handle = 2;  // depends=devmgr.
@@ -514,3 +516,5 @@ extern "C" [[noreturn]] void _start(const void*) {
         do_syscall(uapi::k_syscall_ipc_reply, reinterpret_cast<uint64_t>(&out), 0, 0);
     }
 }
+
+}  // namespace kernsrv::fs::fat32
