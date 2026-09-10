@@ -180,4 +180,26 @@ process_spawn_error mmap_anon(uint64_t size, uint64_t& out_vaddr);
 // 않는다(항상 성공만 반환). process_ops.cpp::munmap_anon 참고.
 process_spawn_error munmap_anon(uint64_t addr, uint64_t size);
 
+// sys_thread_create(M37, real-libc-syscall-layer.md §M37, ADR-187) —
+// musl의 pthread_create()가 우회할 자리. fork_current()와 달리 호출한
+// 스레드의 레지스터를 복제하지 않는다 — 새 스레드는 처음부터
+// entry_rip(arg0)로 진입한다(kern::sched::create_user_thread이 이미
+// 이 모양의 진입을 지원한다, initrun/procsrv가 스폰될 때와 완전히
+// 같은 enter_usermode 경로). **owner_space/handle_table을 복제하지
+// 않고 호출자와 그대로 공유한다**(ADR-187 §결정1 — 이게 pthread를
+// fork()와 구분 짓는 핵심). tls_fs_base는 새 스레드 고유의 TLS
+// (fs_base는 스레드별 필드라 자연스럽게 독립적이다) —
+// clear_child_tid_uaddr!=0이면 이 스레드가 나중에 종료할 때 그
+// 주소에 0을 쓰고 FUTEX_WAKE(1)한다(CLONE_CHILD_CLEARTID 흉내,
+// musl pthread_join()이 이 신호로 깨어난다). 성공하면
+// out_new_thread_id에 호출자 자신의 handle_table에 새로 만든
+// object_kind::thread 핸들(권한 k_right_can_signal, fork의
+// out_thread_handle과 같은 패턴)을 채운다 — musl 쪽에서는 이 값을
+// `pthread_t::tid`처럼 취급한다(진짜 커널 tid는 아니지만, "0이 아니면
+// 살아있다"는 성질만 있으면 pthread_join의 futex 대기 루프에는
+// 충분하다).
+process_spawn_error thread_create(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
+                                   uint64_t tls_fs_base, uint64_t clear_child_tid_uaddr,
+                                   uint32_t& out_new_thread_id);
+
 }  // namespace kern::arch::x86_64

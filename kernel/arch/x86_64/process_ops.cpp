@@ -8,6 +8,8 @@
 
 #include <new>
 
+#include <k/irq_safe.hpp>  // scoped_lock(M37 — address_space::heap_lock/futex_lock)
+
 #include <klog.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
@@ -687,6 +689,13 @@ process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
     }
     kern::object::address_space& space = *self->owner_space;
 
+    // M37(real-libc-syscall-layer.md §M37, ADR-180) — pthread가 같은
+    // address_space를 공유하는 여러 스레드를 만들 수 있게 된 뒤로는
+    // 이 함수 전체가 동시에 두 코어에서 실행될 수 있다(process_ops.hpp::
+    // thread_create 참고) — heap_top/heap_mapped_top을 건드리는 동안
+    // 통째로 잠근다.
+    scoped_lock<spinlock> guard(space.heap_lock);
+
     if (space.heap_top == 0) {
         space.heap_top = k_heap_user_vaddr;
         space.heap_mapped_top = k_heap_user_vaddr;
@@ -740,6 +749,13 @@ process_spawn_error mmap_anon(uint64_t size, uint64_t& out_vaddr) {
     }
     kern::object::address_space& space = *self->owner_space;
 
+    // M37 — brk()와 같은 이유(heap_lock 주석 참고). mmap_top도 같은
+    // address_space를 공유하는 여러 pthread가 동시에 범프할 수 있다
+    // — heap_lock을 그대로 재사용한다(별도 락을 새로 만들 이유가
+    // 없다, 두 범프 포인터가 애초에 "이 프로세스의 사용자 가시적
+    // 할당기 상태"라는 같은 성격이라 경합 빈도도 낮다).
+    scoped_lock<spinlock> guard(space.heap_lock);
+
     if (space.mmap_top == 0) {
         space.mmap_top = k_mmap_user_vaddr;
     }
@@ -780,6 +796,52 @@ process_spawn_error mmap_anon(uint64_t size, uint64_t& out_vaddr) {
 process_spawn_error munmap_anon(uint64_t addr, uint64_t size) {
     (void)addr;
     (void)size;
+    return process_spawn_error::ok;
+}
+
+// M37(real-libc-syscall-layer.md §M37, ADR-187) — sys_thread_create.
+// process_ops.hpp 상단 주석 참고 — fork_current()와 달리 호출자의
+// 레지스터를 복제하지 않고, owner_space/handles도 클론하지 않는다
+// (그대로 같은 포인터를 공유 — 이게 pthread의 핵심).
+process_spawn_error thread_create(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
+                                   uint64_t tls_fs_base, uint64_t clear_child_tid_uaddr,
+                                   uint32_t& out_new_thread_id) {
+    kern::object::thread* self = kern::sched::current();
+    if (self == nullptr || self->owner_space == nullptr || self->handles == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+
+    kern::object::thread* child = kern::sched::create_user_thread(entry_rip, user_rsp, arg0,
+                                                                    self->owner_space, self->handles);
+    if (child == nullptr) {
+        return process_spawn_error::out_of_memory;
+    }
+    child->fs_base = tls_fs_base;
+    child->clear_child_tid_uaddr = clear_child_tid_uaddr;
+    // ADR-154 §결정5와 같은 이유(fork_current도 그대로 물려준다) — 이
+    // pthread가 부모와 같은 I/O 능력을 즉시 쓸 수 있어야 하는 경우는
+    // 아직 없지만(procsrv/devmgr 등 trusted 서버가 pthread를 쓰는
+    // 시나리오가 이번 라운드에 없다), 물려주지 않을 이유도 없다.
+    child->io_port_base = self->io_port_base;
+    child->io_port_count = self->io_port_count;
+
+    // process_spawn()/fork_current()의 기존 out_thread_handle 자리와
+    // 완전히 같은 패턴 — 호출자(부모) 자신의 handle_table에 새
+    // 스레드를 가리키는 핸들을 만든다. musl 쪽은 이 값을 "tid"로
+    // 취급한다(위 process_ops.hpp 주석 참고) — 0이면 곧바로 EAGAIN
+    // 취급되도록 실패로 되돌린다(이미 만든 스레드는 그대로 버려두지
+    // 않고 아직 enqueue하지 않은 채라 그냥 폐기해도 안전하다 — 아직
+    // 아무도 이 thread를 실행한 적이 없다).
+    auto owner = self->handles->create_owner(kern::object::object_kind::thread,
+                                              kern::object::k_right_can_signal, child);
+    if (!owner.is_ok()) {
+        kern::mm::free_pages(kern::mm::virt_to_phys(child->fpu_save_area), 0);
+        kern::mm::slab_free(child, sizeof(kern::object::thread));
+        return process_spawn_error::out_of_memory;
+    }
+    out_new_thread_id = owner.value();
+
+    kern::sched::enqueue(*child);
     return process_spawn_error::ok;
 }
 

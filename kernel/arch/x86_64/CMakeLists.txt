@@ -42,6 +42,7 @@ add_executable(minicore_kernel_x86_64
     idt.cpp
     irq.cpp
     isr_stubs.S
+    futex.cpp
     kernel_main.cpp
     klog_uart.cpp
     lapic.cpp

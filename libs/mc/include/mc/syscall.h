@@ -98,6 +98,10 @@ typedef struct {
 // 겪었다(2026-09-10).
 #define MC_SYSCALL_YIELD 22u
 
+// M37(real-libc-syscall-layer.md §M37, ADR-187) — pthread 최소 구현.
+#define MC_SYSCALL_THREAD_CREATE 23u
+#define MC_SYSCALL_FUTEX 24u
+
 #define MC_MAX_DEBUG_LOG_BYTES 96u
 #define MC_MAX_MMIO_MAP_BYTES (16ull * 1024 * 1024)
 
@@ -189,6 +193,31 @@ typedef struct {
 
 // sys_io_activate(a1=io_base, a2=count) / sys_io_deactivate(인자 없음)
 // — trusted 전용.
+
+// M37(real-libc-syscall-layer.md §M37, ADR-187) — sys_thread_create
+// (a1=이 구조체의 유저 가상주소). process_ops.hpp::thread_create
+// 주석 참고 — entry_rip(arg0)로 곧바로 진입하는 새 스레드를
+// 만들고, owner_space/handle_table은 호출자와 그대로 공유한다(fork
+// 처럼 복제하지 않는다). clear_child_tid_uaddr==0이면 CLONE_CHILD_CLEARTID
+// 흉내를 안 한다(등록 안 함). 성공하면 out_new_thread_id에 새
+// 스레드를 가리키는 핸들(=musl 쪽에서 "tid"로 취급)을 채운다.
+typedef struct {
+    uint64_t entry_rip;
+    uint64_t user_rsp;
+    uint64_t arg0;
+    uint64_t tls_fs_base;
+    uint64_t clear_child_tid_uaddr;
+    uint64_t out_new_thread_id;  // 출력.
+} mc_thread_create_request;
+
+// sys_futex(a1=uaddr, a2=op, a3=val) — op는 아래 두 값만 실제 의미가
+// 있다(futex.hpp의 kern::arch::x86_64::futex_wait/futex_wake가
+// 각각 대응). `FUTEX_WAIT`는 *uaddr!=val이면 즉시(블록 없이)
+// value_mismatch(1)를 반환하고, 같으면 다른 스레드의 `FUTEX_WAKE`가
+// 올 때까지 블록한 뒤 ok(0)를 반환한다. `FUTEX_WAKE`는 항상 즉시
+// 반환하며, 실제로 깨운 스레드 수를 돌려준다.
+#define MC_FUTEX_OP_WAIT 0u
+#define MC_FUTEX_OP_WAKE 1u
 
 // sys_process_kill(a1=대상 object_kind::thread 핸들, MC_RIGHT_CAN_KILL
 // 필요) — 반환값 0=성공(요청 접수), 그 외 process_kill_error 값.
@@ -367,6 +396,33 @@ static inline uint64_t mc_sigreturn(void) {
 
 static inline uint64_t mc_yield(void) {
     return mc_raw_syscall(MC_SYSCALL_YIELD, 0, 0, 0);
+}
+
+// M37(real-libc-syscall-layer.md §M37, ADR-187) — mc_thread_create_request
+// 주석 참고. 성공(반환값 0)하면 *out_new_thread_id가 채워진다.
+static inline uint64_t mc_thread_create(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
+                                         uint64_t tls_fs_base, uint64_t clear_child_tid_uaddr,
+                                         uint64_t* out_new_thread_id) {
+    mc_thread_create_request req;
+    req.entry_rip = entry_rip;
+    req.user_rsp = user_rsp;
+    req.arg0 = arg0;
+    req.tls_fs_base = tls_fs_base;
+    req.clear_child_tid_uaddr = clear_child_tid_uaddr;
+    req.out_new_thread_id = 0;
+    uint64_t ret = mc_raw_syscall(MC_SYSCALL_THREAD_CREATE, (uint64_t)(uintptr_t)&req, 0, 0);
+    if (out_new_thread_id != 0) {
+        *out_new_thread_id = req.out_new_thread_id;
+    }
+    return ret;
+}
+
+static inline uint64_t mc_futex_wait(uint64_t uaddr, uint32_t expected) {
+    return mc_raw_syscall(MC_SYSCALL_FUTEX, uaddr, MC_FUTEX_OP_WAIT, expected);
+}
+
+static inline uint64_t mc_futex_wake(uint64_t uaddr, uint32_t max_count) {
+    return mc_raw_syscall(MC_SYSCALL_FUTEX, uaddr, MC_FUTEX_OP_WAKE, max_count);
 }
 
 #endif  // !MC_LAND_KERNEL

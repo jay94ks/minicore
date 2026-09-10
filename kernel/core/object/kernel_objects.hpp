@@ -29,37 +29,13 @@ class handle_table;  // handle_table.hpp(같은 namespace)가 정의 — thread�
 // security-model.md 영역이라 M1~M8 범위 밖이다 — 여기서는 값만 보관한다.
 enum class confinement_tier : uint8_t { normal = 0, guest = 1, jail = 2 };
 
-struct address_space {
-    bool trusted = false;                                // ADR-063
-    confinement_tier confinement = confinement_tier::normal;  // ADR-085
-    uint64_t page_table_root = 0;  // arch별 최상위 페이지테이블 물리주소(x86_64는 PML4)
-
-    // M24(general-purpose-completion.md §M24, ADR-180) — sys_brk의
-    // per-process 상태. heap_top==0은 "아직 sys_brk를 한 번도 부르지
-    // 않음"을 뜻한다(첫 호출에서 process_ops.cpp가 지연 초기화한다) —
-    // 유저모드 가상주소 0은 애초에 절대 유효한 브레이크 위치가 될 수
-    // 없어(canonical하지 않거나 항상 예약됨) 이 sentinel이 안전하다.
-    // heap_top: 바이트 단위 정확한 brk 포인터(요청한 그대로, 페이지
-    // 정렬 안 될 수 있음). heap_mapped_top: 지금까지 실제로 페이지를
-    // 매핑해 둔 경계(항상 페이지 정렬) — brk가 요청 크기만큼 정확히
-    // 실시간으로 페이지를 매핑하려면 이 둘을 따로 추적해야 한다
-    // (heap_top 하나만으로는 "다음 매핑을 어디서부터 시작할지"를
-    // 페이지 경계로 정확히 복원할 수 없다).
-    uint64_t heap_top = 0;
-    uint64_t heap_mapped_top = 0;
-
-    // M30(real-libc-syscall-layer.md §M30, ADR-183) — sys_mmap_anon의
-    // per-process 범프 포인터. **의도적으로 sys_brk의 heap_top과
-    // 완전히 분리된 별도 영역이다** — musl의 malloc(lite_malloc.c,
-    // SYS_brk를 우선 시도)과 libmc의 mc_malloc(이미 sys_brk를 직접
-    // 쓴다, ADR-180)이 같은 커널 상태를 공유하면 각자 캐싱해 둔
-    // "다음 할당 위치"가 서로의 sys_brk 호출로 어긋나 겹칠 수 있다
-    // (실행 전 분석으로 발견 — mc_malloc()의 g_heap_cursor가 grow
-    // 이후에도 재동기화되지 않는다). syscall_shim.c가 musl의 SYS_brk
-    // 자체를 항상 "실패"로 답해(0을 반환) lite_malloc이 무조건
-    // mmap 경로로 우회하게 만들어 이 충돌을 원천적으로 피한다.
-    uint64_t mmap_top = 0;
-};
+// M37(real-libc-syscall-layer.md §M37) — futex_waiters(아래 address_space
+// 정의에 추가) 필드가 intrusive_list<thread,...>여서 완전한 thread
+// 정의를 요구한다 — 그래서 address_space 자신의 정의는 thread 정의
+// 뒤(struct endpoint 앞)로 옮겼다. thread는 여전히 address_space를
+// 포인터로만 참조하므로(owner_space) 전방 선언만 있으면 된다(handle_table
+// 과 같은 패턴, 위 주석 참고).
+struct address_space;
 
 // scheduler.md §2 그대로 — band/preferred_node/boost_level/타임슬라이스.
 // M4는 필드만 정의한다: 실제로 스케줄링에 쓰이는 것은 M5(run_queue)부터다.
@@ -229,6 +205,26 @@ struct thread {
     };
     static constexpr uint32_t k_max_signal = 32;
     signal_action sigactions[k_max_signal] = {};
+
+    // M37(real-libc-syscall-layer.md §M37, ADR-187) — futex.
+    // futex_wait_hook은 이 스레드가 지금 어떤 address_space::futex_waiters
+    // 에 대기 중일 때 그 목록이 쓰는 훅이다(ipc_wait_hook과 별개 —
+    // 같은 스레드가 동시에 IPC 대기와 futex 대기 양쪽에 들어갈 일은
+    // 없지만, 두 메커니즘을 굳이 하나의 훅으로 합칠 이유도 없다).
+    // futex_wait_uaddr는 그 목록에서 "내가 기다리는 주소"를 식별하는
+    // 값 — FUTEX_WAKE가 이 값으로 일치하는 대기자만 골라 깨운다.
+    list_hook futex_wait_hook;
+    uint64_t futex_wait_uaddr = 0;
+
+    // M37 — musl pthread_create()의 CLONE_CHILD_CLEARTID를 흉내낸다.
+    // 0이 아니면, 이 스레드가 종료할 때(kern::sched::exit() 직전)
+    // 이 유저 가상주소에 0을 쓰고 그 주소로 FUTEX_WAKE(1)을 수행한다
+    // — musl의 pthread_join()이 `while (self->tid) futex_wait(&self->tid, ...)`
+    // 로 정확히 이 신호를 기다린다. 같은 address_space를 공유하는
+    // 스레드끼리라 이 주소를 "지금 실행 중인 스레드의" 페이지테이블
+    // 그대로 읽고 쓸 수 있다(fork의 owner_space 클론과 달리 pthread는
+    // 애초에 포인터를 그대로 공유한다, ADR-187 §결정1).
+    uint64_t clear_child_tid_uaddr = 0;
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/
@@ -253,6 +249,63 @@ constexpr uint32_t k_right_can_kill = 1u << 4;
 // 전체를 건드릴 이유가 없다, 새 이름은 그저 이 권한을 "시그널"
 // 관점에서 부르는 별칭일 뿐이다).
 constexpr uint32_t k_right_can_signal = k_right_can_kill;
+
+// address_space 완전한 정의 — 위 전방 선언(§21 근처) 자리 참고. thread
+// 정의 뒤로 옮긴 이유는 futex_waiters 필드 하나 때문이다.
+struct address_space {
+    bool trusted = false;                                // ADR-063
+    confinement_tier confinement = confinement_tier::normal;  // ADR-085
+    uint64_t page_table_root = 0;  // arch별 최상위 페이지테이블 물리주소(x86_64는 PML4)
+
+    // M24(general-purpose-completion.md §M24, ADR-180) — sys_brk의
+    // per-process 상태. heap_top==0은 "아직 sys_brk를 한 번도 부르지
+    // 않음"을 뜻한다(첫 호출에서 process_ops.cpp가 지연 초기화한다) —
+    // 유저모드 가상주소 0은 애초에 절대 유효한 브레이크 위치가 될 수
+    // 없어(canonical하지 않거나 항상 예약됨) 이 sentinel이 안전하다.
+    // heap_top: 바이트 단위 정확한 brk 포인터(요청한 그대로, 페이지
+    // 정렬 안 될 수 있음). heap_mapped_top: 지금까지 실제로 페이지를
+    // 매핑해 둔 경계(항상 페이지 정렬) — brk가 요청 크기만큼 정확히
+    // 실시간으로 페이지를 매핑하려면 이 둘을 따로 추적해야 한다
+    // (heap_top 하나만으로는 "다음 매핑을 어디서부터 시작할지"를
+    // 페이지 경계로 정확히 복원할 수 없다).
+    uint64_t heap_top = 0;
+    uint64_t heap_mapped_top = 0;
+
+    // M30(real-libc-syscall-layer.md §M30, ADR-183) — sys_mmap_anon의
+    // per-process 범프 포인터. **의도적으로 sys_brk의 heap_top과
+    // 완전히 분리된 별도 영역이다** — musl의 malloc(lite_malloc.c,
+    // SYS_brk를 우선 시도)과 libmc의 mc_malloc(이미 sys_brk를 직접
+    // 쓴다, ADR-180)이 같은 커널 상태를 공유하면 각자 캐싱해 둔
+    // "다음 할당 위치"가 서로의 sys_brk 호출로 어긋나 겹칠 수 있다
+    // (실행 전 분석으로 발견 — mc_malloc()의 g_heap_cursor가 grow
+    // 이후에도 재동기화되지 않는다). syscall_shim.c가 musl의 SYS_brk
+    // 자체를 항상 "실패"로 답해(0을 반환) lite_malloc이 무조건
+    // mmap 경로로 우회하게 만들어 이 충돌을 원천적으로 피한다.
+    uint64_t mmap_top = 0;
+
+    // M37(real-libc-syscall-layer.md §M37, ADR-180/187) — heap_top/
+    // heap_mapped_top/mmap_top은 M1~M36까지는 항상 "이 프로세스의
+    // 유일한 스레드"에서만 접근돼 안전했다. M37이 진짜 pthread(같은
+    // address_space를 공유하는 여러 thread, ADR-187 §결정1)를 들여오면
+    // 서로 다른 코어의 두 pthread가 동시에 malloc()해 sys_brk/
+    // sys_mmap_anon에 동시 진입할 수 있다(M34로 AP가 이미 유저
+    // 스레드를 실제로 병렬 실행한다) — ADR-180이 이미 이 라운드의
+    // 선행 작업으로 지적해 둔 스핀락을 여기 추가한다.
+    spinlock heap_lock;
+
+    // M37 — futex(FUTEX_WAIT/FUTEX_WAKE만, ADR-187 §결정3). 주소별로
+    // 정확히 나누지 않고 이 address_space 전체에 대기열 하나만 둔다
+    // (YAGNI — 프로세스당 스레드 수가 원래 적어 선형 탐색도 충분하다).
+    // endpoint::lock과 완전히 같은 패턴(스핀락 하나로 목록 보호) —
+    // FUTEX_WAIT는 이 락을 잡고 목록에 자신을 추가한 뒤 락을 풀고
+    // kern::sched::block()한다(endpoint.cpp의 sys_call/sys_recv가
+    // 이미 쓰는 것과 같은 "삽입 후 unlock, 그다음 block()" 순서 —
+    // OPEN-68이 이미 지적한 것과 같은 종류의 아주 좁은 경합 창이
+    // 이론상 남지만, 기존 IPC 대기열도 같은 위험을 이미 감수하고
+    // 있어 이번에 새로 만들지 않는다).
+    spinlock futex_lock;
+    intrusive_list<thread, &thread::futex_wait_hook> futex_waiters;
+};
 
 struct endpoint {
     spinlock lock;

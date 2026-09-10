@@ -256,6 +256,35 @@ add_library(minicore_libc STATIC
     # MC_SYSCALL_YIELD 주석 참고).
     ${MUSL_PATCHED_ROOT}/src/sched/sched_yield.c
 
+    # M37(real-libc-syscall-layer.md §M37, ADR-187) — pthread 최소
+    # 구현. musl 자신의 진짜 pthread_create()+pthread_join()+
+    # pthread_mutex_lock/unlock/trylock/timedlock이 이번에 처음
+    # 필요해졌다. __clone(third_party/musl/src/thread/x86_64/clone.s)
+    # 은 M36의 restore.s와 같은 이유(raw Linux ABI 직접 사용, 이
+    # 커널의 syscall ABI와 불일치)로 원본을 쓰지 않고
+    # sysdeps/minicore/clone_shim.c(순수 C 대체, 이 커널에서는 그
+    # asm 트릭이 애초에 필요 없다)로 완전히 갈아 끼운다 — clone.s
+    # 자체는 소스 목록에 없다(third_party 원본을 고치는 대신, 링커가
+    # 이 .c 파일이 정의한 같은 이름의 심벌을 대신 쓰게 한다).
+    # __lock/__unlock은 M30/M31이 no-op으로 미뤄 뒀던 것을 이번에
+    # 진짜 구현(lock_shim.c 주석 참고)으로 되돌린다.
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_create.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_join.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_mutex_lock.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_mutex_unlock.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_mutex_trylock.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_mutex_timedlock.c
+    ${MUSL_PATCHED_ROOT}/src/thread/__timedwait.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_setcancelstate.c
+    ${MUSL_PATCHED_ROOT}/src/thread/pthread_testcancel.c
+    ${MUSL_PATCHED_ROOT}/src/thread/__unmapself.c
+    ${MUSL_PATCHED_ROOT}/src/thread/__lock.c
+    ${MUSL_PATCHED_ROOT}/src/thread/__wait.c
+    ${MUSL_PATCHED_ROOT}/src/thread/vmlock.c
+    ${MUSL_PATCHED_ROOT}/src/time/clock_gettime.c
+    ${MUSL_PATCHED_ROOT}/src/mman/mprotect.c
+    ${MUSL_PATCHED_ROOT}/src/misc/syscall.c
+
     # M35(real-libc-syscall-layer.md §M35, ADR-188) — setlocale()과
     # 그 링크 의존성(locale_map.c::__get_locale, c_locale.c::
     # __c_dot_utf8/__c_locale, __mo_lookup.c::__mo_lookup — __lctrans_impl
@@ -277,6 +306,7 @@ add_library(minicore_libc STATIC
     ${MUSL_PATCHED_ROOT}/src/ctype/isupper.c
     ${MUSL_PATCHED_ROOT}/src/ctype/islower.c
     sysdeps/minicore/locale_shim.c
+    sysdeps/minicore/clone_shim.c
 )
 add_dependencies(minicore_libc minicore_libc_musl_alltypes minicore_libc_musl_syscall_bits
                   minicore_libc_musl_patched)

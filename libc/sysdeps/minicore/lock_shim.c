@@ -1,18 +1,13 @@
-// libc/sysdeps/minicore/lock_shim.c — musl 내부 락(__lock/__unlock,
-// src/internal/lock.h)의 단일 스레드 전용 대체(real-libc-syscall-layer.md
-// §M30). 원본 third_party/musl/src/thread/__lock.c는 futex 기반
-// congestion 처리까지 구현하는데(pthread는 M37 대상), 이 라운드는
-// musl의 lite_malloc.c(§M30)가 요구하는 LOCK/UNLOCK 매크로만 필요할
-// 뿐이고 이 커널엔 아직 스레드가 둘 이상 같은 락을 다툴 일이 없다
-// (단일 스레드) — __futexwait/__wake 의존성 없이 완전한 no-op으로
-// 대체한다.
-void __lock(volatile int* l) {
-    (void)l;
-}
-
-void __unlock(volatile int* l) {
-    (void)l;
-}
+// libc/sysdeps/minicore/lock_shim.c — musl 내부 락 일부의 단일 스레드
+// 전용 대체(real-libc-syscall-layer.md §M30/§M31). __lock/__unlock
+// (src/internal/lock.h)은 M37(진짜 pthread, 두 스레드가 같은
+// address_space를 공유)부터 이 파일의 no-op이 아니라 musl 원본
+// (third_party/musl/src/thread/__lock.c, 진짜 futex 기반 congestion
+// 처리)을 그대로 쓴다 — __tl_lock/__tl_unlock(pthread_create.c의
+// 스레드 목록 락)이 두 pthread의 pthread_exit()이 거의 동시에
+// 끝나는 실제 시나리오에서 정말로 경합할 수 있어(2026-09-10 분석,
+// M37 done 참고), no-op으로는 그 목록이 깨질 수 있다는 것을 실제로
+// 만들기 전에 미리 알았다.
 
 // M31(real-libc-syscall-layer.md §M31) — musl stdio(FLOCK/FUNLOCK,
 // src/internal/stdio_impl.h)의 같은 이유 대체. 이 프로젝트가 만드는
@@ -38,10 +33,14 @@ void __unlockfile(FILE* f) {
 // "pthread_create가 진행 중이면 기다린다"는 뜻으로 거는 락
 // (__inhibit_ptc/__acquire_ptc/__release_ptc, src/thread/lock_ptc.c)
 // 의 같은 이유 대체. 원본은 진짜 pthread_rwlock_wrlock/rdlock/unlock
-// 을 쓰는데, 이 프로젝트에는 아직 pthread_create가 없다(M37 대상) —
-// 만들어질 스레드가 없으니 다툴 대상도 없다. pthread_rwlock의 futex
-// 기반 경쟁 처리 의존성을 이 라운드에 끌어올 이유가 없어 no-op으로
-// 대체한다.
+// 을 쓴다. M37이 실제로 pthread_create()를 들여온 뒤에도 이 세
+// 함수는 여전히 no-op으로 남긴다 — fork()와 pthread_create()가
+// **동시에** 실행되는 시나리오(둘 다 다른 스레드에서 겹쳐 호출)는
+// 이 라운드의 자기테스트에 없다(fork()는 M32/M36 테스트가 먼저 끝난
+// 뒤에만 쓰고, pthread_create()는 항상 메인 스레드 하나에서만
+// 순차적으로 부른다) — 다투는 시나리오 자체가 없으니 진짜
+// pthread_rwlock을 새로 끌어올 이유가 없다(__lock/__unlock과 달리,
+// 위 주석 참고).
 void __inhibit_ptc(void) {}
 
 void __acquire_ptc(void) {}

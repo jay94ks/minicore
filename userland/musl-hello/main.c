@@ -39,6 +39,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <locale.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -58,6 +59,27 @@ static volatile int g_sigusr1_count = 0;
 static void sigusr1_handler(int sig) {
     (void)sig;
     g_sigusr1_count++;
+}
+
+// M37(real-libc-syscall-layer.md §M37, ADR-187) — pthread 최소 구현
+// 자기테스트. 두 워커가 같은 address_space를 실제로 공유한다는
+// 것(fork()의 COW 분리와 정반대)을 mutex로 보호된 전역 카운터
+// 병렬 증가로 확인한다 — mutex 없이 증가했다면 두 스레드가 서로
+// 다른 코어에서 실제로 동시에 도는(M34) 이상 값이 일부 증가분을
+// 잃어버렸을 것이다.
+#define MC_PTHREAD_TEST_INCREMENTS 100000
+
+static pthread_mutex_t g_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+static long g_shared_counter = 0;
+
+static void* pthread_worker(void* arg) {
+    (void)arg;
+    for (int i = 0; i < MC_PTHREAD_TEST_INCREMENTS; i++) {
+        pthread_mutex_lock(&g_counter_mutex);
+        g_shared_counter++;
+        pthread_mutex_unlock(&g_counter_mutex);
+    }
+    return NULL;
 }
 
 static void write_str(const char* s) {
@@ -226,6 +248,27 @@ int main(void) {
 
     int ctype_still_c = (toupper('a') == 'A') && (tolower('B') == 'b');
     write_str(ctype_still_c ? "musl locale ctype still C ok=1\n" : "musl locale ctype still C ok=0\n");
+
+    // M37(real-libc-syscall-layer.md §M37, ADR-187) — 진짜 musl
+    // pthread_create()로 워커 둘을 만들고(M34 덕분에 서로 다른
+    // 코어에서 동시에 돌 수 있다), pthread_mutex_t로 보호된 공유
+    // 카운터를 각각 MC_PTHREAD_TEST_INCREMENTS번 증가시킨 뒤
+    // pthread_join()으로 합류해 손실 없이 정확한 합계인지 확인한다.
+    pthread_t worker_a, worker_b;
+    int create_a = pthread_create(&worker_a, NULL, pthread_worker, NULL);
+    int create_b = pthread_create(&worker_b, NULL, pthread_worker, NULL);
+    int pthread_create_ok = (create_a == 0) && (create_b == 0);
+    write_str(pthread_create_ok ? "musl pthread_create ok=1\n" : "musl pthread_create ok=0\n");
+
+    if (pthread_create_ok) {
+        int join_a = pthread_join(worker_a, NULL);
+        int join_b = pthread_join(worker_b, NULL);
+        int join_ok = (join_a == 0) && (join_b == 0);
+        write_str(join_ok ? "musl pthread_join ok=1\n" : "musl pthread_join ok=0\n");
+
+        int counter_ok = (g_shared_counter == 2L * MC_PTHREAD_TEST_INCREMENTS);
+        write_str(counter_ok ? "musl pthread mutex counter ok=1\n" : "musl pthread mutex counter ok=0\n");
+    }
 
     fflush(stdout);
     _exit(0);

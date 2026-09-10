@@ -219,6 +219,21 @@
 #     을 mc_last_fork_child_thread_handle()로 받아 mc_signal_send()
 #     를 직접 쓴다. 신호 전달 검사 지점도 syscall 리턴 한 곳뿐이다
 #     (IRETQ/인터럽트 리턴 경로는 범위 밖).
+#   M37 (real-libc-syscall-layer.md §M37, kernel-scheduler.md ADR-212):
+#     musl 자신의 진짜 pthread_create()/pthread_join()/pthread_mutex_*.
+#     새 syscall sys_thread_create(entry_rip로 곧바로 진입하는 새
+#     스레드, owner_space/handle_table은 fork와 달리 클론하지 않고
+#     그대로 공유)+sys_futex(WAIT/WAKE만). musl의 __clone(hidden asm,
+#     진짜 Linux ABI 직접 사용)은 M36의 __restore_rt와 같은 이유로
+#     이 커널의 syscall ABI와 안 맞아 순수 C 대체(clone_shim.c)로
+#     간다. 워커 둘을 만들어 pthread_mutex_t로 보호된 공유 카운터를
+#     각각 10만 번씩 증가시킨 뒤 pthread_join()으로 합류해 정확한
+#     합계(20만)를 확인한다("musl pthread_create ok=1"/"musl
+#     pthread_join ok=1"/"musl pthread mutex counter ok=1"). __lock/
+#     __unlock(M30/M31이 단일 스레드라 no-op으로 미뤄 뒀던 것)을 이제
+#     musl 원본(진짜 futex 기반)으로 되돌렸다 — 두 pthread의
+#     pthread_exit()이 거의 동시에 끝나며 실제로 스레드 목록 락을
+#     다툴 수 있어서다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -457,6 +472,9 @@ declare -a EXPECTED=(
   "musl setlocale unknown name ok=1"
   "musl locale ctype still C ok=1"
   "musl signal handler ok=1"
+  "musl pthread_create ok=1"
+  "musl pthread_join ok=1"
+  "musl pthread mutex counter ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

@@ -10,6 +10,7 @@
 // ipc_error를 재사용 — 전용 syscall 에러 코드 체계는 이후 계획).
 #include "syscall.hpp"
 
+#include "futex.hpp"
 #include "gdt_selectors.hpp"
 #include "process_ops.hpp"
 #include "signal.hpp"
@@ -179,6 +180,17 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             return static_cast<uint64_t>(err);
         }
         case MC_SYSCALL_THREAD_EXIT: {
+            // M37(real-libc-syscall-layer.md §M37, ADR-187) —
+            // CLONE_CHILD_CLEARTID 흉내(thread_create.hpp 주석 참고).
+            // 이 스레드가 아직 owner_space 페이지테이블이 살아있는
+            // 지금(kern::sched::exit()가 CR3를 다른 스레드로 넘기기
+            // 전) 유저 가상주소에 0을 쓰고 깨운다 — musl의
+            // pthread_join()이 이 신호를 기다린다.
+            kern::object::thread* self = kern::sched::current();
+            if (self != nullptr && self->clear_child_tid_uaddr != 0) {
+                *reinterpret_cast<uint32_t*>(self->clear_child_tid_uaddr) = 0;
+                kern::arch::x86_64::futex_wake(self->clear_child_tid_uaddr, 1);
+            }
             kern::sched::exit();  // noreturn.
         }
         case MC_SYSCALL_ALLOC_DMA_BUFFER: {
@@ -316,6 +328,30 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             // 바로 이 지점으로 돌아온다).
             kern::sched::yield();
             return 0;
+        }
+        case MC_SYSCALL_THREAD_CREATE: {
+            auto* req = reinterpret_cast<mc_thread_create_request*>(a1);
+            if (req == nullptr) {
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
+            }
+            uint32_t out_id = 0;
+            auto err = kern::arch::x86_64::thread_create(req->entry_rip, req->user_rsp, req->arg0,
+                                                           req->tls_fs_base, req->clear_child_tid_uaddr,
+                                                           out_id);
+            if (err == kern::arch::x86_64::process_spawn_error::ok) {
+                req->out_new_thread_id = out_id;
+            }
+            return static_cast<uint64_t>(err);
+        }
+        case MC_SYSCALL_FUTEX: {
+            if (a2 == MC_FUTEX_OP_WAIT) {
+                auto err = kern::arch::x86_64::futex_wait(a1, static_cast<uint32_t>(a3));
+                return static_cast<uint64_t>(err);
+            }
+            if (a2 == MC_FUTEX_OP_WAKE) {
+                return kern::arch::x86_64::futex_wake(a1, static_cast<uint32_t>(a3));
+            }
+            return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
         }
         case MC_SYSCALL_RT_SIGRETURN: {
             // M36(real-libc-syscall-layer.md §M36) — signal.cpp::mc_signal_return()

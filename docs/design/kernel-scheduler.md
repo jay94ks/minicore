@@ -1290,3 +1290,114 @@
   일반 프리미티브다(스케줄러 자체는 이미 임의 스레드 컨텍스트에서
   안전하게 호출 가능하도록 돼 있었다 — 이번에 유저랜드로 노출만 한
   것뿐이다).
+
+## ADR-212. M37 완성: pthread 최소 구현 — `sys_thread_create`(owner_space/handle_table 공유)+`sys_futex`(WAIT/WAKE), musl `__clone`/`__lock`을 실제 futex 기반으로 되돌림
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M37 실행 중 확정)
+- **배경**: ADR-187(계획 단계)의 결정을 실제로 구현한다. 계획이
+  예정한 범위(§결정1~4) 전부를 실제로 만들었다 — M35/M36과 달리
+  이번엔 계획 대비 범위를 더 좁히지 않았다(다만 진행 중 계획에
+  없던 실제 버그 2건을 발견해 고쳤다, 아래 참고).
+- **결정**:
+  1. `kern::object::thread`에 `futex_wait_hook`(list_hook)/
+     `futex_wait_uaddr`/`clear_child_tid_uaddr`를 추가하고,
+     `kern::object::address_space`에 `heap_lock`(spinlock, ADR-180이
+     이미 예고해 둔 것 — brk()/mmap_anon()의 heap_top/heap_mapped_top/
+     mmap_top을 보호)과 `futex_lock`+`futex_waiters`(address_space당
+     대기열 하나, endpoint::lock과 완전히 같은 패턴)를 추가했다.
+     `address_space`가 `futex_waiters`(intrusive_list<thread,...>)
+     때문에 완전한 `thread` 정의를 요구하게 돼, 정의 자체를 `thread`
+     뒤(`endpoint` 앞)로 옮겼다(kernel_objects.hpp, thread는 여전히
+     `address_space*`를 포인터로만 참조해 전방 선언으로 충분하다).
+  2. 새 커널 syscall `sys_thread_create`(`kernel/arch/x86_64/
+     process_ops.cpp::thread_create`) — `fork_current()`와 달리
+     호출자의 레지스터를 복제하지 않는다(entry_rip(arg0)로 곧바로
+     진입하는 새 스레드, `kern::sched::create_user_thread`를 그대로
+     재사용 — initrun/procsrv 스폰과 완전히 같은 진입 모양). **핵심**:
+     `owner_space`/`handle_table`을 클론하지 않고 호출자와 그대로
+     같은 포인터를 공유한다 — 이게 pthread를 fork()와 구분 짓는다
+     (ADR-187 §결정1). `tls_fs_base`(스레드별 필드라 자연히 독립적)와
+     `clear_child_tid_uaddr`(0이 아니면 종료 시 그 주소에 0을 쓰고
+     FUTEX_WAKE(1) — 아래 §결정4)를 새 필드로 받는다. 성공하면
+     호출자 자신의 handle_table에 새 스레드를 가리키는 핸들(fork의
+     `out_thread_handle`과 같은 패턴, 권한 `k_right_can_signal`)을
+     만들어 그 번호를 "tid"로 돌려준다(진짜 커널 tid는 아니지만,
+     musl 쪽에서 "0이 아니면 살아있다"는 성질만 있으면 충분하다).
+  3. 새 커널 syscall `sys_futex`(`kernel/arch/x86_64/futex.cpp`) —
+     `FUTEX_WAIT`/`FUTEX_WAKE`만(`FUTEX_CMP_REQUEUE` 등은 범위 밖,
+     ADR-187 §결정3). `FUTEX_WAIT`는 endpoint.cpp의 sys_call/sys_recv
+     와 완전히 같은 순서(락을 잡고 "값 확인+대기열 삽입"까지 원자적
+     으로 마친 뒤 락을 풀고서야 `kern::sched::block()`)를 쓴다 — 그
+     사이의 아주 좁은 경합 창은 기존 IPC 대기열도 이미 감수하는
+     것과 같다(OPEN-68 참고, 이번에 새로 만들지 않는다).
+  4. **`clear_child_tid_uaddr`는 Linux의 `CLONE_CHILD_CLEARTID`를
+     그대로 흉내낸다** — `MC_SYSCALL_THREAD_EXIT`(syscall.cpp)가
+     `kern::sched::exit()`를 부르기 **직전**(이 스레드의 페이지테이블
+     이 아직 살아있는 마지막 순간)에 그 유저 주소에 0을 쓰고
+     `futex_wake(1)`한다. musl 쪽에서 이 주소로 넘어오는 값이 호출
+     지점마다 다르다는 것을 실행 중 발견했다(아래 참고) — 이 ADR은
+     그 값이 무엇이든 그대로 전달할 뿐 의미를 해석하지 않는다.
+  5. `brk()`/`mmap_anon()`(process_ops.cpp)이 이제 `address_space::heap_lock`
+     을 잡고 실행된다(ADR-180이 이미 M37을 선행 조건으로 지적해 둔
+     스핀락) — 두 pthread가 다른 코어에서 동시에 malloc()하면(M34로
+     실제 병렬 실행) 이 락이 없으면 heap_top/mmap_top이 깨질 수
+     있었다.
+- **실행 중 발견 1 — musl의 `__clone`도 M36의 `__restore_rt`와 같은
+  문제였다**: musl의 `__clone`(hidden, `third_party/musl/src/thread/
+  x86_64/clone.s`)은 raw `syscall` 명령을 진짜 Linux ABI(번호=RAX)
+  그대로 써서 `__syscallN`(M28의 우회 대상)을 전혀 거치지 않는다 —
+  이 커널의 RDI 기반 syscall ABI와 맞지 않는다. 이번엔 M36처럼 한
+  줄만 고치는 패치로 충분하지 않았다(clone()의 자식 쪽 분기는 "부모와
+  같은 명령어 스트림을 이어 간다"는 진짜 clone(2) 의미론에 의존하는데,
+  이 커널의 `sys_thread_create`는 새 스레드가 처음부터 `entry_rip`로
+  곧바로 진입하는 **다른** 모양이라 그 트릭 자체가 필요 없다) — 그래서
+  `clone.s`를 소스 목록에서 완전히 빼고 순수 C 대체
+  (`libc/sysdeps/minicore/clone_shim.c`)로 갈아 끼웠다. musl이 넘기는
+  `stack` 인자도 그 자체로는 정렬돼 있지 않다는 것을 원본 asm을 읽고
+  알았다(`and $-16,%rsi; sub $8,%rsi`로 "누군가 call한 것처럼" RSP
+  mod 16 == 8을 만드는 게 asm 쪽 책임이었다) — 대체 코드에도 같은
+  계산을 그대로 옮겨야 `func`(musl의 `start`/`start_c11`) 내부의
+  정렬 요구 지역변수가 깨지지 않는다.
+- **실행 중 발견 2 — `SYS_exit`와 `SYS_exit_group`을 한 케이스로
+  묶어 둔 게 진짜 버그였다**: M32부터 `syscall_shim.c`가 둘을
+  `case SYS_exit: case SYS_exit_group:`으로 합쳐 항상
+  `mc_process_exit_report()`(프로세스 전체가 끝났다고 procsrv에
+  보고)를 부르고 있었다 — 단일 스레드 프로세스만 있던 M27~M36까지는
+  "이 스레드가 끝남 = 이 프로세스가 끝남"이 항상 참이라 드러나지
+  않았다. musl의 `__pthread_exit`(하나의 pthread만 끝날 때, 다른
+  스레드는 계속 살아있음)는 raw `SYS_exit`(그룹 아님)을 직접 쓴다
+  (`third_party/musl/src/thread/pthread_create.c`의 마지막 `for(;;)
+  __syscall(SYS_exit, 0);` 루프) — 반면 진짜 프로세스 종료
+  (`_exit()`/`exit()`/`main()` 정상 반환)는 항상 `SYS_exit_group`을
+  쓴다. 둘을 갈랐다 — `SYS_exit_group`만 procsrv에 보고하고
+  `SYS_exit`은 이 스레드만 조용히 버린다(`mc_thread_exit()`만).
+  고치지 않았다면 워커 pthread 하나가 끝날 때마다 procsrv에 "이
+  프로세스 전체가 죽었다"고 잘못 보고했을 것이다(부모의 후속 `wait()`
+  이나 다른 자기테스트에 영향을 줄 수 있는 실제 회귀).
+- **실행 중 발견 3 — `__lock`/`__unlock`을 다시 진짜로 만들어야
+  했다**: M30/M31이 "아직 스레드가 하나뿐"이라는 이유로 no-op으로
+  대체해 둔 `__lock`/`__unlock`(`sysdeps/minicore/lock_shim.c`)은
+  musl의 `__tl_lock`/`__tl_unlock`(스레드 목록 락)이 실제로 쓰는
+  자리다 — 두 워커의 `pthread_exit()`이 거의 동시에 끝나는 실제
+  시나리오(둘 다 같은 개수만큼 반복하는 대칭적인 워크로드라 QEMU에서
+  실제로 겹칠 수 있다)에서 no-op으로는 스레드 목록(이중 연결 리스트)
+  자체가 깨질 위험이 있었다 — 실제로 QEMU에서 재현하기 전에 코드
+  분석으로 먼저 발견해 미리 고쳤다(musl 원본
+  `third_party/musl/src/thread/__lock.c`, 진짜 futex 기반 congestion
+  처리로 되돌림). `pthread_mutex_lock/unlock` 자체(우리 테스트가
+  직접 쓰는 카운터 보호)는 원래부터 `LOCK`/`UNLOCK`을 거치지 않고
+  순수 원자 연산+`__wake`/`__futexwait`만 쓴다는 것도 이 분석 중에
+  확인했다(그래서 이 버그를 고치지 않았어도 카운터 자체는 정확했을
+  것이다 — 하지만 스레드 목록이 깨지면 이후의 `pthread_join`/재사용
+  경로가 위험해진다).
+- **범위 밖(ADR-187이 이미 명시)**: `FUTEX_CMP_REQUEUE` 등 고급
+  futex 연산, `SCHED_FIFO`/`SCHED_RR`, `pthread_cancel`(실시간
+  시그널 기반, ADR-186의 최소 signal로는 아직 부족), 스택 guard
+  page의 진짜 강제(우리 `sys_mmap_anon`이 PROT_NONE을 구분하지 않고
+  항상 읽기/쓰기로 매핑해, musl의 `__mprotect(PROT_READ|WRITE)`가
+  ENOSYS로 실패해도 스택은 이미 쓰기 가능한 상태라 조용히 넘어간다
+  — musl 자신이 이 경우를 명시적으로 허용한다). `handle_table`
+  무동기화(OPEN-68)는 이번 자기테스트가 두 워커 모두 IPC/핸들 조작을
+  전혀 안 해 여전히 실사용으로 검증되지 않았다 — 다음에 실제로
+  건드리는 시나리오가 생기면 재검토.

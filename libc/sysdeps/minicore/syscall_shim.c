@@ -52,6 +52,8 @@
 #define SYS_rt_sigreturn 15
 #define SYS_kill 62  // pid 기반 라우팅(procsrv 경유)이 필요해 이번 라운드는 미구현 — 아래 주석 참고.
 #define SYS_sched_yield 24  // mc_yield() -> MC_SYSCALL_YIELD(syscall.h 주석 참고)로 우회.
+// M37(real-libc-syscall-layer.md §M37, ADR-187) — pthread 최소 구현.
+#define SYS_futex 202
 
 #define ARCH_SET_FS 0x1002
 
@@ -60,6 +62,7 @@
 #define MC_ENOENT (-2)
 #define MC_ENOTTY (-25)
 #define MC_ENOSYS (-38)
+#define MC_EAGAIN (-11)
 
 // M32 — musl-hello가 depends=vfs,procsrv로 initrun에게서 물려받는다
 // (servers/CMakeLists.txt, --depends=musl-hello:vfs,procsrv). handle
@@ -219,7 +222,6 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             mc_debug_log(buf, count);
             return (long)count;
         }
-        case SYS_exit:
         case SYS_exit_group:
             // M32(real-libc-syscall-layer.md §M32) — 이 프로세스가
             // procsrv에 등록된 적이 있으면(mc_fork()/mc_getpid()를
@@ -230,6 +232,22 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             // 처리하지만, 여기서 먼저 걸러 불필요한 IPC 왕복을
             // 없앤다.
             mc_process_exit_report(MC_PROCSRV_HANDLE, mc_getpid_cached(), (int32_t)a);
+            mc_thread_exit();
+            // mc_thread_exit는 _Noreturn이라 여기 도달하지 않는다.
+        case SYS_exit:
+            // M37(real-libc-syscall-layer.md §M37) — SYS_exit_group과
+            // 갈라야 했다: musl의 _exit()/exit()(진짜 "이 프로세스
+            // 전체가 끝난다")는 SYS_exit_group을 쓰고, __pthread_exit
+            // 의 마지막 raw exit 루프("이 스레드 하나만 끝난다",
+            // third_party/musl/src/thread/pthread_create.c)는 SYS_exit
+            // (그룹 아님)을 직접 쓴다 — 둘을 여기서 하나로 묶으면
+            // pthread가 하나 끝날 때마다 procsrv에 "프로세스 전체가
+            // 종료했다"고 잘못 보고하게 된다(다른 스레드가 아직
+            // 살아있어도). SYS_exit은 이 스레드만 버린다 — procsrv
+            // 보고 없음(process_ops.cpp::thread_create가 심어 둔
+            // clear_child_tid_uaddr 처리는 kern::sched::exit() 진입
+            // 전에 syscall.cpp의 MC_SYSCALL_THREAD_EXIT 케이스가 이미
+            // 담당한다).
             mc_thread_exit();
             // mc_thread_exit는 _Noreturn이라 여기 도달하지 않는다.
         case SYS_arch_prctl: {
@@ -417,6 +435,29 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
         }
         case SYS_sched_yield:
             return (long)mc_yield();
+        case SYS_futex: {
+            // a=uaddr, b=op, c=val, d=timeout(무시 — timed futex 미지원,
+            // 이번 라운드는 무한 대기만), e=uaddr2(무시), f=val3(무시).
+            // FUTEX_PRIVATE_FLAG(128) 등 상위 비트는 무시한다 — 이
+            // 커널은 프로세스간 공유 futex와 프로세스 전용 futex를
+            // 구분하지 않는다(둘 다 address_space 하나짜리 대기열로
+            // 처리, kernel_objects.hpp::address_space::futex_waiters
+            // 주석 참고).
+            int base_op = (int)b & 0x7f;
+            if (base_op == MC_FUTEX_OP_WAIT) {
+                uint64_t ret = mc_futex_wait((uint64_t)(unsigned long)a, (uint32_t)c);
+                // futex_error::value_mismatch(=2, futex.hpp) — 실제
+                // Linux의 FUTEX_WAIT도 *uaddr!=val이면 EAGAIN이다.
+                if (ret == 2) {
+                    return MC_EAGAIN;
+                }
+                return 0;
+            }
+            if (base_op == MC_FUTEX_OP_WAKE) {
+                return (long)mc_futex_wake((uint64_t)(unsigned long)a, (uint32_t)c);
+            }
+            return MC_ENOSYS;
+        }
         case SYS_rt_sigreturn:
             // 핸들러가 반환한 뒤 restorer(musl의 __restore_rt)가 부른다
             // — 정상적으로는 이 값이 실제로 쓰이지 않는다(커널이

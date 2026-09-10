@@ -353,5 +353,34 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   단순화가 그 신호를 조용히 버림, `getpid()`처럼 pid가 이미
   캐시된 syscall은 스케줄러를 안 건드려 재시도의 "쉬는 시간"으로
   못 씀 — 새 syscall `sys_yield`(`kern::sched::yield()`를 유저랜드에
-  노출, musl `sched_yield()`가 우회)로 해결). 다음은 M37(pthread
-  최소 — `sys_thread_create`+`sys_futex`)이다.
+  노출, musl `sched_yield()`가 우회)로 해결).
+  **M37(완료)**(결과는
+  [docs/done/real-libc-syscall-layer-m37.md](docs/done/real-libc-syscall-layer-m37.md),
+  [ADR-212](docs/design/kernel-scheduler.md) 참고): pthread 최소
+  구현 — 새 syscall `sys_thread_create`(owner_space/handle_table을
+  fork처럼 클론하지 않고 그대로 공유)+`sys_futex`(WAIT/WAKE만)+
+  `address_space::heap_lock`(brk/mmap_anon 보호, ADR-180이 선행
+  조건으로 미리 지적해 둔 스핀락). musl 자신의 진짜
+  `pthread_create()`/`pthread_join()`/`pthread_mutex_*`가 처음
+  링크됐다 — 워커 둘이 mutex로 보호된 공유 카운터를 각 10만 번씩
+  증가시킨 뒤 join해 정확한 합계(20만)를 확인. 계획(ADR-187) 대비
+  범위를 더 좁히지 않았지만, 실행 중 진짜 문제 3건을 발견했다:
+  (1) musl의 `__clone`(hidden asm)도 M36의 `__restore_rt`와 같은
+  이유(raw Linux ABI 직접 사용)로 이 커널의 syscall ABI와 안 맞아
+  순수 C 대체(`libc/sysdeps/minicore/clone_shim.c`)로 완전히 갈아
+  끼웠다 — 한 줄 패치로 안 끝났다(clone()의 "부모와 같은 명령어
+  스트림을 이어 간다"는 의미론 자체가 이 커널의 `sys_thread_create`
+  (새 스레드가 처음부터 entry_rip로 곧바로 진입)엔 필요 없어서,
+  musl이 넘기는 stack 인자의 16바이트 정렬 보정까지 대체 코드에
+  그대로 옮겨야 했다), (2) `syscall_shim.c`가 M32부터
+  `SYS_exit`/`SYS_exit_group`을 한 케이스로 묶어 둔 게 진짜 회귀
+  버그였다 — 단일 스레드 프로세스만 있던 M27~M36까지는 드러나지
+  않았지만, pthread 하나가 끝날 때(raw `SYS_exit`)마다 프로세스
+  전체 종료로 procsrv에 잘못 보고될 뻔했다(진짜 프로세스 종료는
+  항상 `SYS_exit_group`을 쓴다) — 분리해 고쳤다, (3) M30/M31이
+  "아직 스레드가 하나뿐"이라는 이유로 no-op으로 미뤄 둔
+  `__lock`/`__unlock`을, 두 pthread의 `pthread_exit()`이 거의
+  동시에 끝나는 시나리오에서 musl의 스레드 목록이 깨질 수 있다는
+  것을 QEMU로 재현하기 전에 소스 분석으로 먼저 발견해, 진짜 futex
+  기반(musl 원본 `__lock.c`)으로 되돌렸다. 다음은 M38(minicore
+  타깃 SDK 내보내기)이다.
