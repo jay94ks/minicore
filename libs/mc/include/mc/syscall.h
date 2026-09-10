@@ -77,6 +77,8 @@ typedef struct {
 #define MC_SYSCALL_PROCESS_KILL 12u
 #define MC_SYSCALL_BRK 13u
 #define MC_SYSCALL_ARCH_PRCTL_SET_FS 14u
+#define MC_SYSCALL_MMAP_ANON 15u
+#define MC_SYSCALL_MUNMAP 16u
 
 #define MC_MAX_DEBUG_LOG_BYTES 96u
 #define MC_MAX_MMIO_MAP_BYTES (16ull * 1024 * 1024)
@@ -229,6 +231,18 @@ static inline uint64_t mc_brk(mc_brk_request* req) {
 // M28(real-libc-syscall-layer.md §M28) — sys_arch_prctl_set_fs.
 static inline uint64_t mc_arch_prctl_set_fs(uint64_t fs_base) {
     return mc_raw_syscall(MC_SYSCALL_ARCH_PRCTL_SET_FS, fs_base, 0, 0);
+}
+
+// M30(real-libc-syscall-layer.md §M30) — sys_mmap_anon/sys_munmap.
+// mc_mmap_anon 반환값 0은 실패(이 커널의 유저 주소공간에서 0은
+// 절대 유효한 매핑 시작점이 될 수 없다 — sys_brk의 heap_top==0
+// sentinel과 같은 근거).
+static inline uint64_t mc_mmap_anon(uint64_t size) {
+    return mc_raw_syscall(MC_SYSCALL_MMAP_ANON, size, 0, 0);
+}
+
+static inline uint64_t mc_munmap(uint64_t addr, uint64_t size) {
+    return mc_raw_syscall(MC_SYSCALL_MUNMAP, addr, size, 0);
 }
 
 #endif  // !MC_LAND_KERNEL

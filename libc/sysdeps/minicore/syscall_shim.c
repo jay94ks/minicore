@@ -17,6 +17,9 @@
 #include <mc/syscall.h>
 
 #define SYS_write 1
+#define SYS_mmap 9
+#define SYS_munmap 11
+#define SYS_brk 12
 #define SYS_exit 60
 #define SYS_arch_prctl 158
 #define SYS_exit_group 231
@@ -81,6 +84,37 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
                 return 0;
             }
             return MC_ENOSYS;
+        }
+        // M30(real-libc-syscall-layer.md §M30) — musl의 lite_malloc.c가
+        // 항상 SYS_brk를 먼저 시도한 뒤 실패하면 mmap으로 우회한다
+        // (musl 소스 그대로, 원본 로직). 이 SYS_brk를 **항상 실패로
+        // 답한다**(호출자가 요청한 값과 다른 값, 여기서는 항상 0을
+        // 반환 — Linux의 진짜 brk() 절대주소 관례를 흉내 내려는 게
+        // 아니다) — libmc의 mc_malloc이 이미 sys_brk(ADR-180, 힙
+        // 슬롯 5)를 직접 쓰고 있어, musl의 malloc도 같은 커널 상태를
+        // 공유하면 서로의 캐시된 커서가 어긋나 겹칠 위험이 있다
+        // (kernel_objects.hpp::address_space::mmap_top 주석 참고) —
+        // 이렇게 항상 실패시키면 musl의 malloc은 무조건 SYS_mmap
+        // 경로(완전히 분리된 새 영역)로만 가게 되어 그 위험이
+        // 원천적으로 없어진다.
+        case SYS_brk:
+            return 0;
+        case SYS_mmap: {
+            // a=addr(무시, 항상 NULL 취급), b=length, c=prot(무시),
+            // d=flags(무시 — 이 커널은 익명 매핑만 지원), e=fd(무시),
+            // f=offset(무시). 실패하면 POSIX 관례상 (void*)-1을
+            // 반환해야 하지만, 이 커널의 유저 주소공간에서 0은 절대
+            // 유효한 매핑 시작점이 아니므로 0을 실패로 쓴다 — musl의
+            // mmap() 래퍼(src/mman/mmap.c)가 이 값을 그대로
+            // MAP_FAILED 판정에 쓰지 않고 __syscall_ret을 거치므로,
+            // 0을 그대로 돌려주면 "성공, 주소=0"으로 오인될 수 있다
+            // — 그래서 실패 시 -12(ENOMEM 음수)를 대신 돌려준다.
+            uint64_t vaddr = mc_mmap_anon((uint64_t)b);
+            return vaddr != 0 ? (long)vaddr : -12;
+        }
+        case SYS_munmap: {
+            mc_munmap((uint64_t)a, (uint64_t)b);
+            return 0;
         }
         default:
             log_unimplemented(n);

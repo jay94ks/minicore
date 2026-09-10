@@ -108,7 +108,7 @@ add_custom_target(minicore_libc_musl_syscall_bits DEPENDS ${MUSL_SYSCALL_BITS_H}
 
 # ADR-182가 고른 부분집합 — 문자열 함수 중 syscall/스레드/락 없이도
 # 완결되는 것들만(strdup는 예외로, malloc 하나만 필요하다 — 아래
-# mem_shim.c가 그 자리를 메운다). __stpcpy/__strchrnul/__memrchr처럼
+# lite_malloc.c(M30)가 그 자리를 메운다). __stpcpy/__strchrnul/__memrchr처럼
 # 다른 함수가 내부적으로 요구하는 지원 함수도 함께 담는다.
 add_library(minicore_libc STATIC
     ${MUSL_ROOT}/src/string/memcpy.c
@@ -131,7 +131,6 @@ add_library(minicore_libc STATIC
     ${MUSL_ROOT}/src/string/strcspn.c
     ${MUSL_ROOT}/src/string/strlen.c
     ${MUSL_ROOT}/src/string/strdup.c
-    sysdeps/minicore/mem_shim.c
 
     # M28(real-libc-syscall-layer.md §M28, ADR-183) — musl의 진짜
     # 시작 경로 + 최소 syscall 집합(write/exit/arch_prctl). 이
@@ -140,6 +139,20 @@ add_library(minicore_libc STATIC
     ${MUSL_PATCHED_M28_SOURCES}
     sysdeps/minicore/syscall_shim.c
     sysdeps/minicore/set_thread_area.c
+
+    # M30(real-libc-syscall-layer.md §M30, ADR-183) — musl 자신의
+    # 진짜 malloc(lite_malloc.c, 순수 SYS_mmap 기반 범프 할당자 —
+    # M26의 mem_shim.c 대체, ADR-183 계획대로). lite_malloc.c가
+    # 먼저 SYS_brk를 시도하지만 syscall_shim.c가 항상 실패로
+    # 답해(위 syscall_shim.c 주석 참고) 무조건 mmap 경로로 우회한다.
+    ${MUSL_PATCHED_ROOT}/src/malloc/lite_malloc.c
+    ${MUSL_PATCHED_ROOT}/src/malloc/calloc.c
+    ${MUSL_PATCHED_ROOT}/src/malloc/free.c
+    ${MUSL_PATCHED_ROOT}/src/malloc/replaced.c
+    ${MUSL_PATCHED_ROOT}/src/mman/mmap.c
+    ${MUSL_PATCHED_ROOT}/src/mman/munmap.c
+    sysdeps/minicore/lock_shim.c
+    sysdeps/minicore/malloc_shim.c
 )
 add_dependencies(minicore_libc minicore_libc_musl_alltypes minicore_libc_musl_syscall_bits
                   minicore_libc_musl_patched)

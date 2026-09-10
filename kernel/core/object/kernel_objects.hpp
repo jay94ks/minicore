@@ -47,6 +47,18 @@ struct address_space {
     // 페이지 경계로 정확히 복원할 수 없다).
     uint64_t heap_top = 0;
     uint64_t heap_mapped_top = 0;
+
+    // M30(real-libc-syscall-layer.md §M30, ADR-183) — sys_mmap_anon의
+    // per-process 범프 포인터. **의도적으로 sys_brk의 heap_top과
+    // 완전히 분리된 별도 영역이다** — musl의 malloc(lite_malloc.c,
+    // SYS_brk를 우선 시도)과 libmc의 mc_malloc(이미 sys_brk를 직접
+    // 쓴다, ADR-180)이 같은 커널 상태를 공유하면 각자 캐싱해 둔
+    // "다음 할당 위치"가 서로의 sys_brk 호출로 어긋나 겹칠 수 있다
+    // (실행 전 분석으로 발견 — mc_malloc()의 g_heap_cursor가 grow
+    // 이후에도 재동기화되지 않는다). syscall_shim.c가 musl의 SYS_brk
+    // 자체를 항상 "실패"로 답해(0을 반환) lite_malloc이 무조건
+    // mmap 경로로 우회하게 만들어 이 충돌을 원천적으로 피한다.
+    uint64_t mmap_top = 0;
 };
 
 // scheduler.md §2 그대로 — band/preferred_node/boost_level/타임슬라이스.

@@ -182,6 +182,20 @@
 #     무시되지 않고 반드시 "[syscall_shim] unimplemented n=" 로그를
 #     남긴 뒤 -ENOSYS를 반환한다(musl은 이 실패를 무시하고 계속
 #     진행하도록 설계돼 있어 크래시하지 않는다).
+#   M30 (real-libc-syscall-layer.md §M30, kernel-memory.md ADR-183):
+#     musl 자신의 진짜 malloc(lite_malloc.c, 순수 SYS_mmap 기반 범프
+#     할당자)이 M26의 손으로 짠 mem_shim.c를 완전히 대체한다.
+#     musl-hello가 malloc(64)+memcpy+memcmp+free()로 왕복하고
+#     ("musl malloc ok=1"/"musl malloc content ok=1"), 잘못된 fd로
+#     write()를 호출해 errno가 실제로 EBADF로 설정됨을 확인한다
+#     ("musl errno ok=1" — M28의 arch_prctl/FS_BASE가 이 TLS 경로를
+#     이미 갖춰 뒀다). musl의 malloc이 요구하는 SYS_brk를 항상
+#     실패로 답해(syscall_shim.c) 무조건 SYS_mmap 경로로 우회시킨다
+#     — libmc의 mc_malloc(ADR-180, 셸이 직접 쓴다)이 이미 sys_brk의
+#     같은 커널 상태(heap_top)를 쓰고 있어, musl의 malloc도 같은
+#     것을 공유하면 서로의 캐시된 커서가 어긋나 겹칠 수 있다는
+#     것을 실행 전 분석으로 발견해 완전히 분리된 새 영역
+#     (mmap_top, kernel_objects.hpp)으로 피했다.
 #   M27 (real-libc-syscall-layer.md §M27, security-model.md ADR-201):
 #     procsrv가 실제 process_entry 테이블(pid 발급, parent_pid)을
 #     처음으로 갖는다. procsrv가 스폰하는 세 프로세스 C(kill 대상)→
@@ -357,6 +371,9 @@ declare -a EXPECTED=(
   "[procsrv] reparent mechanism ok=1"
   "[musl-hello] spawn err=0"
   "hello from real musl"
+  "musl malloc ok=1"
+  "musl malloc content ok=1"
+  "musl errno ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

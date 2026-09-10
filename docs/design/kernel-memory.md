@@ -1403,3 +1403,63 @@
     분리하지 않는다** — real-libc-syscall-layer.md 자체가 이미 이
     가능성(정적 링킹 복귀)을 계획 문서에 명시해 뒀으므로 별도 OPEN
     번호 없이 이 ADR 하나로 충분히 추적된다.
+
+## ADR-204. M30 실행 전 발견: musl 자신의 malloc(SYS_brk 우선)이 libmc의 mc_malloc과 같은 sys_brk 상태를 공유하면 캐시된 커서가 어긋나 겹칠 수 있음 — SYS_brk를 항상 실패시켜 SYS_mmap 전용 별도 영역으로 강제 우회
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M30 착수 전 코드 분석으로 발견 — 실행 후가 아니라 **실행 전에**
+  잡아낸 문제라는 점에서 M28/M29의 "실행 중 발견"과 다르다)
+- **배경**: M30은 musl 자신의 `malloc()`을 도입해 M26의
+  `libc/sysdeps/minicore/mem_shim.c`(손으로 짠 `malloc()→mc_malloc()`
+  어댑터)를 완전히 대체하는 것이 목표다. 후보로 검토한 musl의
+  기본 할당자 `mallocng`(`src/malloc/mallocng/malloc.c`)은 `mmap`
+  으로 확보한 영역에 대해 `mprotect`까지 요구하는 정교한 설계라
+  이번 라운드 범위를 넘어선다고 판단해, 훨씬 단순한 대체 할당자
+  `src/malloc/lite_malloc.c`(순수 범프 할당자, musl이 빌드 옵션으로
+  제공하는 실제 대안)를 선택했다. 그런데 `lite_malloc.c`는 **항상
+  먼저 `SYS_brk`로 확장을 시도**하고, 그것이 실패할 때만 `SYS_mmap`
+  으로 우회한다 — 코드를 자세히 보니, `libmc`의 `mc_malloc`
+  (`libs/mc/src/mem/heap.c`, ADR-180)이 **이미 같은 `sys_brk` 커널
+  상태(`address_space::heap_top`)를 자기 것처럼 쓰고 있다**는 것을
+  발견했다. `mc_malloc`은 최초 호출 시 `increment=0`으로 조회한
+  값을 `g_heap_cursor`/`g_heap_limit`에 **캐싱**해 두고, 이후
+  `sys_brk`로 확장할 때마다 새 `g_heap_limit`만 갱신할 뿐
+  `g_heap_cursor`는 절대 재동기화하지 않는다 — 지금까지는 `mc_malloc`
+  이 `sys_brk`의 유일한 소비자여서 이 캐시가 커널 상태와 어긋날
+  일이 없었지만, musl의 `malloc()`도 같은 `sys_brk`를 건드리게
+  되면 두 할당자가 **서로 모르게 같은 힙 영역의 다른 부분을
+  "자기 것"이라고 믿게 되어 메모리 손상으로 이어질 수 있다**.
+- **결정**:
+  1. `libc/sysdeps/minicore/syscall_shim.c`의 `SYS_brk` 처리를
+     **항상 실패**(요청과 다른 값, 이 구현에서는 항상 `0`)로
+     고정한다 — `lite_malloc.c`가 `brk==end && ... &&
+     __syscall(SYS_brk, brk+req)==brk+req` 조건에서 항상 거짓이
+     되어 무조건 `SYS_mmap` 경로로 넘어가게 만드는, musl 소스
+     자체의 기존 폴백 로직을 그대로 이용하는 방법이다(musl을
+     수정하지 않는다, ADR-022).
+  2. 새 커널 syscall `MC_SYSCALL_MMAP_ANON`/`MC_SYSCALL_MUNMAP`이
+     `sys_brk`와 **완전히 분리된** 새 영역(`kern::object::
+     address_space::mmap_top`, ADR-160 슬롯 6, 4MiB 예산)에서만
+     동작한다 — `mc_malloc`이 쓰는 슬롯 5(heap_top)를 전혀 건드리지
+     않는다.
+  3. `SYS_munmap`은 M24의 `sys_brk` 축소 미지원과 같은 정신으로
+     실제 페이지 회수를 하지 않는다(항상 성공만 반환) — 이 테스트
+     규모에서 4MiB 예산은 소진되지 않는다.
+- **근거**: 두 할당자를 완전히 분리하는 대안(예: `mc_malloc`을
+  musl의 malloc으로 완전히 흡수 통합)은 셸이 이미 `mc_malloc`을
+  **직접** 호출하는 기존 코드(M24)를 건드려야 해서 범위가 커진다
+  — 반면 "musl의 malloc이 애초에 `sys_brk`를 절대 쓰지 않게
+  만든다"는 이번 결정은 musl 소스나 셸 어느 쪽도 건드리지 않고
+  `syscall_shim.c`(이 프로젝트가 이미 전적으로 소유한 새 파일)
+  한 곳만 바꿔 해결된다 — ADR-183 §결정4의 "새 IPC/프로토콜 로직은
+  `libmc`/새 syscall로, `syscall_shim.c`는 얇게"라는 원칙과도
+  일치한다.
+- **영향**:
+  - M26의 `mem_shim.c`는 실제로 삭제됐다(더 이상 쓰이지 않음,
+    계획이 예고한 그대로).
+  - 셸의 `mc_malloc()` 직접 호출(M24)과 musl의 `malloc()`(M30,
+    `strdup()` 등이 내부적으로 호출)은 이제 **서로 완전히 독립된
+    별도 커널 영역**을 쓴다 — 어느 쪽 코드도 수정하지 않았다.
+  - 향후 다른 musl 컴포넌트가 `SYS_brk`의 진짜 절대주소 관례를
+    필요로 하게 되면(이번 라운드에는 없었다) 이 "항상 실패" 정책을
+    재검토해야 한다 — 그 시점까지는 유효한 단순화로 남긴다.

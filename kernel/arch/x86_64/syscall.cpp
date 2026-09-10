@@ -240,6 +240,15 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             kern::arch::x86_64::sync_fs_base(*self);
             return 0;
         }
+        case MC_SYSCALL_MMAP_ANON: {
+            uint64_t out_vaddr = 0;
+            auto err = kern::arch::x86_64::mmap_anon(a1, out_vaddr);
+            return err == kern::arch::x86_64::process_spawn_error::ok ? out_vaddr : 0;
+        }
+        case MC_SYSCALL_MUNMAP: {
+            auto err = kern::arch::x86_64::munmap_anon(a1, a2);
+            return static_cast<uint64_t>(err);
+        }
         default:
             return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
     }

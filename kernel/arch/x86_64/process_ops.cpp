@@ -66,6 +66,13 @@ constexpr uint64_t k_mmio_user_vaddr = 0x0000700000300000ull;
 constexpr uint64_t k_heap_user_vaddr = 0x0000700000500000ull;
 constexpr uint64_t k_heap_region_size = 0x100000ull;  // 1MiB.
 
+// M30(real-libc-syscall-layer.md §M30) — sys_mmap_anon 전용 영역
+// (ADR-160 슬롯 6, 위 슬롯 5 heap 바로 다음). sys_brk의 heap_top과
+// 절대 공유하지 않는 이유는 kernel_objects.hpp::address_space::
+// mmap_top 주석 참고.
+constexpr uint64_t k_mmap_user_vaddr = 0x0000700000600000ull;
+constexpr uint64_t k_mmap_region_size = 0x400000ull;  // 4MiB.
+
 // M29(real-libc-syscall-layer.md §M29) — 인터프리터를 올릴 고정
 // 베이스. 주 프로그램 베이스(0x10000000, build_process 상단
 // INITRUN_BASE류 상수와 같은 계열)와 유저 스택(0x700000000000...)
@@ -687,6 +694,63 @@ process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
     }
 
     space.heap_top = new_top;
+    return process_spawn_error::ok;
+}
+
+// M30(real-libc-syscall-layer.md §M30, ADR-183) — musl 자신의
+// mallocng/lite_malloc이 요구하는 SYS_mmap(익명)/SYS_munmap 지원.
+// kernel_objects.hpp::address_space::mmap_top 주석 참고 — sys_brk와
+// 완전히 분리된 별도 영역(k_mmap_user_vaddr, 4MiB 예산)이다. 매
+// 호출마다 요청 크기(페이지 정렬)만큼 새로 매핑해 반환하고, 이전
+// 요청과 절대 겹치지 않는다(단순 범프 — 재사용/회수는 munmap이
+// 담당하지 않는다, 아래 munmap_anon 참고).
+process_spawn_error mmap_anon(uint64_t size, uint64_t& out_vaddr) {
+    kern::object::thread* self = kern::sched::current();
+    if (self == nullptr || self->owner_space == nullptr) {
+        return process_spawn_error::not_a_user_process;
+    }
+    kern::object::address_space& space = *self->owner_space;
+
+    if (space.mmap_top == 0) {
+        space.mmap_top = k_mmap_user_vaddr;
+    }
+    if (size == 0) {
+        return process_spawn_error::invalid_argument;
+    }
+
+    uint64_t aligned_size =
+        (size + kern::mm::k_page_size - 1) & ~(kern::mm::k_page_size - 1);
+    uint64_t base = space.mmap_top;
+    uint64_t new_top = base + aligned_size;
+    if (new_top < base || new_top > k_mmap_user_vaddr + k_mmap_region_size) {
+        return process_spawn_error::out_of_memory;
+    }
+
+    for (uint64_t vaddr = base; vaddr < new_top; vaddr += kern::mm::k_page_size) {
+        auto page = kern::mm::alloc_pages(0, 0);
+        if (!page.is_ok()) {
+            return process_spawn_error::out_of_memory;
+        }
+        auto mapped =
+            map_page(space.page_table_root, vaddr, page.value(), page_perm::write | page_perm::user);
+        if (!mapped.is_ok()) {
+            return process_spawn_error::out_of_memory;
+        }
+    }
+
+    space.mmap_top = new_top;
+    out_vaddr = base;
+    return process_spawn_error::ok;
+}
+
+// **알려진 단순화**(M24의 sys_brk 축소 미지원, M26의 realloc 미보존과
+// 같은 정신) — 실제로 페이지를 회수하지 않는다. mmap_anon의 4MiB
+// 예산 안에서라면 이 테스트 규모(musl-hello 하나의 malloc 왕복)는
+// 계속 누적돼도 소진되지 않는다. 진짜 회수가 필요해지면
+// mmap_top/매핑 해제를 별도로 추적해야 한다.
+process_spawn_error munmap_anon(uint64_t addr, uint64_t size) {
+    (void)addr;
+    (void)size;
     return process_spawn_error::ok;
 }
 

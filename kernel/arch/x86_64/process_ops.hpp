@@ -152,4 +152,14 @@ process_spawn_error io_deactivate();
 // 이상을 요청하면 out_of_memory.
 process_spawn_error brk(int64_t increment, uint64_t& out_old_top);
 
+// sys_mmap_anon(M30, real-libc-syscall-layer.md §M30) — size바이트를
+// (페이지 정렬해) 새로 매핑하고 그 시작 유저 가상주소를 out_vaddr에
+// 채운다. sys_brk와 완전히 분리된 별도 영역이다(kernel_objects.hpp::
+// address_space::mmap_top 참고) — musl 자신의 malloc이 요구.
+process_spawn_error mmap_anon(uint64_t size, uint64_t& out_vaddr);
+
+// sys_munmap(M30) — **알려진 단순화**: 실제로 페이지를 회수하지
+// 않는다(항상 성공만 반환). process_ops.cpp::munmap_anon 참고.
+process_spawn_error munmap_anon(uint64_t addr, uint64_t size);
+
 }  // namespace kern::arch::x86_64
