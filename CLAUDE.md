@@ -317,4 +317,13 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   `timer_source_interface`(ADR-191)는 여전히 미뤘고, `handle_table`
   무동기화(ADR-136, M11부터 이미 지적)도 이번 라운드는 해소하지
   않았다(OPEN-68 신규 등록 — busy/counter 데모가 IPC를 안 써서
-  이 경로를 안 건드림). 다음은 M35(musl locale)다.
+  이 경로를 안 건드림).
+  **M35(완료)**(결과는
+  [docs/done/real-libc-syscall-layer-m35.md](docs/done/real-libc-syscall-layer-m35.md),
+  [ADR-210](docs/design/foundations.md) 참고): musl `setlocale()`
+  왕복 — "C"/"POSIX" 고정 검증. 실행 중 발견: 계획 문서의 "미지원
+  로케일(`ko_KR.UTF-8`)은 실패해야 한다"는 실제 musl 동작과 다름을
+  소스 확인으로 발견했다(musl은 알 수 없는 로케일도 실패시키지
+  않고 C.UTF-8로 조용히 대체한다) — 검증 목표를 "요청은 성공하지만
+  ctype 동작은 여전히 C"로 조정했다. 다음은 M36(완전한 signal
+  계층)이다.

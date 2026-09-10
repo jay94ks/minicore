@@ -198,6 +198,22 @@
 #     linux_abi_stack 필드 추가). SYS_wait4는 pid>0(특정 자식)만
 #     지원한다(pid<=0의 "임의의 자식" 의미론은 범위 밖 — 2026-09-10
 #     사용자 확인, fork/clone 범위 좁힘과 같은 결정).
+#   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
+#     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
+#     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
+#     ok=1"). 계획 문서 원문은 "ko_KR.UTF-8 같은 미지원 로케일 요청은
+#     실패(NULL)해야 한다"고 적어 뒀지만, third_party/musl/src/locale/
+#     locale_map.c::__get_locale()을 실제로 읽어 보면 musl은 알 수
+#     없는 로케일 이름도 실패시키지 않는다(malloc 실패나 '/'·선행
+#     '.'이 있는 이름만 진짜로 실패한다) — 그래서 이 라운드는 "요청
+#     자체는 성공하지만("musl setlocale unknown name ok=1") ctype
+#     동작은 전혀 안 바뀐다("musl locale ctype still C ok=1")"로
+#     검증 목표를 조정했다(ADR-210, docs/done 참고). 새 링크 의존성
+#     (setlocale/locale_map/c_locale/__mo_lookup/getenv/toupper 등)
+#     중 __map_file(MUSL_LOCPATH 환경변수 탐색 — envp가 항상 비어
+#     있어 실제로는 안 타는 경로)은 원본 대신 항상 실패하는
+#     sysdeps/minicore/locale_shim.c로 대체했다(fstat 등 안 쓸 의존성
+#     을 새로 끌어올 이유가 없다).
 #   M31 (real-libc-syscall-layer.md §M31, kernel-memory.md ADR-183): 파일
 #     I/O syscall(SYS_open/openat/read/readv/close/writev, VFS/FS
 #     프로토콜은 이미 있는 libmc의 mc_vfs_open/mc_fs_read를 그대로
@@ -416,6 +432,9 @@ declare -a EXPECTED=(
   "musl fork ok=1"
   "hello from musl-exec-target (a different image)"
   "musl fork+exec+wait ok=1"
+  "musl setlocale empty ok=1"
+  "musl setlocale unknown name ok=1"
+  "musl locale ctype still C ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

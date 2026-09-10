@@ -22,7 +22,16 @@
 // 오퍼레이션(mc/procsrv_protocol.h)을 왕복시킨다 — musl-hello가
 // vfs 외에 procsrv에도 의존해야 한다(servers/CMakeLists.txt
 // --depends=musl-hello:vfs,procsrv).
+// M35(real-libc-syscall-layer.md §M35, ADR-188): musl locale은 "C"/
+// "POSIX" 고정만 검증한다 — 실제 로케일 데이터/iconv/LC_* 전환은
+// 범위 밖. setlocale(LC_ALL, "")가 성공하고, 알려지지 않은 로케일
+// 이름(예: "ko_KR.UTF-8")을 요청해도 ctype 동작이 여전히 C 로케일
+// 그대로임을 확인한다(계획 문서가 원래 기대했던 "알려지지 않은
+// 이름은 실패해야 한다"는 실제 musl 동작과 다르다는 것을 소스
+// 확인으로 발견 — 아래 main() 안 주석 참고).
+#include <ctype.h>
 #include <errno.h>
+#include <locale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,6 +124,33 @@ int main(void) {
             (waited == child) && WIFEXITED(status) && WEXITSTATUS(status) == 42;
         write_str(wait_ok ? "musl fork+exec+wait ok=1\n" : "musl fork+exec+wait ok=0\n");
     }
+
+    // M35(real-libc-syscall-layer.md §M35, ADR-188) — setlocale(LC_ALL,
+    // "")는 POSIX 관례상 항상 성공해야 한다(환경변수 기반 로케일
+    // 선택 — LC_ALL/LANG 등이 전혀 없는 이 환경에서는 musl 자신의
+    // 기본값 "C.UTF-8"로 떨어진다).
+    char* loc_empty = setlocale(LC_ALL, "");
+    int loc_empty_ok = (loc_empty != NULL);
+    write_str(loc_empty_ok ? "musl setlocale empty ok=1\n" : "musl setlocale empty ok=0\n");
+
+    // 계획 문서 원문은 "ko_KR.UTF-8 요청은 실패(NULL)해야 한다"고
+    // 적어 뒀지만, third_party/musl/src/locale/locale_map.c::
+    // __get_locale()을 실제로 읽어 보면 musl은 **알 수 없는 로케일
+    // 이름도 실패시키지 않는다** — 진짜 실패(LOC_MAP_FAILED)는
+    // malloc 실패나 이름에 '/'·선행 '.'이 있을 때만 나오고, 그 외엔
+    // 항상 "요청한 이름을 기억하되 내부 동작은 C.UTF-8 그대로"로
+    // 조용히 대체한다(실제 로케일 아카이브가 없으면 __map_file이
+    // 실패해도 그 이름을 담은 __locale_map을 새로 만들어 성공
+    // 처리한다). 그래서 이 테스트는 "NULL을 반환해야 한다" 대신
+    // ADR-188이 실제로 뜻하는 것("실제 로케일 데이터 없이 C 동작만
+    // 유지된다")을 검증한다 — 요청 자체는 성공하지만 ctype 동작은
+    // 전혀 안 바뀜을 확인한다.
+    char* loc_ko = setlocale(LC_ALL, "ko_KR.UTF-8");
+    int loc_ko_ok = (loc_ko != NULL);
+    write_str(loc_ko_ok ? "musl setlocale unknown name ok=1\n" : "musl setlocale unknown name ok=0\n");
+
+    int ctype_still_c = (toupper('a') == 'A') && (tolower('B') == 'b');
+    write_str(ctype_still_c ? "musl locale ctype still C ok=1\n" : "musl locale ctype still C ok=0\n");
 
     fflush(stdout);
     _exit(0);

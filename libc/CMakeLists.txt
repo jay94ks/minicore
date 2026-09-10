@@ -228,6 +228,28 @@ add_library(minicore_libc STATIC
     # 대체한다 — 그래서 원본 src/thread/lock_ptc.c는 여기 없다.
     ${MUSL_PATCHED_ROOT}/src/exit/abort_lock.c
     ${MUSL_PATCHED_ROOT}/src/signal/block.c
+
+    # M35(real-libc-syscall-layer.md §M35, ADR-188) — setlocale()과
+    # 그 링크 의존성(locale_map.c::__get_locale, c_locale.c::
+    # __c_dot_utf8/__c_locale, __mo_lookup.c::__mo_lookup — __lctrans_impl
+    # 이 부른다). __map_file(MUSL_LOCPATH 환경변수 경로 탐색 — 이
+    # 프로젝트의 envp는 항상 비어 있어(M28) 실제로는 절대 실행되지
+    # 않는 경로)은 원본(third_party/musl/src/time/__map_file.c,
+    # open+fstat+mmap로 진짜 로케일 아카이브를 매핑) 대신
+    # sysdeps/minicore/locale_shim.c의 항상-실패 대체를 쓴다 —
+    # lock_shim.c/malloc_shim.c와 같은 이유(실행되지 않을 코드를
+    # 위해 fstat 등 새 의존성을 끌어올 이유가 없다). getenv/toupper/
+    # tolower는 ctype/env 표준 함수 — 이번에 처음 필요해졌다.
+    ${MUSL_PATCHED_ROOT}/src/locale/setlocale.c
+    ${MUSL_PATCHED_ROOT}/src/locale/locale_map.c
+    ${MUSL_PATCHED_ROOT}/src/locale/c_locale.c
+    ${MUSL_PATCHED_ROOT}/src/locale/__mo_lookup.c
+    ${MUSL_PATCHED_ROOT}/src/env/getenv.c
+    ${MUSL_PATCHED_ROOT}/src/ctype/toupper.c
+    ${MUSL_PATCHED_ROOT}/src/ctype/tolower.c
+    ${MUSL_PATCHED_ROOT}/src/ctype/isupper.c
+    ${MUSL_PATCHED_ROOT}/src/ctype/islower.c
+    sysdeps/minicore/locale_shim.c
 )
 add_dependencies(minicore_libc minicore_libc_musl_alltypes minicore_libc_musl_syscall_bits
                   minicore_libc_musl_patched)

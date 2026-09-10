@@ -538,6 +538,46 @@
     (POSIX 관례상 항상 성공해야 하는 호출)를 넣어 깨지지 않는지
     확인하는 정도만 추가한다.
 
+## ADR-210. M35 완성: musl setlocale() 왕복 — 계획 문서의 "미지원 로케일은 실패해야 한다"는 실제 musl 동작과 다름을 발견해 검증 목표를 조정
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M35 실행 중 확정)
+- **배경**: ADR-188의 결정("C"/"POSIX" 고정)을 실제로 구현·검증한다.
+  계획 문서 §M35 본문은 "`setlocale(LC_ALL, "ko_KR.UTF-8")`가
+  실패해야 한다(`NULL` 반환 확인)"고 명시했었다.
+- **실행 중 발견**: `third_party/musl/src/locale/locale_map.c::
+  __get_locale()`을 실제로 읽어 보면(musl 소스 무수정 원칙상 이
+  동작을 바꿀 수 없다) 이는 musl의 실제 동작과 다르다 — musl은
+  **알려지지 않은 로케일 이름을 실패시키지 않는다.** 내부 실패
+  센티널(`LOC_MAP_FAILED`)은 malloc 실패나 이름에 `/`·선행 `.`이
+  있을 때만 반환되고, 그 외의(진짜 로케일 아카이브가 없어도) 모든
+  이름은 "요청한 이름을 기억하되 실제 데이터는 `C.UTF-8`로 조용히
+  대체"해 **성공**으로 처리된다 — 이것이 바로 ADR-188이 원래 겨냥한
+  "실제 로케일 데이터 없음"의 진짜 모습이다(실패가 아니라 조용한
+  대체). 계획 문서 작성 시점의 "실패해야 한다"는 가정이 틀렸다.
+- **결정**: 검증 목표를 실제 musl 동작에 맞게 조정한다 —
+  1. `setlocale(LC_ALL, "")`가 성공함을 확인한다(계획 원문 그대로,
+     변경 없음).
+  2. `setlocale(LC_ALL, "ko_KR.UTF-8")`도 **성공**(`NULL`이 아님)함을
+     확인한다 — 실패 여부가 아니라 "미지원 로케일이 실제로 아무
+     효과가 없다"를 검증 대상으로 바꾼다.
+  3. 위 호출 뒤에도 `toupper('a')=='A'`/`tolower('B')=='b'`처럼
+     ctype 동작이 여전히 C 로케일 그대로임을 확인한다 — 이것이
+     "실제 로케일 데이터 없음"을 직접 증명하는 조건이다.
+  2번을 검증하려면 `setlocale`+`locale_map.c`(`__get_locale`)+
+  `c_locale.c`+`__mo_lookup.c`+`getenv`+`toupper`/`tolower`(+`isupper`/
+  `islower`, 이들의 링크 의존성)를 처음으로 컴파일에 포함해야 했다.
+  `locale_map.c`가 무조건 참조하는 `__map_file`(MUSL_LOCPATH 환경
+  변수 탐색 — 이 프로젝트의 envp는 항상 비어 있어 실제로는 절대
+  실행되지 않는 경로)은 원본(open+fstat+mmap) 대신
+  `sysdeps/minicore/locale_shim.c`의 항상-실패 대체로 바꿨다 —
+  `lock_shim.c`/`malloc_shim.c`와 같은 이유(실행되지 않을 코드를
+  위해 `fstat`/`fstatat`/`statx`류 새 의존성을 끌어올 이유가 없다).
+- **영향**: 계획 문서(`real-libc-syscall-layer.md` §M35) 자신은
+  수정하지 않는다(그 문서는 "실행 전 계획"만 남기는 자리다) — 이
+  ADR과 `docs/done/real-libc-syscall-layer-m35.md`가 실제로 무엇을
+  검증했는지의 정본이다.
+
 ## ADR-198. 네임스페이스 컨벤션: `kern::*` 계층(커널)·`kernsrv::<서버명>`(서버)·`__internals__` 은닉 마커·`proto` 예외 (ADR-042 보강)
 
 - **상태**: 확정 (2026-09-10, 사용자 지시. **규칙만 확정** — 기존
