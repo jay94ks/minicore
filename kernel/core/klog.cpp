@@ -1,4 +1,4 @@
-// klog::write/printf — arch 독립 구현. klog::putc(arch 구현)만 호출한다
+// kern::klog::write/printf — arch 독립 구현. kern::klog::putc(arch 구현)만 호출한다
 // (ADR-002 HAL 경계, docs/spec/debug-console.md §3).
 //
 // 여러 코어가 동시에 로그를 남길 수 있으므로 전역 스핀락 1개로
@@ -12,7 +12,7 @@
 #include <libk/irq_safe.hpp>
 #include <libk/spinlock.hpp>
 
-namespace klog {
+namespace kern::klog {
 
 namespace {
 
@@ -147,4 +147,4 @@ void printf(const char* fmt, ...) {
     va_end(args);
 }
 
-}  // namespace klog
+}  // namespace kern::klog

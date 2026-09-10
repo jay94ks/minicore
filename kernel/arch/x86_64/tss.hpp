@@ -13,19 +13,19 @@
 
 #include <cstdint>
 
-namespace object {
+namespace kern::object {
 struct thread;  // kernel_objects.hpp(core) — 전방 선언만 필요(ADR-002와 같은 정신, 헤더 의존 최소화).
 }
 
 namespace arch_x86_64 {
 
 // GDT를 TSS 디스크립터(셀렉터 0x38)를 포함한 확장판으로 다시 구성하고
-// LTR로 적재한다. mm::init() 이후, 첫 유저 스레드가 뜨기 전에 호출해야
+// LTR로 적재한다. kern::mm::init() 이후, 첫 유저 스레드가 뜨기 전에 호출해야
 // 한다(install_syscall_entry()와 같은 시점 — kernel_main.cpp 참고).
 void init_tss();
 
 // M14(system-servers-bringup.md §M14, ADR-154, OPEN-58 해소) — t가
-// (object::thread::io_port_base/count로) 활성화해 둔 I/O 포트 범위를
+// (kern::object::thread::io_port_base/count로) 활성화해 둔 I/O 포트 범위를
 // TSS IOPB에 반영한다 — **diff 기반**: 지금 IOPB에 실제로 프로그램된
 // 범위(이 파일 내부에서 기억)와 다를 때만, 이전 범위를 재차단(1)하고
 // 새 범위를 개방(0)한다. 매 호출마다 8KiB 전체를 만지지 않는다.
@@ -38,7 +38,7 @@ void init_tss();
 // ADR-147 시절의 grant_io_port_range()(전역 1회성, 스레드 구분 없음)
 // 를 대체한다 — 이제 IOPB는 "지금 스케줄된 스레드가 활성화해 둔
 // 범위만" 열린다.
-void sync_io_permission(const object::thread& t);
+void sync_io_permission(const kern::object::thread& t);
 
 // M21(general-purpose-completion.md §M21, ADR-177) — t가 (다시)
 // g_current가 될 때마다 TSS.RSP0를 t 전용 커널 스택(t.syscall_kernel_rsp,
@@ -46,7 +46,7 @@ void sync_io_permission(const object::thread& t);
 // 맞춘다. **왜 필요해졌는가**: init_tss()가 RSP0를 딱 하나의 전역
 // 스택으로 고정했던 이유(tss.cpp 주석 — "예외 처리는 항상 순차적,
 // 처리 끝나면 곧바로 IRETQ")가 M21부터 깨진다 — 타이머 ISR이
-// sched::on_timer_tick() → yield()로 다른 스레드에게 전환할 수 있어,
+// kern::sched::on_timer_tick() → yield()로 다른 스레드에게 전환할 수 있어,
 // 이 인터럽트의 IRETQ가 "곧바로"가 아니라 "이 스레드가 나중에 다시
 // 스케줄될 때"에야 일어난다. 그 사이에 다른 유저 스레드가 ring3에서
 // 또 선점되면(전역 RSP0가 그대로였다면) **같은 물리 스택**의 같은
@@ -59,6 +59,6 @@ void sync_io_permission(const object::thread& t);
 // (owner_space==nullptr)는 절대 ring3에서 실행되지 않으므로 RSP0가
 // 읽힐 일이 없다(같은 특권 수준 인터럽트는 스택을 바꾸지 않는다) —
 // sync_syscall_kernel_rsp()와 똑같이 그 경우는 그냥 건드리지 않는다.
-void sync_exception_stack(const object::thread& t);
+void sync_exception_stack(const kern::object::thread& t);
 
 }  // namespace arch_x86_64

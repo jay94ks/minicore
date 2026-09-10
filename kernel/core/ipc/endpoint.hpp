@@ -26,13 +26,13 @@
 #include "object/handle_table.hpp"
 #include "object/kernel_objects.hpp"
 
-namespace ipc {
+namespace kern::ipc {
 
 // 송신 + 응답 대기(블록). h는 CAN_SEND 권한이 있는 endpoint 핸들이어야
 // 한다. msg_in.pages[i]/handles[i]가 있으면 전달을 시도한다 —
 // msg_out.pages[i]를 미리 채워 두지 않았으면(message.hpp 방향 규약)
 // ipc_error::page_not_mapped로 실패한다(블록하지 않고 즉시 반환).
-result<void, ipc_error> sys_call(object::handle_table& table, object::handle h,
+result<void, ipc_error> sys_call(kern::object::handle_table& table, kern::object::handle h,
                                   const message& msg_in, message& msg_out);
 
 // 호출 수신 대기(블록). h는 CAN_RECV 권한이 있는 endpoint 핸들이어야
@@ -40,7 +40,7 @@ result<void, ipc_error> sys_call(object::handle_table& table, object::handle h,
 // 호출에 쓰인 handle이 프록시가 아니라 소유 핸들이면 항상 0). 페이지를
 // 받으려면 호출 전에 msg_out.page_count/pages[]에 목적지 버퍼를 미리
 // 채워 둬야 한다.
-result<uint64_t, ipc_error> sys_recv(object::handle_table& table, object::handle h,
+result<uint64_t, ipc_error> sys_recv(kern::object::handle_table& table, kern::object::handle h,
                                       message& msg_out);
 
 // 가장 최근 sys_recv로 받은 호출에 응답한다. 대응하는 sys_recv가 없는
@@ -51,6 +51,6 @@ result<uint64_t, ipc_error> sys_recv(object::handle_table& table, object::handle
 // 그 table을 소스로 caller의 handle_table에 프록시를 만든다(이 파일
 // 상단 주석의 "알려진 단순화" 참고 — pages[] 내용 자체는 아직 옮기지
 // 않는다).
-result<void, ipc_error> sys_reply(object::handle_table& table, const message& msg_in);
+result<void, ipc_error> sys_reply(kern::object::handle_table& table, const message& msg_in);
 
-}  // namespace ipc
+}  // namespace kern::ipc

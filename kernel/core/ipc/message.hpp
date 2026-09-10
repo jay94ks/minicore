@@ -12,7 +12,7 @@
 
 #include <cstdint>
 
-namespace ipc {
+namespace kern::ipc {
 
 inline constexpr size_t k_message_registers = 4;
 inline constexpr size_t k_max_page_descriptors = 4;
@@ -61,4 +61,4 @@ enum class ipc_error : uint32_t {
     cancelled,          // 상대 스레드 종료 처리(아직 없음)가 생기면 실제로 반환된다.
 };
 
-}  // namespace ipc
+}  // namespace kern::ipc

@@ -79,43 +79,43 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                                       const uint64_t* saved_regs) {
     switch (num) {
         case uapi::k_syscall_ipc_call: {
-            object::thread* self = sched::current();
+            kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
-                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+                return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
             }
-            const auto* msg_in = reinterpret_cast<const ipc::message*>(a2);
-            auto* msg_out = reinterpret_cast<ipc::message*>(a3);
+            const auto* msg_in = reinterpret_cast<const kern::ipc::message*>(a2);
+            auto* msg_out = reinterpret_cast<kern::ipc::message*>(a3);
             if (msg_in == nullptr || msg_out == nullptr) {
-                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+                return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
             }
             auto result =
-                ipc::sys_call(*self->handles, static_cast<object::handle>(a1), *msg_in, *msg_out);
-            return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
+                kern::ipc::sys_call(*self->handles, static_cast<kern::object::handle>(a1), *msg_in, *msg_out);
+            return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
         case uapi::k_syscall_ipc_recv: {
-            object::thread* self = sched::current();
+            kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
-                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+                return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
             }
-            auto* msg_out = reinterpret_cast<ipc::message*>(a2);
+            auto* msg_out = reinterpret_cast<kern::ipc::message*>(a2);
             if (msg_out == nullptr) {
-                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+                return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
             }
             auto result =
-                ipc::sys_recv(*self->handles, static_cast<object::handle>(a1), *msg_out);
-            return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
+                kern::ipc::sys_recv(*self->handles, static_cast<kern::object::handle>(a1), *msg_out);
+            return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
         case uapi::k_syscall_ipc_reply: {
-            object::thread* self = sched::current();
+            kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
-                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+                return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
             }
-            const auto* msg_in = reinterpret_cast<const ipc::message*>(a1);
+            const auto* msg_in = reinterpret_cast<const kern::ipc::message*>(a1);
             if (msg_in == nullptr) {
-                return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+                return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
             }
-            auto result = ipc::sys_reply(*self->handles, *msg_in);
-            return static_cast<uint64_t>(result.is_ok() ? ipc::ipc_error::ok : result.error());
+            auto result = kern::ipc::sys_reply(*self->handles, *msg_in);
+            return static_cast<uint64_t>(result.is_ok() ? kern::ipc::ipc_error::ok : result.error());
         }
         case uapi::k_syscall_process_spawn: {
             auto* req = reinterpret_cast<uapi::process_spawn_request*>(a1);
@@ -153,7 +153,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_thread_exit: {
-            sched::exit();  // noreturn.
+            kern::sched::exit();  // noreturn.
         }
         case uapi::k_syscall_alloc_dma_buffer: {
             auto* out = reinterpret_cast<uapi::dma_buffer_result*>(a1);
@@ -183,7 +183,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
                 buf[i] = str[i];
             }
             buf[len] = '\0';
-            klog::printf("%s", buf);
+            kern::klog::printf("%s", buf);
             return 0;
         }
         case uapi::k_syscall_map_phys: {
@@ -207,7 +207,7 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             return static_cast<uint64_t>(err);
         }
         case uapi::k_syscall_process_kill: {
-            object::thread* self = sched::current();
+            kern::object::thread* self = kern::sched::current();
             if (self == nullptr || self->handles == nullptr) {
                 return static_cast<uint64_t>(arch_x86_64::process_kill_error::invalid_handle);
             }
@@ -223,6 +223,6 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             return static_cast<uint64_t>(err);
         }
         default:
-            return static_cast<uint64_t>(ipc::ipc_error::invalid_handle);
+            return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);
     }
 }

@@ -27,12 +27,12 @@ constexpr uint64_t k_pte_no_execute = 1ull << 63;
 constexpr uint64_t k_pte_addr_mask = 0x000FFFFFFFFFF000ull;
 
 uint64_t* table_virt(uint64_t table_phys) {
-    return static_cast<uint64_t*>(mm::phys_to_virt(table_phys));
+    return static_cast<uint64_t*>(kern::mm::phys_to_virt(table_phys));
 }
 
 // table_phys가 가리키는 테이블의 index번 엔트리가 다음 레벨 테이블을
 // 가리키게 한다 — 이미 있으면 그 물리주소를 반환하고, 없고 create가
-// true면 새로 mm::alloc_pages(order 0)로 만들어 연결한다.
+// true면 새로 kern::mm::alloc_pages(order 0)로 만들어 연결한다.
 result<uint64_t, map_error> next_level(uint64_t table_phys, uint32_t index, bool create) {
     uint64_t* table = table_virt(table_phys);
     uint64_t entry = table[index];
@@ -43,12 +43,12 @@ result<uint64_t, map_error> next_level(uint64_t table_phys, uint32_t index, bool
         return result<uint64_t, map_error>::err(map_error::not_mapped);
     }
 
-    auto page = mm::alloc_pages(0, 0);
+    auto page = kern::mm::alloc_pages(0, 0);
     if (!page.is_ok()) {
         return result<uint64_t, map_error>::err(map_error::out_of_memory);
     }
     uint64_t new_table_phys = page.value();
-    __builtin_memset(table_virt(new_table_phys), 0, mm::k_page_size);
+    __builtin_memset(table_virt(new_table_phys), 0, kern::mm::k_page_size);
     // 중간 레벨은 항상 WRITABLE|USER로 열어 둔다 — 실제 접근 제어는
     // 리프(PT) 엔트리가 담당한다(x86_64 관례: 상위 레벨의 제한 비트는
     // 하위 레벨과 AND로 결합되므로, 중간에서 미리 좁히면 리프에서
@@ -107,13 +107,13 @@ result<uint64_t, map_error> walk_to_pt(uint64_t pml4_phys, const virt_indices& i
 }  // namespace
 
 result<uint64_t, map_error> create_address_space_root() {
-    auto page = mm::alloc_pages(0, 0);
+    auto page = kern::mm::alloc_pages(0, 0);
     if (!page.is_ok()) {
         return result<uint64_t, map_error>::err(map_error::out_of_memory);
     }
     uint64_t new_pml4_phys = page.value();
     uint64_t* table = table_virt(new_pml4_phys);
-    __builtin_memset(table, 0, mm::k_page_size);
+    __builtin_memset(table, 0, kern::mm::k_page_size);
 
     constexpr uint32_t k_physmap_pml4_index =
         static_cast<uint32_t>((arch_mm::k_physmap_base >> 39) & 0x1FFull);
@@ -151,11 +151,11 @@ result<uint64_t, map_error> create_address_space_root() {
     // 나머지 저지대 전체(8MiB~512GiB)가 주소공간마다 독립적이다.
     constexpr uint32_t k_low_ident_pd_entries = 4;  // boot.S가 실제로 채운 [0,8MiB) 몫.
 
-    auto low_pdpt_page = mm::alloc_pages(0, 0);
+    auto low_pdpt_page = kern::mm::alloc_pages(0, 0);
     if (!low_pdpt_page.is_ok()) {
         return result<uint64_t, map_error>::err(map_error::out_of_memory);
     }
-    auto low_pd_page = mm::alloc_pages(0, 0);
+    auto low_pd_page = kern::mm::alloc_pages(0, 0);
     if (!low_pd_page.is_ok()) {
         return result<uint64_t, map_error>::err(map_error::out_of_memory);
     }
@@ -163,8 +163,8 @@ result<uint64_t, map_error> create_address_space_root() {
     uint64_t new_low_pd_phys = low_pd_page.value();
     uint64_t* new_low_pdpt = table_virt(new_low_pdpt_phys);
     uint64_t* new_low_pd = table_virt(new_low_pd_phys);
-    __builtin_memset(new_low_pdpt, 0, mm::k_page_size);
-    __builtin_memset(new_low_pd, 0, mm::k_page_size);
+    __builtin_memset(new_low_pdpt, 0, kern::mm::k_page_size);
+    __builtin_memset(new_low_pd, 0, kern::mm::k_page_size);
     for (uint32_t i = 0; i < k_low_ident_pd_entries; ++i) {
         new_low_pd[i] = low_pd[i];
     }
@@ -379,7 +379,7 @@ result<uint64_t, map_error> clone_address_space_cow(uint64_t src_pml4_phys) {
                         return result<uint64_t, map_error>::err(map_ok.error());
                     }
 
-                    mm::frame_add_ref(phys);
+                    kern::mm::frame_add_ref(phys);
                 }
             }
         }

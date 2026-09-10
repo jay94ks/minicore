@@ -21,6 +21,6 @@
 extern "C" [[noreturn]] void enter_usermode(uint64_t rip, uint64_t rsp, uint64_t arg0);
 
 extern "C" [[noreturn]] void arch_user_thread_trampoline() {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     enter_usermode(self->user_entry_rip, self->user_rsp, self->user_arg0);
 }

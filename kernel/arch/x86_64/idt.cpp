@@ -99,7 +99,7 @@ constexpr int k_max_backtrace_frames = 16;
 
 void print_backtrace_from(uint64_t start_fp) {
     auto* fp = reinterpret_cast<uint64_t*>(start_fp);
-    klog::printf("[idt] backtrace:\n");
+    kern::klog::printf("[idt] backtrace:\n");
     for (int i = 0; i < k_max_backtrace_frames; ++i) {
         if (fp == nullptr || (reinterpret_cast<uint64_t>(fp) & 0x7) != 0) {
             break;
@@ -109,7 +109,7 @@ void print_backtrace_from(uint64_t start_fp) {
         if (ret_addr == 0) {
             break;
         }
-        klog::printf("  #%d 0x%lx\n", i, static_cast<unsigned long>(ret_addr));
+        kern::klog::printf("  #%d 0x%lx\n", i, static_cast<unsigned long>(ret_addr));
         if (saved_fp <= reinterpret_cast<uint64_t>(fp)) {
             break;
         }
@@ -121,20 +121,20 @@ void print_backtrace_from(uint64_t start_fp) {
 // 목적이다. 일반 예외 처리 정책(페이지 폴트 등)은 이 계획의 범위 밖 —
 // 여기서는 무조건 레지스터를 klog로 찍고 백트레이스 후 정지한다.
 [[noreturn]] void diagnose_and_halt(const interrupt_frame& f) {
-    klog::printf(
+    kern::klog::printf(
         "[idt] unexpected exception vector=%lu error_code=0x%lx rip=0x%lx cs=0x%lx "
         "rflags=0x%lx rsp=0x%lx ss=0x%lx\n",
         static_cast<unsigned long>(f.vector), static_cast<unsigned long>(f.error_code),
         static_cast<unsigned long>(f.rip), static_cast<unsigned long>(f.cs),
         static_cast<unsigned long>(f.rflags), static_cast<unsigned long>(f.user_rsp),
         static_cast<unsigned long>(f.ss));
-    klog::printf(
+    kern::klog::printf(
         "[idt] rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx rsi=0x%lx rdi=0x%lx rbp=0x%lx\n",
         static_cast<unsigned long>(f.rax), static_cast<unsigned long>(f.rbx),
         static_cast<unsigned long>(f.rcx), static_cast<unsigned long>(f.rdx),
         static_cast<unsigned long>(f.rsi), static_cast<unsigned long>(f.rdi),
         static_cast<unsigned long>(f.rbp));
-    klog::printf(
+    kern::klog::printf(
         "[idt] r8=0x%lx r9=0x%lx r10=0x%lx r11=0x%lx r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
         static_cast<unsigned long>(f.r8), static_cast<unsigned long>(f.r9),
         static_cast<unsigned long>(f.r10), static_cast<unsigned long>(f.r11),
@@ -162,12 +162,12 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
     if (frame->vector == arch_x86_64::k_vector_spurious) {
         // Intel SDM Vol.3 §11.9 — 스퓨리어스 벡터는 EOI를 보내지 않는다
         // (진짜 인터럽트가 아니었다는 신호이므로 큐에 남길 것이 없다).
-        klog::printf("[idt] spurious interrupt (vector 0xFF) — ignored\n");
+        kern::klog::printf("[idt] spurious interrupt (vector 0xFF) — ignored\n");
         return;
     }
     if (frame->vector == arch_x86_64::k_vector_timer) {
-        // M21(ADR-176) — EOI를 **먼저** 보낸다. sched::on_timer_tick()이
-        // 내부적으로 sched::yield()를 호출하면 arch_context_switch가 이
+        // M21(ADR-176) — EOI를 **먼저** 보낸다. kern::sched::on_timer_tick()이
+        // 내부적으로 kern::sched::yield()를 호출하면 arch_context_switch가 이
         // 인터럽트의 스택 프레임을 통째로 "다른 스레드의 콜스택 아래"에
         // 묻어 버린다 — 이 스레드가 다시 스케줄돼 이 함수까지 되돌아올
         // 때에야 비로소 (isr_common의 에필로그가) iretq를 실행한다. 그
@@ -177,7 +177,7 @@ extern "C" void interrupt_dispatch(arch_x86_64::interrupt_frame* frame) {
         // "일 다 하고 마지막에 EOI"(smp_handle_tlb_shootdown_ipi의
         // 관례)가 아니라 여기서는 반드시 순서를 뒤집는다.
         lapic_eoi();
-        sched::on_timer_tick();
+        kern::sched::on_timer_tick();
         return;
     }
     if (frame->vector == arch_x86_64::k_vector_nm) {

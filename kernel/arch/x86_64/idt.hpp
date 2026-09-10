@@ -12,7 +12,7 @@
 //
 // M21(general-purpose-completion.md §M21, ADR-176)이 네 번째 벡터를
 // 추가한다: k_vector_timer — LAPIC 타이머의 주기적 인터럽트로,
-// idt.cpp가 EOI 후 sched::on_timer_tick()을 부른다(선점형 스케줄링의
+// idt.cpp가 EOI 후 kern::sched::on_timer_tick()을 부른다(선점형 스케줄링의
 // 유일한 강제 전환 지점).
 #pragma once
 

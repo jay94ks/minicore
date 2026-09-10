@@ -109,13 +109,13 @@ constexpr uint32_t k_exception_stack_order = 2;  // 16KiB
 }  // namespace
 
 void init_tss() {
-    auto stack_page = mm::alloc_pages(k_exception_stack_order, 0);
+    auto stack_page = kern::mm::alloc_pages(k_exception_stack_order, 0);
     if (!stack_page.is_ok()) {
         LIBK_PANIC("init_tss: 예외 전용 스택(RSP0) 확보 실패");
     }
-    auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
+    auto* stack_base = static_cast<uint8_t*>(kern::mm::phys_to_virt(stack_page.value()));
     uint64_t stack_top = reinterpret_cast<uint64_t>(stack_base) +
-                          (static_cast<uint64_t>(mm::k_page_size) << k_exception_stack_order);
+                          (static_cast<uint64_t>(kern::mm::k_page_size) << k_exception_stack_order);
     g_tss.tss.rsp0 = stack_top;
     g_tss.tss.iomap_base = sizeof(tss_struct);  // IOPB가 TSS 바로 뒤에서 시작.
     __builtin_memset(g_tss.iopb, 0xFF, sizeof(g_tss.iopb));  // 기본: 모든 포트 접근 거부.
@@ -141,7 +141,7 @@ void init_tss() {
     asm volatile("ltr %w0" : : "r"(k_sel_tss));
 }
 
-void sync_io_permission(const object::thread& t) {
+void sync_io_permission(const kern::object::thread& t) {
     uint16_t new_base = static_cast<uint16_t>(t.io_port_base);
     uint16_t new_count = static_cast<uint16_t>(t.io_port_count);
     if (new_base == g_current_io_base && new_count == g_current_io_count) {
@@ -157,7 +157,7 @@ void sync_io_permission(const object::thread& t) {
     g_current_io_count = new_count;
 }
 
-void sync_exception_stack(const object::thread& t) {
+void sync_exception_stack(const kern::object::thread& t) {
     if (t.owner_space != nullptr) {
         g_tss.tss.rsp0 = t.syscall_kernel_rsp;
     }
@@ -168,13 +168,13 @@ void sync_exception_stack(const object::thread& t) {
 // kernel/core/sched/scheduler.cpp가 컨텍스트 스위치마다 부르는 훅
 // (ADR-002 HAL 경계 — core는 이 파일을 include하지 않고 이 시그니처만
 // extern "C"로 안다).
-extern "C" void arch_sync_io_permission(const object::thread& next) {
+extern "C" void arch_sync_io_permission(const kern::object::thread& next) {
     arch_x86_64::sync_io_permission(next);
 }
 
 // M21(ADR-177) — tss.hpp::sync_exception_stack() 참고. scheduler.cpp가
 // arch_sync_io_permission과 같은 자리(컨텍스트 스위치 4곳)에서 함께
 // 부른다.
-extern "C" void arch_sync_exception_stack(const object::thread& next) {
+extern "C" void arch_sync_exception_stack(const kern::object::thread& next) {
     arch_x86_64::sync_exception_stack(next);
 }

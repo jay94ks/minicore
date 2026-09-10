@@ -32,7 +32,7 @@ namespace {
 
 // COM1 시리얼(kernel/arch/x86_64/klog_uart.cpp와 완전히 같은 초기화·
 // 폴링 로직) — 이 스텁 자신의 진단용. 커널 본체로 넘어간 뒤에는
-// klog::init()이 같은 포트를 다시 초기화해 이어받는다.
+// kern::klog::init()이 같은 포트를 다시 초기화해 이어받는다.
 constexpr uint16_t k_com1_base = 0x3F8;
 
 inline void outb(uint16_t port, uint8_t value) {

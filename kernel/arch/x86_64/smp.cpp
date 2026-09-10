@@ -72,7 +72,7 @@ void bring_up_aps(const madt_result& madt) {
     // 트램폴린 바이트는 매 부팅마다 항상 같은 내용이라 한 번만 복사한다
     // — 모든 AP가 같은 코드를 실행한다.
     uint64_t blob_size = static_cast<uint64_t>(ap_trampoline_end - ap_trampoline_start);
-    void* dest = mm::phys_to_virt(k_ap_trampoline_phys);
+    void* dest = kern::mm::phys_to_virt(k_ap_trampoline_phys);
     __builtin_memcpy(dest, ap_trampoline_start, blob_size);
 
     for (uint32_t i = 0; i < madt.cpu_count && g_cpu_count < k_max_madt_cpus; ++i) {
@@ -81,14 +81,14 @@ void bring_up_aps(const madt_result& madt) {
             continue;
         }
 
-        auto stack_page = mm::alloc_pages(k_ap_stack_order, 0);
+        auto stack_page = kern::mm::alloc_pages(k_ap_stack_order, 0);
         if (!stack_page.is_ok()) {
-            klog::printf("[smp] AP apic_id=%u stack alloc failed — skip\n", apic_id);
+            kern::klog::printf("[smp] AP apic_id=%u stack alloc failed — skip\n", apic_id);
             continue;
         }
-        auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
+        auto* stack_base = static_cast<uint8_t*>(kern::mm::phys_to_virt(stack_page.value()));
         uint64_t stack_top =
-            reinterpret_cast<uint64_t>(stack_base) + (mm::k_page_size << k_ap_stack_order);
+            reinterpret_cast<uint64_t>(stack_base) + (kern::mm::k_page_size << k_ap_stack_order);
 
         uint32_t cpu_index = g_cpu_count;
         g_ap_boot_stack_top = stack_top;
@@ -107,7 +107,7 @@ void bring_up_aps(const madt_result& madt) {
         }
 
         if (!came_up) {
-            klog::printf("[smp] AP apic_id=%u did not come online (timeout)\n", apic_id);
+            kern::klog::printf("[smp] AP apic_id=%u did not come online (timeout)\n", apic_id);
             continue;
         }
         g_cpus[cpu_index].apic_id = apic_id;
@@ -115,7 +115,7 @@ void bring_up_aps(const madt_result& madt) {
         ++g_cpu_count;
     }
 
-    klog::printf("[smp] bring_up_aps done online_count=%u\n", g_cpu_count);
+    kern::klog::printf("[smp] bring_up_aps done online_count=%u\n", g_cpu_count);
 }
 
 uint32_t online_cpu_count() { return g_cpu_count; }
@@ -197,17 +197,17 @@ extern "C" void ap_main(uint32_t cpu_index) {
     arch_x86_64::lapic_enable_this_core();
     // M21(ADR-176) — 일부러 lapic_start_periodic_timer()를 여기서
     // 부르지 않는다(lapic.hpp 그 함수 주석 참고) — AP는 run_queue에
-    // 참여하지 않아, 이 코어에서 타이머가 울려도 sched::on_timer_tick()
+    // 참여하지 않아, 이 코어에서 타이머가 울려도 kern::sched::on_timer_tick()
     // 이 건드릴 g_current는 BSP의 것뿐이다.
     uint32_t apic_id = arch_x86_64::lapic_id();
-    klog::printf("[smp] AP apic_id=%u online cpu_index=%u\n", apic_id, cpu_index);
+    kern::klog::printf("[smp] AP apic_id=%u online cpu_index=%u\n", apic_id, cpu_index);
     arch_x86_64::g_online_count.fetch_add_relaxed(1);
 
     // ap_trampoline.S가 진입 내내 인터럽트를 켜지 않았다(cli 상태 그대로
     // 여기까지 왔다) — IF=0인 채로 hlt하면 나중에 TLB shootdown IPI가
     // 와도 이 코어가 절대 깨어나지 못한다(고정 벡터 인터럽트는 IF=1일
     // 때만 전달된다, NMI/SMI/INIT과 다름). arch_idle_halt() 자체는
-    // BSP(M8, sched::exit())도 공유하는 arch 훅이라 여기서 건드리지
+    // BSP(M8, kern::sched::exit())도 공유하는 arch 훅이라 여기서 건드리지
     // 않고, AP 전용으로 호출 직전에 켠다.
     asm volatile("sti");
     arch_idle_halt();

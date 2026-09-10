@@ -6,7 +6,7 @@
 
 #include <cstddef>
 
-namespace mm {
+namespace kern::mm {
 
 // 실제 목록은 구현 시 프로파일링으로 조정 가능 — 지금은 spec 예시
 // 그대로 쓴다.
@@ -23,4 +23,4 @@ void* slab_alloc(size_t size);
 // 되찾는 데 쓴다 — memory.md §6 시그니처 그대로).
 void slab_free(void* ptr, size_t size);
 
-}  // namespace mm
+}  // namespace kern::mm

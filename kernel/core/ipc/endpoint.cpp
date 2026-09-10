@@ -3,8 +3,8 @@
 
 #include <libk/irq_safe.hpp>  // scoped_lock
 
-#include <mm/page_allocator.hpp>  // mm::k_page_size (페이지 정렬 검사)
-#include <mm/phys_map.hpp>        // mm::phys_to_virt(cross-address-space 메시지 번역)
+#include <mm/page_allocator.hpp>  // kern::mm::k_page_size (페이지 정렬 검사)
+#include <mm/phys_map.hpp>        // kern::mm::phys_to_virt(cross-address-space 메시지 번역)
 
 #include "sched/scheduler.hpp"
 
@@ -24,12 +24,12 @@ extern "C" bool arch_map_ipc_page_readonly(uint64_t page_table_root, uint64_t va
                                             uint64_t phys);
 extern "C" bool arch_unmap_ipc_page(uint64_t page_table_root, uint64_t vaddr);
 
-namespace ipc {
+namespace kern::ipc {
 
 namespace {
 
 struct resolved_endpoint {
-    object::endpoint* ep;
+    kern::object::endpoint* ep;
     uint64_t badge;
 };
 
@@ -38,9 +38,9 @@ struct resolved_endpoint {
 // 포인터만 쓴다)이면 vaddr을 그대로 커널 포인터로 취급한다(기존
 // 단순화 그대로 보존). space!=nullptr이면 그 주소공간의
 // page_table_root로 vaddr을 물리 프레임으로 번역해
-// mm::phys_to_virt로 커널이 역참조 가능한 포인터를 얻는다 — 페이지
+// kern::mm::phys_to_virt로 커널이 역참조 가능한 포인터를 얻는다 — 페이지
 // 경계를 넘는 범위는 페이지 단위로 나눠 처리한다.
-bool copy_user_bytes(object::address_space* space, uint64_t vaddr, void* kernel_buf,
+bool copy_user_bytes(kern::object::address_space* space, uint64_t vaddr, void* kernel_buf,
                       uint64_t len, bool from_user) {
     if (space == nullptr) {
         if (from_user) {
@@ -55,9 +55,9 @@ bool copy_user_bytes(object::address_space* space, uint64_t vaddr, void* kernel_
     uint64_t cur_vaddr = vaddr;
     auto* cur_buf = static_cast<uint8_t*>(kernel_buf);
     while (remaining > 0) {
-        uint64_t page_base = cur_vaddr & ~static_cast<uint64_t>(mm::k_page_size - 1);
+        uint64_t page_base = cur_vaddr & ~static_cast<uint64_t>(kern::mm::k_page_size - 1);
         uint64_t offset_in_page = cur_vaddr - page_base;
-        uint64_t chunk = mm::k_page_size - offset_in_page;
+        uint64_t chunk = kern::mm::k_page_size - offset_in_page;
         if (chunk > remaining) {
             chunk = remaining;
         }
@@ -66,7 +66,7 @@ bool copy_user_bytes(object::address_space* space, uint64_t vaddr, void* kernel_
         if (!arch_translate_user_page(space->page_table_root, page_base, &phys)) {
             return false;
         }
-        auto* page_virt = static_cast<uint8_t*>(mm::phys_to_virt(phys));
+        auto* page_virt = static_cast<uint8_t*>(kern::mm::phys_to_virt(phys));
         if (from_user) {
             __builtin_memcpy(cur_buf, page_virt + offset_in_page, chunk);
         } else {
@@ -80,11 +80,11 @@ bool copy_user_bytes(object::address_space* space, uint64_t vaddr, void* kernel_
     return true;
 }
 
-bool copy_from_user(object::address_space* space, uint64_t vaddr, void* dst, uint64_t len) {
+bool copy_from_user(kern::object::address_space* space, uint64_t vaddr, void* dst, uint64_t len) {
     return copy_user_bytes(space, vaddr, dst, len, /*from_user=*/true);
 }
 
-bool copy_to_user(object::address_space* space, uint64_t vaddr, const void* src, uint64_t len) {
+bool copy_to_user(kern::object::address_space* space, uint64_t vaddr, const void* src, uint64_t len) {
     return copy_user_bytes(space, vaddr, const_cast<void*>(src), len, /*from_user=*/false);
 }
 
@@ -93,27 +93,27 @@ bool copy_to_user(object::address_space* space, uint64_t vaddr, const void* src,
 // sys_recv 호출자가 넘긴 table(양쪽이 같은 g_ipc_table을 공유하는
 // 기존 전제)로 그대로 되돌아간다. 이래야 기존 커널 스레드 IPC 데모의
 // 동작이 이 리팩터 이후에도 완전히 그대로 유지된다.
-object::handle_table& table_for_thread(object::thread* t, object::handle_table& fallback) {
+kern::object::handle_table& table_for_thread(kern::object::thread* t, kern::object::handle_table& fallback) {
     return (t->handles != nullptr) ? *t->handles : fallback;
 }
 
 // h가 가리키는 핸들이 유효하고, endpoint 종류이며, required_right를
 // 갖는지 확인한다 — objects.md §3의 handle_entry 검사를 ipc.md §6의
 // 에러 코드로 옮긴다.
-result<resolved_endpoint, ipc_error> resolve_endpoint(object::handle_table& table,
-                                                        object::handle h, uint32_t required_right) {
-    const object::handle_entry* e = table.debug_entry(h);
+result<resolved_endpoint, ipc_error> resolve_endpoint(kern::object::handle_table& table,
+                                                        kern::object::handle h, uint32_t required_right) {
+    const kern::object::handle_entry* e = table.debug_entry(h);
     if (e == nullptr || !e->valid) {
         return result<resolved_endpoint, ipc_error>::err(ipc_error::invalid_handle);
     }
-    if (e->kind != object::object_kind::endpoint) {
+    if (e->kind != kern::object::object_kind::endpoint) {
         return result<resolved_endpoint, ipc_error>::err(ipc_error::wrong_object_type);
     }
     if ((e->rights & required_right) == 0) {
         return result<resolved_endpoint, ipc_error>::err(ipc_error::permission_denied);
     }
     return result<resolved_endpoint, ipc_error>::ok(
-        resolved_endpoint{static_cast<object::endpoint*>(e->object), e->badge});
+        resolved_endpoint{static_cast<kern::object::endpoint*>(e->object), e->badge});
 }
 
 // t가 이전에 §2 경로(아래)로 받은 IPC 매핑이 남아 있으면 지금
@@ -125,14 +125,14 @@ result<resolved_endpoint, ipc_error> resolve_endpoint(object::handle_table& tabl
 // 있어서 ADR-161이 "이 스레드가 다시 배달 목적지가 되는 시점"으로
 // 일반화했다 — sys_call/sys_recv/sys_reply 세 진입점 모두가 여기로
 // 온다.
-void release_previous_ipc_mapping(object::thread* t) {
+void release_previous_ipc_mapping(kern::object::thread* t) {
     if (t->ipc_mapped_page_count == 0) {
         return;
     }
     for (uint32_t i = 0; i < t->ipc_mapped_page_count; ++i) {
-        uint64_t vaddr = k_ipc_mapped_pages_user_vaddr + i * mm::k_page_size;
+        uint64_t vaddr = k_ipc_mapped_pages_user_vaddr + i * kern::mm::k_page_size;
         (void)arch_unmap_ipc_page(t->owner_space->page_table_root, vaddr);
-        mm::frame_release(t->ipc_mapped_frames[i]);
+        kern::mm::frame_release(t->ipc_mapped_frames[i]);
     }
     t->ipc_mapped_page_count = 0;
 }
@@ -157,11 +157,11 @@ void release_previous_ipc_mapping(object::thread* t) {
 //     보낸 raw 포인터를 유저 프로세스에게 매핑하는 조합은 아직 쓸
 //     곳이 없어 범위 밖) — 슬롯 예산(4페이지)에 맞춰 디스크립터당
 //     정확히 1페이지만 허용한다.
-result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_space* src_space,
-                                         uint64_t dst_vaddr, object::thread* dst_thread,
-                                         object::handle_table& src_table,
-                                         object::handle_table& dst_table) {
-    object::address_space* dst_space = dst_thread->owner_space;
+result<void, ipc_error> deliver_message(uint64_t src_vaddr, kern::object::address_space* src_space,
+                                         uint64_t dst_vaddr, kern::object::thread* dst_thread,
+                                         kern::object::handle_table& src_table,
+                                         kern::object::handle_table& dst_table) {
+    kern::object::address_space* dst_space = dst_thread->owner_space;
 
     message src{};
     if (!copy_from_user(src_space, src_vaddr, &src, sizeof(message))) {
@@ -193,8 +193,8 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_spac
             // move/map은 이 마일스톤 범위 밖(계획 문서 그대로, ADR-015).
             return result<void, ipc_error>::err(ipc_error::permission_denied);
         }
-        if (in_pd.length == 0 || (in_pd.vaddr % mm::k_page_size) != 0 ||
-            (in_pd.length % mm::k_page_size) != 0) {
+        if (in_pd.length == 0 || (in_pd.vaddr % kern::mm::k_page_size) != 0 ||
+            (in_pd.length % kern::mm::k_page_size) != 0) {
             // 정렬 위반은 호출자 버그다(ipc.md §4 "페이지 정렬") —
             // 조용히 틀린 값을 받아들이지 않는다.
             LIBK_PANIC("ipc: page_descriptor not page-aligned");
@@ -212,17 +212,17 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_spac
         }
 
         // §2 — 신설(ADR-155 §2/ADR-159/ADR-161).
-        if (src_space == nullptr || in_pd.length != mm::k_page_size) {
+        if (src_space == nullptr || in_pd.length != kern::mm::k_page_size) {
             return result<void, ipc_error>::err(ipc_error::permission_denied);
         }
         uint64_t phys = 0;
         if (!arch_translate_user_page(src_space->page_table_root, in_pd.vaddr, &phys)) {
             return result<void, ipc_error>::err(ipc_error::page_not_mapped);
         }
-        mm::frame_add_ref(phys);
-        uint64_t slot_vaddr = k_ipc_mapped_pages_user_vaddr + i * mm::k_page_size;
+        kern::mm::frame_add_ref(phys);
+        uint64_t slot_vaddr = k_ipc_mapped_pages_user_vaddr + i * kern::mm::k_page_size;
         if (!arch_map_ipc_page_readonly(dst_space->page_table_root, slot_vaddr, phys)) {
-            mm::frame_release(phys);
+            kern::mm::frame_release(phys);
             return result<void, ipc_error>::err(ipc_error::page_not_mapped);
         }
         dst_thread->ipc_mapped_frames[i] = phys;
@@ -245,7 +245,7 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_spac
             // 진행한다. 정확한 부분 실패 보고 형식은 스펙도 "구현
             // 시 정한다"고 미뤄둔 부분이다(objects.md "아직 정하지
             // 않은 것").
-            dst.handles[i].src_handle = object::k_invalid_handle;
+            dst.handles[i].src_handle = kern::object::k_invalid_handle;
             dst.handles[i].rights_mask = 0;
             continue;
         }
@@ -262,19 +262,19 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, object::address_spac
 
 }  // namespace
 
-result<void, ipc_error> sys_call(object::handle_table& table, object::handle h,
+result<void, ipc_error> sys_call(kern::object::handle_table& table, kern::object::handle h,
                                   const message& msg_in, message& msg_out) {
-    auto resolved = resolve_endpoint(table, h, object::k_right_can_send);
+    auto resolved = resolve_endpoint(table, h, kern::object::k_right_can_send);
     if (!resolved.is_ok()) {
         return result<void, ipc_error>::err(resolved.error());
     }
-    object::endpoint& ep = *resolved.value().ep;
+    kern::object::endpoint& ep = *resolved.value().ep;
     uint64_t badge = resolved.value().badge;
 
-    object::thread* caller = sched::current();
+    kern::object::thread* caller = kern::sched::current();
     caller->ipc.reply_dest = &msg_out;
 
-    object::thread* server = nullptr;
+    kern::object::thread* server = nullptr;
     {
         scoped_lock<spinlock> guard(ep.lock);
         if (!ep.waiting_servers.empty()) {
@@ -305,27 +305,27 @@ result<void, ipc_error> sys_call(object::handle_table& table, object::handle h,
         server->ipc.reply_target = caller;
         server->ipc.saved_boost_level = server->sched.boost_level;
         server->sched.boost_level = caller->sched.boost_level;
-        sched::enqueue(*server);
+        kern::sched::enqueue(*server);
     }
 
     // sys_reply(§5 3단계)가 다시 깨울 때까지 블록한다. 깨어난 시점에는
     // msg_out/badge가 이미 채워져 있다.
-    sched::block();
+    kern::sched::block();
 
     return result<void, ipc_error>::ok();
 }
 
-result<uint64_t, ipc_error> sys_recv(object::handle_table& table, object::handle h,
+result<uint64_t, ipc_error> sys_recv(kern::object::handle_table& table, kern::object::handle h,
                                       message& msg_out) {
-    auto resolved = resolve_endpoint(table, h, object::k_right_can_recv);
+    auto resolved = resolve_endpoint(table, h, kern::object::k_right_can_recv);
     if (!resolved.is_ok()) {
         return result<uint64_t, ipc_error>::err(resolved.error());
     }
-    object::endpoint& ep = *resolved.value().ep;
+    kern::object::endpoint& ep = *resolved.value().ep;
 
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
 
-    object::thread* caller = nullptr;
+    kern::object::thread* caller = nullptr;
     {
         scoped_lock<spinlock> guard(ep.lock);
         if (!ep.waiting_callers.empty()) {
@@ -358,13 +358,13 @@ result<uint64_t, ipc_error> sys_recv(object::handle_table& table, object::handle
 
     // sys_call이 나를 깨울 때까지 블록한다 — 깨어난 시점에는 msg_out/
     // reply_target/recv_badge가 이미 채워져 있다.
-    sched::block();
+    kern::sched::block();
     return result<uint64_t, ipc_error>::ok(self->ipc.recv_badge);
 }
 
-result<void, ipc_error> sys_reply(object::handle_table& table, const message& msg_in) {
-    object::thread* self = sched::current();
-    object::thread* caller = self->ipc.reply_target;
+result<void, ipc_error> sys_reply(kern::object::handle_table& table, const message& msg_in) {
+    kern::object::thread* self = kern::sched::current();
+    kern::object::thread* caller = self->ipc.reply_target;
     if (caller == nullptr) {
         // 대응하는 sys_recv가 없다 — ipc.md §3: 오류가 아니라 아무
         // 동작도 하지 않는다.
@@ -393,9 +393,9 @@ result<void, ipc_error> sys_reply(object::handle_table& table, const message& ms
     // deliver_message가 실패해도 caller.reply_dest에는 아무것도
     // 쓰이지 않았을 뿐, caller는 그대로 깨어나 자신의 msg_out을
     // (호출 전 상태 그대로) 관찰한다.
-    sched::enqueue(*caller);
+    kern::sched::enqueue(*caller);
     // 서버(self)는 블록하지 않고 계속 실행한다.
     return xfer;
 }
 
-}  // namespace ipc
+}  // namespace kern::ipc

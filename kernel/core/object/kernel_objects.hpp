@@ -11,14 +11,14 @@
 #include <libk/intrusive_list.hpp>
 #include <libk/spinlock.hpp>
 
-// ipc::message는 kernel/core/ipc(레이어상 object 위에 있음)가 정의한다 —
+// kern::ipc::message는 kernel/core/ipc(레이어상 object 위에 있음)가 정의한다 —
 // 여기서는 포인터만 보관하므로 전방 선언으로 충분하다(ADR-002와 같은
 // 정신의 계층 분리: object는 ipc를 몰라야 한다).
-namespace ipc {
+namespace kern::ipc {
 struct message;
 }
 
-namespace object {
+namespace kern::object {
 
 class handle_table;  // handle_table.hpp(같은 namespace)가 정의 — thread가
                       // M8부터 자신의 핸들 테이블을 포인터로 들고 있어야
@@ -66,11 +66,11 @@ struct thread;  // ipc_state가 포인터로만 참조 — 아래 thread 정의�
 // 하는 상태. sys_reply가 handle을 받지 않고 "가장 최근 sys_recv로 받은
 // 호출"에 답하는 스펙 규칙(ipc.md §3) 자체가 이 상태를 요구한다.
 struct ipc_state {
-    const ipc::message* pending_call_msg = nullptr;  // sys_call이 서버 대기 중 blocked일 때: 보낼 메시지
+    const kern::ipc::message* pending_call_msg = nullptr;  // sys_call이 서버 대기 중 blocked일 때: 보낼 메시지
     uint64_t pending_call_badge = 0;                 // 위와 짝 — 이 호출에 쓰인 handle의 badge
-    ipc::message* recv_dest = nullptr;               // sys_recv가 caller 대기 중 blocked일 때: 받을 목적지
+    kern::ipc::message* recv_dest = nullptr;               // sys_recv가 caller 대기 중 blocked일 때: 받을 목적지
     uint64_t recv_badge = 0;                          // 위와 짝 — sys_recv가 반환할 badge
-    ipc::message* reply_dest = nullptr;               // sys_call 완료 대기 중: 응답을 받을 목적지
+    kern::ipc::message* reply_dest = nullptr;               // sys_call 완료 대기 중: 응답을 받을 목적지
     thread* reply_target = nullptr;                    // sys_recv로 받은 뒤: sys_reply가 깨울 대상
     uint32_t saved_boost_level = 0;                     // 도네이션 복원용(ADR-028)
 };
@@ -81,10 +81,10 @@ struct thread {
     list_hook run_queue_hook;  // scheduler.md의 run_queue(intrusive_list)가 M5부터 이 훅을 쓴다.
 
     // M21(general-purpose-completion.md §M21, ADR-176) — 이 스레드가
-    // 현재 타임슬라이스에서 남은 타이머 틱 수. sched::reset_preempt_budget()
+    // 현재 타임슬라이스에서 남은 타이머 틱 수. kern::sched::reset_preempt_budget()
     // 이 이 스레드가 (다시) 현재 스레드가 될 때마다
     // base_time_slice_us*multiplier(boost_level)로 채우고,
-    // sched::on_timer_tick()이 매 틱 하나씩 깎다가 0이 되면 yield()를
+    // kern::sched::on_timer_tick()이 매 틱 하나씩 깎다가 0이 되면 yield()를
     // 강제한다. thread_sched_fields(스펙이 그대로 정의한 필드)가 아니라
     // 여기 두는 이유: 이 필드는 "현재 슬라이스에서 얼마나 남았는가"라는
     // 순수 구현 세부(런타임 카운터)이고, thread_sched_fields는 스펙
@@ -138,10 +138,10 @@ struct thread {
     // 내장했다. M11b(ADR-133, XSAVE/AVX)에서 1024바이트+alignas(64)로
     // 바꿔봤다가 실제로 QEMU에서 `#GP`로 깨지는 것을 확인했다 —
     // slab_alloc()이 보장하는 정렬은 16바이트뿐이다(ADR-134가 그
-    // 정도로 고쳤을 뿐, 64바이트를 보장하지 않는다). `object::thread`
+    // 정도로 고쳤을 뿐, 64바이트를 보장하지 않는다). `kern::object::thread`
     // 자체가 slab에서 나오므로, 그 안의 배열에 아무리 `alignas(64)`를
     // 붙여도 실제 런타임 주소는 지켜지지 않는다. 그래서 ADR-138로
-    // 이 필드를 "슬랩이 아니라 별도 페이지(mm::alloc_pages, 항상
+    // 이 필드를 "슬랩이 아니라 별도 페이지(kern::mm::alloc_pages, 항상
     // 4096바이트 정렬)에서 나온 포인터"로 바꿨다 —
     // create_kernel_thread/create_user_thread(scheduler.cpp)가 그
     // 페이지를 0으로 채운 뒤 FCW/MXCSR 기본값을 patch한다. nullptr이면
@@ -162,7 +162,7 @@ struct thread {
     // ADR-159/161(kernel-ipc-objects.md, OPEN-61 해소) — 이 스레드가
     // IPC pages[]로 마지막으로 받은 매핑의 프레임 물리주소들. 고정
     // 슬롯(kernel/core/ipc/message.hpp::k_ipc_mapped_pages_user_vaddr)
-    // 에 매핑돼 있다 — 배열 크기는 ipc::k_max_page_descriptors(=4)와
+    // 에 매핑돼 있다 — 배열 크기는 kern::ipc::k_max_page_descriptors(=4)와
     // 같아야 하지만 object는 ipc를 몰라야 하므로(위 전방 선언 주석과
     // 같은 정신) 리터럴로 둔다. 이 스레드가 deliver_message의
     // 목적지로 다시 선택되는 시점 직전에 endpoint.cpp가 이 기록을
@@ -204,4 +204,4 @@ struct notification {
     thread* waiter = nullptr;
 };
 
-}  // namespace object
+}  // namespace kern::object

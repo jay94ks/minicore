@@ -21,7 +21,7 @@
 #include "mm/page_allocator.hpp"
 #include "mm/phys_map.hpp"
 
-namespace mm {
+namespace kern::mm {
 
 namespace {
 
@@ -32,7 +32,7 @@ namespace {
 // k_slab_size_classes)의 모든 청크가 자연히 16바이트 정렬된다. 이
 // alignas가 없으면 세 멤버(8+8+4=20바이트, 8바이트 정렬 요구라 24로
 // 패딩)가 24바이트가 되어 16의 배수가 아니게 되고, 모든 청크가
-// 8바이트만큼 어긋난다 — object::thread::fxsave_area(ADR-127, FXSAVE/
+// 8바이트만큼 어긋난다 — kern::object::thread::fxsave_area(ADR-127, FXSAVE/
 // FXRSTOR 요구)가 이 문제를 QEMU에서 실제 #GP로 처음 드러냈다(M1~M8은
 // 16바이트 정렬을 요구하는 어떤 것도 slab에 넣은 적이 없었다).
 struct alignas(16) slab_header {
@@ -120,7 +120,7 @@ void* slab_alloc(size_t size) {
 void slab_free(void* ptr, size_t size) {
     int idx = size_class_index(size);
     if (idx < 0) {
-        LIBK_PANIC("mm::slab_free: size exceeds largest slab size class");
+        LIBK_PANIC("kern::mm::slab_free: size exceeds largest slab size class");
     }
 
     size_class_state& state = g_size_classes[idx];
@@ -134,4 +134,4 @@ void slab_free(void* ptr, size_t size) {
     ++header->free_count;
 }
 
-}  // namespace mm
+}  // namespace kern::mm

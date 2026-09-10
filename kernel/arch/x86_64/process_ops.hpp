@@ -12,7 +12,7 @@
 
 #include <uapi.hpp>
 
-namespace object {
+namespace kern::object {
 class handle_table;  // core/object/handle_table.hpp — 전방 선언만 필요(ADR-002와 같은 정신, tss.hpp의 thread 전방 선언과 동일한 관례).
 }
 
@@ -66,10 +66,10 @@ enum class process_kill_error : uint32_t {
 
 // sys_process_kill — h(호출자 자신의 handle_table 안, object_kind::thread,
 // k_right_can_kill 필요)가 가리키는 스레드에게 강제 종료를 요청한다
-// (sched::request_kill, kernel/core/sched/scheduler.hpp 참고 — 실제
+// (kern::sched::request_kill, kernel/core/sched/scheduler.hpp 참고 — 실제
 // 폐기는 즉시가 아니라 그 스레드가 다음에 스케줄러에 뽑히려는
 // 시점이다).
-process_kill_error process_kill(object::handle_table& caller_handles, uint32_t h);
+process_kill_error process_kill(kern::object::handle_table& caller_handles, uint32_t h);
 
 // sys_fork — 호출자의 주소공간을 COW로 복제해 새 프로세스를 만든다
 // (ADR-016/140). 반환값은 **부모 관점의 syscall 반환값**이다: 1=성공,
@@ -121,7 +121,7 @@ process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
 process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_virt_addr);
 
 // sys_io_activate/sys_io_deactivate(ADR-154, OPEN-58 해소) — 호출한
-// 스레드 자신의 활성 I/O 포트 범위(object::thread::io_port_base/count)
+// 스레드 자신의 활성 I/O 포트 범위(kern::object::thread::io_port_base/count)
 // 를 설정/해제하고, 지금 실행 중인 스레드이므로 TSS IOPB에도 즉시
 // 반영한다(arch_x86_64::sync_io_permission을 직접 부른다 — 다음
 // 컨텍스트 스위치까지 기다리지 않는다). trusted 프로세스만 쓸 수

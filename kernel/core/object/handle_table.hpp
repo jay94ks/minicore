@@ -15,7 +15,7 @@
 #include <libk/intrusive_list.hpp>
 #include <libk/result.hpp>
 
-namespace object {
+namespace kern::object {
 
 enum class object_kind : uint32_t {
     thread = 0,
@@ -82,7 +82,7 @@ class handle_table {
 public:
     // 새 소유 핸들을 만든다. object_kind/rights/객체 포인터를 그대로
     // 담는다 — 객체 자신은 호출자가 이미 만들어 둔 것을 넘겨준다
-    // (예: mm::slab_alloc으로 만든 thread/address_space).
+    // (예: kern::mm::slab_alloc으로 만든 thread/address_space).
     result<handle, handle_error> create_owner(object_kind kind, uint32_t rights, void* object);
 
     // objects.md §4(ipc.md의 handles[] 처리)의 핵심 로직 — IPC 자체는
@@ -123,4 +123,4 @@ private:
     bool in_use_[k_max_handles] = {};
 };
 
-}  // namespace object
+}  // namespace kern::object

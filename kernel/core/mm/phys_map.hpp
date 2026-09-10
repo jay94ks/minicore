@@ -15,7 +15,7 @@
 #include <arch_mm_defs.hpp>
 #include <libk/panic.hpp>
 
-namespace mm {
+namespace kern::mm {
 
 inline void* phys_to_virt(uint64_t phys) {
     if (phys >= arch_mm::k_physmap_size) {
@@ -32,4 +32,4 @@ inline uint64_t virt_to_phys(const void* virtual_addr) {
     return addr - arch_mm::k_physmap_base;
 }
 
-}  // namespace mm
+}  // namespace kern::mm

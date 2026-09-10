@@ -33,7 +33,7 @@ namespace {
 // kernel_main.cpp::setup_initrun_process(M8)와 같은 고정 유저
 // 가상주소대를 그대로 쓴다 — 서로 다른 주소공간이라 겹칠 일이 없다.
 struct built_process {
-    object::address_space* space = nullptr;
+    kern::object::address_space* space = nullptr;
     uint64_t entry_rip = 0;
     uint64_t user_rsp = 0;
     uint64_t arg0 = 0;  // argv 매핑 주소, 없으면 0.
@@ -69,7 +69,7 @@ constexpr uint64_t k_heap_region_size = 0x100000ull;  // 1MiB.
 process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
                                    const uint8_t* argv_blob, uint64_t argv_size, bool trusted,
                                    built_process& out) {
-    if (argv_size > mm::k_page_size) {
+    if (argv_size > kern::mm::k_page_size) {
         return process_spawn_error::invalid_argument;
     }
 
@@ -79,49 +79,49 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
     }
     uint64_t pml4_phys = root.value();
 
-    void* space_mem = mm::slab_alloc(sizeof(object::address_space));
+    void* space_mem = kern::mm::slab_alloc(sizeof(kern::object::address_space));
     if (space_mem == nullptr) {
         return process_spawn_error::out_of_memory;
     }
-    auto* space = new (space_mem) object::address_space();
+    auto* space = new (space_mem) kern::object::address_space();
     space->trusted = trusted;
     space->page_table_root = pml4_phys;
 
     auto load_result = load_elf(pml4_phys, elf_data, elf_size);
     if (!load_result.is_ok()) {
-        mm::slab_free(space, sizeof(object::address_space));
+        kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::elf_load_failed;
     }
 
     for (uint32_t i = 0; i < k_user_stack_pages; ++i) {
-        auto page = mm::alloc_pages(0, 0);
+        auto page = kern::mm::alloc_pages(0, 0);
         if (!page.is_ok()) {
-            mm::slab_free(space, sizeof(object::address_space));
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
-        uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * mm::k_page_size;
+        uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * kern::mm::k_page_size;
         auto mapped =
             map_page(pml4_phys, vaddr, page.value(), page_perm::write | page_perm::user);
         if (!mapped.is_ok()) {
-            mm::slab_free(space, sizeof(object::address_space));
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
     }
 
     uint64_t arg0 = 0;
     if (argv_size > 0 && argv_blob != nullptr) {
-        auto argv_page = mm::alloc_pages(0, 0);
+        auto argv_page = kern::mm::alloc_pages(0, 0);
         if (!argv_page.is_ok()) {
-            mm::slab_free(space, sizeof(object::address_space));
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
-        void* argv_virt = mm::phys_to_virt(argv_page.value());
-        __builtin_memset(argv_virt, 0, mm::k_page_size);
+        void* argv_virt = kern::mm::phys_to_virt(argv_page.value());
+        __builtin_memset(argv_virt, 0, kern::mm::k_page_size);
         __builtin_memcpy(argv_virt, argv_blob, argv_size);
         auto argv_mapped = map_page(pml4_phys, k_argv_user_vaddr, argv_page.value(),
                                      page_perm::user);  // 읽기전용(write 비트 없음).
         if (!argv_mapped.is_ok()) {
-            mm::slab_free(space, sizeof(object::address_space));
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
         arg0 = k_argv_user_vaddr;
@@ -141,43 +141,43 @@ process_spawn_error build_process(const uint8_t* elf_data, uint64_t elf_size,
     // 전에 명시적으로 거부한다. ADR-149가 겪은 버그(간격을 넘은 ELF가
     // already_mapped로만 우회 발견됨)를 재발 방지한다.
     if (elf_size > uapi::k_m12_self_info_user_vaddr - uapi::k_m12_self_elf_user_vaddr) {
-        mm::slab_free(space, sizeof(object::address_space));
+        kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::capability_slot_overflow;
     }
 
-    uint64_t self_elf_pages = (elf_size + mm::k_page_size - 1) / mm::k_page_size;
+    uint64_t self_elf_pages = (elf_size + kern::mm::k_page_size - 1) / kern::mm::k_page_size;
     for (uint64_t i = 0; i < self_elf_pages; ++i) {
-        auto page = mm::alloc_pages(0, 0);
+        auto page = kern::mm::alloc_pages(0, 0);
         if (!page.is_ok()) {
-            mm::slab_free(space, sizeof(object::address_space));
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
-        void* virt = mm::phys_to_virt(page.value());
-        uint64_t offset = i * mm::k_page_size;
+        void* virt = kern::mm::phys_to_virt(page.value());
+        uint64_t offset = i * kern::mm::k_page_size;
         uint64_t remaining = elf_size - offset;
-        uint64_t copy_len = remaining < mm::k_page_size ? remaining : mm::k_page_size;
-        __builtin_memset(virt, 0, mm::k_page_size);
+        uint64_t copy_len = remaining < kern::mm::k_page_size ? remaining : kern::mm::k_page_size;
+        __builtin_memset(virt, 0, kern::mm::k_page_size);
         __builtin_memcpy(virt, elf_data + offset, copy_len);
         auto mapped = map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset, page.value(),
                                 page_perm::user);
         if (!mapped.is_ok()) {
-            mm::slab_free(space, sizeof(object::address_space));
+            kern::mm::slab_free(space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
     }
 
-    auto info_page = mm::alloc_pages(0, 0);
+    auto info_page = kern::mm::alloc_pages(0, 0);
     if (!info_page.is_ok()) {
-        mm::slab_free(space, sizeof(object::address_space));
+        kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::out_of_memory;
     }
-    auto* self_info = static_cast<uapi::m12_self_info*>(mm::phys_to_virt(info_page.value()));
+    auto* self_info = static_cast<uapi::m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
     self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
     self_info->elf_size = elf_size;
     auto info_mapped = map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr, info_page.value(),
                                  page_perm::user);
     if (!info_mapped.is_ok()) {
-        mm::slab_free(space, sizeof(object::address_space));
+        kern::mm::slab_free(space, sizeof(kern::object::address_space));
         return process_spawn_error::out_of_memory;
     }
 
@@ -203,9 +203,9 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
         return err;
     }
 
-    object::handle_table* handles = object::create_handle_table();
+    kern::object::handle_table* handles = kern::object::create_handle_table();
     if (handles == nullptr) {
-        mm::slab_free(built.space, sizeof(object::address_space));
+        kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
         return process_spawn_error::out_of_memory;
     }
 
@@ -218,22 +218,22 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
     // 프로세스의 handle 1, 2, 3, ...이 된다 — kernel_main.cpp의 boot
     // endpoint(handle 1) 관례와 일치.
     if (create_endpoint) {
-        void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+        void* ep_mem = kern::mm::slab_alloc(sizeof(kern::object::endpoint));
         if (ep_mem == nullptr) {
-            mm::slab_free(built.space, sizeof(object::address_space));
+            kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
-        auto* ep = new (ep_mem) object::endpoint();
+        auto* ep = new (ep_mem) kern::object::endpoint();
         auto owner = handles->create_owner(
-            object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+            kern::object::object_kind::endpoint, kern::object::k_right_can_send | kern::object::k_right_can_recv, ep);
         if (!owner.is_ok()) {
-            mm::slab_free(built.space, sizeof(object::address_space));
+            kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
             return process_spawn_error::out_of_memory;
         }
 
-        object::thread* caller = sched::current();
+        kern::object::thread* caller = kern::sched::current();
         if (caller != nullptr && caller->handles != nullptr) {
-            auto proxy = handles->create_proxy(owner.value(), object::k_right_can_send,
+            auto proxy = handles->create_proxy(owner.value(), kern::object::k_right_can_send,
                                                 *caller->handles, 0, false);
             if (proxy.is_ok()) {
                 out_endpoint_proxy_handle = proxy.value();
@@ -242,12 +242,12 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
     }
 
     if (inherited_handle_count > uapi::k_max_spawn_inherited_handles) {
-        mm::slab_free(built.space, sizeof(object::address_space));
+        kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
         return process_spawn_error::invalid_argument;
     }
-    object::thread* caller = sched::current();
+    kern::object::thread* caller = kern::sched::current();
     if (inherited_handle_count > 0 && (caller == nullptr || caller->handles == nullptr)) {
-        mm::slab_free(built.space, sizeof(object::address_space));
+        kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
         return process_spawn_error::not_a_user_process;
     }
     for (uint32_t i = 0; i < inherited_handle_count; ++i) {
@@ -258,15 +258,15 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
                                        inherited_handles[i].rights_mask, *handles, 0, false);
     }
 
-    object::thread* t =
-        sched::create_user_thread(built.entry_rip, built.user_rsp, built.arg0, built.space, handles);
+    kern::object::thread* t =
+        kern::sched::create_user_thread(built.entry_rip, built.user_rsp, built.arg0, built.space, handles);
     if (t == nullptr) {
-        mm::slab_free(built.space, sizeof(object::address_space));
+        kern::mm::slab_free(built.space, sizeof(kern::object::address_space));
         return process_spawn_error::out_of_memory;
     }
 
-    sched::enqueue(*t);
-    klog::printf("[process] spawn ok entry=0x%lx trusted=%u\n",
+    kern::sched::enqueue(*t);
+    kern::klog::printf("[process] spawn ok entry=0x%lx trusted=%u\n",
                  static_cast<unsigned long>(built.entry_rip), grant_trusted);
 
     // M22(ADR-178) — out_endpoint_proxy_handle과 같은 "호출자 소유"
@@ -275,7 +275,7 @@ process_spawn_error process_spawn(const uint8_t* elf_data, uint64_t elf_size,
     // g_current가 바뀔 일이 없다)을 그대로 재사용한다.
     if (caller != nullptr && caller->handles != nullptr) {
         auto thread_owner =
-            caller->handles->create_owner(object::object_kind::thread, object::k_right_can_kill, t);
+            caller->handles->create_owner(kern::object::object_kind::thread, kern::object::k_right_can_kill, t);
         if (thread_owner.is_ok()) {
             out_thread_handle = thread_owner.value();
         }
@@ -287,7 +287,7 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
                        uint64_t saved_user_rsp, uint64_t saved_rbx, uint64_t saved_rbp,
                        uint64_t saved_r12, uint64_t saved_r13, uint64_t saved_r14,
                        uint64_t saved_r15) {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return static_cast<uint64_t>(process_spawn_error::not_a_user_process);
     }
@@ -297,11 +297,11 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
         return static_cast<uint64_t>(process_spawn_error::out_of_memory);
     }
 
-    void* space_mem = mm::slab_alloc(sizeof(object::address_space));
+    void* space_mem = kern::mm::slab_alloc(sizeof(kern::object::address_space));
     if (space_mem == nullptr) {
         return static_cast<uint64_t>(process_spawn_error::out_of_memory);
     }
-    auto* child_space = new (space_mem) object::address_space();
+    auto* child_space = new (space_mem) kern::object::address_space();
     child_space->trusted = self->owner_space->trusted;
     child_space->confinement = self->owner_space->confinement;
     child_space->page_table_root = child_root.value();
@@ -317,13 +317,13 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
     // 서버 쪽에 남아 있으므로(servers/fs/memfs/main.cpp), 부모·자식이
     // 같은 open_file_id를 계속 쓰기만 하면 파일 오프셋 공유까지
     // 별도 프로토콜 없이 저절로 성립한다.
-    object::handle_table* child_handles = object::create_handle_table();
+    kern::object::handle_table* child_handles = kern::object::create_handle_table();
     if (child_handles == nullptr) {
-        mm::slab_free(child_space, sizeof(object::address_space));
+        kern::mm::slab_free(child_space, sizeof(kern::object::address_space));
         return static_cast<uint64_t>(process_spawn_error::out_of_memory);
     }
-    for (uint32_t h = 1; h < object::k_max_handles; ++h) {
-        const object::handle_entry* e = self->handles->debug_entry(static_cast<object::handle>(h));
+    for (uint32_t h = 1; h < kern::object::k_max_handles; ++h) {
+        const kern::object::handle_entry* e = self->handles->debug_entry(static_cast<kern::object::handle>(h));
         if (e == nullptr || !e->valid) {
             continue;
         }
@@ -332,16 +332,16 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
         // "완전히 같은 fd 테이블의 복사본"이라는 POSIX fork() 의미론
         // 그대로다. 실패(테이블 가득 참 등)는 objects.md §4 3단계와
         // 같은 정신으로 이 항목만 건너뛴다.
-        self->handles->create_proxy(static_cast<object::handle>(h), e->rights, *child_handles, 0,
+        self->handles->create_proxy(static_cast<kern::object::handle>(h), e->rights, *child_handles, 0,
                                      false);
     }
 
-    object::thread* child =
-        sched::create_forked_thread(saved_user_rip, saved_user_rflags, saved_user_rsp, saved_rbx,
+    kern::object::thread* child =
+        kern::sched::create_forked_thread(saved_user_rip, saved_user_rflags, saved_user_rsp, saved_rbx,
                                      saved_rbp, saved_r12, saved_r13, saved_r14, saved_r15,
                                      child_space, child_handles);
     if (child == nullptr) {
-        mm::slab_free(child_space, sizeof(object::address_space));
+        kern::mm::slab_free(child_space, sizeof(kern::object::address_space));
         return static_cast<uint64_t>(process_spawn_error::out_of_memory);
     }
 
@@ -351,15 +351,15 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
     child->io_port_base = self->io_port_base;
     child->io_port_count = self->io_port_count;
 
-    sched::enqueue(*child);
-    klog::printf("[process] fork ok child_pml4=0x%lx\n",
+    kern::sched::enqueue(*child);
+    kern::klog::printf("[process] fork ok child_pml4=0x%lx\n",
                  static_cast<unsigned long>(child_root.value()));
     return 1;  // 부모 관점: 성공.
 }
 
 process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
                                   const uint8_t* argv_blob, uint64_t argv_size) {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
     }
@@ -380,41 +380,41 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
     // 마일스톤이다.
     self->owner_space = built.space;
 
-    // 지금 이 스레드로 CR3를 직접 전환한다 — 다음 sched::yield/block
+    // 지금 이 스레드로 CR3를 직접 전환한다 — 다음 kern::sched::yield/block
     // 없이 곧바로 새 이미지로 뛰어들 것이므로, 스케줄러의 일반
     // next_pml4_phys() 경로(다음 context switch 시점에만 전환)를 거치지
     // 않는다.
     asm volatile("mov %0, %%cr3" : : "r"(built.space->page_table_root) : "memory");
 
-    klog::printf("[process] exec ok entry=0x%lx\n", static_cast<unsigned long>(built.entry_rip));
+    kern::klog::printf("[process] exec ok entry=0x%lx\n", static_cast<unsigned long>(built.entry_rip));
     enter_usermode(built.entry_rip, built.user_rsp, built.arg0);
 }
 
 process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
                                       uint64_t& out_phys_addr) {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
     }
     if (!self->owner_space->trusted) {
         return process_spawn_error::not_a_user_process;
     }
-    if (order > mm::k_max_order) {
+    if (order > kern::mm::k_max_order) {
         return process_spawn_error::invalid_argument;
     }
 
-    auto page = mm::alloc_pages(order, 0);
+    auto page = kern::mm::alloc_pages(order, 0);
     if (!page.is_ok()) {
         return process_spawn_error::out_of_memory;
     }
     uint64_t phys = page.value();
-    uint64_t size = static_cast<uint64_t>(mm::k_page_size) << order;
+    uint64_t size = static_cast<uint64_t>(kern::mm::k_page_size) << order;
 
-    for (uint64_t off = 0; off < size; off += mm::k_page_size) {
+    for (uint64_t off = 0; off < size; off += kern::mm::k_page_size) {
         auto mapped = map_page(self->owner_space->page_table_root, k_dma_buffer_user_vaddr + off,
                                 phys + off, page_perm::write | page_perm::user);
         if (!mapped.is_ok()) {
-            mm::free_pages(phys, order);
+            kern::mm::free_pages(phys, order);
             return process_spawn_error::out_of_memory;
         }
     }
@@ -425,7 +425,7 @@ process_spawn_error alloc_dma_buffer(uint32_t order, uint64_t& out_virt_addr,
 }
 
 process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_virt_addr) {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
     }
@@ -436,12 +436,12 @@ process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_vi
         return process_spawn_error::invalid_argument;
     }
 
-    uint64_t phys_base = phys_addr & ~(static_cast<uint64_t>(mm::k_page_size) - 1);
+    uint64_t phys_base = phys_addr & ~(static_cast<uint64_t>(kern::mm::k_page_size) - 1);
     uint64_t offset_in_page = phys_addr - phys_base;
     uint64_t map_size = offset_in_page + size;
-    map_size = (map_size + mm::k_page_size - 1) & ~(static_cast<uint64_t>(mm::k_page_size) - 1);
+    map_size = (map_size + kern::mm::k_page_size - 1) & ~(static_cast<uint64_t>(kern::mm::k_page_size) - 1);
 
-    for (uint64_t off = 0; off < map_size; off += mm::k_page_size) {
+    for (uint64_t off = 0; off < map_size; off += kern::mm::k_page_size) {
         // 이전 sys_map_phys 호출이 이 슬롯의 일부를 이미 다른 물리주소로
         // 채워 뒀을 수 있다(고정 슬롯 재사용, 이 파일 상단 주석) —
         // map_page가 already_mapped로 실패하지 않도록 먼저 지운다.
@@ -460,7 +460,7 @@ process_spawn_error map_phys(uint64_t phys_addr, uint64_t size, uint64_t& out_vi
 }
 
 process_spawn_error io_activate(uint16_t io_base, uint16_t count) {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
     }
@@ -474,7 +474,7 @@ process_spawn_error io_activate(uint16_t io_base, uint16_t count) {
 }
 
 process_spawn_error io_deactivate() {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
     }
@@ -487,18 +487,18 @@ process_spawn_error io_deactivate() {
 // M22(general-purpose-completion.md §M22, ADR-178) — endpoint.cpp::
 // resolve_endpoint()와 정확히 같은 패턴(debug_entry로 핸들 검사)을
 // object_kind::thread에 재사용한다.
-process_kill_error process_kill(object::handle_table& caller_handles, uint32_t h) {
-    const object::handle_entry* e = caller_handles.debug_entry(h);
+process_kill_error process_kill(kern::object::handle_table& caller_handles, uint32_t h) {
+    const kern::object::handle_entry* e = caller_handles.debug_entry(h);
     if (e == nullptr || !e->valid) {
         return process_kill_error::invalid_handle;
     }
-    if (e->kind != object::object_kind::thread) {
+    if (e->kind != kern::object::object_kind::thread) {
         return process_kill_error::wrong_object_type;
     }
-    if ((e->rights & object::k_right_can_kill) == 0) {
+    if ((e->rights & kern::object::k_right_can_kill) == 0) {
         return process_kill_error::permission_denied;
     }
-    sched::request_kill(*static_cast<object::thread*>(e->object));
+    kern::sched::request_kill(*static_cast<kern::object::thread*>(e->object));
     return process_kill_error::ok;
 }
 
@@ -510,11 +510,11 @@ process_kill_error process_kill(object::handle_table& caller_handles, uint32_t h
 // 이유). increment==0은 순수 조회 — 아무것도 매핑하지 않고
 // out_old_top만 채운다.
 process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
-    object::thread* self = sched::current();
+    kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
     }
-    object::address_space& space = *self->owner_space;
+    kern::object::address_space& space = *self->owner_space;
 
     if (space.heap_top == 0) {
         space.heap_top = k_heap_user_vaddr;
@@ -539,7 +539,7 @@ process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
     }
 
     while (space.heap_mapped_top < new_top) {
-        auto page = mm::alloc_pages(0, 0);
+        auto page = kern::mm::alloc_pages(0, 0);
         if (!page.is_ok()) {
             return process_spawn_error::out_of_memory;
         }
@@ -548,7 +548,7 @@ process_spawn_error brk(int64_t increment, uint64_t& out_old_top) {
         if (!mapped.is_ok()) {
             return process_spawn_error::out_of_memory;
         }
-        space.heap_mapped_top += mm::k_page_size;
+        space.heap_mapped_top += kern::mm::k_page_size;
     }
 
     space.heap_top = new_top;

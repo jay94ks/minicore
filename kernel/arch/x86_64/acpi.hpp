@@ -17,7 +17,7 @@
 
 namespace arch_x86_64 {
 
-constexpr uint32_t k_max_madt_cpus = 64;  // mm::k_max_cpus와 동일한 골격 상한.
+constexpr uint32_t k_max_madt_cpus = 64;  // kern::mm::k_max_cpus와 동일한 골격 상한.
 
 struct madt_result {
     uint64_t lapic_base_phys;  // 기본 0xFEE00000, override 엔트리가 있으면 그 값.
@@ -40,7 +40,7 @@ bool find_and_parse_madt(uint64_t arch_data_addr, madt_result& out);
 // 노드 번호 부여 규칙: SRAT의 "proximity domain" 값을 그대로 노드
 // 번호로 쓴다(재압축하지 않는다) — QEMU가 `-numa node,nodeid=N`으로
 // 지정한 값이 SRAT에 그대로 실리는 것을 실측으로 확인했다. 값이
-// k_max_numa_nodes를 넘는 도메인은 무시한다(골격 상한, mm::k_max_numa_nodes
+// k_max_numa_nodes를 넘는 도메인은 무시한다(골격 상한, kern::mm::k_max_numa_nodes
 // 와 동일).
 constexpr uint32_t k_max_numa_nodes = 8;
 constexpr uint32_t k_max_memory_affinities = 32;

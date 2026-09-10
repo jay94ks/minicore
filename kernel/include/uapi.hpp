@@ -2,12 +2,12 @@
 // (docs/plan/kernel-bootstrap.md M8, docs/spec/boot.md §6). repo-layout.md가
 // "유저랜드와 공유하는 커널 ABI 헤더"라고 정의한 자리가 kernel/include다.
 //
-// message는 kernel/core/ipc/message.hpp의 ipc::message와 **필드 순서·
+// message는 kernel/core/ipc/message.hpp의 kern::ipc::message와 **필드 순서·
 // 타입이 완전히 동일**해야 한다 — 유저(initrun)와 커널이 서로 다른
 // 컴파일 단위(별도 실행파일)에서 각자 이 레이아웃을 알고 있어야 하기
 // 때문에, kernel-internal 헤더를 유저 실행파일에 직접 include하는 대신
 // 이렇게 ABI 전용으로 복제해 둔다(실제 커널들이 uapi 헤더를 이렇게
-// 분리해 쓰는 것과 같은 이유). ipc::message가 바뀌면 이 파일도 함께
+// 분리해 쓰는 것과 같은 이유). kern::ipc::message가 바뀌면 이 파일도 함께
 // 갱신해야 한다.
 #pragma once
 
@@ -16,9 +16,9 @@
 namespace uapi {
 
 // syscall 번호. RDI(1번 인자)에 싣는다 — syscall.S/syscall.cpp 참고.
-inline constexpr uint64_t k_syscall_ipc_call = 0;  // ipc::sys_call 그대로 노출.
+inline constexpr uint64_t k_syscall_ipc_call = 0;  // kern::ipc::sys_call 그대로 노출.
 
-// ipc::message와 바이트 단위로 동일한 레이아웃이어야 하는 보조 타입들
+// kern::ipc::message와 바이트 단위로 동일한 레이아웃이어야 하는 보조 타입들
 // (kernel/core/ipc/message.hpp 상단 주석 참고) — process_spawn_request
 // (M13부터 handle_transfer를 스폰 시점 캐패빌리티 주입에도 재사용한다,
 // ADR-151)와 message 양쪽이 이 타입들을 먼저 필요로 하므로 파일
@@ -44,7 +44,7 @@ struct handle_transfer {
     uint32_t rights_mask = 0;
 };
 
-// object::k_right_can_*(kernel/core/object/kernel_objects.hpp)와 정확히
+// kern::object::k_right_can_*(kernel/core/object/kernel_objects.hpp)와 정확히
 // 같은 비트값 — handle_transfer.rights_mask에 넣을 값을 유저 코드가
 // 매직 넘버 없이 쓸 수 있게 노출한다(M13부터 vfs/procsrv 등이 실제로
 // endpoint 프록시를 만들며 이 마스크를 지정해야 한다).
@@ -132,7 +132,7 @@ struct exec_request {
 // M12(ADR-142) — 협조적 스케줄러에서 유저 스레드가 스스로 CPU를
 // 물러나려면(예: fork()/sys_process_spawn()으로 만든 새 스레드에게
 // 기회를 주기 위해) 최소한 하나의 자발적 양보 수단이 필요하다.
-// sys_thread_exit(인자 없음)은 절대 반환하지 않는다(sched::exit()
+// sys_thread_exit(인자 없음)은 절대 반환하지 않는다(kern::sched::exit()
 // 그대로 노출) — 아직 sys_yield는 없다(이 스레드가 나중에 다시
 // 실행될 필요가 없는 경우에만 쓸 수 있다).
 inline constexpr uint64_t k_syscall_thread_exit = 4;
@@ -153,11 +153,11 @@ struct dma_buffer_result {
 
 // M13(system-servers-bringup.md §M13, ADR-151) — vfs/memfs 같은 실제
 // 서버가 유저모드에서 IPC 호출을 **받고 응답**하려면 k_syscall_ipc_call
-// (클라이언트 전용)만으로는 부족하다 — ipc::sys_recv/sys_reply를 그대로
+// (클라이언트 전용)만으로는 부족하다 — kern::ipc::sys_recv/sys_reply를 그대로
 // syscall로 노출한다.
 //
 // sys_ipc_recv(a1=handle, a2=이 메시지의 유저 가상주소, a3 미사용) —
-// 블록. 반환값 0=ipc_error::ok(그 외는 ipc::ipc_error 값). badge는
+// 블록. 반환값 0=ipc_error::ok(그 외는 kern::ipc::ipc_error 값). badge는
 // 이 마일스톤에서 아직 쓰이지 않아 반환하지 않는다(다중 클라이언트
 // 구분이 필요해지면 이후 재검토, kernel/core/ipc/endpoint.hpp의 badge
 // 주석 참고 — 소유 핸들로 받으면 항상 0이라 M13의 단일 클라이언트
@@ -252,7 +252,7 @@ struct m12_self_info {
     uint64_t elf_size = 0;
 };
 
-// ipc::message와 바이트 단위로 동일한 레이아웃 — kernel/core/ipc/message.hpp
+// kern::ipc::message와 바이트 단위로 동일한 레이아웃 — kernel/core/ipc/message.hpp
 // 상단 주석 참고(pages[]/handles[]의 방향 규약도 그대로 적용된다).
 struct message {
     uint32_t label = 0;

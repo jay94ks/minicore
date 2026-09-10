@@ -92,7 +92,7 @@ void append_owned_regions(uint32_t& region_count, const boot::boot_info& info) {
     // M10(ADR-055) — AP 트램폴린 스크래치 페이지(smp.hpp::k_ap_trampoline_phys)
     // 도 커널 자신/initrd와 같은 이유로 물리 할당자에서 영구히 빼야
     // 한다 — smp.cpp가 부팅 극초기에 이 페이지에 트램폴린 코드를 써
-    // 두고, 이후 AP가 언제든 그 코드를 다시 실행할 수 있어 mm::alloc_pages가
+    // 두고, 이후 AP가 언제든 그 코드를 다시 실행할 수 있어 kern::mm::alloc_pages가
     // 이 페이지를 다른 용도로 내주면 안 된다. k_region_kernel_image를
     // 그대로 재사용한다(새 type 값을 추가하지 않는다) — 이 영역도
     // "커널이 이미 소유한 물리 범위"라는 점에서 실제 커널 이미지와
@@ -133,7 +133,7 @@ boot::boot_info build_boot_info(uint32_t multiboot_magic, uint32_t multiboot_inf
         return info;
     }
 
-    const uint8_t* mb2 = static_cast<const uint8_t*>(mm::phys_to_virt(multiboot_info_phys));
+    const uint8_t* mb2 = static_cast<const uint8_t*>(kern::mm::phys_to_virt(multiboot_info_phys));
     uint32_t total_size = read_u32(mb2);
 
     const uint8_t* p = mb2 + 8;  // total_size(4) + reserved(4) 건너뜀
@@ -171,13 +171,13 @@ boot::boot_info build_boot_info(uint32_t multiboot_magic, uint32_t multiboot_inf
                 break;
             }
             case k_mb2_tag_cmdline: {
-                info.cmdline_addr = mm::virt_to_phys(p + 8);
+                info.cmdline_addr = kern::mm::virt_to_phys(p + 8);
                 break;
             }
             case k_mb2_tag_acpi_old_rsdp:
             case k_mb2_tag_acpi_new_rsdp: {
                 if (info.arch_data_addr == 0) {
-                    info.arch_data_addr = mm::virt_to_phys(p + 8);
+                    info.arch_data_addr = kern::mm::virt_to_phys(p + 8);
                 }
                 break;
             }

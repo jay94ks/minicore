@@ -26,7 +26,7 @@ namespace arch_x86_64 {
 // 진짜 예외로 취급하게 한다.
 bool try_handle_cow_write_fault_for(uint64_t pml4_phys, uint64_t fault_addr, uint64_t error_code);
 
-// idt.cpp가 실제로 부르는 진입점 — sched::current()의 owner_space에서
+// idt.cpp가 실제로 부르는 진입점 — kern::sched::current()의 owner_space에서
 // pml4_phys를 얻어 위 함수로 넘긴다. 커널 스레드(owner_space==nullptr)
 // 라면 애초에 COW 대상 주소공간이 없으므로 false.
 bool try_handle_cow_write_fault(uint64_t fault_addr, uint64_t error_code);

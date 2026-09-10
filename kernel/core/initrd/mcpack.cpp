@@ -1,7 +1,7 @@
 // MCPACK v1 파서 구현. mcpack.hpp 상단 주석 참고.
 #include "initrd/mcpack.hpp"
 
-namespace initrd {
+namespace kern::initrd {
 
 namespace {
 
@@ -79,4 +79,4 @@ result<entry_span, mcpack_error> find_entry(const uint8_t* image, uint64_t image
     return result<entry_span, mcpack_error>::err(mcpack_error::not_found);
 }
 
-}  // namespace initrd
+}  // namespace kern::initrd

@@ -27,7 +27,7 @@ constexpr uint32_t k_cpuid1_ecx_avx = 1u << 28;
 // XCR0 비트(Intel SDM Vol.1 §13.3): x87=0, SSE=1, AVX=2.
 constexpr uint32_t k_xcr0_enable_mask = (1u << 0) | (1u << 1) | (1u << 2);
 
-// object::thread::fpu_save_area의 실제 크기(ADR-133) — 이보다 커지면
+// kern::object::thread::fpu_save_area의 실제 크기(ADR-133) — 이보다 커지면
 // 버퍼 오버플로다.
 constexpr uint32_t k_max_fpu_area_size = 1024;
 
@@ -38,7 +38,7 @@ uint32_t g_fpu_area_size = 512;  // FXSAVE 고정 크기가 기본값(폴백).
 // (smp.cpp::g_apic_id_to_node와 같은 패턴 — 별도 코어 인덱스 압축이
 // 필요 없다). nullptr = 아무도 소유하지 않음(리셋 이후 또는 이전
 // 소유자가 이미 종료됨, arch_fpu_thread_exiting 참고).
-object::thread* g_fpu_owner_by_apic_id[256] = {};
+kern::object::thread* g_fpu_owner_by_apic_id[256] = {};
 
 void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t& eax, uint32_t& ebx, uint32_t& ecx,
            uint32_t& edx) {
@@ -47,7 +47,7 @@ void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t& eax, uint32_t& ebx, uint32
 
 // XSAVE/XRSTOR는 EDX:EAX에 "요청한 기능 비트마스크"(RFBM)를 싣고
 // 실행한다 — 항상 k_xcr0_enable_mask(부팅 시 XCR0에 켠 것과 동일)를
-// 요청한다. 64바이트 정렬 버퍼가 필요하다(object::thread::fpu_save_area
+// 요청한다. 64바이트 정렬 버퍼가 필요하다(kern::object::thread::fpu_save_area
 // 가 이미 alignas(64), ADR-133).
 void xsave_area(void* area) {
     asm volatile("xsave (%0)" : : "r"(area), "a"(k_xcr0_enable_mask), "d"(0u) : "memory");
@@ -129,7 +129,7 @@ void init_fpu() {
     // 찍을 수 있도록 apic_id는 넣지 않는다(계획 §M11b 검증목표(b)의
     // "-cpu 옵션으로 AVX 유/무 두 QEMU 구성 모두 확인"을 이 로그로
     // 구분한다).
-    klog::printf("[fpu] xsave_avail=%u avx_avail=%u using_xsave=%u area_size=%u\n", has_xsave,
+    kern::klog::printf("[fpu] xsave_avail=%u avx_avail=%u using_xsave=%u area_size=%u\n", has_xsave,
                  has_avx, g_use_xsave, g_fpu_area_size);
 }
 
@@ -144,8 +144,8 @@ extern "C" void arch_x86_64_handle_nm_trap() {
     asm volatile("mov %0, %%cr0" : : "r"(cr0));
 
     uint32_t apic_id = arch_x86_64::lapic_id();
-    object::thread* current = sched::current();
-    object::thread*& owner = arch_x86_64::g_fpu_owner_by_apic_id[apic_id];
+    kern::object::thread* current = kern::sched::current();
+    kern::object::thread*& owner = arch_x86_64::g_fpu_owner_by_apic_id[apic_id];
 
     if (owner == current) {
         // 마지막으로 이 코어에서 FPU를 쓴 게 바로 지금 스레드고, 그
@@ -154,7 +154,7 @@ extern "C" void arch_x86_64_handle_nm_trap() {
         // (ADR-133 §결정2-2, lazy 전환의 핵심 이점). 계획 §M11b의
         // 검증 목표(b) — "같은 스레드가 연속으로 FPU를 쓸 때 저장/
         // 복원 없이 즉시 리턴함"을 로그로 남긴다.
-        klog::printf("[fpu] #NM apic_id=%u owner_changed=0\n", apic_id);
+        kern::klog::printf("[fpu] #NM apic_id=%u owner_changed=0\n", apic_id);
         return;
     }
 
@@ -165,11 +165,11 @@ extern "C" void arch_x86_64_handle_nm_trap() {
         arch_x86_64::restore_fpu_state(current->fpu_save_area);
     }
     owner = current;
-    klog::printf("[fpu] #NM apic_id=%u owner_changed=1\n", apic_id);
+    kern::klog::printf("[fpu] #NM apic_id=%u owner_changed=1\n", apic_id);
 }
 
-extern "C" void arch_fpu_thread_exiting(object::thread* t) {
-    for (object::thread*& owner : arch_x86_64::g_fpu_owner_by_apic_id) {
+extern "C" void arch_fpu_thread_exiting(kern::object::thread* t) {
+    for (kern::object::thread*& owner : arch_x86_64::g_fpu_owner_by_apic_id) {
         if (owner == t) {
             owner = nullptr;
         }

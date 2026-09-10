@@ -57,7 +57,7 @@ void wait_icr_idle() {
         }
         asm volatile("pause");
     }
-    klog::printf("[lapic] wait_icr_idle timeout icr_low=0x%lx icr_high=0x%lx\n",
+    kern::klog::printf("[lapic] wait_icr_idle timeout icr_low=0x%lx icr_high=0x%lx\n",
                  static_cast<unsigned long>(reg(k_reg_icr_low)),
                  static_cast<unsigned long>(reg(k_reg_icr_high)));
 }
@@ -98,7 +98,7 @@ void lapic_enable_this_core() {
 }
 
 void lapic_init(uint64_t base_phys) {
-    g_lapic_base = static_cast<volatile uint32_t*>(mm::phys_to_virt(base_phys));
+    g_lapic_base = static_cast<volatile uint32_t*>(kern::mm::phys_to_virt(base_phys));
     lapic_enable_this_core();
 }
 

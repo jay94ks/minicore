@@ -44,13 +44,13 @@ bool looks_like_rsdp(const uint8_t* p) {
 // 16바이트 경계로 스캔한다(ACPI 6.5 §5.2.5.1) — Multiboot2 태그가 RSDP를
 // 안 줄 때(이 개발 머신의 QEMU PVH 경로, acpi.hpp 상단 주석)의 표준
 // 폴백. 두 스캔 다 물리주소를 그대로 쓴다 — physmap이 이미 512GiB
-// 전체를 항등 매핑해 두므로(paging_setup.cpp) mm::phys_to_virt로 바로
+// 전체를 항등 매핑해 두므로(paging_setup.cpp) kern::mm::phys_to_virt로 바로
 // 접근 가능하다.
 uint64_t scan_for_rsdp() {
-    const auto* bda_ebda_seg = static_cast<const uint16_t*>(mm::phys_to_virt(0x40E));
+    const auto* bda_ebda_seg = static_cast<const uint16_t*>(kern::mm::phys_to_virt(0x40E));
     uint64_t ebda_phys = static_cast<uint64_t>(*bda_ebda_seg) << 4;
     if (ebda_phys != 0) {
-        const auto* base = static_cast<const uint8_t*>(mm::phys_to_virt(ebda_phys));
+        const auto* base = static_cast<const uint8_t*>(kern::mm::phys_to_virt(ebda_phys));
         for (uint32_t off = 0; off < 1024; off += 16) {
             if (looks_like_rsdp(base + off)) {
                 return ebda_phys + off;
@@ -60,7 +60,7 @@ uint64_t scan_for_rsdp() {
 
     constexpr uint64_t k_bios_scan_start = 0xE0000;
     constexpr uint64_t k_bios_scan_end = 0x100000;
-    const auto* base = static_cast<const uint8_t*>(mm::phys_to_virt(k_bios_scan_start));
+    const auto* base = static_cast<const uint8_t*>(kern::mm::phys_to_virt(k_bios_scan_start));
     for (uint64_t off = 0; off < (k_bios_scan_end - k_bios_scan_start); off += 16) {
         if (looks_like_rsdp(base + off)) {
             return k_bios_scan_start + off;
@@ -87,7 +87,7 @@ struct sdt_view {
 };
 
 sdt_view read_sdt(uint64_t phys) {
-    const auto* p = static_cast<const uint8_t*>(mm::phys_to_virt(phys));
+    const auto* p = static_cast<const uint8_t*>(kern::mm::phys_to_virt(phys));
     return sdt_view{p, read_u32(p + 4)};
 }
 
@@ -125,7 +125,7 @@ uint64_t find_acpi_table(uint64_t arch_data_addr, const char* signature4) {
         return 0;
     }
 
-    const auto* rsdp = static_cast<const uint8_t*>(mm::phys_to_virt(rsdp_phys));
+    const auto* rsdp = static_cast<const uint8_t*>(kern::mm::phys_to_virt(rsdp_phys));
     if (!looks_like_rsdp(rsdp)) {
         // Multiboot2 태그가 준 값이 실제로는 RSDP 시그니처를 만족하지
         // 않는다 — 태그를 신뢰하지 않고 직접 스캔으로 폴백한다.
@@ -133,7 +133,7 @@ uint64_t find_acpi_table(uint64_t arch_data_addr, const char* signature4) {
         if (rsdp_phys == 0) {
             return 0;
         }
-        rsdp = static_cast<const uint8_t*>(mm::phys_to_virt(rsdp_phys));
+        rsdp = static_cast<const uint8_t*>(kern::mm::phys_to_virt(rsdp_phys));
     }
 
     uint8_t revision = rsdp[15];

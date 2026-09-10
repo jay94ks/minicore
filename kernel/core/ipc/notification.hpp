@@ -13,15 +13,15 @@
 #include "ipc/message.hpp"
 #include "object/handle_table.hpp"
 
-namespace ipc {
+namespace kern::ipc {
 
 // 대상 비트셋에 bits를 OR한다. 대기 중인 sys_wait가 있으면 즉시
 // 깨운다. h는 object_kind::notification 핸들이어야 한다(rights 검사는
 // 없다 — objects.md가 notification 전용 rights 비트를 정의하지 않았다).
-result<void, ipc_error> sys_notify(object::handle_table& table, object::handle h, uint64_t bits);
+result<void, ipc_error> sys_notify(kern::object::handle_table& table, kern::object::handle h, uint64_t bits);
 
 // 현재 비트셋이 0이 아니면 즉시 그 값을 반환하고 원자적으로 0으로
 // clear한다. 0이면 0이 아닌 값이 도착할 때까지 블록한다.
-result<uint64_t, ipc_error> sys_wait(object::handle_table& table, object::handle h);
+result<uint64_t, ipc_error> sys_wait(kern::object::handle_table& table, kern::object::handle h);
 
-}  // namespace ipc
+}  // namespace kern::ipc

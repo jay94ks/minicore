@@ -5,7 +5,7 @@
 
 #include <libk/irq_safe.hpp>  // scoped_lock
 
-namespace mm {
+namespace kern::mm {
 
 namespace {
 
@@ -23,7 +23,7 @@ uint64_t g_frame_refcount_entries = 0;
 uint32_t frame_index(uint64_t physical_address) {
     uint64_t idx = physical_address / k_page_size;
     if (g_frame_refcount == nullptr || idx >= g_frame_refcount_entries) {
-        LIBK_PANIC("mm::frame_*: physical_address out of refcount table range");
+        LIBK_PANIC("kern::mm::frame_*: physical_address out of refcount table range");
     }
     return static_cast<uint32_t>(idx);
 }
@@ -288,7 +288,7 @@ bool try_alloc_from_cpu_cache(uint64_t& out_addr) {
 
 void init(const boot::boot_info& info, const boot::memory_region* regions) {
     if (g_initialized) {
-        LIBK_PANIC("mm::init called twice");
+        LIBK_PANIC("kern::mm::init called twice");
     }
 
     g_node_count = info.numa_node_count;
@@ -350,13 +350,13 @@ void init(const boot::boot_info& info, const boot::memory_region* regions) {
     while ((1ull << order) < pages_needed) {
         ++order;
         if (order > k_max_order) {
-            LIBK_PANIC("mm::init: physical memory too large for frame refcount table");
+            LIBK_PANIC("kern::mm::init: physical memory too large for frame refcount table");
         }
     }
 
     auto table_page = alloc_pages(order, 0);
     if (!table_page.is_ok()) {
-        LIBK_PANIC("mm::init: no memory for frame refcount table");
+        LIBK_PANIC("kern::mm::init: no memory for frame refcount table");
     }
     g_frame_refcount = static_cast<uint32_t*>(phys_to_virt(table_page.value()));
     g_frame_refcount_entries = entry_count;
@@ -368,10 +368,10 @@ void init(const boot::boot_info& info, const boot::memory_region* regions) {
 result<uint64_t, alloc_error> alloc_pages(uint32_t order, uint32_t preferred_node,
                                            alloc_flags flags) {
     if (!g_initialized) {
-        LIBK_PANIC("mm::alloc_pages called before mm::init");
+        LIBK_PANIC("kern::mm::alloc_pages called before kern::mm::init");
     }
     if (order > k_max_order) {
-        LIBK_PANIC("mm::alloc_pages: order exceeds k_max_order");
+        LIBK_PANIC("kern::mm::alloc_pages: order exceeds k_max_order");
     }
     if (preferred_node >= g_node_count) {
         return result<uint64_t, alloc_error>::err(alloc_error::invalid_node);
@@ -412,10 +412,10 @@ result<uint64_t, alloc_error> alloc_pages(uint32_t order, uint32_t preferred_nod
 
 void free_pages(uint64_t physical_address, uint32_t order) {
     if (!g_initialized) {
-        LIBK_PANIC("mm::free_pages called before mm::init");
+        LIBK_PANIC("kern::mm::free_pages called before kern::mm::init");
     }
     if (order > k_max_order) {
-        LIBK_PANIC("mm::free_pages: order exceeds k_max_order");
+        LIBK_PANIC("kern::mm::free_pages: order exceeds k_max_order");
     }
 
     if (order == 0) {
@@ -448,7 +448,7 @@ uint32_t node_count() { return g_node_count; }
 
 pool_stats stats(uint32_t node) {
     if (node >= g_node_count) {
-        LIBK_PANIC("mm::stats: invalid node");
+        LIBK_PANIC("kern::mm::stats: invalid node");
     }
     const per_node_pool& pool = g_node_pools[node];
     return pool_stats{pool.total_bytes, pool.free_bytes, pool.reserved_bytes};
@@ -484,4 +484,4 @@ uint32_t frame_ref_count(uint64_t physical_address) {
     return g_frame_refcount[frame_index(physical_address)];
 }
 
-}  // namespace mm
+}  // namespace kern::mm

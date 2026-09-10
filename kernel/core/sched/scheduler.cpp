@@ -47,7 +47,7 @@ extern "C" uint32_t arch_current_node_id();
 // 소유자였다면 그 기록을 지운다. kernel/core/sched는 "FPU 소유자"라는
 // 개념 자체를 몰라도 된다 — arch 계층(x86_64: fpu.cpp)이 이 스레드
 // 포인터가 자기 내부 표에 남아 있는지만 확인한다.
-extern "C" void arch_fpu_thread_exiting(object::thread* t);
+extern "C" void arch_fpu_thread_exiting(kern::object::thread* t);
 
 // M12(ADR-142) — sys_fork의 자식이 "처음" 스케줄될 때 진입하는 자리.
 // arch_user_thread_trampoline과 같은 역할이지만, 진입점이 고정된
@@ -56,24 +56,24 @@ extern "C" void arch_fpu_thread_exiting(object::thread* t);
 extern "C" [[noreturn]] void arch_fork_child_resume();
 
 // M14(ADR-154, OPEN-58 해소) — next가 sys_io_activate로 활성화해 둔
-// I/O 포트 범위(object::thread::io_port_base/count)를 TSS IOPB에
+// I/O 포트 범위(kern::object::thread::io_port_base/count)를 TSS IOPB에
 // 반영한다. kernel/core/sched는 TSS/IOPB의 존재를 몰라도 된다
 // (ADR-002 HAL 경계, arch_context_switch와 같은 관례) — 실제 diff
 // 기반 재프로그래밍은 arch 계층(x86_64: tss.cpp)이 담당한다.
-extern "C" void arch_sync_io_permission(const object::thread& next);
+extern "C" void arch_sync_io_permission(const kern::object::thread& next);
 
 // M21(ADR-177, tss.hpp::sync_exception_stack) — next가 g_current가 될
 // 때마다 TSS.RSP0를 next 전용 커널 스택으로 맞춘다. arch_sync_io_permission
 // 과 같은 4곳(start/yield/block/exit)에서 함께 부른다.
-extern "C" void arch_sync_exception_stack(const object::thread& next);
+extern "C" void arch_sync_exception_stack(const kern::object::thread& next);
 
-namespace sched {
+namespace kern::sched {
 
 namespace {
 
 run_queue* g_run_queues = nullptr;
 uint32_t g_node_count = 0;
-object::thread* g_current = nullptr;
+kern::object::thread* g_current = nullptr;
 
 // start() 호출 시점의 kernel_main 실행 흐름을 "버리는" 곳 — 다시 읽지
 // 않는다. arch_context_switch는 첫 인자로 반드시 유효한 쓰기 위치를
@@ -84,7 +84,7 @@ uint64_t g_bootstrap_discard_rsp = 0;
 // CR3를 전환해야 한다. 커널 스레드는 owner_space == nullptr이라 항상
 // 0(= CR3 유지)을 반환한다 — arch_context_switch가 0을 "건드리지 않음"
 // 신호로 해석한다(context_switch.S).
-uint64_t next_pml4_phys(const object::thread& next) {
+uint64_t next_pml4_phys(const kern::object::thread& next) {
     return next.owner_space != nullptr ? next.owner_space->page_table_root : 0;
 }
 
@@ -94,7 +94,7 @@ uint64_t next_pml4_phys(const object::thread& next) {
 // 0" 패턴과 같은 정신).
 extern "C" uint64_t g_syscall_kernel_rsp;
 
-void sync_syscall_kernel_rsp(const object::thread& next) {
+void sync_syscall_kernel_rsp(const kern::object::thread& next) {
     if (next.owner_space != nullptr) {
         g_syscall_kernel_rsp = next.syscall_kernel_rsp;
     }
@@ -116,7 +116,7 @@ uint64_t slice_multiplier(uint32_t boost_level) { return static_cast<uint64_t>(b
 // 실제로는)의 값을 그대로 "타이머 틱 수"로 소비한다 — 실제 보정이
 // 필요해지면(PIT/HPET로 LAPIC 타이머 주파수를 재보고) 이 함수 하나만
 // 고치면 된다.
-uint64_t ticks_for(const object::thread_sched_fields& sched) {
+uint64_t ticks_for(const kern::object::thread_sched_fields& sched) {
     uint64_t budget = sched.base_time_slice_us * slice_multiplier(sched.boost_level);
     return budget == 0 ? 1 : budget;  // 0이면 매 틱마다 선점(최소 보장, 굶지 않음).
 }
@@ -125,7 +125,7 @@ uint64_t ticks_for(const object::thread_sched_fields& sched) {
 // 예산을 채운다. start()/yield()/block()/exit() 전부가 g_current를
 // 바꾸는 모든 지점에서 이걸 불러야 한다 — 그래야 on_timer_tick()이
 // "이번 슬라이스에서 남은 틱"을 정확히 추적한다.
-void reset_preempt_budget(object::thread& t) { t.preempt_ticks_remaining = ticks_for(t.sched); }
+void reset_preempt_budget(kern::object::thread& t) { t.preempt_ticks_remaining = ticks_for(t.sched); }
 
 // M21(ADR-176) — 새로 만든 스레드의 기본 타임슬라이스(틱 수, 위
 // ticks_for() 주석 참고). 특별한 근거로 고른 값은 아니다 — 고전적인
@@ -143,20 +143,20 @@ constexpr uint64_t k_default_time_slice_ticks = 20;
 // 뽑히는" 경우가 생겨 ADR-014를 어길 수 있다 — M11에서 실제로
 // preferred_node=1 데모 스레드가 이 이유로 전혀 스케줄되지 않는
 // 문제를 발견해 이렇게 고쳤다).
-object::thread* try_pick_band(run_queue& rq, bool kernel_band) {
+kern::object::thread* try_pick_band(run_queue& rq, bool kernel_band) {
     scoped_lock<irq_safe<spinlock>> guard(rq.lock);
     if (kernel_band) {
         if (rq.kernel_band.empty()) {
             return nullptr;
         }
-        object::thread& t = rq.kernel_band.front();
+        kern::object::thread& t = rq.kernel_band.front();
         decltype(rq.kernel_band)::erase(t);
         return &t;
     }
     if (rq.user_band.empty()) {
         return nullptr;
     }
-    object::thread& t = rq.user_band.front();
+    kern::object::thread& t = rq.user_band.front();
     decltype(rq.user_band)::erase(t);
     return &t;
 }
@@ -175,18 +175,18 @@ object::thread* try_pick_band(run_queue& rq, bool kernel_band) {
 // ADR-014("커널 밴드는 항상 유저 밴드보다 우선")를 노드 경계에도
 // 그대로 적용한다. 그다음에야 (3) 내 노드의 유저 밴드 (4) 다른
 // 노드의 유저 밴드(스틸).
-object::thread* pick_next_with_stealing() {
+kern::object::thread* pick_next_with_stealing() {
     uint32_t my_node = arch_current_node_id() % g_node_count;
 
     for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
         uint32_t node = (my_node + attempt) % g_node_count;
-        if (object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/true)) {
+        if (kern::object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/true)) {
             return t;
         }
     }
     for (uint32_t attempt = 0; attempt < g_node_count; ++attempt) {
         uint32_t node = (my_node + attempt) % g_node_count;
-        if (object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/false)) {
+        if (kern::object::thread* t = try_pick_band(g_run_queues[node], /*kernel_band=*/false)) {
             return t;
         }
     }
@@ -197,23 +197,23 @@ object::thread* pick_next_with_stealing() {
 // 이 고른 스레드가 kill_requested라면 그 스레드를 실제로 스케줄하지
 // 않고 그 자리에서 폐기한 뒤 다시 고른다. run_queue에서는 이미
 // try_pick_band()가 erase까지 마쳐 뒀으므로(제거된 상태) 여기서
-// 추가로 큐를 건드릴 필요가 없다 — sched::exit()의 자기 종료와
+// 추가로 큐를 건드릴 필요가 없다 — kern::sched::exit()의 자기 종료와
 // 똑같이 "다시 enqueue하지 않는다"가 곧 폐기다. FPU 소유권 기록만
 // exit()와 동일하게 정리한다(다른 코어가 이 스레드를 계속 FPU
 // 소유자로 오인하지 않도록, M11b ADR-133 §결정3과 같은 이유) —
 // 나머지 리소스(주소공간/핸들 테이블/스택)는 exit()과 마찬가지로
 // 회수하지 않는다(기존에도 있던 누수, 이 변경이 새로 만든 것은
 // 아니다).
-object::thread* pick_next_alive() {
+kern::object::thread* pick_next_alive() {
     for (;;) {
-        object::thread* candidate = pick_next_with_stealing();
+        kern::object::thread* candidate = pick_next_with_stealing();
         if (candidate == nullptr) {
             return nullptr;
         }
         if (!candidate->kill_requested) {
             return candidate;
         }
-        klog::printf("[sched] thread killed (discarded before scheduling)\n");
+        kern::klog::printf("[sched] thread killed (discarded before scheduling)\n");
         arch_fpu_thread_exiting(candidate);
     }
 }
@@ -221,9 +221,9 @@ object::thread* pick_next_alive() {
 }  // namespace
 
 void init() {
-    g_node_count = mm::node_count();
-    if (g_node_count > mm::k_max_numa_nodes) {
-        g_node_count = mm::k_max_numa_nodes;
+    g_node_count = kern::mm::node_count();
+    if (g_node_count > kern::mm::k_max_numa_nodes) {
+        g_node_count = kern::mm::k_max_numa_nodes;
     }
     if (g_node_count == 0) {
         g_node_count = 1;
@@ -231,17 +231,17 @@ void init() {
 
     // run_queue 배열도 handle_table(kernel-bootstrap-m4.md)과 같은 이유로
     // 전역에 두지 않고 여기서 mm 위에 만든다.
-    auto page = mm::alloc_pages(0, 0);
+    auto page = kern::mm::alloc_pages(0, 0);
     if (!page.is_ok()) {
-        LIBK_PANIC("sched::init: no memory for run_queue array");
+        LIBK_PANIC("kern::sched::init: no memory for run_queue array");
     }
-    g_run_queues = static_cast<run_queue*>(mm::phys_to_virt(page.value()));
+    g_run_queues = static_cast<run_queue*>(kern::mm::phys_to_virt(page.value()));
     for (uint32_t i = 0; i < g_node_count; ++i) {
         new (&g_run_queues[i]) run_queue();
     }
 }
 
-// M9(ADR-127 §결정3) — object::thread::fpu_save_area는 이미 0으로
+// M9(ADR-127 §결정3) — kern::object::thread::fpu_save_area는 이미 0으로
 // value-initialize돼 있다(kernel_objects.hpp의 `= {}`) — 여기서는
 // FCW/MXCSR만 프로세서 리셋 기본값으로 patch한다. 이 값이 아니면
 // 새 스레드가 처음 FXRSTOR/XRSTOR될 때 예외를 마스킹하지 않은 채(FCW
@@ -256,13 +256,13 @@ constexpr uint32_t k_fpu_default_mxcsr = 0x1F80;
 // 나온다(slab_alloc이 64바이트 정렬을 보장하지 않아 XSAVE가 #GP를
 // 낸다, kernel_objects.hpp 상단 주석 참고). 실패하면 false — 호출자가
 // 이미 만든 thread/스택을 되돌려야 한다.
-bool alloc_fpu_save_area(object::thread* t, uint32_t node) {
-    auto page = mm::alloc_pages(0, node);
+bool alloc_fpu_save_area(kern::object::thread* t, uint32_t node) {
+    auto page = kern::mm::alloc_pages(0, node);
     if (!page.is_ok()) {
         return false;
     }
-    t->fpu_save_area = static_cast<uint8_t*>(mm::phys_to_virt(page.value()));
-    __builtin_memset(t->fpu_save_area, 0, mm::k_page_size);
+    t->fpu_save_area = static_cast<uint8_t*>(kern::mm::phys_to_virt(page.value()));
+    __builtin_memset(t->fpu_save_area, 0, kern::mm::k_page_size);
 
     auto* fcw = reinterpret_cast<uint16_t*>(&t->fpu_save_area[0]);
     auto* mxcsr = reinterpret_cast<uint32_t*>(&t->fpu_save_area[24]);
@@ -271,20 +271,20 @@ bool alloc_fpu_save_area(object::thread* t, uint32_t node) {
     return true;
 }
 
-object::thread* create_kernel_thread(void (*entry)(), object::priority_band band,
+kern::object::thread* create_kernel_thread(void (*entry)(), kern::object::priority_band band,
                                       uint32_t preferred_node) {
-    void* mem = mm::slab_alloc(sizeof(object::thread));
+    void* mem = kern::mm::slab_alloc(sizeof(kern::object::thread));
     if (mem == nullptr) {
         return nullptr;
     }
-    auto* t = new (mem) object::thread();
+    auto* t = new (mem) kern::object::thread();
     t->sched.band = band;
     t->sched.preferred_node = preferred_node;
     t->sched.base_time_slice_us = k_default_time_slice_ticks;
 
     // enqueue()는 이미 preferred_node를 g_node_count로 감싼다(존재하지
     // 않는 노드를 요청해도 항상 유효한 큐에 들어가도록) — 여기서도
-    // 같은 방식으로 감싸야 한다. 안 그러면 mm::alloc_pages가
+    // 같은 방식으로 감싸야 한다. 안 그러면 kern::mm::alloc_pages가
     // preferred_node를 그대로 "유효한 노드 인덱스"로 요구해(범위
     // 밖이면 invalid_node로 실패) 정확히 같은 preferred_node 값인데도
     // enqueue()는 받아주고 create_kernel_thread()는 거부하는
@@ -294,20 +294,20 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     uint32_t alloc_node = preferred_node % g_node_count;
 
     if (!alloc_fpu_save_area(t, alloc_node)) {
-        mm::slab_free(t, sizeof(object::thread));
+        kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
     }
 
     constexpr uint32_t k_stack_order = 2;  // 16KiB (scheduler.hpp 상단 주석)
-    auto stack_page = mm::alloc_pages(k_stack_order, alloc_node);
+    auto stack_page = kern::mm::alloc_pages(k_stack_order, alloc_node);
     if (!stack_page.is_ok()) {
-        mm::free_pages(mm::virt_to_phys(t->fpu_save_area), 0);
-        mm::slab_free(t, sizeof(object::thread));
+        kern::mm::free_pages(kern::mm::virt_to_phys(t->fpu_save_area), 0);
+        kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
     }
 
-    auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
-    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(mm::k_page_size) << k_stack_order);
+    auto* stack_base = static_cast<uint8_t*>(kern::mm::phys_to_virt(stack_page.value()));
+    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(kern::mm::k_page_size) << k_stack_order);
 
     // arch_context_switch가 기대하는 초기 스택 레이아웃을 손으로 만든다
     // — "이 스레드는 예전에 한 번 context_switch를 통해 잠들었었고,
@@ -328,18 +328,18 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
     return t;
 }
 
-object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
-                                    object::address_space* space, object::handle_table* handles) {
-    void* mem = mm::slab_alloc(sizeof(object::thread));
+kern::object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
+                                    kern::object::address_space* space, kern::object::handle_table* handles) {
+    void* mem = kern::mm::slab_alloc(sizeof(kern::object::thread));
     if (mem == nullptr) {
         return nullptr;
     }
-    auto* t = new (mem) object::thread();
-    t->sched.band = object::priority_band::user;
+    auto* t = new (mem) kern::object::thread();
+    t->sched.band = kern::object::priority_band::user;
     t->sched.preferred_node = 0;
     t->sched.base_time_slice_us = k_default_time_slice_ticks;
     if (!alloc_fpu_save_area(t, 0)) {
-        mm::slab_free(t, sizeof(object::thread));
+        kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
     }
     t->owner_space = space;
@@ -355,15 +355,15 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     // arch_user_thread_trampoline 실행 시점에 이 스택 top을 기억해
     // 둔다) — 유저 스택(user_rsp)과는 별개다.
     constexpr uint32_t k_kstack_order = 2;
-    auto stack_page = mm::alloc_pages(k_kstack_order, 0);
+    auto stack_page = kern::mm::alloc_pages(k_kstack_order, 0);
     if (!stack_page.is_ok()) {
-        mm::free_pages(mm::virt_to_phys(t->fpu_save_area), 0);
-        mm::slab_free(t, sizeof(object::thread));
+        kern::mm::free_pages(kern::mm::virt_to_phys(t->fpu_save_area), 0);
+        kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
     }
 
-    auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
-    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(mm::k_page_size) << k_kstack_order);
+    auto* stack_base = static_cast<uint8_t*>(kern::mm::phys_to_virt(stack_page.value()));
+    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(kern::mm::k_page_size) << k_kstack_order);
 
     // M12(ADR-141) — 이 스레드 전용 syscall 커널 스택 top을 미리
     // 계산해 둔다(thread::syscall_kernel_rsp 주석 참고). stack_top은
@@ -388,21 +388,21 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
     return t;
 }
 
-object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_user_rflags,
+kern::object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_user_rflags,
                                       uint64_t saved_user_rsp, uint64_t saved_rbx,
                                       uint64_t saved_rbp, uint64_t saved_r12, uint64_t saved_r13,
                                       uint64_t saved_r14, uint64_t saved_r15,
-                                      object::address_space* space, object::handle_table* handles) {
-    void* mem = mm::slab_alloc(sizeof(object::thread));
+                                      kern::object::address_space* space, kern::object::handle_table* handles) {
+    void* mem = kern::mm::slab_alloc(sizeof(kern::object::thread));
     if (mem == nullptr) {
         return nullptr;
     }
-    auto* t = new (mem) object::thread();
-    t->sched.band = object::priority_band::user;
+    auto* t = new (mem) kern::object::thread();
+    t->sched.band = kern::object::priority_band::user;
     t->sched.preferred_node = 0;
     t->sched.base_time_slice_us = k_default_time_slice_ticks;
     if (!alloc_fpu_save_area(t, 0)) {
-        mm::slab_free(t, sizeof(object::thread));
+        kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
     }
     t->owner_space = space;
@@ -412,14 +412,14 @@ object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_use
     // 필요하다(create_user_thread와 같은 이유). 자식이 나중에 다시
     // syscall을 걸 때 이 값이 g_syscall_kernel_rsp로 동기화된다.
     constexpr uint32_t k_kstack_order = 2;
-    auto stack_page = mm::alloc_pages(k_kstack_order, 0);
+    auto stack_page = kern::mm::alloc_pages(k_kstack_order, 0);
     if (!stack_page.is_ok()) {
-        mm::free_pages(mm::virt_to_phys(t->fpu_save_area), 0);
-        mm::slab_free(t, sizeof(object::thread));
+        kern::mm::free_pages(kern::mm::virt_to_phys(t->fpu_save_area), 0);
+        kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
     }
-    auto* stack_base = static_cast<uint8_t*>(mm::phys_to_virt(stack_page.value()));
-    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(mm::k_page_size) << k_kstack_order);
+    auto* stack_base = static_cast<uint8_t*>(kern::mm::phys_to_virt(stack_page.value()));
+    uint8_t* stack_top = stack_base + (static_cast<uint64_t>(kern::mm::k_page_size) << k_kstack_order);
     t->syscall_kernel_rsp = reinterpret_cast<uint64_t>(stack_top);
 
     // 손짜기 초기 스택 — arch_fork_child_resume 진입 시 RSP가 정확히
@@ -448,10 +448,10 @@ object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_use
     return t;
 }
 
-void enqueue(object::thread& t) {
+void enqueue(kern::object::thread& t) {
     run_queue& rq = g_run_queues[t.sched.preferred_node % g_node_count];
     scoped_lock<irq_safe<spinlock>> guard(rq.lock);
-    if (t.sched.band == object::priority_band::kernel) {
+    if (t.sched.band == kern::object::priority_band::kernel) {
         rq.kernel_band.push_back(t);
     } else {
         rq.user_band.push_back(t);
@@ -463,9 +463,9 @@ void start() {
     // 실제로 여러 노드가 있을 수 있어 pick_next_with_stealing()이
     // "이 코어의 노드"를 먼저 보고, 비어 있으면 다른 노드를 훔쳐본다
     // (ADR-053).
-    object::thread* next = pick_next_alive();
+    kern::object::thread* next = pick_next_alive();
     if (next == nullptr) {
-        LIBK_PANIC("sched::start: no runnable thread");
+        LIBK_PANIC("kern::sched::start: no runnable thread");
     }
 
     g_current = next;
@@ -478,7 +478,7 @@ void start() {
 }
 
 void yield() {
-    object::thread* prev = g_current;
+    kern::object::thread* prev = g_current;
 
     // prev를 먼저 다시 enqueue한 뒤에 고른다(이전에는 순서가
     // 반대였다) — 그래야 "커널 밴드에 나 말고 아무도 없다"는 상황에서
@@ -493,7 +493,7 @@ void yield() {
     // 재현됐다 — M1~M11까지는 항상 "함께 도는" 커널 밴드 스레드가
     // 2개 이상이라 이 경합이 드러날 기회가 없었다.
     enqueue(*prev);
-    object::thread* next = pick_next_alive();
+    kern::object::thread* next = pick_next_alive();
     if (next == nullptr) {
         // M22(ADR-178) — pick_next_alive()가 prev 자신을(방금 위
         // enqueue()로 다시 큐에 들어갔다가) kill_requested라서 폐기했고,
@@ -531,17 +531,17 @@ void yield() {
 }
 
 void block() {
-    object::thread* prev = g_current;
+    kern::object::thread* prev = g_current;
 
-    object::thread* next = pick_next_alive();
+    kern::object::thread* next = pick_next_alive();
     if (next == nullptr) {
-        LIBK_PANIC("sched::block: no runnable thread (deadlock)");
+        LIBK_PANIC("kern::sched::block: no runnable thread (deadlock)");
     }
 
     // yield()와 달리 prev를 다시 enqueue하지 않는다 — 호출자(예: M6의
     // sys_call/sys_recv)가 prev를 이미 다른 대기열(endpoint의
     // waiting_callers/waiting_servers)에 넣어 뒀거나, 나중에 명시적으로
-    // sched::enqueue()할 책임을 진다.
+    // kern::sched::enqueue()할 책임을 진다.
     g_current = next;
     reset_preempt_budget(*next);
     sync_syscall_kernel_rsp(*next);
@@ -557,10 +557,10 @@ void block() {
     // 다만 포인터 값 자체는 arch_fpu_thread_exiting()에 넘겨야 한다
     // (M11b, ADR-133 §결정3) — 이 스레드를 아직 "FPU 소유자"로 기억하고
     // 있는 코어가 있다면 끊어진 스레드를 계속 가리키지 않도록 지운다.
-    object::thread* prev = g_current;
+    kern::object::thread* prev = g_current;
     arch_fpu_thread_exiting(prev);
 
-    object::thread* next = pick_next_alive();
+    kern::object::thread* next = pick_next_alive();
     if (next == nullptr) {
         // 이 코어에서 더 이상 아무도 runnable하지 않다 — 진짜로 멈춘다.
         // prev의 context_rsp는 이제 아무도 다시 읽지 않는다(scheduler.hpp
@@ -581,17 +581,17 @@ void block() {
     __builtin_unreachable();
 }
 
-object::thread* current() { return g_current; }
+kern::object::thread* current() { return g_current; }
 
-void request_kill(object::thread& t) { t.kill_requested = true; }
+void request_kill(kern::object::thread& t) { t.kill_requested = true; }
 
 // M21(ADR-176) — idt.cpp가 EOI를 먼저 보낸 뒤 부른다(scheduler.hpp의
 // on_timer_tick() 선언 주석 참고). g_current가 nullptr일 수 있는
-// 유일한 시점은 sched::start()가 아직 호출되기 전인데, 그때는 IDT가
+// 유일한 시점은 kern::sched::start()가 아직 호출되기 전인데, 그때는 IDT가
 // 걸려 있어도 LAPIC 타이머 자체를 아직 켜지 않았으므로(kernel_main.cpp
 // 호출 순서) 실제로는 일어나지 않는다 — 그래도 방어적으로 확인한다.
 void on_timer_tick() {
-    object::thread* cur = g_current;
+    kern::object::thread* cur = g_current;
     if (cur == nullptr) {
         return;
     }
@@ -603,4 +603,4 @@ void on_timer_tick() {
     }
 }
 
-}  // namespace sched
+}  // namespace kern::sched

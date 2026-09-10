@@ -46,9 +46,9 @@ constexpr uint32_t k_pf_write = 1u << 1;
 constexpr uint16_t k_et_exec = 2;
 constexpr uint16_t k_em_x86_64 = 62;
 
-uint64_t page_align_down(uint64_t v) { return v & ~static_cast<uint64_t>(mm::k_page_size - 1); }
+uint64_t page_align_down(uint64_t v) { return v & ~static_cast<uint64_t>(kern::mm::k_page_size - 1); }
 uint64_t page_align_up(uint64_t v) {
-    return page_align_down(v + mm::k_page_size - 1);
+    return page_align_down(v + kern::mm::k_page_size - 1);
 }
 
 }  // namespace
@@ -56,7 +56,7 @@ uint64_t page_align_up(uint64_t v) {
 result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data,
                                       uint64_t elf_size) {
     if (elf_size < sizeof(elf64_ehdr)) {
-        klog::printf("[elf_loader] truncated(header) elf_size=0x%lx\n",
+        kern::klog::printf("[elf_loader] truncated(header) elf_size=0x%lx\n",
                      static_cast<unsigned long>(elf_size));
         return result<uint64_t, elf_error>::err(elf_error::truncated);
     }
@@ -65,27 +65,27 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
 
     if (eh.e_ident[0] != 0x7F || eh.e_ident[1] != 'E' || eh.e_ident[2] != 'L' ||
         eh.e_ident[3] != 'F') {
-        klog::printf("[elf_loader] bad_magic\n");
+        kern::klog::printf("[elf_loader] bad_magic\n");
         return result<uint64_t, elf_error>::err(elf_error::bad_magic);
     }
     if (eh.e_ident[4] != 2) {  // ELFCLASS64
-        klog::printf("[elf_loader] unsupported_class=%u\n", eh.e_ident[4]);
+        kern::klog::printf("[elf_loader] unsupported_class=%u\n", eh.e_ident[4]);
         return result<uint64_t, elf_error>::err(elf_error::unsupported_class);
     }
     if (eh.e_machine != k_em_x86_64) {
-        klog::printf("[elf_loader] unsupported_machine=%u\n", eh.e_machine);
+        kern::klog::printf("[elf_loader] unsupported_machine=%u\n", eh.e_machine);
         return result<uint64_t, elf_error>::err(elf_error::unsupported_machine);
     }
     if (eh.e_type != k_et_exec) {
         // ET_DYN(PIE)은 재배치 처리가 필요해 이 최소 로더의 범위 밖 —
         // init/initrun/link.ld가 항상 ET_EXEC(고정 주소)로 링크한다.
-        klog::printf("[elf_loader] unsupported_type=%u\n", eh.e_type);
+        kern::klog::printf("[elf_loader] unsupported_type=%u\n", eh.e_type);
         return result<uint64_t, elf_error>::err(elf_error::unsupported_type);
     }
 
     uint64_t ph_bytes = static_cast<uint64_t>(eh.e_phnum) * eh.e_phentsize;
     if (eh.e_phoff > elf_size || elf_size - eh.e_phoff < ph_bytes) {
-        klog::printf("[elf_loader] truncated(phdrs) e_phoff=0x%lx ph_bytes=0x%lx elf_size=0x%lx\n",
+        kern::klog::printf("[elf_loader] truncated(phdrs) e_phoff=0x%lx ph_bytes=0x%lx elf_size=0x%lx\n",
                      static_cast<unsigned long>(eh.e_phoff), static_cast<unsigned long>(ph_bytes),
                      static_cast<unsigned long>(elf_size));
         return result<uint64_t, elf_error>::err(elf_error::truncated);
@@ -99,14 +99,14 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
             continue;
         }
         if (ph.p_offset > elf_size || elf_size - ph.p_offset < ph.p_filesz) {
-            klog::printf("[elf_loader] truncated(seg) p_offset=0x%lx p_filesz=0x%lx elf_size=0x%lx\n",
+            kern::klog::printf("[elf_loader] truncated(seg) p_offset=0x%lx p_filesz=0x%lx elf_size=0x%lx\n",
                          static_cast<unsigned long>(ph.p_offset),
                          static_cast<unsigned long>(ph.p_filesz),
                          static_cast<unsigned long>(elf_size));
             return result<uint64_t, elf_error>::err(elf_error::truncated);
         }
         if (ph.p_filesz > ph.p_memsz) {
-            klog::printf("[elf_loader] truncated(filesz>memsz) filesz=0x%lx memsz=0x%lx\n",
+            kern::klog::printf("[elf_loader] truncated(filesz>memsz) filesz=0x%lx memsz=0x%lx\n",
                          static_cast<unsigned long>(ph.p_filesz),
                          static_cast<unsigned long>(ph.p_memsz));
             return result<uint64_t, elf_error>::err(elf_error::truncated);
@@ -126,15 +126,15 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
         uint64_t file_end = ph.p_vaddr + ph.p_filesz;
 
         for (uint64_t page_vaddr = seg_start; page_vaddr < seg_end;
-             page_vaddr += mm::k_page_size) {
-            auto page = mm::alloc_pages(0, 0);
+             page_vaddr += kern::mm::k_page_size) {
+            auto page = kern::mm::alloc_pages(0, 0);
             if (!page.is_ok()) {
                 return result<uint64_t, elf_error>::err(elf_error::out_of_memory);
             }
-            uint8_t* page_virt = static_cast<uint8_t*>(mm::phys_to_virt(page.value()));
-            __builtin_memset(page_virt, 0, mm::k_page_size);
+            uint8_t* page_virt = static_cast<uint8_t*>(kern::mm::phys_to_virt(page.value()));
+            __builtin_memset(page_virt, 0, kern::mm::k_page_size);
 
-            uint64_t page_end = page_vaddr + mm::k_page_size;
+            uint64_t page_end = page_vaddr + kern::mm::k_page_size;
             uint64_t copy_start = file_start > page_vaddr ? file_start : page_vaddr;
             uint64_t copy_end = file_end < page_end ? file_end : page_end;
             if (copy_start < copy_end) {
@@ -145,7 +145,7 @@ result<uint64_t, elf_error> load_elf(uint64_t pml4_phys, const uint8_t* elf_data
 
             auto mapped = map_page(pml4_phys, page_vaddr, page.value(), perm);
             if (!mapped.is_ok()) {
-                klog::printf("[elf_loader] map_failed page_vaddr=0x%lx err=%u\n",
+                kern::klog::printf("[elf_loader] map_failed page_vaddr=0x%lx err=%u\n",
                              static_cast<unsigned long>(page_vaddr),
                              static_cast<unsigned>(mapped.error()));
                 return result<uint64_t, elf_error>::err(elf_error::map_failed);

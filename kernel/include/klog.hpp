@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdarg>
 
-namespace klog {
+namespace kern::klog {
 
 // arch별 UART 초기화. 여러 번 호출해도 안전해야 한다.
 void init();
@@ -22,4 +22,4 @@ void write(const char* s, size_t len);
 void printf(const char* fmt, ...);
 void vprintf(const char* fmt, va_list args);
 
-}  // namespace klog
+}  // namespace kern::klog

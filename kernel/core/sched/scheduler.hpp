@@ -27,7 +27,7 @@
 
 #include "object/kernel_objects.hpp"
 
-namespace sched {
+namespace kern::sched {
 
 struct run_queue {
     // M21(ADR-176) — 이 락을 쥔 코드가 이제 (BSP 한정) 타이머 인터럽트
@@ -38,27 +38,27 @@ struct run_queue {
     // 만든다(libk/irq_safe.hpp, ADR-076이 이미 klog.cpp에 쓴 것과 같은
     // 방어적 승격).
     irq_safe<spinlock> lock;  // 노드당 1개(ADR-033)
-    intrusive_list<object::thread, &object::thread::run_queue_hook> kernel_band;
-    intrusive_list<object::thread, &object::thread::run_queue_hook> user_band;
+    intrusive_list<kern::object::thread, &kern::object::thread::run_queue_hook> kernel_band;
+    intrusive_list<kern::object::thread, &kern::object::thread::run_queue_hook> user_band;
 };
 
-// mm::init()이 이미 호출된 뒤 실행해야 한다 — run_queue 배열을
-// mm::alloc_pages 위에 만든다(전역 정적 객체의 암시적 동적 초기화를
+// kern::mm::init()이 이미 호출된 뒤 실행해야 한다 — run_queue 배열을
+// kern::mm::alloc_pages 위에 만든다(전역 정적 객체의 암시적 동적 초기화를
 // 피한다, ADR-118 — handle_table과 같은 이유).
 void init();
 
 // 커널 스레드를 만든다. 스택(16KiB — virtual-memory-layout.md §6가
 // "정확한 크기는 M5가 정한다"고 미뤄둔 것을 이 마일스톤이 잠정
-// 확정한다)을 mm::alloc_pages로 확보하고, 처음 스케줄될 때 entry로
+// 확정한다)을 kern::mm::alloc_pages로 확보하고, 처음 스케줄될 때 entry로
 // 진입하도록 컨텍스트를 미리 구성한다. 실패하면 nullptr.
 //
 // 알려진 단순화: 정식 "커널 스택 슬롯 영역"(2GiB, 가드 페이지,
-// virtual-memory-layout.md §2)에 매핑하지 않고 physmap(mm::phys_to_virt)
+// virtual-memory-layout.md §2)에 매핑하지 않고 physmap(kern::mm::phys_to_virt)
 // 가상주소를 그대로 스택으로 쓴다 — 모든 커널 스레드가 지금은 부팅
 // 때 만든 동일한 주소공간(커널 자신의 PML4)에서 돌기 때문에 이것으로
 // 충분하고, 가드 페이지(스택 오버플로 조기 감지)는 나중에 필요해지면
 // 추가한다.
-object::thread* create_kernel_thread(void (*entry)(), object::priority_band band,
+kern::object::thread* create_kernel_thread(void (*entry)(), kern::object::priority_band band,
                                       uint32_t preferred_node);
 
 // M8(kernel-bootstrap.md, boot.md §4) — 유저모드로 진입할 스레드를
@@ -70,8 +70,8 @@ object::thread* create_kernel_thread(void (*entry)(), object::priority_band band
 // entry 자리를 대신함)이 실행되어 CR3를 space로 전환하고(scheduler.cpp가
 // context switch 시점에 이미 해 둔다) IRETQ로 유저모드에 진입시킨다.
 // 실패하면 nullptr.
-object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
-                                    object::address_space* space, object::handle_table* handles);
+kern::object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64_t arg0,
+                                    kern::object::address_space* space, kern::object::handle_table* handles);
 
 // M12(system-servers-bringup.md §M12, ADR-142) — sys_fork의 자식
 // 스레드를 만든다. create_user_thread와 달리 "처음부터 새 진입점으로
@@ -84,13 +84,13 @@ object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, uint64
 // arch_user_thread_trampoline 자리를 대신한다 — 이 스레드가 처음
 // 스케줄되면 그 라벨로 진입해 이 9개 값으로 곧바로 SYSRET한다(RAX는
 // 그 라벨 자신이 0으로 정한다 — "나는 자식이다").
-object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_user_rflags,
+kern::object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t saved_user_rflags,
                                       uint64_t saved_user_rsp, uint64_t saved_rbx,
                                       uint64_t saved_rbp, uint64_t saved_r12, uint64_t saved_r13,
                                       uint64_t saved_r14, uint64_t saved_r15,
-                                      object::address_space* space, object::handle_table* handles);
+                                      kern::object::address_space* space, kern::object::handle_table* handles);
 
-void enqueue(object::thread& t);
+void enqueue(kern::object::thread& t);
 
 // run_queue에서 스레드를 하나 뽑아 그리로 실행을 넘긴다. 이 함수
 // 호출자에게는 절대 돌아오지 않는다 — 그 뒤로는 스케줄된 스레드들
@@ -104,7 +104,7 @@ void yield();
 
 // 현재 스레드를 run_queue에 다시 넣지 않고 다음 스레드로 전환한다 —
 // M6(kernel/core/ipc)이 sys_call/sys_recv의 블로킹 대기에 쓴다. 다른
-// 누군가(보통 상대방 IPC 스레드)가 나중에 sched::enqueue()로 이
+// 누군가(보통 상대방 IPC 스레드)가 나중에 kern::sched::enqueue()로 이
 // 스레드를 다시 깨워야 한다 — 그러지 않으면 영원히 멈춘다. 전환할
 // 다른 runnable 스레드가 없으면 LIBK_PANIC(교착 상태 — 이 협조적
 // 스케줄러에는 idle 스레드가 없다).
@@ -132,15 +132,15 @@ void block();
 // 스레드가 처음 생기면서 이 보장이 실제로 필요해졌다.
 [[noreturn]] void exit();
 
-object::thread* current();
+kern::object::thread* current();
 
 // M22(general-purpose-completion.md §M22, ADR-178) — t에게 강제 종료
-// 요청 표시를 남긴다(object::thread::kill_requested 참고). t 자신도,
+// 요청 표시를 남긴다(kern::object::thread::kill_requested 참고). t 자신도,
 // 이 함수를 부른 스레드도 즉시 어떤 변화를 겪지 않는다 — t가 스스로
 // yield()/시간슬라이스 소진으로 run_queue에 다시 들어갔다가 스케줄러가
 // 다음에 그를 뽑으려는 순간(pick_next_alive(), scheduler.cpp) 실제
 // 폐기가 일어난다. 멱등이다(이미 요청된 스레드에 다시 불러도 안전).
-void request_kill(object::thread& t);
+void request_kill(kern::object::thread& t);
 
 // M21(general-purpose-completion.md §M21, ADR-176) — LAPIC 타이머
 // ISR(idt.cpp, k_vector_timer)이 매 틱 부른다. 반드시 EOI를 먼저 보낸
@@ -153,4 +153,4 @@ void request_kill(object::thread& t);
 // 없음).
 void on_timer_tick();
 
-}  // namespace sched
+}  // namespace kern::sched

@@ -28,7 +28,7 @@ constexpr int k_max_backtrace_frames = 16;
 void print_backtrace() {
     auto* fp = reinterpret_cast<uint64_t*>(__builtin_frame_address(0));
 
-    klog::printf("[PANIC] backtrace:\n");
+    kern::klog::printf("[PANIC] backtrace:\n");
     for (int i = 0; i < k_max_backtrace_frames; ++i) {
         // fp가 NULL이거나 정렬이 안 맞으면(스택 손상) 더 걷지 않는다 —
         // 프레임포인터 체인은 컴파일러가 무결성을 보증하는 구조가
@@ -42,7 +42,7 @@ void print_backtrace() {
         if (ret_addr == 0) {
             break;
         }
-        klog::printf("  #%d 0x%lx\n", i, static_cast<unsigned long>(ret_addr));
+        kern::klog::printf("  #%d 0x%lx\n", i, static_cast<unsigned long>(ret_addr));
 
         // 스택은 아래로 자라므로 다음 프레임은 항상 더 높은 주소여야
         // 한다 — 아니면 체인이 손상됐거나 순환하는 것이니 멈춘다.
@@ -56,7 +56,7 @@ void print_backtrace() {
 }  // namespace
 
 [[noreturn]] void panic_hook(const char* file, int line, const char* msg) {
-    klog::printf("[PANIC] %s:%d: %s\n", file, line, msg);
+    kern::klog::printf("[PANIC] %s:%d: %s\n", file, line, msg);
     print_backtrace();
 
     for (;;) {

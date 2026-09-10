@@ -6,31 +6,31 @@
 
 #include "sched/scheduler.hpp"
 
-namespace ipc {
+namespace kern::ipc {
 
 namespace {
 
-result<object::notification*, ipc_error> resolve_notification(object::handle_table& table,
-                                                                 object::handle h) {
-    const object::handle_entry* e = table.debug_entry(h);
+result<kern::object::notification*, ipc_error> resolve_notification(kern::object::handle_table& table,
+                                                                 kern::object::handle h) {
+    const kern::object::handle_entry* e = table.debug_entry(h);
     if (e == nullptr || !e->valid) {
-        return result<object::notification*, ipc_error>::err(ipc_error::invalid_handle);
+        return result<kern::object::notification*, ipc_error>::err(ipc_error::invalid_handle);
     }
-    if (e->kind != object::object_kind::notification) {
-        return result<object::notification*, ipc_error>::err(ipc_error::wrong_object_type);
+    if (e->kind != kern::object::object_kind::notification) {
+        return result<kern::object::notification*, ipc_error>::err(ipc_error::wrong_object_type);
     }
-    return result<object::notification*, ipc_error>::ok(
-        static_cast<object::notification*>(e->object));
+    return result<kern::object::notification*, ipc_error>::ok(
+        static_cast<kern::object::notification*>(e->object));
 }
 
 }  // namespace
 
-result<void, ipc_error> sys_notify(object::handle_table& table, object::handle h, uint64_t bits) {
+result<void, ipc_error> sys_notify(kern::object::handle_table& table, kern::object::handle h, uint64_t bits) {
     auto resolved = resolve_notification(table, h);
     if (!resolved.is_ok()) {
         return result<void, ipc_error>::err(resolved.error());
     }
-    object::notification& n = *resolved.value();
+    kern::object::notification& n = *resolved.value();
 
     // OR — atomic<T>에는 fetch_or가 없다(ADR-072: 필요해지는 조합만
     // 추가), CAS 루프로 구현한다.
@@ -39,7 +39,7 @@ result<void, ipc_error> sys_notify(object::handle_table& table, object::handle h
         // expected가 관측된 현재값으로 갱신됐다(표준 CAS 관용) — 재시도.
     }
 
-    object::thread* to_wake = nullptr;
+    kern::object::thread* to_wake = nullptr;
     {
         scoped_lock<spinlock> guard(n.lock);
         if (n.waiter != nullptr) {
@@ -48,18 +48,18 @@ result<void, ipc_error> sys_notify(object::handle_table& table, object::handle h
         }
     }
     if (to_wake != nullptr) {
-        sched::enqueue(*to_wake);
+        kern::sched::enqueue(*to_wake);
     }
 
     return result<void, ipc_error>::ok();
 }
 
-result<uint64_t, ipc_error> sys_wait(object::handle_table& table, object::handle h) {
+result<uint64_t, ipc_error> sys_wait(kern::object::handle_table& table, kern::object::handle h) {
     auto resolved = resolve_notification(table, h);
     if (!resolved.is_ok()) {
         return result<uint64_t, ipc_error>::err(resolved.error());
     }
-    object::notification& n = *resolved.value();
+    kern::object::notification& n = *resolved.value();
 
     while (true) {
         uint64_t current = n.bits.load_acquire();
@@ -80,11 +80,11 @@ result<uint64_t, ipc_error> sys_wait(object::handle_table& table, object::handle
             if (n.bits.load_acquire() != 0) {
                 continue;
             }
-            n.waiter = sched::current();
+            n.waiter = kern::sched::current();
         }
-        sched::block();
+        kern::sched::block();
         // sys_notify가 깨웠다 — 위 루프 처음으로 돌아가 비트를 다시 읽는다.
     }
 }
 
-}  // namespace ipc
+}  // namespace kern::ipc

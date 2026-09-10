@@ -69,9 +69,9 @@ extern uint64_t efi_acpi_rsdp_phys;  // ADR-174 — UEFI 경로에서만 0이 �
 namespace {
 
 void dump_pool_stats(const char* tag) {
-    for (uint32_t node = 0; node < mm::node_count(); ++node) {
-        mm::pool_stats s = mm::stats(node);
-        klog::printf("[mm:%s] node[%u] total_bytes=0x%lx free_bytes=0x%lx reserved_bytes=0x%lx\n",
+    for (uint32_t node = 0; node < kern::mm::node_count(); ++node) {
+        kern::mm::pool_stats s = kern::mm::stats(node);
+        kern::klog::printf("[mm:%s] node[%u] total_bytes=0x%lx free_bytes=0x%lx reserved_bytes=0x%lx\n",
                      tag, node, static_cast<unsigned long>(s.total_bytes),
                      static_cast<unsigned long>(s.free_bytes),
                      static_cast<unsigned long>(s.reserved_bytes));
@@ -79,8 +79,8 @@ void dump_pool_stats(const char* tag) {
 }
 
 // M11(smp-fpu-bringup.md §M11, ADR-036) — MADT/LAPIC/SRAT/SLIT 파싱
-// 결과를 한 곳에 모은다. mm::init()보다 먼저 계산해야 한다 — SRAT의
-// 메모리 어피니티가 있으면 mm::init() 자체가 그 실제 범위로 초기화되기
+// 결과를 한 곳에 모은다. kern::mm::init()보다 먼저 계산해야 한다 — SRAT의
+// 메모리 어피니티가 있으면 kern::mm::init() 자체가 그 실제 범위로 초기화되기
 // 때문이다(demo_mm 참고).
 struct acpi_topology {
     arch_x86_64::madt_result madt;
@@ -107,8 +107,8 @@ uint64_t dump_real_boot_info() {
 
 // M10 — ACPI MADT를 파싱해 LAPIC을 켠다. M11 — 이어서 SRAT/SLIT까지
 // 파싱해 CPU→노드 매핑·메모리 어피니티·노드 간 거리를 얻는다. AP
-// 기동(bring_up_aps)은 여기서 하지 않는다 — mm::init()이 아직 끝나지
-// 않아 AP 커널 스택을 확보할 수 없다(kernel_main에서 mm::init() 이후
+// 기동(bring_up_aps)은 여기서 하지 않는다 — kern::mm::init()이 아직 끝나지
+// 않아 AP 커널 스택을 확보할 수 없다(kernel_main에서 kern::mm::init() 이후
 // 별도로 호출).
 // M12(ADR-147) — demo_acpi_lapic()이 채우고 setup_initrun_process()가
 // 읽는다(부트 디바이스 BAR 배정에 ECAM 베이스가 필요, g_ipc_table 등
@@ -131,15 +131,15 @@ uint64_t g_real_arch_data_addr = 0;
 acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     acpi_topology s{};
     bool madt_ok = arch_x86_64::find_and_parse_madt(real_arch_data_addr, s.madt);
-    klog::printf("[acpi] madt_ok=%u cpu_count=%u lapic_base=0x%lx\n", madt_ok, s.madt.cpu_count,
+    kern::klog::printf("[acpi] madt_ok=%u cpu_count=%u lapic_base=0x%lx\n", madt_ok, s.madt.cpu_count,
                  static_cast<unsigned long>(s.madt.lapic_base_phys));
     for (uint32_t i = 0; i < s.madt.cpu_count; ++i) {
-        klog::printf("[acpi] cpu[%u] apic_id=%u\n", i, s.madt.apic_ids[i]);
+        kern::klog::printf("[acpi] cpu[%u] apic_id=%u\n", i, s.madt.apic_ids[i]);
     }
 
     constexpr uint64_t k_default_lapic_base = 0xFEE00000ull;
     arch_x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
-    klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
+    kern::klog::printf("[smp] BSP apic_id=%u\n", arch_x86_64::lapic_id());
 
     // M21(general-purpose-completion.md §M21, ADR-176) — BSP에서만
     // 선점 타이머를 켠다(lapic.hpp::lapic_start_periodic_timer 주석 —
@@ -155,7 +155,7 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     // 실제 사용은 initrun에게 이 값을 넘겨야 할 때, 아래 §M12 계속
     // 참고).
     bool mcfg_ok = arch_x86_64::find_and_parse_mcfg(real_arch_data_addr, g_mcfg);
-    klog::printf("[acpi] mcfg_ok=%u ecam_base=0x%lx\n", mcfg_ok,
+    kern::klog::printf("[acpi] mcfg_ok=%u ecam_base=0x%lx\n", mcfg_ok,
                  static_cast<unsigned long>(g_mcfg.ecam_base_phys));
 
     // MADT를 못 찾았어도(madt_ok==false) BSP 자신은 항상 "온라인 코어
@@ -168,28 +168,28 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     }
 
     s.srat_ok = arch_x86_64::find_and_parse_srat_slit(real_arch_data_addr, s.madt, s.srat);
-    klog::printf("[numa] srat_ok=%u node_count=%u mem_affinity_count=%u\n", s.srat_ok,
+    kern::klog::printf("[numa] srat_ok=%u node_count=%u mem_affinity_count=%u\n", s.srat_ok,
                  s.srat.node_count, s.srat.mem_affinity_count);
     for (uint32_t i = 0; i < s.madt.cpu_count; ++i) {
-        klog::printf("[numa] cpu[%u] apic_id=%u node=%u\n", i, s.madt.apic_ids[i],
+        kern::klog::printf("[numa] cpu[%u] apic_id=%u node=%u\n", i, s.madt.apic_ids[i],
                      s.srat.cpu_node[i]);
     }
     for (uint32_t i = 0; i < s.srat.mem_affinity_count; ++i) {
         const auto& m = s.srat.mem_affinities[i];
-        klog::printf("[numa] mem[%u] base=0x%lx length=0x%lx node=%u\n", i,
+        kern::klog::printf("[numa] mem[%u] base=0x%lx length=0x%lx node=%u\n", i,
                      static_cast<unsigned long>(m.base), static_cast<unsigned long>(m.length),
                      m.node);
     }
     for (uint32_t i = 0; i < s.srat.node_count; ++i) {
         for (uint32_t j = 0; j < s.srat.node_count; ++j) {
-            klog::printf("[numa] distance[%u][%u]=%u\n", i, j, s.srat.distance[i][j]);
+            kern::klog::printf("[numa] distance[%u][%u]=%u\n", i, j, s.srat.distance[i][j]);
         }
     }
     return s;
 }
 
 // M11 — SRAT 메모리 어피니티가 있으면(QEMU `-numa`로 노드별
-// memory-backend-ram이 실제로 구성됐을 때) 그 실제 범위로 mm::init()을
+// memory-backend-ram이 실제로 구성됐을 때) 그 실제 범위로 kern::mm::init()을
 // 채운다 — 처음으로 "가짜가 아닌" 다중 노드 물리 메모리 풀 분리를
 // 검증한다. 없으면(기본, `-numa` 미사용) M1~M10과 완전히 같은 self-test
 // fixture 경로를 그대로 쓴다.
@@ -205,43 +205,43 @@ void demo_mm(const acpi_topology& acpi) {
         boot::dump("selftest", info, regions);
     }
 
-    mm::init(info, regions);
+    kern::mm::init(info, regions);
 
     // M11(ADR-054) — SLIT 거리 행렬이 있으면(-numa 미사용 시는 항상
     // srat_ok==false라 이 분기 자체를 안 탄다) mm에 등록해 노드 폴백을
     // "가까운 노드부터"로 바꾼다. srat.distance는 uint8_t[8][8]이라
     // 첫 원소 주소가 row-major 평탄화 포인터와 정확히 같다.
     if (acpi.srat_ok && acpi.srat.mem_affinity_count > 0) {
-        mm::set_node_distance(acpi.srat.node_count, &acpi.srat.distance[0][0]);
+        kern::mm::set_node_distance(acpi.srat.node_count, &acpi.srat.distance[0][0]);
     }
 
     dump_pool_stats("init");  // 노드 개수만큼 자동으로 순회한다(함수 내부 루프).
 
-    auto page0 = mm::alloc_pages(0, 0);
-    auto page2 = mm::alloc_pages(2, 0);
-    klog::printf("[mm:alloc] order0 ok=%u addr=0x%lx order2 ok=%u addr=0x%lx\n", page0.is_ok(),
+    auto page0 = kern::mm::alloc_pages(0, 0);
+    auto page2 = kern::mm::alloc_pages(2, 0);
+    kern::klog::printf("[mm:alloc] order0 ok=%u addr=0x%lx order2 ok=%u addr=0x%lx\n", page0.is_ok(),
                  static_cast<unsigned long>(page0.is_ok() ? page0.value() : 0), page2.is_ok(),
                  static_cast<unsigned long>(page2.is_ok() ? page2.value() : 0));
     dump_pool_stats("after_alloc");
 
     if (page0.is_ok()) {
-        mm::free_pages(page0.value(), 0);
+        kern::mm::free_pages(page0.value(), 0);
     }
     if (page2.is_ok()) {
-        mm::free_pages(page2.value(), 2);
+        kern::mm::free_pages(page2.value(), 2);
     }
     dump_pool_stats("after_free");
 
-    void* slab_a = mm::slab_alloc(32);
-    void* slab_b = mm::slab_alloc(32);
-    klog::printf("[mm:slab] alloc(32) a=%p b=%p\n", slab_a, slab_b);
+    void* slab_a = kern::mm::slab_alloc(32);
+    void* slab_b = kern::mm::slab_alloc(32);
+    kern::klog::printf("[mm:slab] alloc(32) a=%p b=%p\n", slab_a, slab_b);
     if (slab_a != nullptr) {
-        mm::slab_free(slab_a, 32);
+        kern::mm::slab_free(slab_a, 32);
     }
     if (slab_b != nullptr) {
-        mm::slab_free(slab_b, 32);
+        kern::mm::slab_free(slab_b, 32);
     }
-    klog::printf("[mm:slab] freed both chunks\n");
+    kern::klog::printf("[mm:slab] freed both chunks\n");
 }
 
 // M12(system-servers-bringup.md §M12, ADR-016) — fork() COW의 첫 번째
@@ -251,31 +251,31 @@ void demo_mm(const acpi_topology& acpi) {
 // 반환하면 안 되고, 마지막(진짜 유일한 소유자로 남는 순간)만 true라
 // free_pages를 불러야 한다는 계약을 확인한다.
 void demo_frame_refcount() {
-    auto page = mm::alloc_pages(0, 0);
+    auto page = kern::mm::alloc_pages(0, 0);
     if (!page.is_ok()) {
-        klog::printf("[mm:refcount] alloc failed\n");
+        kern::klog::printf("[mm:refcount] alloc failed\n");
         return;
     }
     uint64_t addr = page.value();
 
-    uint32_t initial = mm::frame_ref_count(addr);
-    mm::frame_add_ref(addr);
-    mm::frame_add_ref(addr);
-    uint32_t after_addref = mm::frame_ref_count(addr);
+    uint32_t initial = kern::mm::frame_ref_count(addr);
+    kern::mm::frame_add_ref(addr);
+    kern::mm::frame_add_ref(addr);
+    uint32_t after_addref = kern::mm::frame_ref_count(addr);
 
-    bool release1 = mm::frame_release(addr);
-    bool release2 = mm::frame_release(addr);
-    bool release3 = mm::frame_release(addr);
+    bool release1 = kern::mm::frame_release(addr);
+    bool release2 = kern::mm::frame_release(addr);
+    bool release3 = kern::mm::frame_release(addr);
 
-    klog::printf(
+    kern::klog::printf(
         "[mm:refcount] initial=%u after_addref=%u release1=%u release2=%u release3=%u "
         "(expect 0,2,0,0,1)\n",
         initial, after_addref, release1, release2, release3);
 
     if (release3) {
-        mm::free_pages(addr, 0);
+        kern::mm::free_pages(addr, 0);
     }
-    klog::printf("[mm:refcount] demo done\n");
+    kern::klog::printf("[mm:refcount] demo done\n");
 }
 
 // M12(system-servers-bringup.md §M12, ADR-016) — fork() COW의 나머지 두
@@ -289,14 +289,14 @@ void demo_frame_refcount() {
 void demo_cow_clone() {
     auto parent = arch_x86_64::create_address_space_root();
     if (!parent.is_ok()) {
-        klog::printf("[cow] create parent failed\n");
+        kern::klog::printf("[cow] create parent failed\n");
         return;
     }
     uint64_t parent_pml4 = parent.value();
 
-    auto page = mm::alloc_pages(0, 0);
+    auto page = kern::mm::alloc_pages(0, 0);
     if (!page.is_ok()) {
-        klog::printf("[cow] alloc page failed\n");
+        kern::klog::printf("[cow] alloc page failed\n");
         return;
     }
     uint64_t phys = page.value();
@@ -310,21 +310,21 @@ void demo_cow_clone() {
 
     auto child = arch_x86_64::clone_address_space_cow(parent_pml4);
     if (!child.is_ok()) {
-        klog::printf("[cow] clone failed\n");
+        kern::klog::printf("[cow] clone failed\n");
         return;
     }
     uint64_t child_pml4 = child.value();
 
     auto q_parent = arch_x86_64::query_page(parent_pml4, k_test_virt);
     auto q_child = arch_x86_64::query_page(child_pml4, k_test_virt);
-    klog::printf(
+    kern::klog::printf(
         "[cow] after clone: parent_write=%u parent_cow=%u child_write=%u child_cow=%u "
         "same_phys=%u refcount=%u (expect 0,1,0,1,1,1)\n",
         arch_x86_64::has_perm(q_parent.perm, arch_x86_64::page_perm::write),
         arch_x86_64::has_perm(q_parent.perm, arch_x86_64::page_perm::cow),
         arch_x86_64::has_perm(q_child.perm, arch_x86_64::page_perm::write),
         arch_x86_64::has_perm(q_child.perm, arch_x86_64::page_perm::cow),
-        static_cast<unsigned>(q_child.phys == phys), mm::frame_ref_count(phys));
+        static_cast<unsigned>(q_child.phys == phys), kern::mm::frame_ref_count(phys));
 
     // 자식이 먼저 쓴다 — 부모가 아직 남아 있으니(refcount>0) 새
     // 프레임으로 복사돼야 한다.
@@ -332,18 +332,18 @@ void demo_cow_clone() {
     bool handled_child =
         arch_x86_64::try_handle_cow_write_fault_for(child_pml4, k_test_virt, k_pf_present | k_pf_write);
     auto q_child_after = arch_x86_64::query_page(child_pml4, k_test_virt);
-    klog::printf(
+    kern::klog::printf(
         "[cow] child write fault: handled=%u child_write_after=%u child_phys_changed=%u "
         "refcount_after=%u (expect 1,1,1,0)\n",
         handled_child, arch_x86_64::has_perm(q_child_after.perm, arch_x86_64::page_perm::write),
-        static_cast<unsigned>(q_child_after.phys != phys), mm::frame_ref_count(phys));
+        static_cast<unsigned>(q_child_after.phys != phys), kern::mm::frame_ref_count(phys));
 
     // 이제 부모가 쓴다 — 자식이 이미 떨어져 나갔으니(refcount==0) 복사
     // 없이 그냥 쓰기 권한만 다시 켜지는 fast-path를 타야 한다.
     bool handled_parent = arch_x86_64::try_handle_cow_write_fault_for(
         parent_pml4, k_test_virt, k_pf_present | k_pf_write);
     auto q_parent_after = arch_x86_64::query_page(parent_pml4, k_test_virt);
-    klog::printf(
+    kern::klog::printf(
         "[cow] parent write fault: handled=%u parent_write_after=%u parent_phys_same=%u "
         "(expect 1,1,1)\n",
         handled_parent, arch_x86_64::has_perm(q_parent_after.perm, arch_x86_64::page_perm::write),
@@ -354,13 +354,13 @@ void demo_cow_clone() {
 // 전역으로 두지 않는다 — ADR-118에서 확인했듯 이런 중첩 타입은
 // 컴파일러가 "동적 초기화 필요"로 판단하기 쉬운데(이 자유freestanding
 // 빌드엔 그걸 실행할 crt0가 없다), mm이 이미 초기화된 뒤 명시적으로
-// 호출되는 이 함수 안에서 mm::alloc_pages + placement new로 만들면
+// 호출되는 이 함수 안에서 kern::mm::alloc_pages + placement new로 만들면
 // 그 문제 자체가 발생하지 않는다(ADR-010의 "명시적 init 함수로 지연
 // 초기화" 원칙과 일치 — 그리고 스택에 두기엔 너무 크다, 8KiB 부트
 // 스택 예산 대비).
-// M12에서 object::create_handle_table()(handle_table.cpp)로 공용화했다 —
+// M12에서 kern::object::create_handle_table()(handle_table.cpp)로 공용화했다 —
 // process_ops.cpp도 이제 같은 함수를 쓴다.
-object::handle_table* create_handle_table() { return object::create_handle_table(); }
+kern::object::handle_table* create_handle_table() { return kern::object::create_handle_table(); }
 
 void demo_object_model() {
     constexpr uint32_t k_all_rights = 0b111;
@@ -370,25 +370,25 @@ void demo_object_model() {
     // 이후)가 없어 실제 프로세스는 없다. objects.md §3~6의 핸들
     // 테이블/프록시/cascade revoke 메커니즘 자체가 스펙대로 동작하는지
     // 커널 내부에서 직접 호출해 확인한다(M1~M3와 같은 self-test 패턴).
-    object::handle_table* table_a = create_handle_table();
-    object::handle_table* table_b = create_handle_table();
+    kern::object::handle_table* table_a = create_handle_table();
+    kern::object::handle_table* table_b = create_handle_table();
     if (table_a == nullptr || table_b == nullptr) {
-        klog::printf("[object] handle_table 할당 실패\n");
+        kern::klog::printf("[object] handle_table 할당 실패\n");
         return;
     }
 
-    object::thread demo_thread;  // 작아서(list_hook 하나뿐) 스택도 안전하다.
+    kern::object::thread demo_thread;  // 작아서(list_hook 하나뿐) 스택도 안전하다.
 
-    auto owner = table_a->create_owner(object::object_kind::thread, k_all_rights, &demo_thread);
-    klog::printf("[object] create_owner ok=%u handle=%u\n", owner.is_ok(),
+    auto owner = table_a->create_owner(kern::object::object_kind::thread, k_all_rights, &demo_thread);
+    kern::klog::printf("[object] create_owner ok=%u handle=%u\n", owner.is_ok(),
                  owner.is_ok() ? owner.value() : 0);
     if (!owner.is_ok()) {
         return;
     }
-    object::handle owner_h = owner.value();
+    kern::object::handle owner_h = owner.value();
 
     auto owner_info = table_a->handle_info(owner_h);
-    klog::printf("[object] owner handle_info ok=%u kind=%u rights=%u\n", owner_info.is_ok(),
+    kern::klog::printf("[object] owner handle_info ok=%u kind=%u rights=%u\n", owner_info.is_ok(),
                  owner_info.is_ok() ? static_cast<uint32_t>(owner_info.value().kind) : 0,
                  owner_info.is_ok() ? owner_info.value().rights : 0);
 
@@ -396,15 +396,15 @@ void demo_object_model() {
     // 부분집합만 허용됨을 확인).
     auto proxy = table_a->create_proxy(owner_h, k_read_only, *table_b, /*badge_override=*/0,
                                         /*has_badge_override=*/false);
-    klog::printf("[object] create_proxy ok=%u handle=%u\n", proxy.is_ok(),
+    kern::klog::printf("[object] create_proxy ok=%u handle=%u\n", proxy.is_ok(),
                  proxy.is_ok() ? proxy.value() : 0);
     if (!proxy.is_ok()) {
         return;
     }
-    object::handle proxy_h = proxy.value();
+    kern::object::handle proxy_h = proxy.value();
 
     auto proxy_info = table_b->handle_info(proxy_h);
-    klog::printf("[object] proxy handle_info ok=%u kind=%u rights=%u (expect rights=%u)\n",
+    kern::klog::printf("[object] proxy handle_info ok=%u kind=%u rights=%u (expect rights=%u)\n",
                  proxy_info.is_ok(),
                  proxy_info.is_ok() ? static_cast<uint32_t>(proxy_info.value().kind) : 0,
                  proxy_info.is_ok() ? proxy_info.value().rights : 0, k_read_only);
@@ -413,30 +413,30 @@ void demo_object_model() {
     // 한다(objects.md §6) — 프록시는 다른 테이블(table_b)에 있다는
     // 점에 주의.
     auto close_result = table_a->close(owner_h);
-    klog::printf("[object] close(owner) ok=%u\n", close_result.is_ok());
+    kern::klog::printf("[object] close(owner) ok=%u\n", close_result.is_ok());
 
     auto proxy_info_after = table_b->handle_info(proxy_h);
-    klog::printf("[object] proxy handle_info after owner close: ok=%u (expect 0 — cascade revoke)\n",
+    kern::klog::printf("[object] proxy handle_info after owner close: ok=%u (expect 0 — cascade revoke)\n",
                  proxy_info_after.is_ok());
 
     auto close_again = table_a->close(owner_h);
-    klog::printf(
+    kern::klog::printf(
         "[object] close(owner) again: is_err=%u error=%u (expect already_closed=%u)\n",
         close_again.is_err(), static_cast<uint32_t>(close_again.error()),
-        static_cast<uint32_t>(object::handle_error::already_closed));
+        static_cast<uint32_t>(kern::object::handle_error::already_closed));
 }
 
 void demo_page_table() {
     auto root = arch_x86_64::create_address_space_root();
-    klog::printf("[pgtbl] create_address_space_root ok=%u\n", root.is_ok());
+    kern::klog::printf("[pgtbl] create_address_space_root ok=%u\n", root.is_ok());
     if (!root.is_ok()) {
         return;
     }
     uint64_t as_root = root.value();
 
-    auto backing_page = mm::alloc_pages(0, 0);
+    auto backing_page = kern::mm::alloc_pages(0, 0);
     if (!backing_page.is_ok()) {
-        klog::printf("[pgtbl] no page available for demo mapping\n");
+        kern::klog::printf("[pgtbl] no page available for demo mapping\n");
         return;
     }
 
@@ -445,10 +445,10 @@ void demo_page_table() {
     auto map_result = arch_x86_64::map_page(
         as_root, k_demo_virt, backing_page.value(),
         arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
-    klog::printf("[pgtbl] map_page ok=%u\n", map_result.is_ok());
+    kern::klog::printf("[pgtbl] map_page ok=%u\n", map_result.is_ok());
 
     arch_x86_64::page_query_result q1 = arch_x86_64::query_page(as_root, k_demo_virt);
-    klog::printf("[pgtbl] query after map: present=%u phys=0x%lx write=%u user=%u exec=%u\n",
+    kern::klog::printf("[pgtbl] query after map: present=%u phys=0x%lx write=%u user=%u exec=%u\n",
                  q1.present, static_cast<unsigned long>(q1.phys),
                  arch_x86_64::has_perm(q1.perm, arch_x86_64::page_perm::write),
                  arch_x86_64::has_perm(q1.perm, arch_x86_64::page_perm::user),
@@ -457,25 +457,25 @@ void demo_page_table() {
     // 다시 매핑하면 already_mapped여야 한다.
     auto remap_result = arch_x86_64::map_page(as_root, k_demo_virt, backing_page.value(),
                                                arch_x86_64::page_perm::user);
-    klog::printf("[pgtbl] remap same addr: is_err=%u (expect 1, already_mapped)\n",
+    kern::klog::printf("[pgtbl] remap same addr: is_err=%u (expect 1, already_mapped)\n",
                  remap_result.is_err());
 
     // read-only로 낮춘다(COW clone이 실제로 구현될 때 쓸 프리미티브,
     // page_table.hpp 상단 주석 참고).
     arch_x86_64::protect_page(as_root, k_demo_virt, arch_x86_64::page_perm::user);
     arch_x86_64::page_query_result q2 = arch_x86_64::query_page(as_root, k_demo_virt);
-    klog::printf("[pgtbl] query after protect(read-only): write=%u (expect 0)\n",
+    kern::klog::printf("[pgtbl] query after protect(read-only): write=%u (expect 0)\n",
                  arch_x86_64::has_perm(q2.perm, arch_x86_64::page_perm::write));
 
     arch_x86_64::unmap_page(as_root, k_demo_virt);
     arch_x86_64::page_query_result q3 = arch_x86_64::query_page(as_root, k_demo_virt);
-    klog::printf("[pgtbl] query after unmap: present=%u (expect 0)\n", q3.present);
+    kern::klog::printf("[pgtbl] query after unmap: present=%u (expect 0)\n", q3.present);
 }
 
 // M5(scheduler.md §1~3) — 커널 스레드 2개가 yield()로 번갈아 실행됨을
 // 시리얼 로그로 확인한다(kernel-bootstrap.md M5의 완료 기준). 각
-// 스레드는 정해진 횟수만큼 돌고 나서 sched::exit()로 영구 종료한다 —
-// sched::start() 이후로는 커널 스레드들만 남고 kernel_main으로는
+// 스레드는 정해진 횟수만큼 돌고 나서 kern::sched::exit()로 영구 종료한다 —
+// kern::sched::start() 이후로는 커널 스레드들만 남고 kernel_main으로는
 // 돌아오지 않는다.
 //
 // **M8에서 바뀐 부분**: M6/M7까지는 각자 "전체 스레드 수보다 넉넉히"
@@ -489,27 +489,27 @@ void demo_page_table() {
 // 있어도 아무도 그들을 깨워 줄 수 없어(타이머 인터럽트가 없어 hlt는
 // 영원히 안 돌아온다) 기계 전체가 멈춰 버린다. M8에서 유저 스레드
 // (initrun)가 처음 생기면서 정확히 이 경합이 재현 가능하게 실제로
-// 발생했다 — 대신 sched::exit()(kernel/core/sched/scheduler.hpp 상단
+// 발생했다 — 대신 kern::sched::exit()(kernel/core/sched/scheduler.hpp 상단
 // 주석)로 스레드 수·필요 yield 횟수에 무관하게 항상 정확한, 스케줄러
 // 자신이 보장하는 종료로 바꿨다.
 constexpr int k_sched_demo_iterations = 3;
 
 void thread_a_entry() {
     for (int i = 0; i < k_sched_demo_iterations; ++i) {
-        klog::printf("[sched] thread A iteration %d\n", i);
-        sched::yield();
+        kern::klog::printf("[sched] thread A iteration %d\n", i);
+        kern::sched::yield();
     }
-    klog::printf("[sched] thread A done\n");
-    sched::exit();
+    kern::klog::printf("[sched] thread A done\n");
+    kern::sched::exit();
 }
 
 void thread_b_entry() {
     for (int i = 0; i < k_sched_demo_iterations; ++i) {
-        klog::printf("[sched] thread B iteration %d\n", i);
-        sched::yield();
+        kern::klog::printf("[sched] thread B iteration %d\n", i);
+        kern::sched::yield();
     }
-    klog::printf("[sched] thread B done\n");
-    sched::exit();
+    kern::klog::printf("[sched] thread B done\n");
+    kern::sched::exit();
 }
 
 // M9(smp-fpu-bringup.md, ADR-127) — 서로 다른 두 스레드가 xmm0에 넣어 둔
@@ -526,15 +526,15 @@ __attribute__((target("sse2"))) void thread_fpu_a_entry() {
 
     bool all_preserved = true;
     for (int i = 0; i < k_sched_demo_iterations; ++i) {
-        sched::yield();
+        kern::sched::yield();
         uint64_t readback;
         asm volatile("movq %%xmm0, %0" : "=r"(readback));
         bool ok = (readback == k_pattern);
         all_preserved = all_preserved && ok;
-        klog::printf("[fpu] thread A iteration %d xmm0 preserved=%u\n", i, ok);
+        kern::klog::printf("[fpu] thread A iteration %d xmm0 preserved=%u\n", i, ok);
     }
-    klog::printf("[fpu] thread A done all_preserved=%u\n", all_preserved);
-    sched::exit();
+    kern::klog::printf("[fpu] thread A done all_preserved=%u\n", all_preserved);
+    kern::sched::exit();
 }
 
 __attribute__((target("sse2"))) void thread_fpu_b_entry() {
@@ -543,22 +543,22 @@ __attribute__((target("sse2"))) void thread_fpu_b_entry() {
 
     bool all_preserved = true;
     for (int i = 0; i < k_sched_demo_iterations; ++i) {
-        sched::yield();
+        kern::sched::yield();
         uint64_t readback;
         asm volatile("movq %%xmm0, %0" : "=r"(readback));
         bool ok = (readback == k_pattern);
         all_preserved = all_preserved && ok;
-        klog::printf("[fpu] thread B iteration %d xmm0 preserved=%u\n", i, ok);
+        kern::klog::printf("[fpu] thread B iteration %d xmm0 preserved=%u\n", i, ok);
     }
-    klog::printf("[fpu] thread B done all_preserved=%u\n", all_preserved);
-    sched::exit();
+    kern::klog::printf("[fpu] thread B done all_preserved=%u\n", all_preserved);
+    kern::sched::exit();
 }
 
 // M11b(smp-fpu-bringup.md §M11b, ADR-133 검증목표(b)) — "같은 스레드가
 // 연속으로 FPU를 쓸 때 #NM이 두 번째부터는 발생하지 않음(또는 발생해도
 // 저장/복원 없이 즉시 리턴함)"을 보이는 전용 데모. thread_fpu_a/b보다
 // 반복 횟수를 훨씬 더 많이 잡아(k_fpu_lazy_iterations), 둘이 이미
-// sched::exit()로 영구 종료한 뒤에도 여러 라운드가 남게 한다 — 그
+// kern::sched::exit()로 영구 종료한 뒤에도 여러 라운드가 남게 한다 — 그
 // 시점부터는 이 스레드 말고 FPU를 쓰는 다른 스레드가 전혀 없으므로,
 // (fpu.cpp의 g_fpu_owner_by_apic_id가 계속 이 스레드를 가리킨 채라)
 // 매 라운드 #NM은 여전히 발생하지만(CR0.TS가 스위치마다 무조건 켜지므로,
@@ -572,20 +572,20 @@ __attribute__((target("sse2"))) void thread_fpu_c_entry() {
     bool all_preserved = true;
     for (int i = 0; i < k_fpu_lazy_iterations; ++i) {
         asm volatile("movq %0, %%xmm0" : : "r"(k_pattern) : "xmm0");
-        sched::yield();
+        kern::sched::yield();
         uint64_t readback;
         asm volatile("movq %%xmm0, %0" : "=r"(readback));
         bool ok = (readback == k_pattern);
         all_preserved = all_preserved && ok;
-        klog::printf("[fpu-lazy] thread C iteration %d xmm0 preserved=%u\n", i, ok);
+        kern::klog::printf("[fpu-lazy] thread C iteration %d xmm0 preserved=%u\n", i, ok);
     }
-    klog::printf("[fpu-lazy] thread C done all_preserved=%u\n", all_preserved);
-    sched::exit();
+    kern::klog::printf("[fpu-lazy] thread C done all_preserved=%u\n", all_preserved);
+    kern::sched::exit();
 }
 
 // M11(smp-fpu-bringup.md §M11, ADR-053) — preferred_node=1로 만든
 // 스레드는 g_run_queues[1]에 들어간다. 이 협조적 스케줄러는 여전히
-// BSP 한 코어만 sched::start()/yield()를 실행하므로(계획 §M11 재해석
+// BSP 한 코어만 kern::sched::start()/yield()를 실행하므로(계획 §M11 재해석
 // — AP는 온라인 신호만 보내고 스케줄러에는 참여하지 않는다,
 // docs/done/smp-fpu-bringup-m10.md 참고), BSP 자신의 노드(전형적으로
 // 0)가 아닌 노드의 큐에 있는 이 스레드는 work-stealing(ADR-053)이
@@ -594,8 +594,8 @@ __attribute__((target("sse2"))) void thread_fpu_c_entry() {
 // 데모는 항상 실행되지만, "훔쳐옴"이 실제로 필요한지는 노드 개수에
 // 따라 달라진다.
 void thread_numa_node1_entry() {
-    klog::printf("[numa-sched] thread on preferred_node=1 ran (stolen if node_count>1)\n");
-    sched::exit();
+    kern::klog::printf("[numa-sched] thread on preferred_node=1 ran (stolen if node_count>1)\n");
+    kern::sched::exit();
 }
 
 // M6(ipc.md §3~5) — 커널 스레드 2개(서버/클라이언트) 사이에
@@ -603,9 +603,9 @@ void thread_numa_node1_entry() {
 // (kernel-bootstrap.md M6의 완료 기준). 핸들 테이블 하나를 공유한다 —
 // M4 데모와 같은 이유(아직 프로세스/procsrv가 없어 스레드마다 별도
 // 테이블을 가질 이유가 없다)로 "커널 컨텍스트 하나"로 취급한다.
-object::handle_table* g_ipc_table = nullptr;
-object::handle g_ipc_recv_handle = object::k_invalid_handle;  // 서버용: CAN_RECV만
-object::handle g_ipc_send_handle = object::k_invalid_handle;  // 클라이언트용: CAN_SEND만 + 커스텀 badge
+kern::object::handle_table* g_ipc_table = nullptr;
+kern::object::handle g_ipc_recv_handle = kern::object::k_invalid_handle;  // 서버용: CAN_RECV만
+kern::object::handle g_ipc_send_handle = kern::object::k_invalid_handle;  // 클라이언트용: CAN_SEND만 + 커스텀 badge
 
 constexpr uint64_t k_ipc_demo_badge = 0xCAFEull;
 
@@ -615,28 +615,28 @@ bool demo_ipc_setup() {
         return false;
     }
 
-    void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+    void* ep_mem = kern::mm::slab_alloc(sizeof(kern::object::endpoint));
     if (ep_mem == nullptr) {
         return false;
     }
-    auto* ep = new (ep_mem) object::endpoint();
+    auto* ep = new (ep_mem) kern::object::endpoint();
 
     auto owner = g_ipc_table->create_owner(
-        object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+        kern::object::object_kind::endpoint, kern::object::k_right_can_send | kern::object::k_right_can_recv, ep);
     if (!owner.is_ok()) {
         return false;
     }
 
     // 서버용: CAN_RECV만 남긴 프록시(ADR-029 — 원본 권한의 부분집합만).
     auto recv_proxy =
-        g_ipc_table->create_proxy(owner.value(), object::k_right_can_recv, *g_ipc_table,
+        g_ipc_table->create_proxy(owner.value(), kern::object::k_right_can_recv, *g_ipc_table,
                                    /*badge_override=*/0, /*has_badge_override=*/false);
     // 클라이언트용: CAN_SEND만 남기고 커스텀 badge를 붙인 프록시 —
     // objects.md §3의 "재위임 가능한 마스터가 새 badge를 붙이는 시점"을
     // 흉내낸다. 서버는 이 badge를 sys_recv의 반환값으로 그대로 받아야
     // 한다(아래 thread_c_server_entry에서 확인).
     auto send_proxy =
-        g_ipc_table->create_proxy(owner.value(), object::k_right_can_send, *g_ipc_table,
+        g_ipc_table->create_proxy(owner.value(), kern::object::k_right_can_send, *g_ipc_table,
                                    k_ipc_demo_badge, /*has_badge_override=*/true);
     if (!recv_proxy.is_ok() || !send_proxy.is_ok()) {
         return false;
@@ -648,35 +648,35 @@ bool demo_ipc_setup() {
 }
 
 void thread_c_server_entry() {
-    ipc::message in{};
-    auto recv_result = ipc::sys_recv(*g_ipc_table, g_ipc_recv_handle, in);
-    klog::printf(
+    kern::ipc::message in{};
+    auto recv_result = kern::ipc::sys_recv(*g_ipc_table, g_ipc_recv_handle, in);
+    kern::klog::printf(
         "[ipc] server sys_recv ok=%u badge=0x%lx (expect 0x%lx) label=0x%x regs0=%lu\n",
         recv_result.is_ok(), static_cast<unsigned long>(recv_result.is_ok() ? recv_result.value() : 0),
         static_cast<unsigned long>(k_ipc_demo_badge), in.label,
         static_cast<unsigned long>(in.regs[0]));
 
-    ipc::message out{};
+    kern::ipc::message out{};
     out.label = 0x5EED;
     out.regs[0] = in.regs[0] + 1;
-    ipc::sys_reply(*g_ipc_table, out);
-    klog::printf("[ipc] server sys_reply sent\n");
+    kern::ipc::sys_reply(*g_ipc_table, out);
+    kern::klog::printf("[ipc] server sys_reply sent\n");
 
-    sched::exit();
+    kern::sched::exit();
 }
 
 void thread_d_client_entry() {
-    ipc::message out{};
+    kern::ipc::message out{};
     out.label = 0x1234;
     out.regs[0] = 41;
 
-    ipc::message in{};
-    auto call_result = ipc::sys_call(*g_ipc_table, g_ipc_send_handle, out, in);
-    klog::printf(
+    kern::ipc::message in{};
+    auto call_result = kern::ipc::sys_call(*g_ipc_table, g_ipc_send_handle, out, in);
+    kern::klog::printf(
         "[ipc] client sys_call ok=%u reply_label=0x%x (expect 0x5eed) reply_regs0=%lu (expect 42)\n",
         call_result.is_ok(), in.label, static_cast<unsigned long>(in.regs[0]));
 
-    sched::exit();
+    kern::sched::exit();
 }
 
 // M7(ipc.md §4/§7) — 페이지 1개를 copy 모드로, 핸들 1개를 두 스레드
@@ -685,10 +685,10 @@ void thread_d_client_entry() {
 // 두 스레드 사이에 copy 모드로 전달 성공"). M6 데모(C/D, endpoint 1개)와
 // 섞이지 않도록 endpoint를 하나 더 둔다 — handle_table은 계속 공유
 // (M4/M6과 같은 "커널 컨텍스트 하나" 단순화).
-object::handle g_ipc2_recv_handle = object::k_invalid_handle;
-object::handle g_ipc2_send_handle = object::k_invalid_handle;
-object::handle g_notify_owner_handle = object::k_invalid_handle;  // G가 H에게 넘길 핸들
-object::handle g_notify_send_handle = object::k_invalid_handle;   // I가 직접 notify할 핸들(같은 객체)
+kern::object::handle g_ipc2_recv_handle = kern::object::k_invalid_handle;
+kern::object::handle g_ipc2_send_handle = kern::object::k_invalid_handle;
+kern::object::handle g_notify_owner_handle = kern::object::k_invalid_handle;  // G가 H에게 넘길 핸들
+kern::object::handle g_notify_send_handle = kern::object::k_invalid_handle;   // I가 직접 notify할 핸들(같은 객체)
 
 uint64_t g_page_source_phys = 0;
 uint64_t g_page_dest_phys = 0;
@@ -697,19 +697,19 @@ constexpr uint32_t k_page_pattern_seed = 0x11223344u;
 constexpr uint64_t k_notify_bits = 0x2ull;
 
 bool demo_ipc2_setup() {
-    void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+    void* ep_mem = kern::mm::slab_alloc(sizeof(kern::object::endpoint));
     if (ep_mem == nullptr) {
         return false;
     }
-    auto* ep = new (ep_mem) object::endpoint();
+    auto* ep = new (ep_mem) kern::object::endpoint();
     auto owner = g_ipc_table->create_owner(
-        object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+        kern::object::object_kind::endpoint, kern::object::k_right_can_send | kern::object::k_right_can_recv, ep);
     if (!owner.is_ok()) {
         return false;
     }
-    auto recv_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_recv,
+    auto recv_proxy = g_ipc_table->create_proxy(owner.value(), kern::object::k_right_can_recv,
                                                  *g_ipc_table, 0, false);
-    auto send_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_send,
+    auto send_proxy = g_ipc_table->create_proxy(owner.value(), kern::object::k_right_can_send,
                                                  *g_ipc_table, 0, false);
     if (!recv_proxy.is_ok() || !send_proxy.is_ok()) {
         return false;
@@ -717,14 +717,14 @@ bool demo_ipc2_setup() {
     g_ipc2_recv_handle = recv_proxy.value();
     g_ipc2_send_handle = send_proxy.value();
 
-    void* n_mem = mm::slab_alloc(sizeof(object::notification));
+    void* n_mem = kern::mm::slab_alloc(sizeof(kern::object::notification));
     if (n_mem == nullptr) {
         return false;
     }
-    auto* n = new (n_mem) object::notification();
+    auto* n = new (n_mem) kern::object::notification();
     // objects.md는 notification 전용 rights 비트를 정의하지 않는다 —
     // 0으로 둔다(어차피 sys_notify/sys_wait는 rights를 검사하지 않는다).
-    auto notify_owner = g_ipc_table->create_owner(object::object_kind::notification, 0, n);
+    auto notify_owner = g_ipc_table->create_owner(kern::object::object_kind::notification, 0, n);
     auto notify_proxy = g_ipc_table->create_proxy(notify_owner.value(), 0, *g_ipc_table, 0, false);
     if (!notify_owner.is_ok() || !notify_proxy.is_ok()) {
         return false;
@@ -732,8 +732,8 @@ bool demo_ipc2_setup() {
     g_notify_owner_handle = notify_owner.value();  // 이걸 G가 H에게 IPC로 위임한다.
     g_notify_send_handle = notify_proxy.value();   // I는 이 프록시로 직접 notify한다.
 
-    auto src_page = mm::alloc_pages(0, 0);
-    auto dst_page = mm::alloc_pages(0, 0);
+    auto src_page = kern::mm::alloc_pages(0, 0);
+    auto dst_page = kern::mm::alloc_pages(0, 0);
     if (!src_page.is_ok() || !dst_page.is_ok()) {
         return false;
     }
@@ -742,8 +742,8 @@ bool demo_ipc2_setup() {
 
     // 소스 페이지에 알려진 패턴을 써 둔다 — 목적지 페이지는 일부러
     // 건드리지 않는다(진짜 복사됐는지 나중에 값으로 구분하기 위해).
-    auto* src_words = static_cast<uint32_t*>(mm::phys_to_virt(g_page_source_phys));
-    for (size_t i = 0; i < mm::k_page_size / sizeof(uint32_t); ++i) {
+    auto* src_words = static_cast<uint32_t*>(kern::mm::phys_to_virt(g_page_source_phys));
+    for (size_t i = 0; i < kern::mm::k_page_size / sizeof(uint32_t); ++i) {
         src_words[i] = k_page_pattern_seed + static_cast<uint32_t>(i);
     }
 
@@ -751,31 +751,31 @@ bool demo_ipc2_setup() {
 }
 
 void thread_g_sender_entry() {
-    ipc::message out{};
+    kern::ipc::message out{};
     out.page_count = 1;
-    out.pages[0] = {reinterpret_cast<uint64_t>(mm::phys_to_virt(g_page_source_phys)),
-                    mm::k_page_size, ipc::transfer_mode::copy};
+    out.pages[0] = {reinterpret_cast<uint64_t>(kern::mm::phys_to_virt(g_page_source_phys)),
+                    kern::mm::k_page_size, kern::ipc::transfer_mode::copy};
     out.handle_count = 1;
     out.handles[0] = {g_notify_owner_handle, 0xFFFFFFFFu};
 
-    ipc::message in{};
-    auto call_result = ipc::sys_call(*g_ipc_table, g_ipc2_send_handle, out, in);
-    klog::printf("[ipc2] sender sys_call ok=%u ack_label=0x%x\n", call_result.is_ok(), in.label);
+    kern::ipc::message in{};
+    auto call_result = kern::ipc::sys_call(*g_ipc_table, g_ipc2_send_handle, out, in);
+    kern::klog::printf("[ipc2] sender sys_call ok=%u ack_label=0x%x\n", call_result.is_ok(), in.label);
 
-    sched::exit();
+    kern::sched::exit();
 }
 
 void thread_h_receiver_entry() {
-    ipc::message in{};
+    kern::ipc::message in{};
     in.page_count = 1;
-    in.pages[0] = {reinterpret_cast<uint64_t>(mm::phys_to_virt(g_page_dest_phys)), mm::k_page_size,
-                   ipc::transfer_mode::copy};
+    in.pages[0] = {reinterpret_cast<uint64_t>(kern::mm::phys_to_virt(g_page_dest_phys)), kern::mm::k_page_size,
+                   kern::ipc::transfer_mode::copy};
 
-    auto recv_result = ipc::sys_recv(*g_ipc_table, g_ipc2_recv_handle, in);
+    auto recv_result = kern::ipc::sys_recv(*g_ipc_table, g_ipc2_recv_handle, in);
 
-    auto* dst_words = static_cast<uint32_t*>(mm::phys_to_virt(g_page_dest_phys));
+    auto* dst_words = static_cast<uint32_t*>(kern::mm::phys_to_virt(g_page_dest_phys));
     bool content_ok = true;
-    for (size_t i = 0; i < mm::k_page_size / sizeof(uint32_t); ++i) {
+    for (size_t i = 0; i < kern::mm::k_page_size / sizeof(uint32_t); ++i) {
         if (dst_words[i] != k_page_pattern_seed + static_cast<uint32_t>(i)) {
             content_ok = false;
             break;
@@ -783,34 +783,34 @@ void thread_h_receiver_entry() {
     }
 
     auto handle_info = g_ipc_table->handle_info(in.handles[0].src_handle);
-    klog::printf(
+    kern::klog::printf(
         "[ipc2] receiver sys_recv ok=%u page_count=%u content_ok=%u handle_count=%u "
         "received_handle_kind=%u (expect notification=%u)\n",
         recv_result.is_ok(), in.page_count, content_ok, in.handle_count,
         handle_info.is_ok() ? static_cast<uint32_t>(handle_info.value().kind) : 0xFF,
-        static_cast<uint32_t>(object::object_kind::notification));
+        static_cast<uint32_t>(kern::object::object_kind::notification));
 
-    ipc::message ack{};
+    kern::ipc::message ack{};
     ack.label = 0xACC0;
-    ipc::sys_reply(*g_ipc_table, ack);
+    kern::ipc::sys_reply(*g_ipc_table, ack);
 
     // 방금 IPC로 받은 새 핸들(원본과 다른 핸들 번호지만 같은 객체를
     // 가리킴)로 직접 기다린다 — 핸들 위임이 "진짜로 쓸 수 있는"
     // 핸들을 만들어 냈음을 보여준다.
-    auto wait_result = ipc::sys_wait(*g_ipc_table, in.handles[0].src_handle);
-    klog::printf("[ipc2] receiver sys_wait ok=%u bits=0x%lx (expect 0x%lx)\n",
+    auto wait_result = kern::ipc::sys_wait(*g_ipc_table, in.handles[0].src_handle);
+    kern::klog::printf("[ipc2] receiver sys_wait ok=%u bits=0x%lx (expect 0x%lx)\n",
                  wait_result.is_ok(),
                  static_cast<unsigned long>(wait_result.is_ok() ? wait_result.value() : 0),
                  static_cast<unsigned long>(k_notify_bits));
 
-    sched::exit();
+    kern::sched::exit();
 }
 
 void thread_i_notifier_entry() {
-    auto notify_result = ipc::sys_notify(*g_ipc_table, g_notify_send_handle, k_notify_bits);
-    klog::printf("[ipc2] notifier sys_notify ok=%u\n", notify_result.is_ok());
+    auto notify_result = kern::ipc::sys_notify(*g_ipc_table, g_notify_send_handle, k_notify_bits);
+    kern::klog::printf("[ipc2] notifier sys_notify ok=%u\n", notify_result.is_ok());
 
-    sched::exit();
+    kern::sched::exit();
 }
 
 // M8(boot.md §4/§6, kernel-bootstrap.md) — initrd에서 initrun ELF를
@@ -821,46 +821,46 @@ void thread_i_notifier_entry() {
 // kernel/include로 옮길 만큼의 재사용 가치가 없다고 판단했다).
 constexpr uint32_t k_initrun_boot_label = 0xB007;
 
-object::handle g_initrun_boot_recv_handle = object::k_invalid_handle;  // 커널(수신) 쪽 핸들
+kern::object::handle g_initrun_boot_recv_handle = kern::object::k_invalid_handle;  // 커널(수신) 쪽 핸들
 
 // initrun이 syscall로 보낸 부팅 성공 알림을 받는다 — 이 스레드가
 // initrun main.cpp 상단 주석이 말하는 "유일한 출력 관찰 수단"이다.
 void thread_initrun_boot_server_entry() {
-    ipc::message in{};
-    auto recv_result = ipc::sys_recv(*g_ipc_table, g_initrun_boot_recv_handle, in);
-    klog::printf(
+    kern::ipc::message in{};
+    auto recv_result = kern::ipc::sys_recv(*g_ipc_table, g_initrun_boot_recv_handle, in);
+    kern::klog::printf(
         "[initrun] kernel received boot call ok=%u label=0x%x (expect 0x%x) - 부팅 성공\n",
         recv_result.is_ok(), in.label, k_initrun_boot_label);
     // M12(system-servers-bringup.md §M12) — main.cpp::test_cpio_and_ini()의
     // 결과. cpio/INI 파서는 호스트 단위 테스트가 없다(mcpack/elf_loader와
     // 같은 이 프로젝트 관례 — QEMU 왕복으로 검증).
-    klog::printf("[initrun] cpio/ini self-test ok=%u\n", static_cast<unsigned>(in.regs[0]));
+    kern::klog::printf("[initrun] cpio/ini self-test ok=%u\n", static_cast<unsigned>(in.regs[0]));
 
-    ipc::message ack{};
+    kern::ipc::message ack{};
     ack.label = 0xB0A0;
-    ipc::sys_reply(*g_ipc_table, ack);
+    kern::ipc::sys_reply(*g_ipc_table, ack);
 
-    sched::exit();
+    kern::sched::exit();
 }
 
 // initrd 파싱 + ELF 로드 + 새 주소공간/핸들 테이블/유저 스레드 생성까지
 // 전부 이 함수 하나가 맡는다(§4의 1~4단계). 실패하면 nullptr — 호출자가
 // klog로 이미 각 단계를 보고했으므로 추가 보고 없이 그냥 포기한다.
-object::thread* setup_initrun_process() {
+kern::object::thread* setup_initrun_process() {
     // 1) endpoint 하나 — 커널(수신) 쪽은 g_ipc_table에 소유 핸들로 둔다
     //    (M6/M7과 같은 "커널 컨텍스트" 관례 — 이 엔드포인트의 서버는
     //    실제로 커널 스레드다).
-    void* ep_mem = mm::slab_alloc(sizeof(object::endpoint));
+    void* ep_mem = kern::mm::slab_alloc(sizeof(kern::object::endpoint));
     if (ep_mem == nullptr) {
         return nullptr;
     }
-    auto* ep = new (ep_mem) object::endpoint();
+    auto* ep = new (ep_mem) kern::object::endpoint();
     auto owner = g_ipc_table->create_owner(
-        object::object_kind::endpoint, object::k_right_can_send | object::k_right_can_recv, ep);
+        kern::object::object_kind::endpoint, kern::object::k_right_can_send | kern::object::k_right_can_recv, ep);
     if (!owner.is_ok()) {
         return nullptr;
     }
-    auto recv_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_recv,
+    auto recv_proxy = g_ipc_table->create_proxy(owner.value(), kern::object::k_right_can_recv,
                                                  *g_ipc_table, 0, false);
     if (!recv_proxy.is_ok()) {
         return nullptr;
@@ -871,14 +871,14 @@ object::thread* setup_initrun_process() {
     //    1이 되도록(handle_table.cpp::allocate_slot이 1부터 채운다) 이
     //    CAN_SEND 프록시를 가장 먼저, 유일하게 만든다 — init/initrun/
     //    main.cpp의 k_boot_endpoint_handle=1 고정 관례가 여기서 성립한다.
-    object::handle_table* initrun_handles = create_handle_table();
+    kern::object::handle_table* initrun_handles = create_handle_table();
     if (initrun_handles == nullptr) {
         return nullptr;
     }
-    auto send_proxy = g_ipc_table->create_proxy(owner.value(), object::k_right_can_send,
+    auto send_proxy = g_ipc_table->create_proxy(owner.value(), kern::object::k_right_can_send,
                                                  *initrun_handles, 0, false);
     if (!send_proxy.is_ok() || send_proxy.value() != 1) {
-        klog::printf("[initrun] boot send handle != 1 (got %u) - main.cpp 고정 관례 위반\n",
+        kern::klog::printf("[initrun] boot send handle != 1 (got %u) - main.cpp 고정 관례 위반\n",
                      send_proxy.is_ok() ? send_proxy.value() : 0);
         return nullptr;
     }
@@ -886,8 +886,8 @@ object::thread* setup_initrun_process() {
     // 3) initrd(§5, MCPACK v1)에서 "initrun" 엔트리를 찾는다.
     uint64_t initrd_size =
         static_cast<uint64_t>(g_embedded_initrd_end - g_embedded_initrd_start);
-    auto entry = initrd::find_entry(g_embedded_initrd_start, initrd_size, "initrun");
-    klog::printf("[initrun] mcpack find_entry ok=%u size=0x%lx\n", entry.is_ok(),
+    auto entry = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "initrun");
+    kern::klog::printf("[initrun] mcpack find_entry ok=%u size=0x%lx\n", entry.is_ok(),
                  static_cast<unsigned long>(entry.is_ok() ? entry.value().size : 0));
     if (!entry.is_ok()) {
         return nullptr;
@@ -901,16 +901,16 @@ object::thread* setup_initrun_process() {
     }
     uint64_t pml4_phys = root.value();
 
-    void* space_mem = mm::slab_alloc(sizeof(object::address_space));
+    void* space_mem = kern::mm::slab_alloc(sizeof(kern::object::address_space));
     if (space_mem == nullptr) {
         return nullptr;
     }
-    auto* space = new (space_mem) object::address_space();
+    auto* space = new (space_mem) kern::object::address_space();
     space->trusted = true;
     space->page_table_root = pml4_phys;
 
     auto load_result = arch_x86_64::load_elf(pml4_phys, entry.value().data, entry.value().size);
-    klog::printf("[initrun] load_elf ok=%u entry=0x%lx\n", load_result.is_ok(),
+    kern::klog::printf("[initrun] load_elf ok=%u entry=0x%lx\n", load_result.is_ok(),
                  static_cast<unsigned long>(load_result.is_ok() ? load_result.value() : 0));
     if (!load_result.is_ok()) {
         return nullptr;
@@ -921,11 +921,11 @@ object::thread* setup_initrun_process() {
     constexpr uint64_t k_user_stack_top = 0x0000700000000000ull;
     constexpr uint32_t k_user_stack_pages = 4;
     for (uint32_t i = 0; i < k_user_stack_pages; ++i) {
-        auto page = mm::alloc_pages(0, 0);
+        auto page = kern::mm::alloc_pages(0, 0);
         if (!page.is_ok()) {
             return nullptr;
         }
-        uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * mm::k_page_size;
+        uint64_t vaddr = k_user_stack_top - (k_user_stack_pages - i) * kern::mm::k_page_size;
         auto mapped = arch_x86_64::map_page(
             pml4_phys, vaddr, page.value(),
             arch_x86_64::page_perm::write | arch_x86_64::page_perm::user);
@@ -940,7 +940,7 @@ object::thread* setup_initrun_process() {
     //    memory_map_addr 등 물리주소 필드는 유저 쪽에서 아직 무의미하다
     //    (init/initrun/main.cpp는 이 내용을 읽지 않는다, 위 주석 참고).
     constexpr uint64_t k_boot_info_user_vaddr = 0x0000700000001000ull;
-    auto bi_page = mm::alloc_pages(0, 0);
+    auto bi_page = kern::mm::alloc_pages(0, 0);
     if (!bi_page.is_ok()) {
         return nullptr;
     }
@@ -965,7 +965,7 @@ object::thread* setup_initrun_process() {
     // 는 커널이 부팅 중 실제로 BAR를 배정한 뒤 채우는 런타임 전용
     // 필드라 disk.cfg에는 존재하지 않는다(boot_info.hpp 상단 주석).
     constexpr uint64_t k_disk_cfg_static_size = 5 * sizeof(uint32_t);
-    auto disk_cfg_entry = initrd::find_entry(g_embedded_initrd_start, initrd_size, "disk.cfg");
+    auto disk_cfg_entry = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "disk.cfg");
     if (disk_cfg_entry.is_ok() && disk_cfg_entry.value().size == k_disk_cfg_static_size) {
         __builtin_memcpy(&bi.boot_device, disk_cfg_entry.value().data, k_disk_cfg_static_size);
     }
@@ -981,7 +981,7 @@ object::thread* setup_initrun_process() {
             arch_x86_64::assign_virtio_blk_bar(g_mcfg.ecam_base_phys, bi.boot_device.pci_bus,
                                                 bi.boot_device.pci_device,
                                                 bi.boot_device.pci_function);
-        klog::printf("[pci] assign_virtio_blk_bar ok=%u vendor=0x%x device=0x%x io_base=0x%x\n",
+        kern::klog::printf("[pci] assign_virtio_blk_bar ok=%u vendor=0x%x device=0x%x io_base=0x%x\n",
                      bar.ok, bar.vendor_id, bar.device_id, bar.io_port_base);
         if (bar.ok) {
             bi.boot_device.io_port_ok = 1;
@@ -989,8 +989,8 @@ object::thread* setup_initrun_process() {
         }
     }
 
-    void* bi_virt = mm::phys_to_virt(bi_page.value());
-    __builtin_memset(bi_virt, 0, mm::k_page_size);
+    void* bi_virt = kern::mm::phys_to_virt(bi_page.value());
+    __builtin_memset(bi_virt, 0, kern::mm::k_page_size);
     __builtin_memcpy(bi_virt, &bi, sizeof(bi));
     auto bi_mapped =
         arch_x86_64::map_page(pml4_phys, k_boot_info_user_vaddr, bi_page.value(),
@@ -1005,17 +1005,17 @@ object::thread* setup_initrun_process() {
     // CR3로 전환하기 전, 커널 컨텍스트) 그대로 읽을 수 있다 — 유저 접근
     // 가능한 새 페이지에 복사해야 initrun(ring 3)이 읽을 수 있다.
     uint64_t self_elf_size = entry.value().size;
-    uint64_t self_elf_pages = (self_elf_size + mm::k_page_size - 1) / mm::k_page_size;
+    uint64_t self_elf_pages = (self_elf_size + kern::mm::k_page_size - 1) / kern::mm::k_page_size;
     for (uint64_t i = 0; i < self_elf_pages; ++i) {
-        auto page = mm::alloc_pages(0, 0);
+        auto page = kern::mm::alloc_pages(0, 0);
         if (!page.is_ok()) {
             return nullptr;
         }
-        void* virt = mm::phys_to_virt(page.value());
-        uint64_t offset = i * mm::k_page_size;
+        void* virt = kern::mm::phys_to_virt(page.value());
+        uint64_t offset = i * kern::mm::k_page_size;
         uint64_t remaining = self_elf_size - offset;
-        uint64_t copy_len = remaining < mm::k_page_size ? remaining : mm::k_page_size;
-        __builtin_memset(virt, 0, mm::k_page_size);
+        uint64_t copy_len = remaining < kern::mm::k_page_size ? remaining : kern::mm::k_page_size;
+        __builtin_memset(virt, 0, kern::mm::k_page_size);
         __builtin_memcpy(virt, entry.value().data + offset, copy_len);
         auto mapped = arch_x86_64::map_page(pml4_phys, uapi::k_m12_self_elf_user_vaddr + offset,
                                              page.value(), arch_x86_64::page_perm::user);
@@ -1024,11 +1024,11 @@ object::thread* setup_initrun_process() {
         }
     }
 
-    auto info_page = mm::alloc_pages(0, 0);
+    auto info_page = kern::mm::alloc_pages(0, 0);
     if (!info_page.is_ok()) {
         return nullptr;
     }
-    auto* self_info = static_cast<uapi::m12_self_info*>(mm::phys_to_virt(info_page.value()));
+    auto* self_info = static_cast<uapi::m12_self_info*>(kern::mm::phys_to_virt(info_page.value()));
     self_info->elf_addr = uapi::k_m12_self_elf_user_vaddr;
     self_info->elf_size = self_elf_size;
     auto info_mapped = arch_x86_64::map_page(pml4_phys, uapi::k_m12_self_info_user_vaddr,
@@ -1037,7 +1037,7 @@ object::thread* setup_initrun_process() {
         return nullptr;
     }
 
-    return sched::create_user_thread(load_result.value(), k_user_stack_top,
+    return kern::sched::create_user_thread(load_result.value(), k_user_stack_top,
                                       k_boot_info_user_vaddr, space, initrun_handles);
 }
 
@@ -1049,36 +1049,36 @@ object::thread* setup_initrun_process() {
 // sys_debug_log로 보고한다 — 타이머 선점이 없으면 counter의 로그가
 // 전혀 늘어나지 않는다는 것이 이 데모의 검증 방법이다. 둘 다 handle이
 // 전혀 없는(create_endpoint=false, inherited_handle_count=0) 완전히
-// 독립된 프로세스라 sched::current()(지금은 아직 스케줄러 시작 전이라
+// 독립된 프로세스라 kern::sched::current()(지금은 아직 스케줄러 시작 전이라
 // nullptr)를 건드리지 않는 process_spawn() 경로만 탄다.
 void spawn_preempt_demo_processes() {
     uint64_t initrd_size = static_cast<uint64_t>(g_embedded_initrd_end - g_embedded_initrd_start);
     uint32_t unused_endpoint_handle = 0;
     uint32_t unused_thread_handle = 0;
 
-    auto busy = initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_busy");
-    klog::printf("[preempt-demo] find preempt_busy ok=%u\n", busy.is_ok());
+    auto busy = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_busy");
+    kern::klog::printf("[preempt-demo] find preempt_busy ok=%u\n", busy.is_ok());
     if (busy.is_ok()) {
         auto err = arch_x86_64::process_spawn(busy.value().data, busy.value().size, nullptr, 0,
                                                /*grant_trusted=*/false, /*create_endpoint=*/false,
                                                nullptr, 0, unused_endpoint_handle,
                                                unused_thread_handle);
-        klog::printf("[preempt-demo] spawn busy err=%u\n", static_cast<uint32_t>(err));
+        kern::klog::printf("[preempt-demo] spawn busy err=%u\n", static_cast<uint32_t>(err));
     }
 
-    auto counter = initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_counter");
-    klog::printf("[preempt-demo] find preempt_counter ok=%u\n", counter.is_ok());
+    auto counter = kern::initrd::find_entry(g_embedded_initrd_start, initrd_size, "preempt_counter");
+    kern::klog::printf("[preempt-demo] find preempt_counter ok=%u\n", counter.is_ok());
     if (counter.is_ok()) {
         auto err = arch_x86_64::process_spawn(counter.value().data, counter.value().size, nullptr,
                                                0, /*grant_trusted=*/false,
                                                /*create_endpoint=*/false, nullptr, 0,
                                                unused_endpoint_handle, unused_thread_handle);
-        klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
+        kern::klog::printf("[preempt-demo] spawn counter err=%u\n", static_cast<uint32_t>(err));
     }
 }
 
 [[noreturn]] void demo_sched() {
-    sched::init();
+    kern::sched::init();
     arch_x86_64::install_syscall_entry();  // M8 — 첫 유저 스레드가 뜨기 전에 STAR/LSTAR/FMASK를 설정해 둔다.
     // M12(ADR-143) — usermode.S가 M8 시점에 이미 "TSS는 ring3→ring0
     // 방향에만 필요하다"고 정확히 지적해 뒀던 그 방향이, 유저 스레드의
@@ -1086,116 +1086,116 @@ void spawn_preempt_demo_processes() {
     // 전에 반드시 먼저 있어야 한다.
     arch_x86_64::init_tss();
 
-    object::thread* a =
-        sched::create_kernel_thread(&thread_a_entry, object::priority_band::kernel, 0);
-    object::thread* b =
-        sched::create_kernel_thread(&thread_b_entry, object::priority_band::kernel, 0);
-    klog::printf("[sched] create_kernel_thread a=%u b=%u\n", a != nullptr, b != nullptr);
+    kern::object::thread* a =
+        kern::sched::create_kernel_thread(&thread_a_entry, kern::object::priority_band::kernel, 0);
+    kern::object::thread* b =
+        kern::sched::create_kernel_thread(&thread_b_entry, kern::object::priority_band::kernel, 0);
+    kern::klog::printf("[sched] create_kernel_thread a=%u b=%u\n", a != nullptr, b != nullptr);
 
-    object::thread* fpu_a =
-        sched::create_kernel_thread(&thread_fpu_a_entry, object::priority_band::kernel, 0);
-    object::thread* fpu_b =
-        sched::create_kernel_thread(&thread_fpu_b_entry, object::priority_band::kernel, 0);
-    klog::printf("[fpu] create_kernel_thread a=%u b=%u\n", fpu_a != nullptr, fpu_b != nullptr);
+    kern::object::thread* fpu_a =
+        kern::sched::create_kernel_thread(&thread_fpu_a_entry, kern::object::priority_band::kernel, 0);
+    kern::object::thread* fpu_b =
+        kern::sched::create_kernel_thread(&thread_fpu_b_entry, kern::object::priority_band::kernel, 0);
+    kern::klog::printf("[fpu] create_kernel_thread a=%u b=%u\n", fpu_a != nullptr, fpu_b != nullptr);
 
-    object::thread* fpu_c =
-        sched::create_kernel_thread(&thread_fpu_c_entry, object::priority_band::kernel, 0);
-    klog::printf("[fpu-lazy] create_kernel_thread c=%u\n", fpu_c != nullptr);
+    kern::object::thread* fpu_c =
+        kern::sched::create_kernel_thread(&thread_fpu_c_entry, kern::object::priority_band::kernel, 0);
+    kern::klog::printf("[fpu-lazy] create_kernel_thread c=%u\n", fpu_c != nullptr);
 
-    // M11(ADR-053) — preferred_node=1 고정. mm::node_count()가 1이면
+    // M11(ADR-053) — preferred_node=1 고정. kern::mm::node_count()가 1이면
     // enqueue()가 1 % 1 = 0으로 접어 그냥 노드 0에 들어간다(무해).
-    object::thread* numa1 =
-        sched::create_kernel_thread(&thread_numa_node1_entry, object::priority_band::kernel, 1);
-    klog::printf("[numa-sched] create_kernel_thread node1=%u\n", numa1 != nullptr);
+    kern::object::thread* numa1 =
+        kern::sched::create_kernel_thread(&thread_numa_node1_entry, kern::object::priority_band::kernel, 1);
+    kern::klog::printf("[numa-sched] create_kernel_thread node1=%u\n", numa1 != nullptr);
 
     bool ipc_ready = demo_ipc_setup();
-    klog::printf("[ipc] setup ok=%u\n", ipc_ready);
+    kern::klog::printf("[ipc] setup ok=%u\n", ipc_ready);
 
-    object::thread* c = nullptr;
-    object::thread* d = nullptr;
+    kern::object::thread* c = nullptr;
+    kern::object::thread* d = nullptr;
     if (ipc_ready) {
-        c = sched::create_kernel_thread(&thread_c_server_entry, object::priority_band::kernel, 0);
-        d = sched::create_kernel_thread(&thread_d_client_entry, object::priority_band::kernel, 0);
+        c = kern::sched::create_kernel_thread(&thread_c_server_entry, kern::object::priority_band::kernel, 0);
+        d = kern::sched::create_kernel_thread(&thread_d_client_entry, kern::object::priority_band::kernel, 0);
     }
 
     bool ipc2_ready = demo_ipc2_setup();
-    klog::printf("[ipc2] setup ok=%u\n", ipc2_ready);
+    kern::klog::printf("[ipc2] setup ok=%u\n", ipc2_ready);
 
-    object::thread* g = nullptr;
-    object::thread* hh = nullptr;
-    object::thread* ii = nullptr;
+    kern::object::thread* g = nullptr;
+    kern::object::thread* hh = nullptr;
+    kern::object::thread* ii = nullptr;
     if (ipc2_ready) {
-        g = sched::create_kernel_thread(&thread_g_sender_entry, object::priority_band::kernel, 0);
-        hh = sched::create_kernel_thread(&thread_h_receiver_entry, object::priority_band::kernel,
+        g = kern::sched::create_kernel_thread(&thread_g_sender_entry, kern::object::priority_band::kernel, 0);
+        hh = kern::sched::create_kernel_thread(&thread_h_receiver_entry, kern::object::priority_band::kernel,
                                           0);
-        ii = sched::create_kernel_thread(&thread_i_notifier_entry, object::priority_band::kernel,
+        ii = kern::sched::create_kernel_thread(&thread_i_notifier_entry, kern::object::priority_band::kernel,
                                           0);
     }
 
     // M8 — g_ipc_table이 demo_ipc_setup()에서 이미 만들어진 뒤라야
     // setup_initrun_process()가 그 위에 boot endpoint를 만들 수 있다.
-    object::thread* k = nullptr;
-    object::thread* initrun = nullptr;
+    kern::object::thread* k = nullptr;
+    kern::object::thread* initrun = nullptr;
     if (ipc_ready) {
-        k = sched::create_kernel_thread(&thread_initrun_boot_server_entry,
-                                         object::priority_band::kernel, 0);
+        k = kern::sched::create_kernel_thread(&thread_initrun_boot_server_entry,
+                                         kern::object::priority_band::kernel, 0);
         initrun = setup_initrun_process();
     }
-    klog::printf("[initrun] setup_initrun_process ok=%u\n", initrun != nullptr);
+    kern::klog::printf("[initrun] setup_initrun_process ok=%u\n", initrun != nullptr);
 
     spawn_preempt_demo_processes();
 
     if (a != nullptr) {
-        sched::enqueue(*a);
+        kern::sched::enqueue(*a);
     }
     if (b != nullptr) {
-        sched::enqueue(*b);
+        kern::sched::enqueue(*b);
     }
     if (fpu_a != nullptr) {
-        sched::enqueue(*fpu_a);
+        kern::sched::enqueue(*fpu_a);
     }
     if (fpu_b != nullptr) {
-        sched::enqueue(*fpu_b);
+        kern::sched::enqueue(*fpu_b);
     }
     if (fpu_c != nullptr) {
-        sched::enqueue(*fpu_c);
+        kern::sched::enqueue(*fpu_c);
     }
     if (numa1 != nullptr) {
-        sched::enqueue(*numa1);
+        kern::sched::enqueue(*numa1);
     }
     if (c != nullptr) {
-        sched::enqueue(*c);
+        kern::sched::enqueue(*c);
     }
     if (d != nullptr) {
-        sched::enqueue(*d);
+        kern::sched::enqueue(*d);
     }
     if (g != nullptr) {
-        sched::enqueue(*g);
+        kern::sched::enqueue(*g);
     }
     if (hh != nullptr) {
-        sched::enqueue(*hh);
+        kern::sched::enqueue(*hh);
     }
     if (ii != nullptr) {
-        sched::enqueue(*ii);
+        kern::sched::enqueue(*ii);
     }
     if (k != nullptr) {
-        sched::enqueue(*k);
+        kern::sched::enqueue(*k);
     }
     if (initrun != nullptr) {
-        sched::enqueue(*initrun);
+        kern::sched::enqueue(*initrun);
     }
 
     // 여기서부터는 절대 돌아오지 않는다 — 이후로는 위 스레드들 사이의
     // yield()/sys_call/sys_recv/sys_reply/sys_notify/sys_wait/SYSCALL로만
     // 제어가 옮겨간다(M8부터 initrun은 유저모드에서 SYSCALL로 들어온다).
-    sched::start();
+    kern::sched::start();
 }
 
 }  // namespace
 
 extern "C" [[noreturn]] void kernel_main() {
-    klog::init();
-    klog::printf("hello from kernel\n");
+    kern::klog::init();
+    kern::klog::printf("hello from kernel\n");
 
     // M10(smp-fpu-bringup.md, ADR-055) — IDT를 가장 먼저 건다. 이후의
     // 모든 예외(원인 불명 정지 포함)가 catch-all로 진단 가능해진다.
@@ -1210,7 +1210,7 @@ extern "C" [[noreturn]] void kernel_main() {
     g_real_arch_data_addr = real_arch_data_addr;
     acpi_topology acpi = demo_acpi_lapic(real_arch_data_addr);
 
-    // M11(ADR-036/053) — sched::init()/demo_sched()보다 반드시 먼저다:
+    // M11(ADR-036/053) — kern::sched::init()/demo_sched()보다 반드시 먼저다:
     // scheduler.cpp의 work-stealing이 arch_current_node_id()로 "지금
     // 코어가 속한 노드"를 물어보는데, 이 표를 먼저 채워 둬야 한다.
     arch_x86_64::set_cpu_node_map(acpi.madt, acpi.srat);
@@ -1219,10 +1219,10 @@ extern "C" [[noreturn]] void kernel_main() {
     demo_frame_refcount();
     demo_cow_clone();
 
-    // M10(ADR-055) — mm::init()이 끝난 뒤에야 AP 커널 스택을 확보할 수
-    // 있다(bring_up_aps가 mm::alloc_pages를 쓴다).
+    // M10(ADR-055) — kern::mm::init()이 끝난 뒤에야 AP 커널 스택을 확보할 수
+    // 있다(bring_up_aps가 kern::mm::alloc_pages를 쓴다).
     arch_x86_64::bring_up_aps(acpi.madt);
-    klog::printf("[smp] online_cpu_count=%u\n", arch_x86_64::online_cpu_count());
+    kern::klog::printf("[smp] online_cpu_count=%u\n", arch_x86_64::online_cpu_count());
 
     demo_object_model();
     demo_page_table();

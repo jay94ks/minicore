@@ -6,17 +6,17 @@
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
 
-namespace object {
+namespace kern::object {
 
 handle_table* create_handle_table() {
     // handle_table.hpp 상단 주석 참고 — M4(kernel_main.cpp)가 쓰던 것과
     // 동일한 크기(order 2 = 16KiB, sizeof(handle_table) 여유 있게 담김).
     constexpr uint32_t k_order = 2;
-    auto page = mm::alloc_pages(k_order, 0);
+    auto page = kern::mm::alloc_pages(k_order, 0);
     if (!page.is_ok()) {
         return nullptr;
     }
-    void* mem = mm::phys_to_virt(page.value());
+    void* mem = kern::mm::phys_to_virt(page.value());
     return new (mem) handle_table();
 }
 
@@ -144,4 +144,4 @@ const handle_entry* handle_table::debug_entry(handle h) const {
     return &entries_[h];
 }
 
-}  // namespace object
+}  // namespace kern::object

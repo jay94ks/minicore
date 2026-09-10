@@ -1,4 +1,4 @@
-// x86_64 klog::init()/putc() — 16550 호환 UART(COM1, I/O 포트 0x3F8)
+// x86_64 kern::klog::init()/putc() — 16550 호환 UART(COM1, I/O 포트 0x3F8)
 // (docs/spec/debug-console.md §2.1, §3).
 #include "klog.hpp"
 
@@ -33,7 +33,7 @@ inline uint8_t inb(uint16_t port) {
 
 }  // namespace
 
-namespace klog {
+namespace kern::klog {
 
 void init() {
     outb(k_com1_base + k_reg_ier, 0x00);  // 인터럽트 비활성화 (폴링 모드)
@@ -54,4 +54,4 @@ void putc(char c) {
     outb(k_com1_base + k_reg_data, static_cast<uint8_t>(c));
 }
 
-}  // namespace klog
+}  // namespace kern::klog

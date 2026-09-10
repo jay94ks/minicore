@@ -17,14 +17,14 @@ constexpr uint64_t k_ap_trampoline_size = 0x1000;
 // MADT에서 얻은 결과로 BSP를 제외한 모든 AP를 하나씩 순차적으로
 // 기동한다(ADR-055 — "즉시 전부", 다만 온라인 확인까지는 한 번에 하나씩
 // 진행해 mailbox 하나로 충분하게 한다). lapic_init()이 이미 호출된
-// 뒤, 그리고 mm::init()이 이미 끝난 뒤(AP 커널 스택을 이 함수가 직접
+// 뒤, 그리고 kern::mm::init()이 이미 끝난 뒤(AP 커널 스택을 이 함수가 직접
 // 할당한다) 호출해야 한다.
 void bring_up_aps(const madt_result& madt);
 
 uint32_t online_cpu_count();
 
 // M11(ADR-036) — SRAT가 준 cpu→node 매핑을 apic_id로 색인해 저장한다.
-// kernel_main이 acpi.cpp 파싱 직후, sched::init() 이전에 한 번 호출한다
+// kernel_main이 acpi.cpp 파싱 직후, kern::sched::init() 이전에 한 번 호출한다
 // — bring_up_aps()와는 독립적이다(코어 온라인 여부와 무관하게 매핑
 // 자체는 항상 알 필요가 있다).
 void set_cpu_node_map(const madt_result& madt, const srat_slit_result& srat);

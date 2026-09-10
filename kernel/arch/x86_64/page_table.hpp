@@ -38,7 +38,7 @@ enum class page_perm : uint32_t {
     // 페이지는 "권한이 없어서 못 쓰는 게 아니라 COW라 복사가 필요할
     // 뿐"이라는 뜻 — page_fault.cpp가 진짜 권한 위반과 구분하는 유일한
     // 근거다. COW 클론(같은 파일::clone_address_space_cow)이 부모/자식
-    // 양쪽 PTE에 이 비트를 세우고 mm::frame_add_ref를 부른다.
+    // 양쪽 PTE에 이 비트를 세우고 kern::mm::frame_add_ref를 부른다.
     cow = 1u << 3,
 };
 
@@ -74,7 +74,7 @@ page_query_result query_page(uint64_t pml4_phys, uint64_t virt);
 // 저지대 GDT 항등 매핑과 256 이상의 커널/physmap은 create_address_space_root와
 // 같은 정책으로 그대로 공유한다)에 present인 모든 리프 페이지를 새
 // 주소공간에 COW로 복제한다: 양쪽 다 write를 떼고 page_perm::cow를
-// 세운 뒤 mm::frame_add_ref(phys)를 한 번 부른다(0→1, "실소유자가
+// 세운 뒤 kern::mm::frame_add_ref(phys)를 한 번 부른다(0→1, "실소유자가
 // 이제 둘"이라는 뜻 — page_allocator.hpp의 값 의미 참고). 실제 쓰기
 // 시점의 진짜 분기(그대로 쓰기 재개 vs 새 프레임에 복사)는
 // page_fault.cpp가 담당한다.

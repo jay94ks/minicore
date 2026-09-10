@@ -10,7 +10,7 @@ namespace arch_x86_64 {
 
 // base_phys는 acpi.hpp가 MADT(또는 Local APIC Address Override 엔트리)
 // 에서 얻은 LAPIC MMIO 물리주소(기본값 0xFEE00000, Intel SDM Vol.3
-// §11.4.1) — mm::phys_to_virt로 physmap을 통해 접근한다(paging_setup.cpp가
+// §11.4.1) — kern::mm::phys_to_virt로 physmap을 통해 접근한다(paging_setup.cpp가
 // 부팅 시점에 이미 512GiB 전체를 항등 매핑해 두므로 이 MMIO 대상도
 // 별도 매핑 없이 바로 접근 가능하다). BSP가 한 번만 호출한다(가상주소
 // 매핑은 전역이라 코어마다 다시 계산할 필요 없다) — 이후 각 AP는
@@ -42,7 +42,7 @@ void lapic_send_fixed_ipi(uint32_t target_apic_id, uint8_t vector);
 // M21(general-purpose-completion.md §M21, ADR-176) — 이 코어의 LAPIC
 // 타이머를 주기(periodic) 모드로 재프로그램해 vector로 반복 인터럽트를
 // 건다. **BSP에서만 호출한다** — AP는 아직(M10/M11 결정 그대로)
-// 협조적 스케줄러의 run_queue에 전혀 참여하지 않는다(sched::current()가
+// 협조적 스케줄러의 run_queue에 전혀 참여하지 않는다(kern::sched::current()가
 // 코어별이 아니라 전역 하나뿐이다, scheduler.cpp). AP에서 이 함수를
 // 부르면 그 코어의 타이머 틱이 BSP의 g_current를 잘못 건드리게 되므로
 // (smp.cpp의 AP 진입부가 이 함수를 호출하지 않는 이유) 호출하지 않는다.

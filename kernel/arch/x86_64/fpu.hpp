@@ -29,13 +29,13 @@ void init_fpu();
 // 선언과 같은 관례).
 extern "C" void arch_x86_64_handle_nm_trap();
 
-namespace object {
+namespace kern::object {
 struct thread;
-}  // namespace object
+}  // namespace kern::object
 
-// kernel/core/sched/scheduler.cpp(M11b, ADR-133 §결정3)가 sched::exit()
+// kernel/core/sched/scheduler.cpp(M11b, ADR-133 §결정3)가 kern::sched::exit()
 // 에서 부르는 HAL 훅 — 영구 종료하는 스레드가 어느 코어의 FPU
 // 소유자였다면 그 기록을 지운다(끊어진 스레드를 계속 "소유자"로
 // 가리키는 채로 남지 않도록). ADR-002와 같은 최소 결합 관례 —
 // scheduler.cpp는 g_fpu_owner의 존재 자체를 몰라도 된다.
-extern "C" void arch_fpu_thread_exiting(object::thread* t);
+extern "C" void arch_fpu_thread_exiting(kern::object::thread* t);

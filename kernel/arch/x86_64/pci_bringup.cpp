@@ -27,7 +27,7 @@ uint64_t config_addr(uint64_t ecam_base, uint32_t bus, uint32_t device, uint32_t
 }
 
 volatile uint8_t* config_ptr(uint64_t config_base, uint32_t offset) {
-    return static_cast<volatile uint8_t*>(mm::phys_to_virt(config_base + offset));
+    return static_cast<volatile uint8_t*>(kern::mm::phys_to_virt(config_base + offset));
 }
 
 uint16_t read16(uint64_t config_base, uint32_t offset) {

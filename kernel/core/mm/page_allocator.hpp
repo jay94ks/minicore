@@ -24,7 +24,7 @@
 
 #include "boot_info.hpp"
 
-namespace mm {
+namespace kern::mm {
 
 constexpr uint32_t k_page_size = 4096;
 constexpr uint32_t k_max_order = 10;            // order N = 4KiB << N (최대 4MiB)
@@ -108,7 +108,7 @@ pool_stats stats(uint32_t node);
 // 노드 j까지의 거리(값이 작을수록 가깝다, ACPI 관례상 로컬=10). 등록
 // 전까지 alloc_pages()의 노드 폴백은 M1~M10과 동일한 순서(노드 번호
 // 순 라운드로빈)를 그대로 쓴다 — 이 함수를 부르는 순간부터만 "가까운
-// 노드부터"(ADR-054) 순서로 바뀐다. node_count는 mm::node_count()와
+// 노드부터"(ADR-054) 순서로 바뀐다. node_count는 kern::mm::node_count()와
 // 같아야 한다(다르면 무시하고 기존 순서를 유지).
 void set_node_distance(uint32_t node_count, const uint8_t* distance);
 
@@ -123,7 +123,7 @@ void set_node_distance(uint32_t node_count, const uint8_t* distance);
 // 이만큼 더 있다"(실소유자 수는 이 값+1) — COW 클론이 프레임을 다른
 // 주소공간과 공유하게 만들 때마다 1씩 늘어난다.
 //
-// mm::init() 시점에 보이는 최대 물리주소를 기준으로 크기를 정해
+// kern::mm::init() 시점에 보이는 최대 물리주소를 기준으로 크기를 정해
 // order-10(4MiB) 블록 하나에 담는다 — 이 상한(4GiB 물리 메모리까지
 // 추적 가능, uint32_t 엔트리 기준)을 넘는 시스템은 이 프로젝트의
 // QEMU 개발 규모(수백 MiB~수 GiB)를 크게 벗어나므로 LIBK_PANIC한다.
@@ -141,4 +141,4 @@ bool frame_release(uint64_t physical_address);
 // 현재 "나 말고 이만큼 더 있다" 값을 그냥 조회한다(변경 없음).
 uint32_t frame_ref_count(uint64_t physical_address);
 
-}  // namespace mm
+}  // namespace kern::mm
