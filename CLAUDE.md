@@ -584,20 +584,24 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   준비해 둔 `SYS_pipe2`(293)가 아니라 `SYS_pipe`로 왔다 — 처음엔
   그대로 `-ENOSYS`로 떨어졌고, 둘 다 같은 핸들러로 처리하도록
   케이스를 합쳐 해결했다.
-  **M52는 착수했으나 사용자 결정으로 잠시 멈췄다**(2026-09-11) —
-  BusyBox를 `third_party/busybox`(release `1_36_1`)로 submodule만
-  추가한 상태다(빌드 연결은 아직 안 함). 착수 중 발견한 진짜 장벽
-  하나를 **OPEN-74**로 등록했다: BusyBox의 Makefile(`scripts/
-  trylink`)은 `$(CC)`가 컴파일과 링크를 한 번에 다 하는 정상적인
-  hosted gcc/clang이라고 전제하는데, 이 저장소는 정확히 그
-  반대다(ADR-020/M38 — clang은 컴파일에만, 최종 링크는 `ld.lld`를
-  커스텀 link.ld와 함께 직접 부른다). 실제로 손으로
-  `-fuse-ld=lld`를 줘서 clang을 링커로 써 봤더니, 이 Windows
-  호스트에서 그 플래그가 조용히 무시되고 MSYS2 gcc의 collect2로
-  새는 것까지 직접 확인했다(M38이 겪은 것과 같은 부류의 문제).
-  `trylink`는 그 외에도 `int main(){}`을 실제로 컴파일+링크해 보는
-  식의 여러 "hosted 환경 가정" 프로브를 한다 — 풀려면 컴파일/링크
-  모드를 구분해 후자를 `ld.lld` 호출로 바꿔치는 `CC` 셈 스크립트를
-  새로 만들고 `third_party/patches/busybox/`(ADR-022 관례)로
-  `trylink`의 프로브를 우회시켜야 한다는 것까지는 파악했다 — 다음
-  대화에서 이어간다.
+  **M52는 착수 중 방향을 바꿨다**(2026-09-11, ADR-221): BusyBox를
+  `third_party/busybox`(release `1_36_1`)로 vendoring까지는
+  됐지만, 빌드 연결 중 서로 다른 두 층위의 환경 문제를 만났다 —
+  (1) BusyBox의 Makefile(`scripts/trylink`)이 `$(CC)` 하나가
+  컴파일+링크를 다 하는 정상적인 hosted gcc/clang을 전제하는데,
+  이 저장소는 정확히 반대(clang은 컴파일만, 최종 링크는 `ld.lld`
+  직접 호출, ADR-020/M38)라 안 맞았다 — 이건 컴파일/링크 모드를
+  구분해 링크를 `ld.lld` 호출로 바꿔치는 `CC` 셈 스크립트로 실제로
+  풀었다. (2) 그 뒤 Kconfig 호스트 도구(`fixdep`)조차 이 MSYS2
+  설치의 호스트 `gcc`에 표준 헤더 패키지(`msys2-runtime-*-devel`)
+  가 없어 컴파일이 안 됐다 — 패키지 설치로 고칠 수 있는 문제였지만,
+  사용자가 이 시점에서 **BusyBox 도입 자체를 철회하고 셸/coreutils
+  를 이 저장소에서 직접 작성**하기로 결정했다. 정적으로 이
+  저장소의 musl에 링크한다는 원래 결정(ADR-203)은 그대로 유지되고,
+  `userland/musl-hello`/`pipe-test`가 이미 증명한 CMake+clang+
+  `ld.lld` 빌드 경로를 그대로 새 셸/coreutils에도 쓴다 — 바뀐 건
+  "어디서 소스를 가져오는가"뿐이다. `third_party/busybox`
+  submodule과 `tools/busybox-cc-shim.sh`는 되돌렸다. OPEN-74는
+  "그 문제 자체가 더 이상 적용되지 않는 대상에 대한 것이었다"는
+  뜻으로 ADR-221로 해소 처리했다. 다음 대화에서 자체 셸/coreutils
+  구현으로 M52를 이어간다.

@@ -811,3 +811,75 @@
   "fd-3" 오프셋 관례)와 달리 fd 번호로 직접 인덱싱한다 — 새 fd를
   할당할 때(open()/pipe2()) 두 표 모두와 충돌하지 않는지 확인하는
   `fd_is_free()`를 새로 두었다.
+
+## ADR-221. M52 방향 전환: BusyBox(서드파티) 도입 철회, 셸/coreutils를 이 저장소에서 직접 작성 — 정적 musl 링크 자체는 그대로 유지
+
+- **상태**: 확정 (2026-09-11), [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M52 착수 중 사용자 결정.
+- **배경**: M52는 원래 BusyBox(sh+coreutils 단일 정적 바이너리)를
+  `third_party/`에 git submodule로 들여 이 저장소의 musl에 정적으로
+  링크하는 것이었다. 실제로 vendoring까지는 문제없이 됐지만
+  (`third_party/busybox`, release `1_36_1`), 빌드 연결 착수 중
+  **두 겹의 서로 다른 환경 문제**를 만났다:
+  1. BusyBox의 `Makefile`(`scripts/trylink`)은 `$(CC)` 하나가
+     컴파일과 링크를 전부 처리하는 정상적인 hosted gcc/clang이라고
+     전제한다 — 이 저장소는 정확히 반대다(ADR-020/M38: clang은
+     컴파일에만 쓰고 최종 링크는 `ld.lld`를 커스텀 link.ld와 함께
+     직접 부른다, 이 Windows 호스트에서 clang/gcc를 링커로 쓰면
+     `-fuse-ld=lld`가 조용히 무시되고 MSYS2 gcc의 collect2로 새는
+     것을 직접 확인했다). 이건 컴파일/링크 모드를 구분해 링크를
+     `ld.lld` 호출로 바꿔치는 `CC` 셈 스크립트로 실제로 풀렸다
+     (`tools/busybox-cc-shim.sh`, 이번에 되돌리며 함께 삭제).
+  2. 그 셈이 통과한 뒤 맞닥뜨린 **완전히 다른 층위의 문제**: BusyBox
+     의 `.config`조차 만들려면 Kconfig의 호스트 도구(`fixdep` 등,
+     크로스 타깃과 무관하게 **이 빌드 호스트 자신**을 위해 컴파일돼야
+     하는 코드)가 필요한데, 이 MSYS2 설치의 호스트 `gcc`
+     (`x86_64-pc-msys` 타깃)에 표준 헤더 자체가 없었다(`/usr/include`
+     가 존재하지 않음 — `msys2-runtime-*-devel` 패키지가 설치돼 있지
+     않은 이 저장소 밖 로컬 환경 문제). 패키지 설치로 고칠 수 있는
+     문제였지만, 사용자가 이 시점에서 BusyBox 도입 자체를 재고하기로
+     결정했다.
+- **결정**:
+  1. **BusyBox(그리고 일반적으로 Kbuild/Makefile 기반의 "정상적인
+     hosted 컴파일러" 전제가 깊게 박힌 외부 프로젝트)를 이 계획의
+     대상에서 뺀다.** `third_party/busybox` submodule과
+     `.gitmodules`의 항목, `tools/busybox-cc-shim.sh`를 전부
+     되돌린다.
+  2. **셸과 coreutils(`ls`/`cat`/`echo`)는 이 저장소 안에서 직접
+     작성한다** — `userland/musl-hello`/`userland/pipe-test`가 이미
+     증명한 패턴 그대로(순수 CMake+clang 컴파일+`ld.lld` 직접
+     링크, 이 저장소의 다른 모든 유저 프로그램과 완전히 같은 빌드
+     경로) 새 실행파일들을 추가한다. **정적으로 이 저장소의 musl에
+     링크한다는 원래 결정(ADR-203)은 그대로 유지**된다 — 바뀐 건
+     "어디서 소스를 가져오는가"뿐, "어떻게 빌드/링크하는가"는
+     전혀 바뀌지 않았다.
+  3. 셸은 M51이 만든 진짜 syscall(fork/execve/waitpid/pipe/dup2)
+     을 실제로 행사해야 한다 — ADR-170(M20)의 minicore 네이티브
+     대체 셸(빌트인 명령 디스패치, fork/exec 없음)과 혼동하지
+     않는다. 이 새 셸은 명령을 **별도 실행파일로 fork+exec**해야
+     M39/M52~M54가 원래 세운 검증 목표("ls/cat 같은 명령이 빌트인이
+     아니라 별도 실행파일")가 그대로 성립한다 — "서드파티 소스를
+     그대로 가져왔는가"만 빠졌을 뿐, "진짜 프로세스 분리로 명령을
+     실행하는가"라는 원래 목표의 핵심은 유지된다.
+- **근거**: BusyBox 도입에서 실제로 부딫힌 두 문제 모두 이
+  프로젝트의 아키텍처(정적 musl 링크, 커스텀 link.ld+`ld.lld`
+  직접 링크)와 무관한 **외부 빌드 시스템 통합 비용**이었다 —
+  Kbuild가 스스로 확인하려는 수십 가지 "정상적인 Linux 호스트"
+  가정(호스트 도구 컴파일, `trylink`의 다단계 프로브) 중 이
+  프로젝트에 실제로 의미 있는 건 거의 없다. 반면 이 저장소 자신의
+  CMake+clang+`ld.lld` 경로는 M27~M51 내내 단 한 번도 이런 종류의
+  마찰 없이 15개 이상의 실행파일을 만들어 왔다 — 같은 경로를 셸/
+  coreutils에도 그대로 쓰는 것이 훨씬 적은 위험으로 M52~M54의
+  실제 목표(진짜 fork/exec+파이프/리다이렉션으로 명령을 실행하는
+  로그인 셸)를 달성한다.
+- **영향**:
+  - `docs/plan/musl-userland-porting.md` 문서 자체는 수정하지
+    않는다(문서 체계 원칙 — M29/ADR-203이 이미 같은 방식으로
+    처리한 선례). M52의 실제 실행 결과(이 방향 전환 포함)는
+    `docs/done/musl-userland-porting-m52.md`에 정직하게 기록한다.
+  - **OPEN-74**(BusyBox의 Makefile↔이 저장소의 링크 방식 불일치)는
+    이 ADR로 해소된다 — 그 문제 자체가 더 이상 적용되지 않는
+    대상(BusyBox)에 대한 것이었기 때문이다.
+  - 새 유저 프로그램들의 정확한 이름·목록(예: `userland/mush`
+    (minicore shell)+`userland/coreutils-*` 또는 단일 멀티콜
+    바이너리 등)은 M52 실행 착수 시점에 확정한다.
