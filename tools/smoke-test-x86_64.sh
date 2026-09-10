@@ -164,6 +164,20 @@
 #     (open/read/write 등)·동적 링커·스레드까지의 완전한 포팅은 범위
 #     밖이다(ADR-182 "알려진 단순화" — M20/ADR-170이 미뤄 둔 것의
 #     연장, 이번에도 전체가 아니라 검증 가능한 부분집합만).
+#   M27 (real-libc-syscall-layer.md §M27, security-model.md ADR-201):
+#     procsrv가 실제 process_entry 테이블(pid 발급, parent_pid)을
+#     처음으로 갖는다. procsrv가 스폰하는 세 프로세스 C(kill 대상)→
+#     B(자식)→A(부모) 중, A가 mc/procsrv_protocol.h의 범용
+#     proc_op::wait/kill(mc/syscall.h가 아니라 이 M27이 처음 도입한
+#     별도 프로토콜 헤더, ADR-195 마크업 최초 실전 적용)로 B의 pid를
+#     물어 exit_code(77)를 회수하고("[procsrv] m27 wait exit_code
+#     ok=1"), C의 pid로 kill을 요청해 성공을 확인한다("[procsrv] m27
+#     kill ok=1") — M22의 wait/kill 자기테스트와 달리 procsrv 자신의
+#     전용 endpoint가 아니라 **pid로 식별되는 임의의 두 유저 프로세스
+#     사이**의 왕복이다(caller_pid는 자기주장 값, badge 검증은 범위
+#     밖 — done 보고 참고). 재부모화 메커니즘(ADR-192 §결정3, 대상은
+#     매개변수)도 합성 pid로 별도 증명한다("[procsrv] reparent
+#     mechanism ok=1").
 #   M19 (system-servers-bringup.md, registry-decisions.md ADR-060~064/169):
 #     부트 디스크에 cfgsrv가 추가된다(의존 vfs, procsrv는 이제
 #     vfs+cfgsrv 둘 다에 의존). procsrv가 cfgsrv에 "@global/test/settings"
@@ -320,6 +334,9 @@ declare -a EXPECTED=(
   "[procsrv] wait exit_code ok=1"
   "[procsrv] kill requested ok=1"
   "[sched] thread killed (discarded before scheduling)"
+  "[procsrv] m27 wait exit_code ok=1"
+  "[procsrv] m27 kill ok=1"
+  "[procsrv] reparent mechanism ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

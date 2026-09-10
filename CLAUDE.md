@@ -223,9 +223,20 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   `minicore_libmc` 링크 추가로 해결(커널은 자신의
   `freestanding_mem.cpp`가 있어 `minicore_libmc`를 링크하지 않으므로
   중복 심벌 없음). 이 계획에는 더 이상 다음 마일스톤이 없다.
-- `namespace-refactor.md`와 `libs-restructure.md` 둘 다 완료됐으므로,
-  사용자가 지정한 순서("네 계획 전부를 순서대로")에 따라 다음은
-  [docs/plan/user-service-manager.md](docs/plan/user-service-manager.md)
-  (M40~M43, **착수 전**), 그 다음
+- `namespace-refactor.md`와 `libs-restructure.md` 둘 다 완료됐다.
+  다음 계획으로 [docs/plan/user-service-manager.md](docs/plan/user-service-manager.md)
+  (M40~M43)를 시작하려 했으나, 그 계획의 M40이 자체적으로
   [docs/plan/real-libc-syscall-layer.md](docs/plan/real-libc-syscall-layer.md)
-  (M27~M39, **착수 전**)이다.
+  **M27**(procsrv 실제 프로세스 테이블+범용 OP_WAIT/OP_KILL+재부모화
+  메커니즘)이 먼저 끝나 있어야 한다고 명시하고 있어 실행 순서와
+  충돌이 발견됐다 — 사용자가 **순서를 뒤집어 real-libc-syscall-layer.md
+  (M27~M39) 전체를 먼저 끝내고, 그 다음 user-service-manager.md
+  (M40~M43)를 진행**하기로 확정했다(2026-09-10).
+  [real-libc-syscall-layer.md](docs/plan/real-libc-syscall-layer.md)의
+  **M27이 완료됐다**(결과는
+  [docs/done/real-libc-syscall-layer-m27.md](docs/done/real-libc-syscall-layer-m27.md),
+  [ADR-201](docs/design/security-model.md) 참고) — procsrv 실제
+  process_entry 테이블+범용 `proc_op::wait`/`kill`(caller_pid
+  자기주장+비블로킹 폴링으로 범위 좁힘, OPEN-54 해소+OPEN-67 신설)+
+  재부모화 메커니즘 증명. **M28(musl syscall 번역 계층 착수)부터
+  진행 중**이다.

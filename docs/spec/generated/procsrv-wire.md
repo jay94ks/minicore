@@ -1,0 +1,9 @@
+# procsrv 와이어 프로토콜 (자동 생성 — 손으로 고치지 않는다)
+
+`tools/gen-wire-docs.py`가 procsrv_protocol.h의 `@wire-op` 마크업에서 추출했다(ADR-195). 헤더가 바뀌면 이 파일을 다시 생성한다 — 이 파일 자체를 손으로 고치지 않는다.
+
+| label | name | request | reply | source |
+|---|---|---|---|---|
+| 10 | wait | uint32 target_pid; uint32 caller_pid | uint32 status; int32 exit_code | procsrv_protocol.h:15 |
+| 11 | kill | uint32 target_pid; uint32 caller_pid | uint32 status | procsrv_protocol.h:17 |
+| 12 | exit_report | uint32 pid; int32 exit_code | (없음) | procsrv_protocol.h:19 |

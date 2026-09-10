@@ -19,6 +19,11 @@
 | [procsrv.md](spec/procsrv.md) | 프로세스 서버: 프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원 프로토콜, 계정 생성·로그인·session_program 프로토콜 (에스컬레이션/su·sudo/쿼터/콘솔 연동은 후속) |
 | [fs-protocol.md](spec/fs-protocol.md) | FS 서버 공통 프로토콜(M20 v4): open/write/read/list 오퍼레이션, OP_OPEN 호출자 신원 필드, pages[] 기반 wire 포맷, 상태 코드 |
 
+### spec/generated — 자동 생성 와이어 프로토콜 참조표 (ADR-195, 손으로 고치지 않는다)
+| 문서 | 설명 |
+|---|---|
+| [generated/procsrv-wire.md](spec/generated/procsrv-wire.md) | `tools/gen-wire-docs.py`가 `libs/mc/include/mc/procsrv_protocol.h`의 `@wire-op` 마크업에서 추출(M27) — wait/kill/exit_report |
+
 ## plan — 실행 계획 (실행 전)
 | 문서 | 설명 |
 |---|---|
@@ -30,7 +35,7 @@
 | [libs-restructure.md](plan/libs-restructure.md) | M49(libk/libmc를 libs/k, libs/mc로 이동+lib 접두사 제거)~M50(uapi.hpp 폐지, mc로 흡수+MC_LAND_KERNEL 매크로) — [build-system.md](../design/build-system.md) ADR-199, [foundations.md](../design/foundations.md) ADR-200(ADR-132 보강)의 실제 적용. M50이 namespace-refactor.md의 M45(uapi→kern::proto 단순 리네임)를 대체한다. **전체(M49~M50) 완료**(결과는 done 참고) — 이 계획에는 더 이상 다음 마일스톤이 없다 |
 | [namespace-refactor.md](plan/namespace-refactor.md) | M44(kern:: 최상위+커널 코어 리네임)~M48(kernsrv::proto 분리) — [foundations.md](../design/foundations.md) ADR-198(네임스페이스 컨벤션 규칙 확정)의 실제 적용. 순수 기계적 리네임(동작 변화 없음), 각 마일스톤 5개 QEMU 스위트 회귀 없음 확인. **전체 완료**(M45는 libs-restructure.md M50으로 대체돼 스킵) — 결과는 done 참고. 이 계획에는 더 이상 다음 마일스톤이 없다 |
 | [user-service-manager.md](plan/user-service-manager.md) | M40(servers/svcmgr 골격+재부모화 완성)~M43(계정별 유저 서비스 인스턴스, 스트레치) — OPEN-51이 남긴 "유저 서비스 등록 프로토콜" 실제 구현. ADR-196(유닛 모델+시작 절차+컨트롤 프로토콜 개요), ADR-197(@global/system/services 레지스트리 스키마, 새 프로토콜 없이 기존 reg_op 재사용). svcmgr는 순수 minicore 네이티브 서버라 real-libc-syscall-layer.md와 독립적으로 진행 가능(M27만 선행 전제). **착수 전(계획만 존재)** |
-| [real-libc-syscall-layer.md](plan/real-libc-syscall-layer.md) | M27(procsrv 실제 프로세스 테이블)~M39(실제 서드파티 셸/coreutils 재포팅 시도, 스트레치) — OPEN-54·62·63·65·66 해소(65는 완료). ADR-183(syscall 번역: 커널 확장 대신 musl의 syscall_arch.h 패치, libmc를 항상 거침), ADR-189(동적 링킹을 M29로 앞당김, musl 자신의 공유 libc.so), ADR-184(LAPIC 타이머 PIT/HPET 보정, 모든 타이머는 유저모드 진입 전 보정), ADR-185/191(진짜 멀티코어 선점+timer_source_interface 추상화), ADR-188(locale), ADR-186(signal 전달, SIGKILL 즉시 unlink), ADR-187(pthread), ADR-190(minicore 타깃 SDK 내보내기), ADR-195(와이어 프로토콜 마크업+추출 도구, M27 선행 작업). **착수 전(계획만 존재)** |
+| [real-libc-syscall-layer.md](plan/real-libc-syscall-layer.md) | M27(procsrv 실제 프로세스 테이블)~M39(실제 서드파티 셸/coreutils 재포팅 시도, 스트레치) — OPEN-54·62·63·65·66 해소(54·65는 완료, 나머지 진행 중). ADR-183(syscall 번역: 커널 확장 대신 musl의 syscall_arch.h 패치, libmc를 항상 거침), ADR-189(동적 링킹을 M29로 앞당김, musl 자신의 공유 libc.so), ADR-184(LAPIC 타이머 PIT/HPET 보정, 모든 타이머는 유저모드 진입 전 보정), ADR-185/191(진짜 멀티코어 선점+timer_source_interface 추상화), ADR-188(locale), ADR-186(signal 전달, SIGKILL 즉시 unlink), ADR-187(pthread), ADR-190(minicore 타깃 SDK 내보내기), ADR-195(와이어 프로토콜 마크업+추출 도구, M27 선행 작업). **M27 완료**(결과는 done 참고, ADR-201) — M28부터 진행 중 |
 
 ## done — 완료 보고
 | 문서 | 설명 |
@@ -72,6 +77,7 @@
 | [libs-restructure-m49.md](done/libs-restructure-m49.md) | M49(완료): `libk`/`libmc`를 `libs/k`/`libs/mc`로 이동, `#include <libk/`→`#include <k/` 26개 파일 치환(`mc`는 내부 세그먼트가 이미 `mc`였어서 소스 변경 없음). CMake 타깃 이름은 유지. 실행 중 aarch64 빌드 실패(M3 시절부터 소스 자체가 없던 무관한 기존 상태)를 회귀와 구분해 확인 — x86_64 빌드+5개 QEMU 스위트 전부 회귀 없음 |
 | [namespace-refactor-m48.md](done/namespace-refactor-m48.md) | M48(완료, 계획 최종 마일스톤): `kernsrv::proto` 분리 — netsrv의 IEEE/IANA/RFC 표준 상수 5개만 이동(헤더 구조체 자체는 원래 없었음). 중첩 네임스페이스 정의 함정 두 번 겪고 "netsrv 열기 전에 proto 먼저 정의+using" 방식으로 해결 — namespace-refactor.md 전체(M44/M46~M48, M45는 대체) 완료 |
 | [libs-restructure-m50.md](done/libs-restructure-m50.md) | M50(완료, 계획 최종 마일스톤): `kernel/include/uapi.hpp` 폐지 — `libs/mc/include/mc/syscall.h`를 커널·유저 공용 syscall ABI 단일 출처로 재작성하고 `MC_LAND_KERNEL` 매크로로 커널-랜드/유저-랜드를 구분(ADR-200). 실행 중 발견한 유저랜드 `memset` 미정의 링크 에러(트리비얼 aggregate `{}` 초기화가 memset 호출로 낮춰짐)를 `libs/mc/src/freestanding_mem.c` 신설+15개 유저 실행파일에 `minicore_libmc` 링크 추가로 해결 — libs-restructure.md 전체(M49~M50) 완료 |
+| [real-libc-syscall-layer-m27.md](done/real-libc-syscall-layer-m27.md) | M27(완료): procsrv 실제 process_entry 테이블(pid/parent_pid/thread_handle/state/exit_code)+범용 `proc_op::wait`/`kill`/`exit_report`(`mc/procsrv_protocol.h`, ADR-195 마크업 최초 실전 적용, `tools/gen-wire-docs.py` 신설, OPEN-54 해소)+재부모화 메커니즘 증명(ADR-192 §결정3, 합성 pid). M22와 달리 procsrv 전용 endpoint가 아니라 pid로 식별되는 임의의 두 유저 프로세스(A/B/C) 사이의 왕복 — caller_pid 자기주장+비블로킹 폴링 wait로 범위 좁힘(ADR-201, OPEN-67 신설). 실행 중 parent_pid 등록 순서 버그(A의 pid를 먼저 할당해야 wait 권한 검사가 통과함) 진단·수정 |
 
 ## design — 설계/상세
 

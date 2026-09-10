@@ -1387,6 +1387,77 @@ ADR-011/023)만으로 표현한다.
   - OPEN-42는 "명령 단위" 부분만 이 ADR로 해소된다 — "시간대 단위"
     부분은 여전히 미결정으로 남는다(아래 갱신된 OPEN-42).
 
+## ADR-201. M27 procsrv 실제 프로세스 테이블: 자기주장 pid + 비블로킹 폴링 wait + 별도 재부모화 증명 (범위 좁힘, OPEN-54 해소)
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M27 실행 중 확정)
+- **배경**: [procsrv.md](../spec/procsrv.md) §2/§3/§6이 그려 둔
+  `process_entry` 테이블/`op_fork` 설계는 "procsrv가 IPC로 fork를
+  받아 커널에 새 프로세스를 요청한다"는 모양이지만, 실제로 구현된
+  `sys_fork`(ADR-179)/`sys_process_spawn`(M12)은 **호출 스레드 자신의
+  컨텍스트를 그 자리에서 복제/치환**하는 syscall이라 다른 프로세스가
+  대신 실행해 줄 수 없다(procsrv가 IPC로 그 요청을 "대행"할 방법이
+  없다) — 이 ADR은 그 간극을 실제 코드가 이미 서 있는 대로 인정하고,
+  procsrv.md의 아직 구현되지 않은 부분과의 차이를 명시적으로 기록한다.
+- **결정**:
+  1. **커널/기존 syscall은 전혀 바꾸지 않는다** — `sys_process_spawn`/
+     `sys_fork`/`sys_exec`/`sys_process_kill`은 M12/ADR-179/ADR-178
+     그대로다. procsrv는 이번 라운드에서도 **자기 자신이 직접
+     `sys_process_spawn`을 호출**해 프로세스를 만든다(M18/M22의
+     기존 self-test 관례와 동일) — "임의의 클라이언트가 procsrv에게
+     스폰을 대행시키는" 범용 API는 이 라운드에서 만들지 않는다(아래
+     "포함하지 않는 것" 참고).
+  2. **실제 `process_entry` 테이블**(`pid`/`parent_pid`/
+     `thread_handle`/`state`/`exit_code`, procsrv.md §2의 부분집합 —
+     `fd_table`/`quota_state`/`identity_badge`는 아직 없다)을
+     procsrv가 갖는다. `pid`는 procsrv가 발급하는 단순 증가 카운터이고
+     procsrv 자기 자신이 `pid=1`로 부트스트랩 등록된다.
+  3. **범용 `proc_op::wait`/`kill`**(`libmc/include/mc/procsrv_protocol.h`,
+     ADR-195 마크업 최초 실전 적용)이 procsrv의 공유 endpoint 위에서
+     동작한다 — M22처럼 procsrv가 자식 전용 endpoint로 직접 물어보는
+     것이 아니라, **pid로 식별되는 임의의 두 유저 프로세스** 사이의
+     왕복이다.
+  4. **caller_pid는 호출자가 메시지 필드로 스스로 주장하는 값이다**
+     (커널 badge로 검증하지 않는다) — `wait`는 `target->parent_pid ==
+     caller_pid`만 대조한다. 이는 의도적인 범위 축소다(§근거).
+  5. **wait는 블로킹이 아니라 비블로킹 폴링이다** — procsrv는
+     단일 스레드로 한 번에 한 메시지만 처리하므로(`sys_ipc_recv`
+     한 번에 하나), 대상이 아직 zombie가 아니면 즉시
+     `MC_PROC_STATUS_STILL_RUNNING`을 반환하고 **호출자가 재시도**
+     한다(procsrv가 Call을 붙들고 대기하지 않는다). 대상이 먼저
+     자신의 종료를 `proc_op::exit_report`로 procsrv에 스스로 보고한
+     뒤(이 보고 자체도 자기주장 pid) 종료해야 wait가 성립한다 — 이
+     보고를 생략하는 프로세스(강제로 kill된 프로세스 등)는
+     `handle_proc_kill`이 직접 zombie로 표시해 대체한다.
+  6. **재부모화 메커니즘**(ADR-192 §결정3)은 매개변수화된 일반 함수
+     (`reparent_children(from, to)`)로 존재하지만, 실제 initrun 종료
+     이벤트와 연결하지 않는다 — 합성 pid로 메커니즘 자체만 증명한다
+     (아래 "포함하지 않는 것" 참고).
+- **근거**: 완전한 신원 검증(badge 기반 caller 인증)과 진짜 블로킹
+  wait(procsrv의 멀티플렉싱/비동기 응답 모델)는 각각 이 프로젝트가
+  아직 갖추지 않은 인프라(badge를 통한 pid 인코딩, procsrv의 단일
+  요청-응답 루프를 넘어서는 동시성 모델)를 새로 설계해야 하는
+  독립적인 작업이다 — OPEN-54가 요구한 "실제 regs[]/pages[] 배치
+  확정"과 "임의의 두 프로세스 사이의 wait/kill이 실제로 동작"이라는
+  핵심은 이번 범위로도 충분히 증명되고(M27의 명시된 목표), 나머지는
+  솔직하게 새 OPEN 항목으로 분리하는 쪽이 이 프로젝트의 기존 패턴
+  (ADR-049, M17~M26의 반복된 범위 좁힘)과 일치한다.
+- **영향**:
+  - **OPEN-54는 procsrv 프로토콜의 실제 regs[] 배치 확정이라는
+    본래 취지대로 이 ADR로 해소된다.**
+  - 새 **OPEN-67**을 연다 — "procsrv 클라이언트의 caller_pid
+    자기주장을 커널이 검증 가능한 방식(badge에 pid 인코딩 등)으로
+    교체"와 "procsrv의 wait를 진짜 블로킹(또는 notification 기반
+    비동기 응답)으로 전환"은 이 ADR이 명시적으로 미룬 것이다 —
+    [user-service-manager.md](../plan/user-service-manager.md)나
+    이후 musl `SYS_wait4`(M32) 착수 시점에 재검토 대상.
+  - [procsrv.md](../spec/procsrv.md) §2/§6은 여전히 목표 설계로
+    보존한다(이 ADR이 옛 설계를 틀렸다고 무효화하는 것이 아니라,
+    "지금 실제로 구현된 부분집합이 그와 다르게 좁다"는 사실만
+    기록한다) — §2/§6에 이 ADR을 가리키는 실제 구현 각주를 추가한다.
+  - `docs/spec/generated/procsrv-wire.md`(자동 생성, ADR-195)가 이
+    프로토콜의 최신 정본 참조표다.
+
 ## 아직 정하지 않은 것
 
 - **OPEN-42**(범위 좁혀짐, ADR-194로 명령 단위는 해결): 위임의

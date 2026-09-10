@@ -30,6 +30,12 @@ procsrv는 다음을 소유한다 (repo-layout.md, ADR-008):
 
 ## 2. `process_entry` — 프로세스 테이블
 
+> **M27 실제 구현 각주**([security-model.md](../design/security-model.md)
+> ADR-201): 이 §가 그리는 전체 구조(`fd_table`/`quota_state`/
+> `identity_badge`/`children` 트리)는 여전히 목표 설계다. 실제로
+> 구현된 것은 `pid`/`parent_pid`/`thread_handle`/`state`/`exit_code`
+> 만 있는 부분집합이다 — 아래 §6 각주 참고.
+
 ```cpp
 enum class process_state : uint8_t {
     running = 0,
@@ -214,6 +220,16 @@ ADR-086이 이미 원칙을 정해뒀다: **신원 변경은 절대 기존 프�
 만드는 방식으로만 한다.** §7~8이 이 원칙을 실제 절차로 구체화한다.
 
 ## 6. procsrv IPC 프로토콜 (오퍼레이션 개요)
+
+> **M27 실제 구현 각주**([security-model.md](../design/security-model.md)
+> ADR-201): 아래 `proc_op` enum은 여전히 목표 설계다(fork/exec을
+> procsrv가 IPC로 "대행"한다는 모양이 실제 `sys_fork`/`sys_exec`
+> syscall과 맞지 않는다는 것을 ADR-201이 인정한다). 실제로 구현된
+> 것은 `mc/procsrv_protocol.h`(별도 헤더)의 `wait`(label=10)/
+> `kill`(label=11)/`exit_report`(label=12)뿐이고, 이들은 procsrv
+> 자신이 직접 스폰한 프로세스 사이에서만 동작하며 caller_pid는
+> 자기주장 값이다(badge 검증 없음, OPEN-67). 정본 참조표는
+> `docs/spec/generated/procsrv-wire.md`(ADR-195 자동 생성).
 
 ipc.md §4의 `message.label`로 구분되는 procsrv 전용 오퍼레이션:
 

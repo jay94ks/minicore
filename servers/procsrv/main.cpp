@@ -36,6 +36,7 @@
 // 같은 바이너리이지만 magic 접두사가 붙은 argv(`su_target_argv`)로
 // "이번엔 su-target 역할을 하라"고 구분해 받는다(procsrv 자신의
 // self-exec 판별 관례를 확장한 것, 이 파일 상단 argv 규약 참고).
+#include <mc/procsrv_protocol.h>
 #include <mc/syscall.h>
 
 namespace kernsrv::procsrv {
@@ -124,6 +125,131 @@ bool bytes_equal(const void* a, const void* b, uint64_t len) {
         }
     }
     return true;
+}
+
+// ---------- M27(real-libc-syscall-layer.md §M27, ADR-201) — 실제
+// 프로세스 테이블 + 범용 wait/kill ----------
+//
+// procsrv.md §2가 정의한 process_entry의 이번 라운드 부분집합이다 —
+// fd_table/quota_state/identity_badge 등 이 마일스톤이 다루지 않는
+// 필드는 아직 없다(§10류 후속 확장 대상, 아래 done 보고의 "남긴
+// 문제" 참고). pid는 procsrv가 발급하는 단순 증가 카운터이고,
+// procsrv 자기 자신이 pid=1로 부트스트랩 등록된다.
+enum class process_state : uint8_t {
+    running = 0,
+    zombie = 1,
+};
+
+constexpr uint32_t k_max_processes = 64;
+constexpr uint32_t k_parent_none = 0;      // procsrv.md §2 — 0 = 부모 없음.
+constexpr uint32_t k_procsrv_self_pid = 1;
+
+struct process_entry {
+    uint32_t pid = 0;              // 0 = 미사용 슬롯.
+    uint32_t parent_pid = k_parent_none;
+    uint32_t thread_handle = 0;    // procsrv 자신의 핸들 테이블 인덱스(sys_process_kill 대상). 0=없음(procsrv 자기 자신).
+    process_state state = process_state::running;
+    int32_t exit_code = 0;
+};
+
+process_entry g_processes[k_max_processes];
+uint32_t g_next_pid = k_procsrv_self_pid;
+
+uint32_t alloc_pid() {
+    return g_next_pid++;
+}
+
+process_entry* find_process(uint32_t pid) {
+    for (auto& p : g_processes) {
+        if (p.pid == pid) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+process_entry* alloc_process_slot() {
+    for (auto& p : g_processes) {
+        if (p.pid == 0) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+// pid는 이미 alloc_pid()로 할당돼 있어야 한다(스폰 전에 argv에 미리
+// 담아야 하는 경우가 있어 "번호 할당"과 "테이블 등록"을 분리했다 —
+// 아래 run_general_process_table_test() 참고).
+void insert_process_entry(uint32_t pid, uint32_t parent_pid, uint32_t thread_handle) {
+    process_entry* slot = alloc_process_slot();
+    if (slot == nullptr) {
+        return;
+    }
+    slot->pid = pid;
+    slot->parent_pid = parent_pid;
+    slot->thread_handle = thread_handle;
+    slot->state = process_state::running;
+    slot->exit_code = 0;
+}
+
+// ADR-192 §결정3의 재부모화 메커니즘 — 대상(to_parent_pid)을
+// 매개변수로 받는 일반 함수. M27은 실제 initrun 종료 트리거와
+// 연결하지 않는다(아래 done 보고 참고) — run_reparenting_mechanism_test()
+// 가 합성 pid로 메커니즘 자체만 증명한다.
+void reparent_children(uint32_t from_parent_pid, uint32_t to_parent_pid) {
+    for (auto& p : g_processes) {
+        if (p.pid != 0 && p.parent_pid == from_parent_pid) {
+            p.parent_pid = to_parent_pid;
+        }
+    }
+}
+
+// OPEN-54 해소 — 정확한 regs[] 배치(mc/procsrv_protocol.h의 @wire-op
+// 마크업과 정확히 일치해야 한다). caller_pid는 호출자가 스스로
+// 주장하는 값이다(ADR-201 §결정2 — badge 기반 검증은 이 라운드
+// 범위 밖).
+void handle_proc_wait(const mc_message& in, mc_message& out) {
+    uint32_t target_pid = static_cast<uint32_t>(in.regs[0]);
+    uint32_t caller_pid = static_cast<uint32_t>(in.regs[1]);
+    process_entry* target = find_process(target_pid);
+    if (target == nullptr || target->parent_pid != caller_pid) {
+        out.regs[0] = MC_PROC_STATUS_NOT_FOUND;
+        return;
+    }
+    if (target->state != process_state::zombie) {
+        out.regs[0] = MC_PROC_STATUS_STILL_RUNNING;
+        return;
+    }
+    out.regs[0] = MC_PROC_STATUS_OK;
+    out.regs[1] = static_cast<uint64_t>(static_cast<int64_t>(target->exit_code));
+    target->pid = 0;  // POSIX wait() 관례 — 회수 후 좀비 슬롯을 반환한다.
+}
+
+// M27은 caller_pid의 kill 권한(예: 같은 uid/조상 관계) 검사를 생략한다
+// — pid를 아는 누구나 kill을 요청할 수 있다. 실제 권한 모델은 이
+// 계획의 범위 밖(procsrv.md §10류 후속 확장 대상)이라 명시적으로
+// 남긴다.
+void handle_proc_kill(const mc_message& in, mc_message& out) {
+    uint32_t target_pid = static_cast<uint32_t>(in.regs[0]);
+    process_entry* target = find_process(target_pid);
+    if (target == nullptr) {
+        out.regs[0] = MC_PROC_STATUS_NOT_FOUND;
+        return;
+    }
+    do_syscall(MC_SYSCALL_PROCESS_KILL, target->thread_handle, 0, 0);
+    target->state = process_state::zombie;
+    target->exit_code = -9;  // SIGKILL 관례(신호 계층 자체는 M36).
+    out.regs[0] = MC_PROC_STATUS_OK;
+}
+
+void handle_proc_exit_report(const mc_message& in) {
+    uint32_t pid = static_cast<uint32_t>(in.regs[0]);
+    int32_t exit_code = static_cast<int32_t>(in.regs[1]);
+    process_entry* p = find_process(pid);
+    if (p != nullptr) {
+        p->state = process_state::zombie;
+        p->exit_code = exit_code;
+    }
 }
 
 // M18(security-model.md ADR-079 최소 버전/ADR-167) — uid/S·G·J
@@ -288,6 +414,100 @@ bool is_kill_target_argv(const void* argv) {
     uint32_t magic;
     __builtin_memcpy(&magic, argv, sizeof(magic));
     return magic == k_kill_target_magic;
+}
+
+// M27(real-libc-syscall-layer.md §M27, ADR-201) — 위 M22 자기테스트와
+// 달리, procsrv 자신의 endpoint가 아니라 **범용 proc_op::wait/kill**
+// (mc/procsrv_protocol.h)을 실제로 왕복시키는 두 역할. role=0(A,
+// 부모)은 wait_target_pid/kill_target_pid로 procsrv에게 물어보고,
+// role=1(B, 자식)은 exit_report로 자신의 종료를 procsrv에게 스스로
+// 보고한다 — procsrv가 두 pid를 미리 알고(스폰 순서: kill 대상→B→A)
+// argv에 담아 준다(이 파일 상단 주석과 같은 관례, "procsrv가 A/B
+// 양쪽을 다 스폰하므로 서로의 pid를 사전에 알 수 있다"는 이번
+// 라운드의 단순화 — 아래 run_general_process_table_test() 참고).
+constexpr uint32_t k_m27_test_magic = 0x4D323757;  // "M27W"
+constexpr int32_t k_m27_expected_exit_code = 77;
+struct m27_test_argv {
+    uint32_t magic = 0;
+    uint32_t self_pid = 0;
+    uint32_t wait_target_pid = 0;  // role=0(A)만 사용.
+    uint32_t kill_target_pid = 0;  // role=0(A)만 사용.
+    int32_t exit_code = 0;         // role=1(B)만 사용.
+    uint8_t role = 0;              // 0=A(부모), 1=B(자식).
+};
+
+bool is_m27_test_argv(const void* argv) {
+    if (argv == nullptr) {
+        return false;
+    }
+    uint32_t magic;
+    __builtin_memcpy(&magic, argv, sizeof(magic));
+    return magic == k_m27_test_magic;
+}
+
+// inherited_handles[0]이 항상 procsrv 자신의 수신 endpoint(handle 1,
+// k_own_endpoint_handle)의 프록시다 — create_endpoint=true가 먼저
+// handle 1을 차지하므로 상속된 첫 핸들은 handle 2가 된다(ADR-152의
+// 고정 순서, spawn_su_target과 같은 관례).
+constexpr uint32_t k_m27_procsrv_call_handle = 2;
+
+[[noreturn]] void run_as_m27_child_b(const m27_test_argv& a) {
+    mc_message req{};
+    req.label = MC_PROC_OP_EXIT_REPORT;
+    req.regs[0] = a.self_pid;
+    req.regs[1] = static_cast<uint64_t>(static_cast<int64_t>(a.exit_code));
+    mc_message reply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_m27_procsrv_call_handle, reinterpret_cast<uint64_t>(&req),
+               reinterpret_cast<uint64_t>(&reply));
+    quiet_exit();
+}
+
+[[noreturn]] void run_as_m27_parent_a(const m27_test_argv& a) {
+    bool wait_ok = false;
+    int32_t got_exit_code = 0;
+    // procsrv의 수신 루프는 한 번에 한 메시지씩만 처리하므로(단일
+    // 스레드), B의 exit_report가 이 wait보다 늦게 도착할 수 있다 —
+    // MC_PROC_STATUS_STILL_RUNNING을 받으면 재시도한다(비블로킹
+    // 폴링, ADR-201 §결정3).
+    for (uint32_t attempt = 0; attempt < 64 && !wait_ok; ++attempt) {
+        mc_message req{};
+        req.label = MC_PROC_OP_WAIT;
+        req.regs[0] = a.wait_target_pid;
+        req.regs[1] = a.self_pid;
+        mc_message reply{};
+        do_syscall(MC_SYSCALL_IPC_CALL, k_m27_procsrv_call_handle,
+                   reinterpret_cast<uint64_t>(&req), reinterpret_cast<uint64_t>(&reply));
+        if (reply.regs[0] == MC_PROC_STATUS_OK) {
+            wait_ok = true;
+            got_exit_code = static_cast<int32_t>(reply.regs[1]);
+        }
+    }
+    bool ok = wait_ok && got_exit_code == k_m27_expected_exit_code;
+    const char* m1 =
+        ok ? "[procsrv] m27 wait exit_code ok=1\n" : "[procsrv] m27 wait exit_code ok=0\n";
+    debug_log(m1, cstr_len(m1));
+
+    mc_message kreq{};
+    kreq.label = MC_PROC_OP_KILL;
+    kreq.regs[0] = a.kill_target_pid;
+    kreq.regs[1] = a.self_pid;
+    mc_message kreply{};
+    do_syscall(MC_SYSCALL_IPC_CALL, k_m27_procsrv_call_handle, reinterpret_cast<uint64_t>(&kreq),
+               reinterpret_cast<uint64_t>(&kreply));
+    bool kill_ok = (kreply.regs[0] == MC_PROC_STATUS_OK);
+    const char* m2 = kill_ok ? "[procsrv] m27 kill ok=1\n" : "[procsrv] m27 kill ok=0\n";
+    debug_log(m2, cstr_len(m2));
+
+    quiet_exit();
+}
+
+[[noreturn]] void run_as_m27_test(const void* argv) {
+    m27_test_argv a{};
+    __builtin_memcpy(&a, argv, sizeof(a));
+    if (a.role == 1) {
+        run_as_m27_child_b(a);
+    }
+    run_as_m27_parent_a(a);
 }
 
 // M23(general-purpose-completion.md §M23, ADR-179) — fork+exec 뒤에도
@@ -755,6 +975,113 @@ void run_process_lifecycle_test() {
     debug_log(m2, cstr_len(m2));
 }
 
+// M27(real-libc-syscall-layer.md §M27, ADR-201) — 위 run_process_lifecycle_test()
+// 와 달리, procsrv 자신의 process_entry 테이블+범용 proc_op::wait/kill
+// (mc/procsrv_protocol.h)을 실제로 왕복시킨다. 세 프로세스를 순서대로
+// 스폰한다: C(kill 대상, 기존 kill_target_argv 재사용)→B(exit_report로
+// 스스로 종료를 보고)→A(B/C의 pid를 이미 알고 wait/kill을 실제로
+// 호출). procsrv가 A/B/C 전부를 스폰하므로 서로의 pid를 스폰 시점에
+// 미리 알려줄 수 있다(이번 라운드의 단순화 — done 보고 참고).
+void run_general_process_table_test() {
+    if (!g_loader_ok) {
+        return;
+    }
+
+    // procsrv 자기 자신을 pid=1로 부트스트랩 등록한다(아직 안 됐다면).
+    if (find_process(k_procsrv_self_pid) == nullptr) {
+        insert_process_entry(k_procsrv_self_pid, k_parent_none, /*thread_handle=*/0);
+    }
+
+    // A의 pid를 먼저 할당한다(아직 스폰하지 않았어도 번호만 필요) —
+    // B/C를 "A의 자식"으로 등록해야 A의 OP_WAIT(caller_pid=자기 자신)
+    // 권한 검사(handle_proc_wait의 parent_pid 비교)가 통과한다. A를
+    // procsrv 자신의 자식으로 등록하는 것과는 별개다(A는 procsrv가
+    // 실제로 스폰했으므로 parent_pid=k_procsrv_self_pid가 맞다 —
+    // "누가 물리적으로 스폰했는가"와 "테이블상 부모가 누구인가"가
+    // 다른 것은 procsrv 자신이 A/B/C 모두를 대신 스폰해 주는 이번
+    // 라운드의 단순화 때문이다, done 보고 참고).
+    uint32_t a_pid = alloc_pid();
+
+    // --- C: kill 대상(기존 kill_target_argv, 오래 도는 busy loop) ---
+    kill_target_argv cargv{};
+    cargv.magic = k_kill_target_magic;
+    mc_process_spawn_request creq{};
+    creq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+    creq.elf_size = g_reassembled_size;
+    creq.argv_blob = reinterpret_cast<uint64_t>(&cargv);
+    creq.argv_size = sizeof(cargv);
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&creq), 0, 0);
+    uint32_t c_pid = alloc_pid();
+    insert_process_entry(c_pid, a_pid, creq.out_thread_handle);
+
+    // --- B: exit_report로 스스로 종료를 procsrv에 알린다 ---
+    uint32_t b_pid = alloc_pid();
+    m27_test_argv bargv{};
+    bargv.magic = k_m27_test_magic;
+    bargv.role = 1;
+    bargv.self_pid = b_pid;
+    bargv.exit_code = k_m27_expected_exit_code;
+    mc_process_spawn_request breq{};
+    breq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+    breq.elf_size = g_reassembled_size;
+    breq.argv_blob = reinterpret_cast<uint64_t>(&bargv);
+    breq.argv_size = sizeof(bargv);
+    breq.create_endpoint = true;  // handle 1 = B 자신의 새 endpoint(이번 시나리오는 안 쓰지만 관례 유지).
+    breq.inherited_handle_count = 1;
+    breq.inherited_handles[0].src_handle = k_own_endpoint_handle;  // procsrv 자신의 수신 endpoint(handle 1) — B/A가 handle 2로 받는다.
+    breq.inherited_handles[0].rights_mask = MC_RIGHT_CAN_SEND;
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&breq), 0, 0);
+    insert_process_entry(b_pid, a_pid, breq.out_thread_handle);
+
+    // --- A: B/C의 pid를 이미 알고 wait/kill을 실제로 호출한다 ---
+    m27_test_argv aargv{};
+    aargv.magic = k_m27_test_magic;
+    aargv.role = 0;
+    aargv.self_pid = a_pid;
+    aargv.wait_target_pid = b_pid;
+    aargv.kill_target_pid = c_pid;
+    mc_process_spawn_request areq{};
+    areq.elf_data = reinterpret_cast<uint64_t>(g_reassembled);
+    areq.elf_size = g_reassembled_size;
+    areq.argv_blob = reinterpret_cast<uint64_t>(&aargv);
+    areq.argv_size = sizeof(aargv);
+    areq.create_endpoint = true;
+    areq.inherited_handle_count = 1;
+    areq.inherited_handles[0].src_handle = k_own_endpoint_handle;
+    areq.inherited_handles[0].rights_mask = MC_RIGHT_CAN_SEND;
+    do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&areq), 0, 0);
+    insert_process_entry(a_pid, k_procsrv_self_pid, areq.out_thread_handle);
+}
+
+// ADR-192 §결정3의 재부모화 메커니즘(대상은 매개변수) 자체를
+// 증명한다 — 실제 initrun 종료 트리거와의 연결은 이 마일스톤 범위
+// 밖이라(done 보고 참고) 합성 pid로만 호출한다.
+void run_reparenting_mechanism_test() {
+    constexpr uint32_t k_synthetic_old_parent = 999;
+    uint32_t child1 = alloc_pid();
+    insert_process_entry(child1, k_synthetic_old_parent, /*thread_handle=*/0);
+    uint32_t child2 = alloc_pid();
+    insert_process_entry(child2, k_synthetic_old_parent, /*thread_handle=*/0);
+
+    reparent_children(k_synthetic_old_parent, /*to_parent_pid=*/k_parent_none);
+
+    process_entry* p1 = find_process(child1);
+    process_entry* p2 = find_process(child2);
+    bool ok = p1 != nullptr && p2 != nullptr && p1->parent_pid == k_parent_none &&
+              p2->parent_pid == k_parent_none;
+    const char* m =
+        ok ? "[procsrv] reparent mechanism ok=1\n" : "[procsrv] reparent mechanism ok=0\n";
+    debug_log(m, cstr_len(m));
+
+    // 실제 프로세스가 아닌 테스트 전용 슬롯이므로 회수한다.
+    if (p1 != nullptr) {
+        p1->pid = 0;
+    }
+    if (p2 != nullptr) {
+        p2->pid = 0;
+    }
+}
+
 // vfs→memfs로 파일을 열고, 그 응답으로 위임받은 memfs 핸들에 직접
 // 쓰고 다시 읽어 내용이 일치하는지 확인한다(fs-protocol.md §2). 결과는
 // sys_debug_log로만 관찰 가능하다(klog가 유저에 노출된 적이 없어서 —
@@ -1160,6 +1487,10 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     if (is_fd_continue_argv(argv_or_null)) {
         run_as_fd_continue_target(argv_or_null);
     }
+    // M27(real-libc-syscall-layer.md §M27) — 위와 같은 자리, 같은 이유.
+    if (is_m27_test_argv(argv_or_null)) {
+        run_as_m27_test(argv_or_null);
+    }
     if (argv_or_null == nullptr) {
         quiet_exit();  // sys_fork+sys_exec으로 만들어진 사본.
     }
@@ -1215,6 +1546,16 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // 생명주기(자식의 exit_code 회수 + 강제 종료)를 검증한다.
     run_process_lifecycle_test();
 
+    // M27(real-libc-syscall-layer.md §M27, ADR-201) — 실제
+    // process_entry 테이블 위의 범용 proc_op::wait/kill과 재부모화
+    // 메커니즘을 검증한다. run_general_process_table_test()가 스폰한
+    // A/B/C는 아래 서비스 루프(k_own_endpoint_handle)에 자신들의
+    // wait/kill/exit_report 메시지를 보내므로, 이 루프가 실제로
+    // 시작돼야 그 메시지들이 처리된다 — 이 두 함수는 스폰/등록만
+    // 하고 돌아온다.
+    run_general_process_table_test();
+    run_reparenting_mechanism_test();
+
     // M17(security-model.md ADR-165) — 여기서부터 procsrv가 처음으로
     // 진짜 서버가 된다. servers/login이 OP_LOGIN/OP_SU로 이 계정
     // 저장소와 위임 테이블에 묻는다.
@@ -1230,6 +1571,12 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
                 handle_login(in, out);
             } else if (in.label == k_op_su) {
                 handle_su(in, out);
+            } else if (in.label == MC_PROC_OP_WAIT) {
+                handle_proc_wait(in, out);
+            } else if (in.label == MC_PROC_OP_KILL) {
+                handle_proc_kill(in, out);
+            } else if (in.label == MC_PROC_OP_EXIT_REPORT) {
+                handle_proc_exit_report(in);
             }
         }
         do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);
