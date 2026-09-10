@@ -103,8 +103,16 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
 // procsrv.md §4 6단계와 동일한 관례) — 실패했을 때만 값을 반환한다.
 // **알려진 단순화**(M12 범위): 이전 주소공간의 페이지테이블/프레임은
 // 회수하지 않고 그대로 버려둔다(누수) — 실제 회수는 이후 마일스톤.
+// linux_abi_stack(M32, real-libc-syscall-layer.md §M32) — true면 새
+// 이미지를 build_process()의 기존 Linux ABI 초기 스택 경로(M28,
+// mc_process_spawn_request::linux_abi_stack과 완전히 같은 레이아웃)로
+// 띄운다. musl execve()가 여기로 온다 — exec 대상도 musl의 crt_arch.h
+// 를 거쳐야 하므로 M28이 스폰 경로에 만든 것과 같은 처리가 필요하다
+// (M28 시점엔 "exec()은 이번 라운드에 linux_abi_stack을 지원하지
+// 않는다"로 미뤄 뒀던 부분).
 process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
-                                  const uint8_t* argv_blob, uint64_t argv_size);
+                                  const uint8_t* argv_blob, uint64_t argv_size,
+                                  bool linux_abi_stack);
 
 // sys_alloc_dma_buffer(ADR-147) — 물리적으로 연속인 4KiB<<order 바이트를
 // 확보해 호출자의 주소공간에 매핑하고, 그 가상주소와 물리주소를 모두

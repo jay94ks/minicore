@@ -226,10 +226,17 @@ ADR-086이 이미 원칙을 정해뒀다: **신원 변경은 절대 기존 프�
 > procsrv가 IPC로 "대행"한다는 모양이 실제 `sys_fork`/`sys_exec`
 > syscall과 맞지 않는다는 것을 ADR-201이 인정한다). 실제로 구현된
 > 것은 `mc/procsrv_protocol.h`(별도 헤더)의 `wait`(label=10)/
-> `kill`(label=11)/`exit_report`(label=12)뿐이고, 이들은 procsrv
-> 자신이 직접 스폰한 프로세스 사이에서만 동작하며 caller_pid는
-> 자기주장 값이다(badge 검증 없음, OPEN-67). 정본 참조표는
-> `docs/spec/generated/procsrv-wire.md`(ADR-195 자동 생성).
+> `kill`(label=11)/`exit_report`(label=12)뿐이고, caller_pid는
+> 자기주장 값이다(badge 검증 없음, OPEN-67). **M32
+> 갱신**([security-model.md](../design/security-model.md) ADR-206):
+> "procsrv 자신이 직접 스폰한 프로세스 사이에서만 동작"이라던
+> 위 제약은 `self_register`(label=13)/`fork_register`(label=14)로
+> 풀렸다 — initrun이 스폰한 일반 프로세스(musl 프로그램 등)도 최초
+> `getpid()`/`fork()` 호출 시점에 procsrv에 스스로 등록해 pid를
+> 받을 수 있다. pid는 이제 유저랜드가 아니라 커널 스레드 객체에
+> 캐시되어(`kern::object::thread::procsrv_pid`) `execve()`를 거쳐도
+> 보존된다. 정본 참조표는 `docs/spec/generated/procsrv-wire.md`
+> (ADR-195 자동 생성).
 
 ipc.md §4의 `message.label`로 구분되는 procsrv 전용 오퍼레이션:
 

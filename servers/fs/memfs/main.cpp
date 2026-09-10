@@ -29,8 +29,15 @@ constexpr uint64_t k_status_no_space = 3;
 constexpr uint32_t k_max_files = 8;
 // M18(fs-protocol.md v3, security-model.md ADR-167) — su/sudo 로더가
 // procsrv 자신의 ELF(수십 KiB)를 여기 써야 해서 4096→131072로
-// 늘렸다.
-constexpr uint32_t k_max_file_bytes = 131072;
+// 늘렸다. M32(real-libc-syscall-layer.md §M32) — procsrv가
+// musl-exec-target ELF를 자기 컴파일 시점 데이터로 심으면서(tools/
+// bin2c.py) procsrv 자신의 ELF도 같이 커져 131072를 넘어서기 시작해
+// (실제로 겪음, 2026-09-10 — 139072바이트) 131072→262144로 다시
+// 늘렸다. 이 값이 여전히 procsrv 자신의 M18 self-exec 왕복
+// (run_loader_test, su-target 경로) 상한이라는 점은 그대로다 — 그
+// 왕복이 실패하지 않을 만큼 여유를 둔 것뿐, 정확한 크기 계산에
+// 기반한 값은 아니다.
+constexpr uint32_t k_max_file_bytes = 262144;
 constexpr uint32_t k_max_open_files = 16;
 constexpr uint64_t k_page_size = 4096;
 

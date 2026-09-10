@@ -204,6 +204,30 @@ add_library(minicore_libc STATIC
     ${MUSL_PATCHED_ROOT}/src/math/scalbn.c
     ${MUSL_PATCHED_ROOT}/src/math/__fpclassifyl.c
     ${MUSL_PATCHED_ROOT}/src/math/__signbitl.c
+
+    # M32(real-libc-syscall-layer.md §M32, ADR-183) — musl 자신의
+    # 진짜 fork()/execve()/waitpid()/getpid(). fork()는 _Fork()로
+    # 내려가고, _Fork()는 x86_64에서 SYS_clone이 아니라 SYS_fork를
+    # 직접 쓴다(third_party/musl/src/process/_Fork.c의
+    # `#ifdef SYS_fork` 분기).
+    ${MUSL_PATCHED_ROOT}/src/process/fork.c
+    ${MUSL_PATCHED_ROOT}/src/process/_Fork.c
+    ${MUSL_PATCHED_ROOT}/src/process/execve.c
+    ${MUSL_PATCHED_ROOT}/src/process/waitpid.c
+    ${MUSL_PATCHED_ROOT}/src/unistd/getpid.c
+
+    # M32 — fork()/_Fork()의 링크 의존성. abort_lock.c는 순수 전역
+    # 배열이라 그대로 쓴다. block.c(__block_all_sigs/__block_app_sigs/
+    # __restore_sigs)는 SYS_rt_sigprocmask를 부르는데, 이 syscall은
+    # 아직 미구현이라 syscall_shim.c의 기본 정책대로 -ENOSYS+로그로
+    # 처리된다 — 반환값을 확인하지 않는 void 함수라 무해하다(신호
+    # 마스크 자체가 아직 이 커널에 없다, 완전한 signal 계층은 M36
+    # 대상). __inhibit_ptc/__acquire_ptc/__release_ptc(원본은
+    # pthread_rwlock 기반)는 sysdeps/minicore/lock_shim.c의 같은
+    # 이유(단일 스레드, 아직 pthread_create 없음, M37 대상)로 no-op
+    # 대체한다 — 그래서 원본 src/thread/lock_ptc.c는 여기 없다.
+    ${MUSL_PATCHED_ROOT}/src/exit/abort_lock.c
+    ${MUSL_PATCHED_ROOT}/src/signal/block.c
 )
 add_dependencies(minicore_libc minicore_libc_musl_alltypes minicore_libc_musl_syscall_bits
                   minicore_libc_musl_patched)

@@ -7,3 +7,7 @@ add_subdirectory(shell)
 # real-libc-syscall-layer.md §M28 — musl 진짜 시작 경로 검증용 최초
 # 테스트 프로그램(기존 셸/서버와 무관).
 add_subdirectory(musl-hello)
+
+# real-libc-syscall-layer.md §M32 — musl-hello가 fork()+execve()로
+# 실행 이미지를 바꿔 넣을 "다른" 바이너리.
+add_subdirectory(musl-exec-target)

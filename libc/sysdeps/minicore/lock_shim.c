@@ -33,3 +33,17 @@ int __lockfile(FILE* f) {
 void __unlockfile(FILE* f) {
     (void)f;
 }
+
+// M32(real-libc-syscall-layer.md §M32) — fork()가 fork-safety를 위해
+// "pthread_create가 진행 중이면 기다린다"는 뜻으로 거는 락
+// (__inhibit_ptc/__acquire_ptc/__release_ptc, src/thread/lock_ptc.c)
+// 의 같은 이유 대체. 원본은 진짜 pthread_rwlock_wrlock/rdlock/unlock
+// 을 쓰는데, 이 프로젝트에는 아직 pthread_create가 없다(M37 대상) —
+// 만들어질 스레드가 없으니 다툴 대상도 없다. pthread_rwlock의 futex
+// 기반 경쟁 처리 의존성을 이 라운드에 끌어올 이유가 없어 no-op으로
+// 대체한다.
+void __inhibit_ptc(void) {}
+
+void __acquire_ptc(void) {}
+
+void __release_ptc(void) {}

@@ -151,7 +151,8 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
             // 실패했을 때만 아래로 떨어진다.
             auto err = kern::arch::x86_64::exec_current(
                 reinterpret_cast<const uint8_t*>(req->elf_data), req->elf_size,
-                reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size);
+                reinterpret_cast<const uint8_t*>(req->argv_blob), req->argv_size,
+                req->linux_abi_stack != 0);
             return static_cast<uint64_t>(err);
         }
         case MC_SYSCALL_THREAD_EXIT: {
@@ -248,6 +249,21 @@ extern "C" uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uin
         case MC_SYSCALL_MUNMAP: {
             auto err = kern::arch::x86_64::munmap_anon(a1, a2);
             return static_cast<uint64_t>(err);
+        }
+        case MC_SYSCALL_PROCSRV_PID_GET: {
+            // M32(real-libc-syscall-layer.md §M32) — mc/syscall.h의
+            // mc_procsrv_pid_get 주석, kernel_objects.hpp::thread::
+            // procsrv_pid 주석 참고.
+            kern::object::thread* self = kern::sched::current();
+            return self == nullptr ? 0 : self->procsrv_pid;
+        }
+        case MC_SYSCALL_PROCSRV_PID_SET: {
+            kern::object::thread* self = kern::sched::current();
+            if (self == nullptr) {
+                return static_cast<uint64_t>(kern::arch::x86_64::process_spawn_error::invalid_argument);
+            }
+            self->procsrv_pid = static_cast<uint32_t>(a1);
+            return 0;
         }
         default:
             return static_cast<uint64_t>(kern::ipc::ipc_error::invalid_handle);

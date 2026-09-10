@@ -79,6 +79,8 @@ typedef struct {
 #define MC_SYSCALL_ARCH_PRCTL_SET_FS 14u
 #define MC_SYSCALL_MMAP_ANON 15u
 #define MC_SYSCALL_MUNMAP 16u
+#define MC_SYSCALL_PROCSRV_PID_GET 17u
+#define MC_SYSCALL_PROCSRV_PID_SET 18u
 
 #define MC_MAX_DEBUG_LOG_BYTES 96u
 #define MC_MAX_MMIO_MAP_BYTES (16ull * 1024 * 1024)
@@ -126,6 +128,13 @@ typedef struct {
     uint64_t elf_size;
     uint64_t argv_blob;
     uint64_t argv_size;
+
+    // M32(real-libc-syscall-layer.md §M32) — mc_process_spawn_request::
+    // linux_abi_stack과 완전히 같은 의미(M28의 Linux ABI 초기 스택,
+    // build_process()의 기존 경로 재사용). false(기본, POD 구조체를
+    // {}로 초기화하면 0)면 기존 M12 self-exec/M18 su-target 관례
+    // 그대로다.
+    uint8_t linux_abi_stack;
 } mc_exec_request;
 
 // sys_fork(인자 없음) — 반환값: 자식에서는 0, 부모에서는 1(성공)
@@ -165,6 +174,14 @@ typedef struct {
 // (ARCH_SET_FS)만 전용 syscall로 노출한다(ADR-001 — 정확성 우선,
 // 안 쓰는 경우를 미리 일반화하지 않는다). 항상 성공(0)한다 — 실패
 // 조건이 없다(호출 스레드 자신의 MSR을 즉시 쓴다).
+
+// sys_procsrv_pid_get(인자 없음)/sys_procsrv_pid_set(a1=pid) — 이
+// 스레드의 kern::object::thread::procsrv_pid를 읽고 쓴다(M32,
+// real-libc-syscall-layer.md §M32). 커널은 이 값의 의미를 모른다 —
+// procsrv가 부여한 pid를 exec()을 거쳐도 잃지 않게 스레드 객체에
+// 저장해 두는 순수 스토리지 역할뿐이다(kernel_objects.hpp::
+// thread::procsrv_pid 주석 참고). 둘 다 항상 성공한다(실패 조건이
+// 없다 — 호출 스레드 자신의 필드를 즉시 읽고 쓴다).
 
 // M12 self-test 임시 배선 — kernel_main.cpp::setup_initrun_process와
 // procsrv가 자기 자신을 fork/spawn/exec으로 다시 만들어 보는 데
@@ -243,6 +260,33 @@ static inline uint64_t mc_mmap_anon(uint64_t size) {
 
 static inline uint64_t mc_munmap(uint64_t addr, uint64_t size) {
     return mc_raw_syscall(MC_SYSCALL_MUNMAP, addr, size, 0);
+}
+
+// M32(real-libc-syscall-layer.md §M32) — sys_procsrv_pid_get/set.
+static inline uint32_t mc_procsrv_pid_get(void) {
+    return (uint32_t)mc_raw_syscall(MC_SYSCALL_PROCSRV_PID_GET, 0, 0, 0);
+}
+
+static inline void mc_procsrv_pid_set(uint32_t pid) {
+    mc_raw_syscall(MC_SYSCALL_PROCSRV_PID_SET, pid, 0, 0);
+}
+
+// M32(real-libc-syscall-layer.md §M32) — sys_exec(기존 M12부터 있던
+// syscall, ADR-183 §결정4가 요구하는 "새 Linux syscall(SYS_execve)은
+// 먼저 libmc 얇은 래퍼로" 원칙을 여기서 지킨다). IPC/프로토콜 로직이
+// 전혀 없는 순수 syscall 트램폴린이라 procsrv_client.h가 아니라 다른
+// mc_mmap_anon류와 같은 자리에 둔다. 성공하면 반환하지 않는다 —
+// 실패해야만 반환하고, 반환값은 process_ops.hpp::process_spawn_error
+// 값이다.
+static inline uint64_t mc_exec(uint64_t elf_data, uint64_t elf_size, uint64_t argv_blob,
+                                uint64_t argv_size, uint8_t linux_abi_stack) {
+    mc_exec_request req;
+    req.elf_data = elf_data;
+    req.elf_size = elf_size;
+    req.argv_blob = argv_blob;
+    req.argv_size = argv_size;
+    req.linux_abi_stack = linux_abi_stack;
+    return mc_raw_syscall(MC_SYSCALL_EXEC, (uint64_t)(uintptr_t)&req, 0, 0);
 }
 
 #endif  // !MC_LAND_KERNEL

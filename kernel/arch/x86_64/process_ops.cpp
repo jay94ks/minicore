@@ -489,6 +489,19 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
     child->io_port_base = self->io_port_base;
     child->io_port_count = self->io_port_count;
 
+    // M32(real-libc-syscall-layer.md §M32) — fs_base(M28, TLS)도 같은
+    // 이유로 물려받는다. create_forked_thread()가 만드는 새 thread
+    // 객체는 fs_base=0(기본값)으로 시작하는데, 이걸 그대로 두면 musl
+    // 프로그램(TLS로 errno/pthread_self를 읽는)의 자식이 fork() 직후
+    // (아직 exec()하기 전, 여전히 부모와 같은 이미지를 실행하는 동안)
+    // %fs 상대 접근에서 곧바로 페이지 폴트를 일으킨다 — 실제로 겪음
+    // (2026-09-10, musl-hello의 fork() 자식이 _Fork.c::__post_Fork의
+    // __pthread_self() 호출에서 크래시). fork()는 COW로 주소공간
+    // 전체를 복제하므로, 부모의 fs_base가 가리키는 가상주소(TLS
+    // 블록)도 자식 쪽에 그대로 유효한 COW 사본으로 존재한다 — 값만
+    // 그대로 넘기면 된다(위 io_port_base/count와 완전히 같은 패턴).
+    child->fs_base = self->fs_base;
+
     kern::sched::enqueue(*child);
     kern::klog::printf("[process] fork ok child_pml4=0x%lx\n",
                  static_cast<unsigned long>(child_root.value()));
@@ -496,7 +509,8 @@ uint64_t fork_current(uint64_t saved_user_rip, uint64_t saved_user_rflags,
 }
 
 process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
-                                  const uint8_t* argv_blob, uint64_t argv_size) {
+                                  const uint8_t* argv_blob, uint64_t argv_size,
+                                  bool linux_abi_stack) {
     kern::object::thread* self = kern::sched::current();
     if (self == nullptr || self->owner_space == nullptr) {
         return process_spawn_error::not_a_user_process;
@@ -506,11 +520,13 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
     // 유지된다. trusted는 기존 address_space에서 그대로 물려받는다
     // (exec는 새 신원 부여가 아니다).
     built_process built;
-    // M28 — exec()은 이번 라운드에 linux_abi_stack을 지원하지 않는다
-    // (musl의 execve() 번역은 M32 대상, procsrv.md §4처럼 신원 유지만
-    // 다루는 이 경로는 여전히 우리 자신의 arg0 관례를 쓴다).
+    // M32(real-libc-syscall-layer.md §M32) — musl execve()가 여기로
+    // 오면 linux_abi_stack=true(build_process()의 기존 M28 경로를
+    // 그대로 재사용, 인터프리터는 여전히 없음 — ADR-203의 정적
+    // 링킹 기준선). procsrv.md §4처럼 신원 유지만 다루는 기존
+    // 호출자(M12 self-exec, M18 su-target)는 그대로 false를 넘긴다.
     auto err = build_process(elf_data, elf_size, argv_blob, argv_size,
-                              self->owner_space->trusted, /*linux_abi_stack=*/false,
+                              self->owner_space->trusted, linux_abi_stack,
                               /*interp_data=*/nullptr, /*interp_size=*/0, built);
     if (err != process_spawn_error::ok) {
         return err;

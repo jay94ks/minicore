@@ -1519,3 +1519,47 @@
   - `-D_XOPEN_SOURCE=700`은 앞으로 추가되는 모든 musl 소스 파일에
     이미 적용돼 있다(타깃 전체 `PRIVATE` 정의) — 새 파일을 추가할
     때 이 문제를 다시 겪지 않는다.
+
+## ADR-207. M32 실행 중 발견: `fork()`는 `fs_base`도 물려줘야 한다(TLS) + `sys_exec`가 `linux_abi_stack`을 받도록 확장
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M32 실행 중 발견)
+- **배경**: M28은 `exec_current()`를 "이번 라운드에 `linux_abi_stack`
+  을 지원하지 않는다"로 명시적으로 미뤄 뒀다(procsrv.md §4류 신원
+  유지 exec만 다뤘으므로) — M32의 목표(musl의 진짜 `execve()`로
+  **다른** musl 실행 이미지를 실행)가 이 자리를 요구한다. 또한
+  `fork_current()`(ADR-179, M23)는 `io_port_base`/`io_port_count`
+  만 부모에게서 물려받고 있었다 — TLS(`fs_base`, ADR-183/M28)는
+  물려주는 코드가 없었다. procsrv 자신의 fork 자기테스트(M23/M27)는
+  TLS를 전혀 쓰지 않아 이 간극이 드러나지 않았다.
+- **결정**:
+  1. **`mc_exec_request`(mc/syscall.h)에 `linux_abi_stack` 필드를
+     추가한다**(`mc_process_spawn_request`와 완전히 같은 의미) —
+     `exec_current()`가 이 값을 그대로 `build_process()`(M28이 이미
+     만든 경로, 스폰과 exec가 그대로 재사용)에 전달한다. M12
+     self-exec/M18 su-target 같은 기존 호출자는 POD 구조체를 `{}`
+     로 0 초기화하므로 자동으로 `false`(기존 동작 그대로) — 회귀
+     없다.
+  2. **`fork_current()`가 `child->fs_base = self->fs_base;`를
+     추가한다**(`io_port_base`/`io_port_count`와 같은 자리, 같은
+     패턴). fork()는 주소공간 전체를 COW로 복제하므로, 부모의
+     `fs_base`가 가리키는 가상주소(TLS 블록, musl의 `builtin_tls`
+     정적 구조체 등)도 자식 쪽에 이미 유효한 COW 사본으로 존재한다 —
+     값만 그대로 넘기면 된다.
+- **실행 중 발견**: `fs_base` 상속 없이 musl-hello의 `fork()`를
+  QEMU로 실행하자, `create_forked_thread()`가 만드는 새 스레드
+  객체가 `fs_base=0`(기본값)으로 시작해, 자식이 exec() 전에(여전히
+  부모와 같은 이미지를 실행하는 동안) `_Fork()`의 `__post_Fork()`가
+  `__pthread_self()`(`%fs` 상대 읽기)를 호출하는 순간 페이지 폴트로
+  죽었다(vector=14, error_code=0x5 — present+user+read, 이 커널의
+  저지대 항등 매핑처럼 present이지만 supervisor 전용인 영역을 읽은
+  것과 일치). `child->fs_base = self->fs_base;` 한 줄로 해결됐다 —
+  "실제 Linux에서 fork()가 TLS를 그대로 물려준다"는 성질을 이
+  커널에서도 재현해야 했다는 뜻이다.
+- **영향**: 앞으로 `thread` 구조체에 스레드별 상태를 추가할 때마다
+  "fork()가 이 필드를 부모에게서 물려줘야 하는가"를 명시적으로
+  검토해야 한다(이번에 놓친 것이 `fs_base` 하나였다는 사실 자체가
+  이 검토를 건너뛰기 쉽다는 증거) — `procsrv_pid`(ADR-206)는 반대로
+  **물려주지 않는 것이 맞는** 필드다(자식은 자기만의 새 pid를
+  받아야 하므로, `create_forked_thread()`의 기본값 0을 그대로
+  둔다).

@@ -6,12 +6,39 @@ if(NOT MINICORE_ARCH STREQUAL "x86_64")
   return()
 endif()
 
+# M32(real-libc-syscall-layer.md §M32) — musl-hello가 execve()할
+# "다른 실행 이미지"(userland/musl-exec-target)의 원본 바이트를
+# procsrv 자신의 컴파일 시점 데이터로 심는다(procsrv가 부팅 시 VFS
+# (memfs)에 그 바이트를 미리 써 둬야 musl-hello가 경로로 열 수
+# 있다 — 커널이 initrun.elf를 자기 이미지에 .incbin하는 것과 같은
+# 목적이지만, procsrv는 일반 유저 프로세스 빌드 드라이버라 .incbin을
+# 못 써서 tools/bin2c.py로 대신한다).
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(MUSL_EXEC_TARGET_BLOB_H ${CMAKE_CURRENT_BINARY_DIR}/generated/musl_exec_target_blob.h)
+add_custom_command(
+    OUTPUT ${MUSL_EXEC_TARGET_BLOB_H}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/bin2c.py
+            $<TARGET_FILE:minicore_musl_exec_target_elf>
+            ${MUSL_EXEC_TARGET_BLOB_H}
+            g_musl_exec_target_elf
+    DEPENDS minicore_musl_exec_target_elf
+            ${CMAKE_SOURCE_DIR}/tools/bin2c.py
+    COMMENT "Generating musl-exec-target ELF blob header (tools/bin2c.py)"
+    VERBATIM
+)
+add_custom_target(minicore_procsrv_musl_exec_target_blob DEPENDS ${MUSL_EXEC_TARGET_BLOB_H})
+
 add_executable(minicore_procsrv_elf
     main.cpp
 )
 
+add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob)
+
 target_include_directories(minicore_procsrv_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/mc/include
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
 target_link_libraries(minicore_procsrv_elf PRIVATE minicore_libk minicore_libmc)

@@ -7,3 +7,5 @@
 | 10 | wait | uint32 target_pid; uint32 caller_pid | uint32 status; int32 exit_code | procsrv_protocol.h:15 |
 | 11 | kill | uint32 target_pid; uint32 caller_pid | uint32 status | procsrv_protocol.h:17 |
 | 12 | exit_report | uint32 pid; int32 exit_code | (없음) | procsrv_protocol.h:19 |
+| 13 | self_register | (없음) | uint32 status; uint32 pid | procsrv_protocol.h:31 |
+| 14 | fork_register | uint32 caller_pid | uint32 status; uint32 new_pid | procsrv_protocol.h:33 |

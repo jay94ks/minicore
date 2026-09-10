@@ -188,6 +188,26 @@ struct thread {
     // sync_fs_base 참고) — 컨텍스트 스위치마다 이 값이 실제 MSR에
     // 반영돼야 스레드마다 독립된 TLS가 성립한다.
     uint64_t fs_base = 0;
+
+    // M32(real-libc-syscall-layer.md §M32) — procsrv가 이 스레드에게
+    // 부여한 pid(procsrv.md의 process_entry.pid, 이 커널 자신은
+    // 의미를 모르는 불투명한 번호다 — ADR-201이 이미 "pid는 순수
+    // procsrv/userland 개념"으로 정한 것과 같은 정신, 커널은 그저
+    // 스레드별로 하나 기억해 두는 스토리지 역할만 한다). 기본
+    // 0=아직 procsrv에 등록된 적 없음.
+    //
+    // sys_exec는 이 thread 객체를 그대로 재사용하고 owner_space만
+    // 바꾼다(exec_current()) — 그래서 이 필드는 fs_base와 달리
+    // exec()을 거쳐도 그대로 살아남는다. 이게 필요한 이유: exec()은
+    // 완전히 새 주소공간(BSS/데이터 포함)으로 이미지를 통째로
+    // 바꾸므로, 새 이미지의 libmc(mc/procsrv_client.c)가 자기 pid를
+    // 캐시해 둔 유저랜드 static 변수는 exec 이후 전부 사라진다 —
+    // 만약 pid를 유저랜드에만 캐시했다면 fork()+exec()의 자식이 자기
+    // pid를 잃어버려 exit_report를 procsrv에 올바르게 보고할 수
+    // 없다. 커널 스레드 객체(exec을 거쳐도 동일한 객체)에 저장해야
+    // "실제 Linux에서 pid/tgid가 execve() 이후에도 그대로 유지된다"
+    // 는 성질을 이 커널에서도 재현할 수 있다.
+    uint32_t procsrv_pid = 0;
 };
 
 // ipc.md §2 — Call/Reply가 오가는 대상. rights: CAN_SEND/CAN_RECV/

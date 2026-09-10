@@ -1458,6 +1458,66 @@ ADR-011/023)만으로 표현한다.
   - `docs/spec/generated/procsrv-wire.md`(자동 생성, ADR-195)가 이
     프로토콜의 최신 정본 참조표다.
 
+## ADR-206. M32 procsrv pid를 procsrv 직접 스폰 프로세스 너머로 확장: self_register/fork_register + 커널 스레드 필드에 저장(exec 생존)
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M32 실행 중 확정)
+- **배경**: ADR-201(M27)은 procsrv의 `wait`/`kill`/`exit_report`를
+  **procsrv 자신이 직접 스폰한 프로세스 사이에서만** 검증했다 —
+  pid는 procsrv가 스폰 직전에 A/B/C의 argv에 미리 실어 준 값이었다.
+  M32는 musl의 진짜 `fork()`+`execve()`+`waitpid()`+`getpid()`가
+  **initrun이 스폰한 일반 프로세스**(musl-hello) 사이에서 동작해야
+  한다 — procsrv가 스폰 시점에 pid를 미리 알려줄 방법이 없는 대상
+  이다. 또한 fork()의 자식이 곧바로 execve()하면(이 라운드의 실제
+  시나리오) 자식의 주소공간(BSS/데이터 포함)이 execve()로 완전히
+  새 이미지로 갈아엎어진다 — 유저랜드 static 변수에 pid를 캐시해
+  두면 이 시점에 사라진다는 것을 실제로 겪었다(아래 "실행 중 발견").
+- **결정**:
+  1. **`mc/procsrv_protocol.h`에 두 오퍼레이션을 추가한다**:
+     `self_register`(label=13, 요청 없음, 응답=신규 pid) — 아직
+     procsrv에 등록된 적 없는 프로세스가 최초로 자기 pid를 물을 때
+     쓴다(parent_pid=0="부모 없음", procsrv.md §2 관례). `fork_register`
+     (label=14, 요청=caller_pid, 응답=신규 child_pid) — `sys_fork`
+     (커널의 실제 fork syscall) **이전에** 호출해 자식의 pid를 미리
+     확정받는다. ADR-201의 "caller_pid는 자기주장, badge 검증 없음"
+     모델을 그대로 확장한다(OPEN-67과 같은 정신 — 완전한 신원 검증은
+     여전히 범위 밖).
+  2. **pid는 유저랜드 static이 아니라 커널 스레드 객체
+     (`kern::object::thread::procsrv_pid`, `mc_procsrv_pid_get/set`)
+     에 캐시한다.** `sys_exec`는 같은 스레드 객체를 재사용하고
+     `owner_space`만 바꾸므로(`exec_current()`), 이 필드는 execve()
+     를 거쳐도 살아남는다 — "실제 Linux에서 pid/tgid가 execve() 이후
+     에도 유지된다"는 성질을 이 커널에서도 재현한다.
+  3. **`mc_fork()`(libmc, syscall_shim.c가 부르는 얇은 래퍼)는
+     `fork_register`로 자식의 pid를 먼저 확정한 뒤에야 실제
+     `sys_fork`를 호출한다** — 그 결과(child_pid)를 담은 지역변수가
+     `sys_fork`의 COW 복제로 부모/자식 양쪽 스택에 그대로 남으므로,
+     별도 조율 없이 부모는 그 값을 반환하고 자식은 자신의
+     `procsrv_pid` 필드를 그 값으로 설정하기만 하면 된다.
+  4. **`SYS_exit`/`SYS_exit_group`은 `mc_getpid_cached()`(IPC 없이
+     커널 필드만 읽음)가 0이 아닐 때만 `exit_report`를 보낸다** — 한
+     번도 procsrv에 등록된 적 없는 프로세스(fork/getpid를 부른 적
+     없음)는 애초에 procsrv가 모르는 pid라 조용히 건너뛴다.
+  5. **`SYS_wait4`는 `pid>0`(특정 자식)만 지원한다** — `pid<=0`
+     ("임의의 자식"/프로세스 그룹)은 이 라운드 범위 밖이다. musl의
+     `_Fork()`가 x86_64에서 `SYS_clone`이 아니라 `SYS_fork`를 직접
+     쓰므로(계획이 대비해 둔 "SYS_clone, flags==SIGCHLD만" 케이스는
+     이 아키텍처에서 밟히지 않는다), fork 변형 범위를 좁히는 결정은
+     이미 2026-09-10 사용자 확인으로 다뤄졌다(§M32 본문 참고) — 이
+     `wait4` 범위 좁힘은 그와 별개로 이번에 새로 필요해진 결정이다.
+- **실행 중 발견**: 처음엔 pid를 유저랜드 `static uint32_t` 변수에
+  캐시했는데, musl-hello의 fork() 자식이 execve()로 musl-exec-target
+  이미지로 바뀌자 그 static이 완전히 새 BSS로 초기화돼(값 0) 자기
+  pid를 잃어버리고, `_exit(42)`가 procsrv에 아무 보고도 못 해
+  부모의 `waitpid()`가 영원히 `STILL_RUNNING`으로 남는 문제를 실제로
+  겪었다(2026-09-10) — 커널 스레드 필드로 옮겨 해결했다(위 결정2).
+- **영향**: OPEN-67("procsrv 클라이언트의 caller_pid 자기주장을
+  커널이 검증 가능한 방식으로 강화")은 이 ADR로도 해소되지 않는다
+  (`self_register`/`fork_register`도 여전히 자기주장 모델이다) —
+  OPEN-67은 그대로 열어 둔다. procsrv.md §2/§6의 "procsrv가 직접
+  스폰한 프로세스 사이에서만 동작"이라는 ADR-201의 실제 구현 각주는
+  이 ADR로 낡았다 — procsrv.md에 이 ADR을 가리키는 각주를 추가한다.
+
 ## 아직 정하지 않은 것
 
 - **OPEN-42**(범위 좁혀짐, ADR-194로 명령 단위는 해결): 위임의

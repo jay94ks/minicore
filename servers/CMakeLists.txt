@@ -35,6 +35,15 @@ add_subdirectory(login)
 # tools/mkbootdisk.py 참고)로 표시된 유일한 서비스라 initrun이
 # musl의 crt_arch.h가 요구하는 Linux ABI 초기 스택으로 스폰한다
 # (다른 모든 서비스는 이 커널의 기존 arg0 관례를 그대로 쓴다).
+# M32(real-libc-syscall-layer.md §M32) — musl-hello가 진짜
+# fork()+execve()+waitpid()로 procsrv에 pid를 등록/조회하려면
+# procsrv의 endpoint도 물려받아야 해서 procsrv를 두 번째 의존으로
+# 추가했다(handle 순서는 libc/sysdeps/minicore/syscall_shim.c::
+# MC_PROCSRV_HANDLE 참고). execve()가 실행할 "다른 이미지"
+# (userland/musl-exec-target)는 이 목록에 없다 — initrun이 부팅 시
+# 스폰하는 서비스가 아니라, procsrv가 VFS(memfs)에 미리 써 두고
+# musl-hello가 런타임에 경로로 여는 대상이다(servers/procsrv/
+# CMakeLists.txt의 tools/bin2c.py 배선 참고).
 if(MINICORE_ARCH STREQUAL "x86_64")
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -70,7 +79,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=fat32:devmgr
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
-              --depends=musl-hello:vfs
+              --depends=musl-hello:vfs,procsrv
               --linux-abi-stack=musl-hello
               --trusted=devmgr
               --trusted=ps2

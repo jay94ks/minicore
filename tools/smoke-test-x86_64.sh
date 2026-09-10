@@ -182,6 +182,22 @@
 #     무시되지 않고 반드시 "[syscall_shim] unimplemented n=" 로그를
 #     남긴 뒤 -ENOSYS를 반환한다(musl은 이 실패를 무시하고 계속
 #     진행하도록 설계돼 있어 크래시하지 않는다).
+#   M32 (real-libc-syscall-layer.md §M32): 프로세스 syscall — 진짜
+#     musl fork()/execve()/waitpid()/getpid()가 procsrv의 새
+#     self_register/fork_register 오퍼레이션(mc/procsrv_protocol.h
+#     label=13/14)을 왕복한다("musl getpid ok=1" — procsrv가 이미
+#     자신의 여러 self-test로 pid를 소비해 둬서 정확한 숫자는 매번
+#     달라질 수 있어 값 자체는 확인하지 않는다). fork()의 자식이 execve()로
+#     **다른** 실행 이미지(userland/musl-exec-target — procsrv가
+#     부팅 시 VFS에 미리 써 둔다, run_exec_target_seed())를 실행하고
+#     ("musl fork ok=1"), 부모가 waitpid()로 그 고유한 exit code(42)
+#     를 회수한다("musl fork+exec+wait ok=1"). SYS_execve를 지원하려면
+#     exec_current()(kernel/arch/x86_64/process_ops.cpp)도 M28의
+#     linux_abi_stack 경로를 받아야 했다(M28 시점엔 "exec()은 이번
+#     라운드에 지원하지 않는다"로 미뤄 뒀던 부분 — mc_exec_request에
+#     linux_abi_stack 필드 추가). SYS_wait4는 pid>0(특정 자식)만
+#     지원한다(pid<=0의 "임의의 자식" 의미론은 범위 밖 — 2026-09-10
+#     사용자 확인, fork/clone 범위 좁힘과 같은 결정).
 #   M31 (real-libc-syscall-layer.md §M31, kernel-memory.md ADR-183): 파일
 #     I/O syscall(SYS_open/openat/read/readv/close/writev, VFS/FS
 #     프로토콜은 이미 있는 libmc의 mc_vfs_open/mc_fs_read를 그대로
@@ -395,6 +411,11 @@ declare -a EXPECTED=(
   "musl fopen ok=1"
   "musl fread content ok=1"
   "musl printf read: hello vfs (9 bytes)"
+  "[procsrv] musl-exec-target seed ok=1"
+  "musl getpid ok=1"
+  "musl fork ok=1"
+  "hello from musl-exec-target (a different image)"
+  "musl fork+exec+wait ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

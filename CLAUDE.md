@@ -267,5 +267,23 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   musl-hello가 처음 실전에 씀 — VFS 핸들이 필요해 musl-hello를
   커널 직접 스폰에서 initrun의 15번째 정식 서비스로 재배치했다
   (새 `mkbootdisk.py --linux-abi-stack=` ini 키, ADR-205).
-  **M32(fork/execve/wait4 실왕복)부터 정적 링킹 기반으로 진행
-  중**이다.
+  **M32(완료)**(결과는
+  [docs/done/real-libc-syscall-layer-m32.md](docs/done/real-libc-syscall-layer-m32.md),
+  [ADR-206](docs/design/security-model.md)/[ADR-207](docs/design/kernel-memory.md)
+  참고): 진짜 musl `fork()`+`execve()`+`waitpid()`+`getpid()` 실왕복.
+  procsrv에 `self_register`/`fork_register`를 추가해 M27의 "procsrv
+  직접 스폰 프로세스 사이에서만" 제약을 initrun이 스폰한 일반
+  프로세스까지 확장하고, pid를 유저랜드 static이 아니라 커널 스레드
+  필드(`thread::procsrv_pid`)에 저장해 `execve()`를 거쳐도 보존시켰다
+  (ADR-206) — 자식이 곧바로 exec()하는 이 라운드의 실제 시나리오상
+  static 캐시는 exec가 BSS를 통째로 새로 갈아엎어 사라진다는 것을
+  실제로 겪었다. 자식이 execve()로 **다른** 이미지(신규
+  `userland/musl-exec-target`, `tools/bin2c.py`로 procsrv 자신에
+  컴파일 시점 데이터로 심어 VFS(memfs)에 씀)를 실행하고 부모가 그
+  exit code를 회수함을 확인했다(M29가 이미 ADR-203으로 정적 링킹에
+  되돌아가 있어, PT_INTERP 로더 경로 확인은 이번에도 범위 밖).
+  실행 중 `fork_current()`가 `fs_base`(TLS)를 물려주지 않아 musl
+  자식이 exec 전에 죽는 진짜 버그를 발견해 고쳤다(ADR-207,
+  `io_port_base`/`count`와 같은 자리에 한 줄 추가) — musl 프로그램이
+  `fork()`한 것은 이번이 처음이라 지금까지 드러나지 않았던 간극이다.
+  다음은 M33(LAPIC 타이머 보정)이다.

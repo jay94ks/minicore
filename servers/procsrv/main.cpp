@@ -39,6 +39,8 @@
 #include <mc/procsrv_protocol.h>
 #include <mc/syscall.h>
 
+#include "musl_exec_target_blob.h"
+
 namespace kernsrv::procsrv {
 
 namespace {
@@ -179,17 +181,22 @@ process_entry* alloc_process_slot() {
 
 // pid는 이미 alloc_pid()로 할당돼 있어야 한다(스폰 전에 argv에 미리
 // 담아야 하는 경우가 있어 "번호 할당"과 "테이블 등록"을 분리했다 —
-// 아래 run_general_process_table_test() 참고).
-void insert_process_entry(uint32_t pid, uint32_t parent_pid, uint32_t thread_handle) {
+// 아래 run_general_process_table_test() 참고). 반환값은 실제로
+// 슬롯에 들어갔는지(false=테이블 가득 참, k_max_processes=64) — M27의
+// 기존 호출자들(procsrv 자신의 self-test)은 무시해도 안전하지만,
+// M32의 handle_proc_fork_register()는 이 실패를 caller에게 그대로
+// 보고해야 한다(MC_PROC_STATUS_TABLE_FULL).
+bool insert_process_entry(uint32_t pid, uint32_t parent_pid, uint32_t thread_handle) {
     process_entry* slot = alloc_process_slot();
     if (slot == nullptr) {
-        return;
+        return false;
     }
     slot->pid = pid;
     slot->parent_pid = parent_pid;
     slot->thread_handle = thread_handle;
     slot->state = process_state::running;
     slot->exit_code = 0;
+    return true;
 }
 
 // ADR-192 §결정3의 재부모화 메커니즘 — 대상(to_parent_pid)을
@@ -250,6 +257,42 @@ void handle_proc_exit_report(const mc_message& in) {
         p->state = process_state::zombie;
         p->exit_code = exit_code;
     }
+}
+
+// M32(real-libc-syscall-layer.md §M32, libmc mc_getpid()) — 호출자가
+// 아직 procsrv에 알려지지 않은 프로세스(procsrv 자신이 직접 스폰하지
+// 않은 일반 프로세스 — 예: initrun이 스폰한 musl-hello)일 때, 최초로
+// 자신의 pid를 물을 때 그 자리에서 등록한다. parent_pid=k_parent_none
+// (procsrv.md §2 "0 = 부모 없음"과 같은 관례 — 이 경로로 등록되는
+// 프로세스는 진짜 부모를 모른다, ADR-201과 같은 정신의 확장).
+void handle_proc_self_register(mc_message& out) {
+    uint32_t pid = alloc_pid();
+    if (!insert_process_entry(pid, k_parent_none, /*thread_handle=*/0)) {
+        out.regs[0] = MC_PROC_STATUS_TABLE_FULL;
+        return;
+    }
+    out.regs[0] = MC_PROC_STATUS_OK;
+    out.regs[1] = pid;
+}
+
+// M32 — libmc mc_fork()가 실제 sys_fork(MC_SYSCALL_FORK) **이전에**
+// 호출한다. 자식의 pid를 미리 확정해 두면, sys_fork가 COW로 복제하는
+// 호출자의 스택(그 pid를 담은 지역변수)을 통해 부모/자식 양쪽이
+// 별도 통신 없이 같은 값을 보게 된다(libs/mc/src/ipc/procsrv_client.c
+// mc_fork() 주석 참고). thread_handle=0(모름)으로 등록한다 — 이
+// 자식은 procsrv가 직접 스폰한 게 아니라 진짜 sys_fork가 만들어서,
+// M22의 sys_process_kill 대상 핸들을 procsrv가 얻을 길이 없다(OPEN-67
+// 과 같은 정신 — kill()은 이 경로로 만들어진 자식에는 이 라운드에서
+// 지원하지 않는다, wait()/exit_report만 지원).
+void handle_proc_fork_register(const mc_message& in, mc_message& out) {
+    uint32_t caller_pid = static_cast<uint32_t>(in.regs[0]);
+    uint32_t child_pid = alloc_pid();
+    if (!insert_process_entry(child_pid, caller_pid, /*thread_handle=*/0)) {
+        out.regs[0] = MC_PROC_STATUS_TABLE_FULL;
+        return;
+    }
+    out.regs[0] = MC_PROC_STATUS_OK;
+    out.regs[1] = child_pid;
 }
 
 // M18(security-model.md ADR-079 최소 버전/ADR-167) — uid/S·G·J
@@ -353,7 +396,13 @@ const account* find_account_by_username(const void* username_bytes) {
 
 // ---------- M18 — 경로→ELF 로더 + su-target 스폰(security-model.md ADR-167) ----------
 constexpr uint64_t k_page_size = 4096;
-constexpr uint64_t k_max_reassembled_bytes = 131072;  // servers/fs/memfs::k_max_file_bytes와 일치.
+// M32(real-libc-syscall-layer.md §M32) — procsrv 자신이 musl-exec-target
+// ELF를 컴파일 시점 데이터로 심게 되면서(tools/bin2c.py) procsrv 자신의
+// ELF도 131072를 넘어서(139072바이트, 2026-09-10) servers/fs/memfs::
+// k_max_file_bytes와 함께 262144로 늘렸다 — 이 값은 BSS 배열(아래
+// g_reassembled) 크기라 늘려도 procsrv 자신의 ELF **파일** 크기에는
+// 영향이 없다(BSS는 파일에 저장되지 않는다).
+constexpr uint64_t k_max_reassembled_bytes = 262144;  // servers/fs/memfs::k_max_file_bytes와 일치.
 constexpr const char* k_su_target_path = "/bin/su-target";
 
 alignas(k_page_size) uint8_t g_write_scratch[k_page_size] = {};
@@ -1142,6 +1191,22 @@ void run_vfs_roundtrip_test() {
     }
 }
 
+// M32(real-libc-syscall-layer.md §M32) — musl-hello가 fork()+execve()
+// 로 실행할 "다른 이미지"의 원본 바이트(userland/musl-exec-target,
+// procsrv 자신의 컴파일 시점 데이터로 tools/bin2c.py가 심어 둠 —
+// servers/procsrv/CMakeLists.txt 참고)를 VFS(memfs)에 미리 써 둔다.
+// write_elf_to_vfs는 이미 M18(su-target)이 만들어 둔 범용 헬퍼다 —
+// 새로 만들 필요가 없었다. musl-hello는 vfs 하나에만 의존해도(같은
+// initrun 스폰 순서 관례, M31의 "test.txt"와 같은 이유) 이 시점에는
+// 이미 이 파일이 준비돼 있다.
+void run_exec_target_seed() {
+    bool ok = write_elf_to_vfs("musl-exec-target.elf", g_musl_exec_target_elf,
+                               g_musl_exec_target_elf_len);
+    const char* msg =
+        ok ? "[procsrv] musl-exec-target seed ok=1\n" : "[procsrv] musl-exec-target seed ok=0\n";
+    debug_log(msg, cstr_len(msg));
+}
+
 // M16(fs-protocol.md v2, ADR-057/129) — vfs의 마운트 테이블을 거쳐
 // fat32/ext4 서버가 실제로 마운트한 이미지에서 파일을 열어 읽는다.
 // tools/make-fs-test-images.sh가 각 이미지의 루트에 hello.txt를
@@ -1517,6 +1582,7 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // 가능하다). M13의 검증 목표(VFS 경유 memfs 왕복)는 여기서 이어서
     // 확인한다.
     run_vfs_roundtrip_test();
+    run_exec_target_seed();
 
     // M16 — tools/make-fs-test-images.sh가 심어 둔 내용과 정확히
     // 일치해야 한다(그 스크립트의 FAT32_CONTENT/EXT4_CONTENT).
@@ -1577,6 +1643,10 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
                 handle_proc_kill(in, out);
             } else if (in.label == MC_PROC_OP_EXIT_REPORT) {
                 handle_proc_exit_report(in);
+            } else if (in.label == MC_PROC_OP_SELF_REGISTER) {
+                handle_proc_self_register(out);
+            } else if (in.label == MC_PROC_OP_FORK_REGISTER) {
+                handle_proc_fork_register(in, out);
             }
         }
         do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);

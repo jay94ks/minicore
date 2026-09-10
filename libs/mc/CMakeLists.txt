@@ -4,10 +4,11 @@
 # 다른 아키텍처의 syscall 트램폴린은 아직 없다). `#include <mc/...>`
 # 경로 자체는 안 바뀌었다 — 내부 세그먼트 이름이 이미 `mc`였다.
 #
-# ADR-170이 확정한 이번 라운드의 범위: syscall 1:1 래퍼(mc/syscall.h,
-# 헤더 전용)+VFS/FS 공통 프로토콜·콘솔·ps2 클라이언트+_start 진입점
-# 글루뿐이다 — procsrv/devmgr/cfgsrv 클라이언트는 아직 어떤
-# 소비자도 없어 비워 둔다.
+# ADR-170이 확정한 범위: syscall 1:1 래퍼(mc/syscall.h, 헤더 전용)+
+# VFS/FS 공통 프로토콜·콘솔·ps2 클라이언트+_start 진입점 글루.
+# devmgr/cfgsrv 클라이언트는 아직 어떤 소비자도 없어 비워 둔다 —
+# procsrv 클라이언트는 M32(real-libc-syscall-layer.md §M32)가 musl의
+# syscall_shim.c를 첫 소비자로 만들며 추가했다(mc/procsrv_client.h).
 if(NOT MINICORE_ARCH STREQUAL "x86_64")
   add_library(minicore_libmc INTERFACE)
   return()
@@ -18,6 +19,7 @@ add_library(minicore_libmc STATIC
     src/ipc/fs_client.c
     src/ipc/console_client.c
     src/ipc/ps2_client.c
+    src/ipc/procsrv_client.c
     src/mem/heap.c
     src/x86_64/start.c
     src/freestanding_mem.c
