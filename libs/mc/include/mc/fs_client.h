@@ -1,7 +1,8 @@
 // libmc/include/mc/fs_client.h — OP_OPEN 이후 FS 서버에 직접 거는
-// OP_READ/OP_LIST 클라이언트(docs/spec/fs-protocol.md v3/v4). 이번
-// 라운드의 셸은 읽기만 하므로 OP_WRITE 클라이언트는 아직 없다
-// (ADR-170 §영향 — 실제로 필요해지는 시점에 추가).
+// OP_READ/OP_WRITE/OP_LIST 클라이언트(docs/spec/fs-protocol.md
+// v3/v4). ADR-170 §영향이 "실제로 필요해지는 시점에 추가"로 미뤄
+// 뒀던 OP_WRITE 클라이언트는 M54(musl-userland-porting.md §M54,
+// ADR-225)가 msh의 출력 리다이렉션(`>`)을 위해 처음 추가했다.
 #pragma once
 
 #include <stdint.h>
@@ -26,6 +27,14 @@ uint64_t mc_fs_read_all(uint32_t fs_handle, uint64_t open_file_id, uint8_t* out_
 // out_buf에 채우므로, mc_fs_read_all처럼 "서버가 더 읽었는데 일부만
 // 복사"해서 데이터를 잃어버릴 위험이 없다. 0 반환 = EOF 또는 오류.
 uint64_t mc_fs_read(uint32_t fs_handle, uint64_t open_file_id, uint8_t* out_buf, uint64_t count);
+
+// M54(musl-userland-porting.md §M54, ADR-225) — mc_fs_read와 대칭인
+// 단 한 번의 OP_WRITE(fs-protocol.md v3 §2.2, write_cursor 위치부터
+// 이어 쓴다). count가 한 페이지(4096)를 넘으면 그만큼만 보낸다(호출자
+// 가 남은 만큼 다시 불러야 한다 — write()의 짧은 쓰기 의미론과 같다).
+// 반환값은 실제로 쓴 바이트 수(항상 요청한 양 이하), 0=오류.
+uint64_t mc_fs_write(uint32_t fs_handle, uint64_t open_file_id, const uint8_t* data,
+                      uint64_t count);
 
 // fs-protocol.md v4 §2.4 — memfs 전용. 성공하면 0(OK)을 반환하고
 // out_names_blob에 NUL로 구분된 이름 목록을, *out_count에 개수를

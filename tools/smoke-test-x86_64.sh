@@ -464,6 +464,39 @@
 #     가리킨다). msh 자신의 self-test("[msh] running: ...")는 M52에서
 #     이미 검증됐고 이번엔 트리거만 바뀌었다(부팅 시점 서비스 →
 #     로그인 시점 스폰) — 같은 어서션이 여전히 통과함을 확인했다.
+#   M54 (docs/plan/musl-userland-porting.md §M54, ADR-225): msh가
+#     `|`(파이프라인)와 `>`(출력 리다이렉션)를 실제로 지원한다 —
+#     "[msh] running: ls @pipefd 1 2"/"cat @pipefd 0 1"(msh가 자기
+#     pipe()로 만든 id를 argv에 실어 다음 단계로 넘기는 관례,
+#     mc/shell_fd_binding.h)과 "[msh] running: echo @filefd 1 10 36
+#     msh-redirect-test"(출력 리다이렉션 — msh가 먼저 파일을 열고
+#     그 {fs_handle, open_file_id}를 argv로 넘긴다) 다음 "cat
+#     /tmp/msh-redirect.txt"가 그 파일 내용을 읽어 확인한다(직접
+#     출력은 어서션에 안 넣는다 — "msh-redirect-test" 한 줄은 ls의
+#     출력과 뒤섞일 수 있어 순서 보장이 약하다, "self-test done
+#     ok=1"이 전체 성공의 최종 확인이다). 실행 중 발견한 진짜 버그
+#     여러 건, 가장 심각한 것은 execve()가 fd 테이블(g_pipe_fds[]
+#     등, syscall_shim.c의 로컬 BSS)을 통째로 지운다는 것 자체가
+#     아니라(그건 이미 알고 시작함), 그로부터 파생된 참조 카운트
+#     버그 두 겹이었다 — msh가 파이프 양끝을 들고 두 번 fork()하면
+#     SYS_fork의 자동 dup 로직(M51, "그 시점에 살아있는 파이프 fd
+#     전부를 자식 쪽에서 op_dup")이 매 fork()마다 불필요하게 참조를
+#     늘려 다음 단계가 EOF를 영원히 못 받았고(1차), 이를 "fork() 전에
+#     msh 자신의 파이프 fd를 닫는다"로 고쳤더니 그 close()가
+#     mc_pipe_close로 서버 참조 카운트까지 줄여 버려 자식이 argv로
+#     넘겨받기도 전에 파이프 자체가 사라졌다(2차 — "ls | cat"이
+#     조용히 exit status 1로 실패하는 것으로 드러났다, 겉보기엔
+#     "그냥 좀 느린가" 싶은 타이밍 문제로 오인하기 쉬웠다). 최종
+#     해법은 mc_shell_bind_pipe_fd()가 더 이상 dup을 부르지 않고
+#     (넘겨받는 것뿐이라 dup이 필요 없다) msh 쪽엔 서버에 알리지
+#     않고 로컬 표만 지우는 새 mc_shell_forget_pipe_fd()를 둬서
+#     "정확히 하나의 참조가 정확히 한 자식에게 그대로 이동한다"는
+#     모델로 바꾼 것이다. 그 밖에 memfs의 k_max_open_files(64→256)/
+#     k_max_files(8→16) 고정 한도가 msh 자기테스트 하나로 바닥나는
+#     것, musl open()의 O_CREAT는 세 번째 va_arg(mode)를 항상
+#     읽는다는 것(안 넘기면 UB), extract_redirect가 `>` 토큰을 자른
+#     뒤 NUL 종료를 빠뜨려 파일명까지 스푸리어스 인자로 넘어가던
+#     것도 실행 중 발견해 고쳤다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -713,6 +746,10 @@ declare -a EXPECTED=(
   "[msh] running: echo hello msh"
   "[msh] running: ls"
   "[msh] running: cat /bin/echo"
+  "[msh] running: ls @pipefd 1 2"
+  "[msh] running: cat @pipefd 0 1"
+  "[msh] running: echo @filefd 1 10 36 msh-redirect-test"
+  "[msh] running: cat /tmp/msh-redirect.txt"
   "[msh] self-test done ok=1"
   "[procsrv] coreutils seed ok=1"
   "[procsrv] loader roundtrip ok=1"

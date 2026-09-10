@@ -648,5 +648,34 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   마커를 `[msh] self-test done ok=1`로 교체, 스모크(139)+SMP(11)+
   NUMA(24)+AVX(12)+net(6) 5개 회귀 스위트 전부 PASS(결과는
   [docs/done/musl-userland-porting-m53.md](docs/done/musl-userland-porting-m53.md)
-  참고). 다음은 M54(파이프라인/리다이렉션 통합 검증, 새 구현 없음)
-  이다.
+  참고).
+  **M54(완료)**([ADR-225](docs/design/foundations.md) 참고): "M51+M53
+  통합 검증, 새 구현 없음"이라던 계획의 예상은 틀렸다 — `msh`의
+  `\|`(파이프라인)/`>`(출력 리다이렉션)를 실제로 구현하려면 새
+  메커니즘이 필요했다. execve()가 fd 테이블(`g_pipe_fds[]` 등,
+  `syscall_shim.c`의 로컬 BSS)을 통째로 지운다는 게 이 프로젝트에
+  진짜 "fd 진실 공급원"이 없다는 것(OPEN-64)과 같은 이유로 발목을
+  잡아, 새 `mc/shell_fd_binding.h`로 파이프/리다이렉션 대상 fd를
+  argv의 `"@pipefd"`/`"@filefd"` 토큰으로 실어 보내고 대상 프로그램
+  (`echo`/`ls`/`cat`)이 `main()` 맨 앞에서 `mc_shell_strip_bindings()`
+  로 벗겨내는 관례를 새로 만들었다. 실행 중 진짜 버그 5건을
+  발견·수정했다: memfs `k_max_open_files`(64→256)/`k_max_files`
+  (8→16) 고정 한도 고갈, musl `open()`의 `O_CREAT` 세 번째 va_arg
+  (mode) 누락, `extract_redirect`의 NUL 종료 누락, 그리고 **가장
+  심각한 것**: M51이 설계한 pipesrv 참조 카운트의 "dup" 계약(fork()가
+  fd 테이블을 복제하는 경우를 전제)이 msh의 실제 패턴(파이프 양끝을
+  들고 있다가 각기 다른 자식에게 정확히 한 번씩 **넘겨준다**)과 안
+  맞아 연쇄된 두 겹 버그다 — 1차: `SYS_fork`의 자동 dup 루프가 msh의
+  매 fork()마다 참조를 불필요하게 늘려 다음 단계가 EOF를 영원히
+  못 받는 무한 대기(QEMU 부트가 120초→180초→240초→300초로도 안
+  끝나 처음엔 "느려졌나" 오인), 2차: 그걸 "fork() 전에 msh 자신의
+  fd를 close()한다"로 "고쳤"더니 그 close()가 msh의 유일한 참조를
+  자식이 넘겨받기도 전에 지워버려 파이프 자체가 사라지고 "ls | cat"
+  이 조용히 exit status 1로 실패(hang이 아니라 "겉보기엔 성공"처럼
+  보이는 함정이었다). 최종 해법은 `mc_shell_bind_pipe_fd`가 더 이상
+  dup을 안 부르고(참조를 그대로 이어받을 뿐), 새 `mc_shell_forget_pipe_fd`
+  가 서버에 알리지 않고 msh의 로컬 표만 지워 자동 dup을 막는
+  "이동" 모델이다. `tools/smoke-test-x86_64.sh`에 M54 어서션 4개
+  추가, 스모크+SMP+NUMA+AVX+net 5개 회귀 스위트 전부 PASS(결과는
+  [docs/done/musl-userland-porting-m54.md](docs/done/musl-userland-porting-m54.md)
+  참고). M55(job control 최소, 스트레치)만 남았다.

@@ -56,8 +56,13 @@ namespace {
 // 스폰 시점에 넣어 준 vfs endpoint 프록시(lib/*.ini의 `depends=vfs`).
 constexpr uint32_t k_own_endpoint_handle = 1;
 constexpr uint32_t k_vfs_handle = 2;
-// M20(security-model.md ADR-171) — handle 4는 initrun이 스폰 시점에
-// 넣어 준 셸 endpoint 프록시(lib/*.ini의 depends=vfs,cfgsrv,shell).
+// handle 3은 initrun이 넣어 준 cfgsrv endpoint 프록시(k_cfgsrv_handle,
+// 아래 M19 섹션에서 선언). handle 4는 M20(ADR-171)엔 셸 endpoint
+// 프록시였지만 M53(ADR-224)이 그 배선을 완전히 걷어냈다 — 지금은
+// pipesrv endpoint 프록시다(lib/*.ini의 depends=vfs,cfgsrv,pipesrv,
+// M54/ADR-225 — start_session_once()가 이 handle을 그대로 msh에게
+// 넘겨줘야 해서 앞쪽에 선언한다).
+constexpr uint32_t k_pipesrv_handle = 4;
 
 constexpr uint32_t k_op_open = 1;
 constexpr uint32_t k_op_write = 2;
@@ -375,24 +380,33 @@ void start_session_once() {
         return;
     }
     g_session_started = true;
-    // msh는 실제 musl 프로그램이라 execve()/fork()/waitpid()로
-    // procsrv에게 되돌아와야 한다 — syscall_shim.c의 고정 핸들 관례
-    // (MC_VFS_HANDLE=2, MC_PROCSRV_HANDLE=3)와 맞추려면
-    // inherited_handles[0]=vfs, [1]=procsrv 자신(순서 그대로) —
-    // create_endpoint=true가 먼저 handle 1을 차지하므로 [0]이 2,
-    // [1]이 3이 된다(userland/msh가 예전엔 initrun의 --depends=
-    // msh:vfs,procsrv로 받던 것과 정확히 같은 배선, 이제는 procsrv
-    // 자신이 스폰자가 됐을 뿐이다).
+    // msh는 실제 musl 프로그램이라 execve()/fork()/waitpid()/pipe()로
+    // procsrv/pipesrv에게 되돌아와야 한다 — syscall_shim.c의 고정
+    // 핸들 관례(MC_VFS_HANDLE=2, MC_PROCSRV_HANDLE=3,
+    // MC_PIPESRV_HANDLE=4)와 맞추려면 inherited_handles[0]=vfs,
+    // [1]=procsrv 자신, [2]=pipesrv(순서 그대로) — create_endpoint=
+    // true가 먼저 handle 1을 차지하므로 [0]이 2, [1]이 3, [2]가 4가
+    // 된다(userland/msh가 예전엔 initrun의 --depends=msh:vfs,procsrv
+    // 로만 받던 것에, M54(ADR-225)의 pipe() 지원을 위해 pipesrv를
+    // 더한 것 — 이제는 procsrv 자신이 스폰자가 됐을 뿐이다). M54
+    // 실행 중 발견: pipesrv를 빼먹으면 mc_pipe_create()가 존재하지
+    // 않는 handle 4에 IPC를 걸어, 그 syscall이 조용히 실패하고 남은
+    // 회신 버퍼(0으로 미리 채워 둔 것)를 그대로 읽어 버린다 —
+    // MC_PIPE_STATUS_OK가 마침 0이라 "성공했는데 파이프 id가 둘 다
+    // 0"이라는 혼란스러운 증상으로 나타났다(0은 pipesrv 자신이
+    // "항상 무효"로 예약해 둔 값인데도).
     mc_process_spawn_request req{};
     req.elf_data = reinterpret_cast<uint64_t>(g_msh_elf);
     req.elf_size = g_msh_elf_len;
     req.linux_abi_stack = 1;  // musl crt_arch.h가 요구하는 초기 스택(M28/ADR-183).
     req.create_endpoint = true;
-    req.inherited_handle_count = 2;
+    req.inherited_handle_count = 3;
     req.inherited_handles[0].src_handle = k_vfs_handle;
     req.inherited_handles[0].rights_mask = MC_RIGHT_CAN_SEND;
     req.inherited_handles[1].src_handle = k_own_endpoint_handle;
     req.inherited_handles[1].rights_mask = MC_RIGHT_CAN_SEND;
+    req.inherited_handles[2].src_handle = k_pipesrv_handle;
+    req.inherited_handles[2].rights_mask = MC_RIGHT_CAN_SEND;
     do_syscall(MC_SYSCALL_PROCESS_SPAWN, reinterpret_cast<uint64_t>(&req), 0, 0);
     const char* msg = "[procsrv] shell session start ok=1\n";
     debug_log(msg, cstr_len(msg));
@@ -1353,9 +1367,10 @@ void run_mounted_fs_read_test(const char* mount_path, const char* expected,
 }
 
 // ---------- M19 — cfgsrv 클라이언트(registry.md, registry-decisions.md ADR-169) ----------
-// handle 3 = initrun이 스폰 시점에 넣어 준 cfgsrv endpoint 프록시,
-// handle 4는 셸 endpoint 프록시(M20, 아래 참고) — 나열 순서
-// (lib/*.ini의 depends=vfs,cfgsrv,shell) 그대로 handle 2/3/4.
+// handle 3 = initrun이 스폰 시점에 넣어 준 cfgsrv endpoint 프록시 —
+// 나열 순서(lib/*.ini의 depends=vfs,cfgsrv,pipesrv) 그대로 handle
+// 2/3/4다(handle 4=k_pipesrv_handle은 이 파일 위쪽에서 이미
+// 선언했다 — start_session_once()가 일찍 써야 해서).
 constexpr uint32_t k_cfgsrv_handle = 3;
 
 constexpr uint32_t k_reg_op_open_table = 1;

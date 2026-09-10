@@ -883,3 +883,88 @@
   - 새 유저 프로그램들의 정확한 이름·목록(예: `userland/mush`
     (minicore shell)+`userland/coreutils-*` 또는 단일 멀티콜
     바이너리 등)은 M52 실행 착수 시점에 확정한다.
+
+## ADR-225. msh 파이프라인(M54): execve()가 지우는 fd 테이블을 argv 관례로 우회 + pipesrv 참조 카운트를 "이동" 모델로 정정
+
+- **상태**: 확정 (2026-09-11), [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M54 실행 완료.
+- **배경**: M52가 만든 `userland/msh`는 명령 하나만 fork+execve했다 —
+  `|`(파이프라인)와 `>`(출력 리다이렉션)는 M54까지 미뤄 뒀다. 이
+  라운드의 핵심 장애물은 이 커널/이 저장소에 **fd 테이블이라는
+  "진실 공급원"이 애초에 없다**는 것이다(procsrv.md §3.6, OPEN-64) —
+  `g_pipe_fds[]`/`g_open_files[]`/`g_std_redirect[]`는 전부
+  `libc/sysdeps/minicore/syscall_shim.c` 안의 평범한 프로세스별 BSS
+  변수일 뿐이라, `execve()`가 이미지를 통째로 새로 올리는 순간(fresh
+  BSS) 그 내용이 전부 사라진다 — `dup2()`를 exec 직전에 걸어도
+  Linux처럼 새 이미지에 살아남지 않는다.
+- **결정 1 — argv를 통한 fd 바인딩 전달**: msh는 파이프/리다이렉션
+  대상 fd를 execve()가 실제로 보존하는 유일한 채널인 **argv**로
+  직접 실어 보낸다. 새 헤더 `libs/mc/include/mc/shell_fd_binding.h`가
+  이 관례를 정의한다 — msh가 argv[1..] 맨 앞에 `"@pipefd" <fd>
+  <pipe_id>`(파이프 연결) 또는 `"@filefd" <fd> <fs_handle>
+  <open_file_id>`(출력 리다이렉션, msh 자신이 먼저 `open()`한 결과)를
+  필요한 만큼 붙이고, 대상 프로그램(`echo`/`ls`/`cat`, 그리고 msh가
+  다음 세대에 spawn하는 모든 명령)은 `main()` 맨 앞에서
+  `mc_shell_strip_bindings(&argc, argv)` 하나만 불러 그 토큰을 실제
+  바인딩(`mc_shell_bind_pipe_fd`/`mc_shell_bind_file_fd`, 둘 다
+  `syscall_shim.c`의 정적 fd 표에 직접 접근)으로 바꾸고 벗겨낸다.
+  파일 리다이렉션 지원을 위해 `SYS_write`에도 `g_std_redirect[3]`
+  (fd 0/1/2 전용 — `g_open_files[]`는 fd>=3 오프셋이라 표준 fd를
+  못 담는다)과 `mc_fs_write`(새 `libmc` 클라이언트, 기존
+  `mc_fs_read`의 쓰기 쌍)를 추가했다. 새 서버 프로토콜은 필요 없다
+  (`mc/pipesrv_protocol.h`/`mc/fs_client.h`의 기존 오퍼레이션만
+  재사용).
+- **결정 2 — pipesrv 참조 카운트를 "이동"(move) 모델로 정정**:
+  M51은 참조 카운트 계약을 "서버는 fork()/dup2()로 늘어난 참조를
+  스스로 관찰 못 하니 호출자가 명시적으로 `op_dup`을 불러 알려준다"
+  로 설계했는데, 이건 "이미 있는 참조 옆에 하나 더 늘어난다"는
+  상황(진짜 fork()가 fd 테이블을 복제하고 부모/자식이 각자 독립적으로
+  그 fd를 계속 쓰는 경우)에만 맞는 계약이다. msh의 파이프라인은
+  그 반대다 — msh가 `pipe()`로 만든 참조(읽기 쪽 refcount=1, 쓰기
+  쪽 refcount=1)를 정확히 한 자식에게 **그대로 넘겨줄 뿐**, msh
+  자신은 그 참조를 다시 쓰지 않는다. 실행 중 이 차이를 무시하고
+  기존 dup 계약을 그대로 적용했다가 진짜 버그 두 겹을 순서대로
+  만났다(자세한 재현 경위는
+  [musl-userland-porting-m54.md](../done/musl-userland-porting-m54.md)
+  참고):
+  1. **참조 카운트 과다 증가로 인한 무한 대기**: msh가 파이프 양끝을
+     들고 있는 채로 파이프라인 단계마다 한 번씩 `fork()`하면,
+     `SYS_fork`의 자식 쪽 처리(M51, "그 시점에 `g_pipe_fds[]`에서
+     살아있는 파이프 fd 전부를 자동으로 `op_dup`")가 매 fork()마다
+     msh가 들고 있는 양끝 모두를 불필요하게 한 번씩 더 늘렸다 —
+     실제 소비자(각 단계의 execve() 이후 `mc_shell_bind_pipe_fd`)의
+     몫을 넘어 참조 카운트가 계속 쌓여 결코 0에 도달하지 못했고,
+     다음 단계(`cat`)가 EOF를 영원히 못 받은 채 `pipe_read_retry`의
+     무한 `mc_yield()` 재시도에 갇혔다.
+  2. **"고친" 방법이 참조를 아예 지워버림**: (1)을 "fork() 전에 msh
+     자신의 파이프 fd를 `close()`한다"로 고쳤더니, 그 `close()`가
+     실제로 `mc_pipe_close`를 불러 서버 참조 카운트까지 줄여버렸다 —
+     msh가 만든 유일한 참조(읽기/쓰기 각 refcount=1)가 자식이 argv로
+     넘겨받기도 전에 0으로 떨어져, pipesrv가 두 refcount 모두 0인
+     것을 보고 파이프 슬롯을 그 즉시 반납했다. 이후 자식이
+     `mc_shell_bind_pipe_fd`로 시도한 `mc_pipe_dup`은 이미 죽은
+     id라 전부 실패해 바인딩이 안 먹혔고, `ls`의 출력은 콘솔
+     폴백으로 새고 `cat`의 읽기는 진짜 에러를 내 조용히 exit
+     status 1로 실패했다(hang이 아니라서 "겉보기엔 성공"처럼
+     보이는 함정이었다 — `[msh] self-test done ok=0`으로만
+     드러났다).
+  최종 해법은 참조를 늘리지도 줄이지도 않고 **그대로 옮기는** 것이다
+  — `mc_shell_bind_pipe_fd(fd, pipe_id)`는 더 이상 `mc_pipe_dup`을
+  부르지 않고 로컬 표에 그대로 반영만 한다(넘겨받는 참조는 이미
+  존재하므로 dup이 필요 없다). msh 쪽엔 새 `mc_shell_forget_pipe_fd(fd)`
+  를 둬 fork() 직전에 로컬 `g_pipe_fds[]` 항목만 지운다(서버에는
+  알리지 않음 — `SYS_fork`의 자동 dup 루프가 더 이상 이 fd를 찾지
+  못하게 하는 목적만 달성하고, 서버 쪽 참조 카운트는 그대로 살아
+  남아 자식이 있는 그대로 이어받는다). 결과적으로 "정확히 하나의
+  참조가 정확히 한 프로세스로 이동한다"는 모델이 성립하고, 그
+  프로세스가 나중에 `close()`할 때만(예: `ls`가 끝나며 자기 fd 1을
+  닫을 때) 실제로 refcount가 0에 도달해 다음 단계가 정상적으로
+  EOF를 본다. 이 모델은 M51의 dup 계약을 대체하지 않는다 — 진짜
+  fork()+fd 그대로 상속(M51의 `userland/pipe-test` 시나리오)은
+  여전히 기존 자동 dup을 그대로 쓴다, msh의 exec-즉시-이어지는
+  hand-off 패턴만 새 "이동" 경로를 쓴다.
+- **범위 밖으로 남긴 것**: 파이프라인은 최대 4단계(`MC_MAX_STAGES`),
+  argv 파이프/파일 바인딩은 표준 fd 0/1/2만 지원, 따옴표/이스케이프
+  없음, `>>`(append)나 `<`(입력 리다이렉션)는 다루지 않는다 — 계획
+  문서가 이미 이렇게 좁혀 둔 범위다. job control(M55, 스트레치)은
+  별도.

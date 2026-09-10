@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <mc/shell_fd_binding.h>
+
 static int cat_fd(int fd) {
     char buf[512];
     for (;;) {
@@ -28,20 +30,30 @@ static int cat_fd(int fd) {
 }
 
 int main(int argc, char** argv) {
+    // M54(musl-userland-porting.md §M54, ADR-225) — echo/main.c와
+    // 같은 이유(msh의 파이프/리다이렉션 argv 관례 벗겨내기).
+    mc_shell_strip_bindings(&argc, argv);
+    int status;
     if (argc < 2) {
-        return cat_fd(0);
-    }
-    int status = 0;
-    for (int i = 1; i < argc; ++i) {
-        int fd = open(argv[i], O_RDONLY);
-        if (fd < 0) {
-            status = 1;
-            continue;
+        status = cat_fd(0);
+    } else {
+        status = 0;
+        for (int i = 1; i < argc; ++i) {
+            int fd = open(argv[i], O_RDONLY);
+            if (fd < 0) {
+                status = 1;
+                continue;
+            }
+            if (cat_fd(fd) != 0) {
+                status = 1;
+            }
+            close(fd);
         }
-        if (cat_fd(fd) != 0) {
-            status = 1;
-        }
-        close(fd);
     }
+    // M54 — ls/main.c와 같은 이유(다음 파이프라인 단계가 있을 경우
+    // fd 0/1의 파이프 참조를 명시적으로 닫아야 한다). 파이프가
+    // 아니면(콘솔/이미 닫힌 파일) 조용히 무해한 no-op이다.
+    close(0);
+    close(1);
     return status;
 }

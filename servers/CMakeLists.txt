@@ -124,7 +124,14 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=vfs:memfs,fat32,ext4
               --depends=cfgsrv:vfs
               --depends=netsrv:virtio-net
-              --depends=procsrv:vfs,cfgsrv
+              # M54(musl-userland-porting.md §M54, ADR-225) — procsrv가
+              # 로그인 성공 시 스폰하는 msh가 이제 pipe()도 실제로
+              # 쓴다(파이프라인 `|`) — msh의 syscall_shim.c가 하드코딩
+              # 전제로 삼는 MC_PIPESRV_HANDLE(=4)을 procsrv가 자기
+              # 핸들에서 그대로 넘겨줄 수 있어야 해서 pipesrv를 세 번째
+              # 의존으로 추가했다(vfs=2, cfgsrv=3, pipesrv=4 순서 —
+              # start_session_once()의 inherited_handles와 맞춘다).
+              --depends=procsrv:vfs,cfgsrv,pipesrv
               --depends=usb:devmgr
               --depends=virtio-blk:devmgr
               --depends=virtio-net:devmgr

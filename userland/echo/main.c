@@ -7,7 +7,14 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <mc/shell_fd_binding.h>
+
 int main(int argc, char** argv) {
+    // M54(musl-userland-porting.md §M54, ADR-225) — msh가 파이프/
+    // 리다이렉션 대상으로 넘긴 argv 앞머리("@pipefd"/"@filefd")를
+    // 실제 fd 바인딩으로 바꾸고 벗겨낸다. msh를 거치지 않고 그냥
+    // 실행됐으면(argv에 그런 토큰이 없으면) 아무 일도 안 한다.
+    mc_shell_strip_bindings(&argc, argv);
     for (int i = 1; i < argc; ++i) {
         write(1, argv[i], strlen(argv[i]));
         if (i + 1 < argc) {
@@ -15,5 +22,8 @@ int main(int argc, char** argv) {
         }
     }
     write(1, "\n", 1);
+    // M54 — ls/main.c와 같은 이유(파이프/리다이렉션으로 fd 1이 묶여
+    // 있으면 명시적으로 닫아야 다음 단계가 EOF를 받는다).
+    close(1);
     return 0;
 }

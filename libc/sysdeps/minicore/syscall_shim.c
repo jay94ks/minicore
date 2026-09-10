@@ -19,6 +19,7 @@
 #include <mc/pipesrv_protocol.h>
 #include <mc/procsrv_client.h>
 #include <mc/procsrv_protocol.h>
+#include <mc/shell_fd_binding.h>
 #include <mc/syscall.h>
 #include <mc/vfs_client.h>
 #include <sys/uio.h>
@@ -157,6 +158,87 @@ static int fd_is_free(int fd) {
     return 1;
 }
 
+// M54(musl-userland-porting.md §M54, ADR-225) — 표준입출력(0/1/2)
+// 리다이렉션 오버라이드. g_open_files[]는 fd-3 오프셋(fd>=3 전제,
+// M31 주석 참고)이라 fd 0/1/2를 못 담는다 — 그래서 별도의 작은
+// 표를 둔다. mc/shell_fd_binding.h::mc_shell_strip_bindings()가
+// argv의 "@filefd" 토큰을 보고 이 표를 채운다.
+static struct {
+    int in_use;
+    uint32_t fs_handle;
+    uint64_t open_file_id;
+} g_std_redirect[3];
+
+void mc_shell_bind_pipe_fd(int fd, unsigned long long pipe_id) {
+    if (fd < 0 || fd >= MC_MAX_FDS) {
+        return;
+    }
+    // M54 실행 중 발견한 진짜 버그 — 처음엔 여기서도 M51의 fork()
+    // 처리와 같은 계약(mc_pipe_dup으로 새 참조를 알린다)을 따라했지만,
+    // 그건 "이미 존재하는 다른 참조 옆에 하나 더 늘어난다"는 상황
+    // (fork가 fd 테이블을 복제하는 경우)에만 맞는 계약이다. msh의
+    // 파이프라인은 그 반대다 — msh는 pipe()로 만든 참조 하나(읽기
+    // 쪽 refcount=1, 쓰기 쪽 refcount=1)를 정확히 한 자식에게
+    // *넘겨줄* 뿐, 자신은 그 참조를 다시 쓰지 않는다(mc_shell_forget_pipe_fd
+    // 참고). 그런데도 여기서 dup을 불렀더니 참조 카운트가 실제
+    // 소유자 수보다 하나씩 더 많아져, 그 자식이 나중에 close()해도
+    // 0에 도달하지 못해 파이프라인의 다음 단계가 EOF를 영원히 못
+    // 받는 채로 남았다(cat이 "ls | cat" 자기테스트에서 진짜로
+    // 겪은 증상). 이 fd는 msh가 만든 그 단일 참조를 넘겨받는 것뿐이니
+    // dup 없이 그대로 표에 반영한다.
+    g_pipe_fds[fd].in_use = 1;
+    g_pipe_fds[fd].pipe_id = pipe_id;
+}
+
+// M54 — msh가 fork() 전에 자기 자신의 파이프 fd 표 항목을 "잊는다"
+// (서버에 알리지 않고 로컬 표만 지운다). msh는 이 fd를 다시 안 쓰고
+// 정확히 한 자식에게 argv로 그 pipe_id를 넘겨줄 뿐이라(위
+// mc_shell_bind_pipe_fd 주석 참고), 진짜 close()(mc_pipe_close로
+// 서버에 알려 참조 카운트를 줄이는 것)를 부르면 그 유일한 참조가
+// 자식이 아직 받기도 전에 사라져 파이프 자체가 없어진다(서버가
+// read_refcount==write_refcount==0을 보고 슬롯을 즉시 반납한다) —
+// 이 역시 M54가 실제로 겪은 버그다. 로컬 표만 지워 SYS_fork의
+// 자동 dup 루프가 이 fd를 더 이상 찾지 못하게 하면서도(그 목적은
+// 그대로 달성), 서버 쪽 참조 카운트는 손대지 않아 자식이 나중에
+// mc_shell_bind_pipe_fd로 그 참조를 있는 그대로 넘겨받을 수 있다.
+void mc_shell_forget_pipe_fd(int fd) {
+    if (fd < 0 || fd >= MC_MAX_FDS) {
+        return;
+    }
+    g_pipe_fds[fd].in_use = 0;
+}
+
+void mc_shell_bind_file_fd(int fd, unsigned int fs_handle, unsigned long long open_file_id) {
+    if (fd < 0 || fd > 2) {
+        return;
+    }
+    g_std_redirect[fd].in_use = 1;
+    g_std_redirect[fd].fs_handle = fs_handle;
+    g_std_redirect[fd].open_file_id = open_file_id;
+}
+
+int mc_shell_query_file_fd(int fd, unsigned int* out_fs_handle,
+                            unsigned long long* out_open_file_id) {
+    if (fd < 3 || fd - 3 >= MC_MAX_OPEN_FILES || !g_open_files[fd - 3].in_use) {
+        return 0;
+    }
+    *out_fs_handle = g_open_files[fd - 3].fs_handle;
+    *out_open_file_id = g_open_files[fd - 3].open_file_id;
+    return 1;
+}
+
+// msh가 pipe()로 만든 파이프의 id를 파이프라인 다음 단계의 argv에
+// "@pipefd"로 실어 보내려면, 그 fd가 실제로 어느 pipe_id인지 알아야
+// 한다(g_pipe_fds[]는 이 파일 안에서만 아는 정적 표라 msh 쪽에서
+// 직접 못 읽는다) — mc_shell_query_file_fd와 같은 이유.
+int mc_shell_query_pipe_fd(int fd, unsigned long long* out_pipe_id) {
+    if (fd < 0 || fd >= MC_MAX_FDS || !g_pipe_fds[fd].in_use) {
+        return 0;
+    }
+    *out_pipe_id = g_pipe_fds[fd].pipe_id;
+    return 1;
+}
+
 // VFS 클라이언트 핸들 — musl-hello가 depends=vfs로 initrun에게서
 // 물려받는다(servers/CMakeLists.txt, --depends=musl-hello:vfs).
 // create_endpoint=true가 항상 handle 1을 먼저 차지하므로(ADR-152의
@@ -264,6 +346,29 @@ static long pipe_read_retry(uint64_t pipe_id, void* buf, unsigned long count) {
     }
 }
 
+// M54(musl-userland-porting.md §M54, ADR-225) — msh의 출력
+// 리다이렉션(`>`)이 열어 둔 일반 VFS 파일 fd에 실제로 쓸 수 있어야
+// 한다. mc_fs_write는 한 페이지까지만 보내므로(read_common의
+// mc_fs_read와 같은 이유) count를 다 쓸 때까지 반복한다 — 파이프와
+// 달리 memfs의 OP_WRITE는 WOULD_BLOCK이 없다(k_max_file_bytes를
+// 넘으면 그냥 그 자리에서 잘린 길이를 돌려준다, servers/fs/memfs/
+// main.cpp::handle_write), 그래서 반환 길이가 요청보다 짧으면 그
+// 자리에서 멈춘다(더 불러도 늘지 않는다 — 디스크 꽉 찬 것과 같은
+// 의미).
+static long fs_write_common(uint32_t fs_handle, uint64_t open_file_id, const void* buf,
+                             unsigned long count) {
+    unsigned long total = 0;
+    const uint8_t* p = (const uint8_t*)buf;
+    while (total < count) {
+        uint64_t n = mc_fs_write(fs_handle, open_file_id, p + total, count - total);
+        if (n == 0) {
+            break;
+        }
+        total += n;
+    }
+    return (long)total;
+}
+
 static long read_common(long fd, void* buf, unsigned long count) {
     if (fd >= 0 && fd < MC_MAX_FDS && g_pipe_fds[fd].in_use) {
         return pipe_read_retry(g_pipe_fds[fd].pipe_id, buf, count);
@@ -346,14 +451,29 @@ long __minicore_syscall_dispatch(long n, long a, long b, long c, long d, long e,
             if (fd >= 0 && fd < MC_MAX_FDS && g_pipe_fds[fd].in_use) {
                 return pipe_write_retry(g_pipe_fds[fd].pipe_id, buf, count);
             }
-            if (fd != 1 && fd != 2) {
+            // M54(musl-userland-porting.md §M54, ADR-225) — msh의
+            // `>` 출력 리다이렉션이 mc_shell_bind_file_fd()로 fd
+            // 1(또는 2)을 VFS 파일에 묶어 뒀으면 콘솔보다 먼저
+            // 이걸 확인한다.
+            if (fd >= 0 && fd <= 2 && g_std_redirect[fd].in_use) {
+                return fs_write_common(g_std_redirect[fd].fs_handle,
+                                        g_std_redirect[fd].open_file_id, buf, count);
+            }
+            if (fd == 1 || fd == 2) {
+                if (count > MC_MAX_DEBUG_LOG_BYTES) {
+                    count = MC_MAX_DEBUG_LOG_BYTES;
+                }
+                mc_debug_log(buf, count);
+                return (long)count;
+            }
+            // M54(musl-userland-porting.md §M54, ADR-225) — msh의
+            // `>` 리다이렉션이 연 일반 VFS 파일 fd(open_common()이
+            // 준 fd>=3). 파이프도 콘솔(1/2)도 아니면 여기까지 온다.
+            if (fd < 3 || fd - 3 >= MC_MAX_OPEN_FILES || !g_open_files[fd - 3].in_use) {
                 return MC_EBADF;
             }
-            if (count > MC_MAX_DEBUG_LOG_BYTES) {
-                count = MC_MAX_DEBUG_LOG_BYTES;
-            }
-            mc_debug_log(buf, count);
-            return (long)count;
+            return fs_write_common(g_open_files[fd - 3].fs_handle,
+                                    g_open_files[fd - 3].open_file_id, buf, count);
         }
         case SYS_pipe:
         case SYS_pipe2: {

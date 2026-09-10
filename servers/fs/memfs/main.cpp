@@ -26,7 +26,13 @@ constexpr uint64_t k_status_ok = 0;
 constexpr uint64_t k_status_not_found = 1;
 constexpr uint64_t k_status_no_space = 3;
 
-constexpr uint32_t k_max_files = 8;
+// M54(musl-userland-porting.md §M54, ADR-225) 실행 중 발견 — 이
+// 부팅 하나만으로 이미 8개(su-target/test.txt/musl-exec-target.elf/
+// bin/echo/bin/ls/bin/cat/home/guest1/allowed.txt)가 다 차 있어서,
+// msh의 출력 리다이렉션(`>`) 자기테스트가 새 파일("tmp/msh-
+// redirect.txt")을 하나도 못 만들고 조용히 실패했다(open()이
+// k_status_no_space로 떨어짐) — 8→16으로 올린다.
+constexpr uint32_t k_max_files = 16;
 // M18(fs-protocol.md v3, security-model.md ADR-167) — su/sudo 로더가
 // procsrv 자신의 ELF(수십 KiB)를 여기 써야 해서 4096→131072로
 // 늘렸다. M32(real-libc-syscall-layer.md §M32) — procsrv가
@@ -53,7 +59,15 @@ constexpr uint32_t k_max_file_bytes = 1048576;
 // 아무 관계 없는 shell의 cat 자기테스트까지 open 실패로 덩달아
 // 깨졌다(같은 고갈된 풀을 공유하기 때문). 근본 수정(close 프로토콜
 // 추가)은 이 라운드 범위 밖 — 즉시는 여유를 4배로 늘려 막는다.
-constexpr uint32_t k_max_open_files = 64;
+// M54(musl-userland-porting.md §M54, ADR-225) 실행 중 다시 발견 —
+// msh가 매 자기테스트 명령마다(echo/ls/cat 각각의 exec_common()
+// 읨는 open, ls의 부트스트랩 open, cat의 대상 파일 open 등) VFS
+// open을 새로 소비하고, 그 위에 procsrv/cfgsrv/svcmgr가 부팅
+// 내내 쌓아 온 leak까지 겹쳐 64개마저 다시 바닥났다 — msh의 출력
+// 리다이렉션(`>`) 자기테스트가 "vfs_open_fail status=3"(no_space)
+// 으로 조용히 실패했다. 근본 수정(OPEN-70)은 여전히 범위 밖 —
+// 이번에도 즉시는 여유를 4배로 늘려 막는다.
+constexpr uint32_t k_max_open_files = 256;
 constexpr uint64_t k_page_size = 4096;
 
 // M16(fs-protocol.md v2 §2.3, ADR-155 §2/ADR-159/ADR-161) — OP_READ

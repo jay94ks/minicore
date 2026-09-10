@@ -66,6 +66,41 @@ uint64_t mc_fs_read(uint32_t fs_handle, uint64_t open_file_id, uint8_t* out_buf,
     return n;
 }
 
+// M54(musl-userland-porting.md §M54, ADR-225) — data는 호출자의
+// 임의 버퍼(page-aligned 보장 없음)라, page_descriptor 전송
+// (ADR-159/161)이 요구하는 page-aligned 소스 버퍼로 먼저 복사해
+// 담는다(procsrv::write_elf_to_vfs()의 g_write_scratch와 같은 이유
+// ・같은 패턴).
+uint64_t mc_fs_write(uint32_t fs_handle, uint64_t open_file_id, const uint8_t* data,
+                      uint64_t count) {
+    static uint8_t scratch[MC_PAGE_SIZE] __attribute__((aligned(MC_PAGE_SIZE)));
+    uint64_t chunk = count;
+    if (chunk > MC_PAGE_SIZE) {
+        chunk = MC_PAGE_SIZE;
+    }
+    for (uint64_t i = 0; i < MC_PAGE_SIZE; ++i) {
+        scratch[i] = (i < chunk) ? data[i] : 0;
+    }
+
+    mc_message req;
+    mc_zero_bytes(&req, sizeof(req));
+    req.label = MC_FS_OP_WRITE;
+    req.regs[0] = open_file_id;
+    req.regs[1] = chunk;
+    req.page_count = 1;
+    req.pages[0].vaddr = (uint64_t)(uintptr_t)scratch;
+    req.pages[0].length = MC_PAGE_SIZE;
+    req.pages[0].mode = MC_TRANSFER_COPY;
+
+    mc_message reply;
+    mc_zero_bytes(&reply, sizeof(reply));
+    mc_ipc_call(fs_handle, &req, &reply);
+    if (reply.regs[1] != MC_FS_STATUS_OK) {
+        return 0;
+    }
+    return reply.regs[0];
+}
+
 uint64_t mc_fs_list(uint32_t fs_handle, uint8_t* out_names_blob, uint64_t out_cap,
                      uint32_t* out_count) {
     mc_message req;
