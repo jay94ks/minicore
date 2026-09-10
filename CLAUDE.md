@@ -143,3 +143,66 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   `--target minicore_bootdisk_image`를 반드시 추가로 돌려야 한다
   (M22에서 실제로 겪음, docs/done/general-purpose-completion-m22.md
   참고).
+- M26 완료 후, 사용자가 OPEN 항목 검토 + 실제로 동작하는 musl 포팅
+  (동적 링킹·멀티코어 선점·pthread·locale·완전한 signal·외부 SDK
+  포함)을 다음 목표로 지정했다. 계획은
+  [docs/plan/real-libc-syscall-layer.md](docs/plan/real-libc-syscall-layer.md)
+  (M27~M39, **아직 착수 전**) — 핵심 전략: 커널을 확장하지 않고
+  musl의 `syscall_arch.h`를 패치해 유저랜드(`libmc` 경유, ADR-183)로
+  우회 · 동적 링킹을 M29로 앞당겨 이후 마일스톤 전부의 기본 검증
+  경로로 씀(ADR-189, 최초 초안이었던 "맨 뒤 스트레치" 대비 개정) ·
+  LAPIC 타이머 보정+`timer_source_interface` 추상화(ADR-184/191, OPEN-62)
+  로 진짜 멀티코어 선점(ADR-185, OPEN-63) · signal(ADR-186, OPEN-65
+  포함 해소)·pthread(ADR-187)·locale(ADR-188) · 저장소 밖 SDK
+  내보내기(ADR-190) · 새 와이어 프로토콜은 서버 헤더의 `@wire-op`
+  마크업+추출 도구부터 만들고 시작(ADR-195, OPEN-54). OPEN-64는
+  절반만 겨냥, OPEN-66은 완료돼도 완전히 해소되지 않는다 — 세부는
+  계획 문서와 [docs/design/open-items.md](docs/design/open-items.md)
+  참고.
+- 이 계획을 세우며 `docs/reply.md`에 쌓여 있던 미결정 답변들도
+  함께 반영·처리했다 — OPEN-42(명령 단위 범위)는 ADR-194, OPEN-52
+  (준비완료 신호 통일)은 ADR-193으로 해결됐다. OPEN-51(유저 서비스
+  관리자 데몬의 정체성)은 **ADR-192(2026-09-10 사용자 피드백으로
+  갱신)** — 데몬 자체는 폐기하지 않는다: "커널 서버"(procsrv/vfs/
+  devmgr 등)는 initrun이 하드코딩된 이름으로 직접 실행하고, 이
+  systemd류 데몬(`servers/svcmgr`)은 그와 겹치지 않는 "유저
+  서비스"만 관리한다. 프로세스 트리의 영구 루트는 이 데몬이다.
+- OPEN-51이 남긴 "유저 서비스를 실제로 어떻게 등록·시작·정지하는가"
+  도 이어서 설계했다 — 유닛 모델+시작 절차+컨트롤 프로토콜 개요는
+  [ADR-196](docs/design/boot-and-drivers.md), 레지스트리 스키마
+  (`@global/system/services`, 새 프로토콜 없이 기존 `reg_op` 재사용)
+  는 [ADR-197](docs/design/registry-decisions.md). 실제 구현 계획은
+  [docs/plan/user-service-manager.md](docs/plan/user-service-manager.md)
+  (M40 `servers/svcmgr` 골격+재부모화 완성 ~ M43 계정별 인스턴스,
+  스트레치) — **아직 착수 전**. svcmgr는 순수 minicore 네이티브
+  서버(`libk`+`libmc`만)라 `real-libc-syscall-layer.md`와 독립적으로
+  병행 가능하고, M27(재부모화 메커니즘)만 선행 전제다. **OPEN-60**(cfgsrv I/O
+  권한 동적 부여)은 여전히 미해결이다 — 한때 같은 번호로 태그됐던
+  답변("fork 특수 변형 한정")은 태그 오기였음을 사용자가 확인했다
+  (2026-09-10, M32/M37의 확인사항으로만 반영).
+- 네임스페이스 컨벤션도 정리했다 — 커널(및 커널과 함께 컴파일되는
+  코드)은 `kern::*` 계층(`kern::arch::x86_64`/`kern::ipc`/`kern::mm`/
+  `kern::proc` 등, 서브시스템당 하나), 커널 서버는 `kernsrv::<서버명>`,
+  외부 비노출 하위 네임스페이스는 `__internals__`, 프로토콜(와이어
+  포맷) 정의는 예외로 `kern::proto`/`kernsrv::proto`
+  ([ADR-198](docs/design/foundations.md), [cxx-conventions.md](docs/spec/cxx-conventions.md)
+  §6에 목표 상태 반영 완료). **규칙만 확정, 기존 코드 리네임은 아직
+  실행 전** — 사용자가 "별도 계획으로 분리해서 지금 세우기"를
+  선택해 [docs/plan/namespace-refactor.md](docs/plan/namespace-refactor.md)
+  (M44~M48, 전부 순수 기계적 리네임+5개 QEMU 스위트 회귀 확인)를
+  만들었다. M45(`uapi`→`kern::proto`)는 이후 아래 라이브러리
+  재배치 작업으로 대체됐다.
+- 이 저장소가 직접 만들고 유지·관리하는 라이브러리(`libk`/`libmc`)
+  경로와 명명 규칙도 정리했다 — `libs/` 하위로 옮기고 `lib` 접두사를
+  뗀다(`libk`→`k`→`libs/k/`, `libmc`→`mc`→`libs/mc/`,
+  [ADR-199](docs/design/build-system.md)). 더 나아가 `mc`를
+  **커널·유저 공용**으로 통합한다 — 소비자가 정의하는 전처리기
+  매크로(가칭 `MC_LAND_KERNEL`)로 커널-랜드/유저-랜드를 가르고,
+  지금 `kernel/include/uapi.hpp`가 손으로 복제해 온 커널 syscall
+  ABI를 `mc`의 헤더로 흡수해 `uapi.hpp`를 폐지한다
+  ([ADR-200](docs/design/foundations.md), ADR-132 보강). 규칙만
+  확정, 실제 실행은 [docs/plan/libs-restructure.md](docs/plan/libs-restructure.md)
+  (M49 이동+리네임, M50 `uapi.hpp` 폐지+매크로 도입 — M45를
+  대체) — **아직 착수 전**. [repo-layout.md](docs/design/repo-layout.md)
+  의 트리는 이미 목표 상태(`libs/k/`, `libs/mc/`)로 갱신해 뒀고,
+  실제 저장소는 아직 옛 경로 그대로임을 문서 상단에 명시했다.

@@ -787,3 +787,253 @@
   - `block()`의 기존 "no runnable thread" PANIC은 그대로 둔다 —
     이제 이론적으로 "다른 스레드들이 전부 kill됨"으로도 도달할 수
     있지만, 이 마일스톤의 데모 시나리오에서는 일어나지 않는다.
+
+## ADR-184. LAPIC 타이머 보정: PIT(폴백)/HPET 실측 기반 initial_count 산출 (해결: OPEN-62)
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M33 착수 전에 전략만 먼저 결정한다)
+- **결정**:
+  1. ADR-176(M21)이 고정 상수로 둔 LAPIC 타이머의 divide/initial_count를
+     부팅 시 **코어마다 1회**(BSP+각 AP, AP 기동 시퀀스 — ADR-055 —
+     끝에서 각 AP가 스스로 수행) 실측해 재계산한다. 커널이 이미 부팅
+     초기(유저 프로세스가 아직 없는 시점, M10)에 ACPI MADT를 직접
+     파싱하므로, 같은 시점에 **HPET ACPI 테이블**도 함께 찾는다
+     (devmgr의 M14 유저랜드 PCIe/ACPI 열거와는 별개 — 이 보정은 devmgr가
+     존재하기 훨씬 전, 타이머 인터럽트를 걸기 직전에 끝나야 한다).
+  2. HPET가 있으면 HPET 메인 카운터(고정 주파수, 레지스터로 직접 읽음)를
+     기준시계로 삼아 LAPIC 타이머를 짧은 구간(예: 10ms) 카운트다운시켜
+     실측 주파수를 얻는다. HPET가 없으면 PIT(8254) 채널 2(스피커
+     게이트와 무관한 범용 채널)를 폴링 방식으로 기준시계 대신 쓴다
+     (레거시 PC 호환, ADR-173이 이미 8259 PIC 레거시 배선을 다뤄 본
+     전례가 있다).
+  3. 실측 주파수로부터 목표 `base_time_slice_us`(scheduler.md §2, 지금은
+     "틱 수"로만 쓰이는 필드)에 정확히 대응하는 `initial_count`를
+     계산해 LAPIC 타이머 레지스터에 다시 써 넣는다 — 이후 재보정하지
+     않는다(터보 부스트 등으로 런타임 중 주파수가 바뀔 수 있는
+     한계는 이번 라운드에 다루지 않는다, YAGNI).
+  4. **원칙(사용자 지시, 2026-09-10): 커널이 쓰는 모든 시스템
+     타이머는 최초로 유저모드에 진입하기 전에(코어별 보정 포함)
+     반드시 보정이 끝나 있어야 한다.** 지금은 LAPIC 타이머 하나뿐
+     이지만, 이후 다른 타이머 소스가 추가되더라도(예: TSC-deadline
+     모드, ADR-191의 `timer_source_interface`가 새 백엔드로 확장될
+     경우) 이 순서 제약은 예외 없이 적용된다 — "AP가 아직 유저
+     스레드를 실행하기 전"이 아니라 **"이 시스템의 어떤 코어에서도
+     첫 유저모드 진입이 일어나기 전"**이 정확한 경계다(BSP가 M8부터
+     이미 initrun을 유저모드로 띄우므로, 사실상 이 경계는 커널 부팅
+     시퀀스의 가장 이른 단계에 해당한다).
+- **근거**: OPEN-62가 지적한 대로 `base_time_slice_us`는 이름과 달리
+  지금 실제 마이크로초를 보장하지 않는다. ADR-185(M34, 진짜 멀티코어
+  선점)가 여러 코어에서 동시에 타임슬라이스 소진을 비교하려면(코어 간
+  공정성이 성립하는지 확인하려면) 최소한 "같은 목표 시간이면 코어마다
+  비슷한 틱 수"라는 전제가 필요한데, 지금은 코어별 실측 없이는 이
+  전제가 보장되지 않는다 — 그래서 M34보다 먼저 이 마일스톤을 둔다.
+- **영향**: `kernel/arch/x86_64/lapic.cpp`에 `calibrate_lapic_timer()`
+  추가. 부팅 초기 ACPI 파싱 코드(M10, MADT용)를 HPET 테이블도 찾도록
+  확장. PIT 채널2를 폴링하는 최소 드라이버가 새로 필요(기존에 PIT를
+  전혀 쓰지 않았다 — 레거시 8259 PIC는 ADR-173에서 마스킹만 다뤘을
+  뿐 카운터로 쓴 적이 없다).
+
+## ADR-185. 진짜 멀티코어 선점형 스케줄러: 코어별 `g_current`+독립 타이머+AP의 유저 run_queue 참여 (해결: OPEN-63)
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M34 착수 전에 전략만 먼저 결정한다)
+- **결정**:
+  1. 스케줄러의 "현재 스레드" 포인터(`g_current`, 지금은 전역 단일
+     변수)를 **코어별**(percpu — 코어 인덱스로 배열 접근, 또는
+     GS-relative)로 바꾼다.
+  2. 유저 밴드 run_queue(NUMA 노드별, ADR-053/054)는 그대로 두되,
+     **AP 코어도 이 run_queue에서 직접 유저 스레드를 뽑아 실행**하게
+     한다 — 지금까지 AP는 IPI 처리/TLB shootdown(ADR-055)만 하고 유저
+     run_queue를 절대 건드리지 않았다(M9~M11의 결정 그대로).
+  3. ADR-176(M21)의 LAPIC 타이머 기반 선점을 **각 코어가 자신의 로컬
+     LAPIC 타이머로 독립적으로** 수행하도록 확장한다(지금은 BSP
+     하나만 주기 모드로 프로그램돼 있다) — ADR-184(M33)의 코어별
+     보정값을 그대로 쓴다. 이 선점 경로는 LAPIC 레지스터를 직접
+     건드리지 않고 **ADR-191의 `timer_source_interface`**를 통해서만
+     타이머를 다룬다(아래 ADR-191 참고) — 스케줄러 코드는 "지금
+     코어의 타이머 소스"라는 추상 인터페이스만 알면 된다.
+  4. run_queue 락(기존 워크 스틸링, ADR-053/137이 이미 커널 밴드까지
+     넘나드는 경합을 다뤄 본 전례가 있다)에 "AP도 이 락을 유저 밴드
+     선점 경로에서 잡을 수 있다"는 사실을 반영해 ADR-136(락 순서 표)을
+     갱신한다.
+- **근거**: 지금 AP는 유저 스레드를 절대 실행하지 않는다 — SMP(여러
+  코어)가 있어도 유저 프로그램은 항상 BSP 하나에서만 돈다. ADR-001
+  (범용 OS 지향)이 멀티코어의 실질적 이점을 가지려면, 그리고
+  ADR-187(M37, pthread)이 진짜 병렬성을 가지려면 이게 반드시 필요하다.
+- **영향**: `kernel/core/sched/scheduler.cpp`의 `pick_next_alive()`/
+  run_queue 접근 경로 전체가 "어느 코어에서 호출됐는지"를 알아야
+  한다 — 코어 ID를 얻는 기존 수단(M10의 LAPIC ID 조회)을 재사용.
+  `object::thread`에 "마지막으로 실행된 코어" 같은 필드가 캐시
+  지역성을 위해 유용할 수 있으나, 처음엔 "아무 유휴 코어나 뽑는다"로
+  시작해도 정확성엔 문제없다(성능 최적화는 후속, YAGNI). 이 ADR
+  이후 SMP/NUMA 회귀 스위트(`tools/smoke-test-smp-x86_64.sh`/
+  `smoke-test-numa-x86_64.sh`)를 특히 꼼꼼히 재확인해야 한다 —
+  ADR-176이 M21에서 이미 "타이머 인터럽트가 기존 IPI/TLB shootdown
+  경로와 상호작용할 수 있다"고 경고해 둔 위험이 이제 AP에도 그대로
+  적용된다.
+
+## ADR-191. 커널 타이머 추상화: `timer_source_interface` + 코어별 LAPIC 백엔드 (OPEN-63 보강)
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M34 착수 전에 전략만 먼저 결정한다. 사용자 지시: "커널이 사용하는
+  타이머를 추상화하여 SW 수준의 타이머를 설계하고 그걸 쓰도록
+  만들고, LAPIC은 AP마다 하나씩 있으므로 이걸 세밀하게 잘 제어할
+  수 있어야 한다.")
+- **결정**:
+  1. `kernel/core/sched/`(또는 `kernel/core/time/` 신설)에 순수
+     인터페이스(ADR-042 네이밍 관례: `_interface` 포스트픽스)
+     `timer_source_interface`를 둔다 — 최소 멤버:
+     `void arm(uint64_t ticks)`(다음 틱까지 카운트다운 재설정),
+     `void calibrate(...)`(ADR-184의 실측 절차를 이 인터페이스
+     뒤로 캡슐화), `uint64_t ticks_per_microsecond() const`(보정된
+     환산 계수 조회).
+  2. **코어마다 자신만의 `timer_source_interface` 구현 인스턴스를
+     하나씩 갖는다** — x86_64에서는 `lapic_timer_source`(각 코어의
+     로컬 LAPIC 레지스터를 직접 다룸)가 그 구현체다. 코어별 인스턴스
+     배열(또는 percpu 슬롯)로 관리해, "이 코어의 타이머"를 항상
+     정확히 가리킬 수 있게 한다 — LAPIC이 코어마다 독립적으로
+     존재한다는 하드웨어 사실을 그대로 반영한다(다른 코어의 LAPIC을
+     실수로 건드리는 경로가 애초에 만들어지지 않는다).
+  3. `kernel/core/sched/scheduler.cpp`(ADR-176/185)는 이제 LAPIC
+     레지스터를 직접 참조하지 않고, **"현재 코어의
+     `timer_source_interface&`를 얻어 `arm()`을 호출"**하는 형태로만
+     선점 타이머를 재설정한다 — arch 의존 코드(ADR-002)가 스케줄러
+     코어 로직으로 새어나가지 않는다는 원칙을 이 경로에도 적용한다.
+  4. ADR-184(M33)의 코어별 보정 절차도 이 인터페이스의 `calibrate()`
+     호출로 재구성한다 — PIT/HPET을 기준시계로 쓰는 세부는
+     `lapic_timer_source::calibrate()` 내부에 캡슐화되고, 호출부
+     (부팅 시퀀스)는 "각 코어의 타이머를 보정하라"고만 요청한다.
+- **근거**: ADR-185가 "각 코어가 자신의 로컬 LAPIC 타이머로 독립적으로
+  선점한다"고만 정했을 때는 스케줄러 코드가 LAPIC 레지스터를 코어
+  인덱스로 직접 인덱싱하는 구조가 되기 쉽다 — 이러면 (a) aarch64
+  이식(ADR-009, 다음 방향) 시점에 GIC 타이머용 코드를 스케줄러
+  안에 또 분기로 끼워 넣어야 하고, (b) "이 AP의 타이머만 정확히
+  건드린다"는 요구(사용자 지시)가 코드 리뷰만으로 보장되는 약한
+  형태로 남는다. 인터페이스 하나로 강제하면 두 문제가 함께 풀린다 —
+  코어별 정밀 제어가 타입 시스템 수준에서 강제되고, 다음 아키텍처
+  이식 시 이 인터페이스의 새 구현체 하나만 추가하면 된다.
+- **영향**: ADR-185/184의 구현이 이 인터페이스를 거치도록 순서가
+  바뀐다 — M33(보정)이 먼저 `timer_source_interface`/
+  `lapic_timer_source`를 만들고, M34(멀티코어 선점)가 그 위에서
+  코어별 인스턴스 배열을 완성한다. aarch64 이식 시점에는
+  `gic_timer_source`(가칭) 하나만 추가하면 스케줄러 코어 로직은
+  수정할 필요가 없다 — 이 이점이 이 ADR의 실질적 검증 기준이다
+  (다음 방향인 aarch64 이식 착수 시 실제로 확인한다).
+
+## ADR-186. 완전한 signal 전달: `pending_signals` 비트마스크 + return-to-user 트램폴린 주입
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M36 착수 전에 전략만 먼저 결정한다)
+- **결정**:
+  1. `object::thread`의 `kill_requested`(bool, ADR-178)를 일반화한
+     `pending_signals: uint64_t`(표준 시그널 1~32만 — 실시간 시그널
+     확장은 범위 밖)와 `signal_mask: uint64_t`(sigprocmask로 가려진
+     시그널)를 추가한다.
+  2. `object::k_right_can_kill`(ADR-178)을 `k_right_can_signal`로
+     일반화해 재사용한다. 새 커널 syscall `sys_signal_send`(대상
+     `object_kind::thread` 핸들+시그널 번호)가 대상의
+     `pending_signals`에 해당 비트를 세운다 — 즉시 아무 일도 하지
+     않는다(ADR-178의 `kill_requested` 관례 그대로).
+  3. **return-to-user 경계**(syscall 리턴 직전, IRQ/인터럽트 리턴
+     직전 — 유저 코드가 다시 실행되기 전이면 전부)에서
+     `pending_signals & ~signal_mask`가 0이 아니면, 커널이 유저
+     스택에 시그널 프레임(리턴 직전 RIP/RSP/RFLAGS 스냅샷)을 밀어
+     넣고 RIP를 유저가 `sys_rt_sigaction`으로 등록해 둔 핸들러
+     주소로, 인자로 시그널 번호를 얹어 되돌아간다(Linux의 시그널
+     트램폴린과 같은 관례). 핸들러가 끝나면 새 syscall
+     `sys_rt_sigreturn`이 저장된 프레임을 복원한다.
+  4. `SIGKILL`은 핸들러 등록을 허용하지 않는다 — ADR-178의
+     `sys_process_kill`을 그대로 `SIGKILL` 전용 경로로 유지한다
+     (일반화하지 않는다 — "절대 막을 수 없는 강제 종료"라는 기존
+     보장을 그대로 지킨다).
+  5. `SIGCHLD`는 procsrv가 자식 종료 시(M27의 `process_entry` 상태
+     전이 시점) 부모 스레드에 이 메커니즘으로 실제로 전달한다 — M27은
+     `OP_WAIT`가 **블로킹 호출로만** 자식 종료를 알렸는데, 이제부터는
+     블로킹 wait 없이도 부모가 비동기로 알 수 있다.
+  6. **`SIGKILL`(과 새로 추가하는 강제 시그널만) 은 대기열에서도
+     즉시 깨운다 — 실제 POSIX `SIGKILL`이 인터럽터블 슬립 중인
+     프로세스도 즉시 깨워 종료시키는 것과 같은 동작이다(해결:
+     OPEN-65, 사용자 지시: "POSIX의 SIGKILL 메커니즘을 차용").**
+     `sys_signal_send`(또는 §결정4의 `sys_process_kill` 경로)가
+     `SIGKILL`을 대상으로 보낼 때, 대상이 **지금 어떤 대기열에
+     있는지**(`object::thread::ipc_wait_hook` — `endpoint::waiting_servers`/
+     `waiting_callers`, 또는 `notification::waiter`, M37 이후는
+     futex 대기열도 포함)를 확인해, 있으면 **그 대기열에서 즉시
+     `unlink`하고 스케줄러의 runnable 목록에 "폐기 대상"으로
+     넣는다**(`pick_next_alive()`가 다음에 뽑는 순간 실제로 버려짐 —
+     §결정3의 "다음 실행 시점"이 아니라 "지금 당장 대기 상태에서
+     끌어낸다"는 점이 다르다). 이 unlink 자체가 각 대기열 구조체의
+     `lock`(ADR-033/136 순서)을 잡고 수행되므로 기존 락 순서를
+     벗어나지 않는다. **`SIGKILL` 이외의 시그널은 이 즉시-unlink를
+     적용하지 않는다** — POSIX 의미론에서도 `SIGKILL`/`SIGSTOP`류만
+     이런 특별 취급을 받고, 나머지는 대상이 실행 가능 상태로
+     돌아와야 전달되는 것이 정상이다(§결정3의 "다음 유저모드 복귀
+     시점" 규칙 그대로 유지).
+- **근거**: ADR-178이 이미 "스케줄러가 다음에 실행하려는 시점에
+  확인"하는 패턴(`kill_requested`)을 만들어 뒀다 — 이를 일반
+  비트마스크로 확장하고 확인 시점을 "유저모드 복귀 시점"으로 넓히면
+  정확히 POSIX 시그널의 "다음에 유저 코드가 실행되기 전에 전달됨"
+  의미론이 된다. 완전히 새로운 메커니즘이 아니라 기존 관례의
+  일반화다.
+- **영향**: `kernel/arch/x86_64/`의 SYSRET 직전 경로와 IRETQ 직전
+  경로 **양쪽 다** 이 확인을 거쳐야 한다 — 스레드가 IPC 대기나 IRQ로
+  깨어나 유저 코드로 돌아가는 모든 경로. §결정6의 즉시-unlink로
+  **OPEN-65는 이 ADR로 해소된다** — 단 `SIGKILL` 한정이다(일반
+  시그널/`kill_requested`의 나머지 경로는 여전히 대기 중에는 다음에
+  깨어나야 전달된다 — 이 나머지는 이 ADR에서 별도로 풀지 않는다).
+  **job control**(프로세스 그룹, `setpgid`/
+  `tcsetpgrp` 등)은 범위 밖 — `SIGKILL`/`SIGTERM`/`SIGCHLD`/사용자
+  등록 핸들러까지만 다룬다.
+
+## ADR-187. pthread: 기존 `create_user_thread`의 address_space 공유 능력 재사용 + 새 futex syscall
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M37 착수 전에 전략만 먼저 결정한다)
+- **결정**:
+  1. 새 커널 syscall `sys_thread_create`(musl의
+     `SYS_clone(CLONE_VM|CLONE_FS|CLONE_THREAD|...)`가 번역 대상) —
+     `sched::create_user_thread(entry_rip, user_rsp, arg0, space, handles)`
+     (kernel/core/sched/scheduler.hpp)를 그대로 호출하되 **`space`를
+     새로 만들지 않고 호출자 자신의 `owner_space`를 그대로 넘긴다**.
+     `object::thread`가 `owner_space`를 포인터로만 참조하는 구조
+     (kernel_objects.hpp)라 여러 `thread`가 같은 `address_space`를
+     공유하는 것을 구조적으로 이미 지원한다 — 지금까지 실제로 이렇게
+     쓰인 적만 없었다. `handles`(handle_table)도 같은 것을 공유한다
+     (POSIX 스레드는 fd를 공유해야 한다).
+  2. 각 pthread는 자신만의 TLS(FS base, ADR-183/M30의 `sys_arch_prctl`)와
+     자신만의 스택을 가진다 — M30 착수 시점에 `sys_arch_prctl`을
+     "프로세스당 1개"가 아니라 처음부터 **스레드당 1개**로 설계해야
+     한다는 점을 이 ADR이 미리 기록해 둔다(M30이 이 ADR보다 먼저
+     실행되므로, 소급 수정 없이 처음부터 반영하기 위함).
+  3. 새 커널 syscall `sys_futex`(`FUTEX_WAIT`/`FUTEX_WAKE`만 — `FUTEX_CMP_REQUEUE`
+     등 고급 연산은 범위 밖) — 유저 가상주소(같은 `address_space`
+     안에서 서로 다른 스레드가 같은 주소를 가리킴)를 키로 스레드를
+     재우고 깨운다. `object::endpoint`의 `waiting_servers`/
+     `waiting_callers`(intrusive_list) 패턴을 그대로 재사용해 대기열을
+     만든다 — 주소별로 정확히 나누지 않고 `address_space`당 대기열
+     하나를 선형 탐색해도 충분하다(YAGNI, 프로세스당 스레드 수가
+     원래 적다).
+  4. `sys_thread_exit`(기존, ADR-142)이 이미 "이 스레드만" 종료시키는
+     의미론이므로 pthread 종료에 그대로 쓴다 — "마지막 스레드가
+     나갈 때 address_space까지 회수하는가"는 이 ADR 착수 시점에
+     점검해 필요하면 보강한다.
+  5. **AP 코어에서 실제로 병렬 실행되는 것은 ADR-185(M34)가 선행돼야**
+     의미가 있다 — 이 ADR(스레드 생성/futex) 자체는 ADR-185 없이도
+     BSP 하나에서 협조적으로 정확하게 동작한다(정확성과 병렬성을
+     분리해 둔다).
+  6. `pthread_cancel`(musl 내부적으로 예약된 시그널을 쓴다)은
+     ADR-186(M36, signal)이 선행돼야 동작한다 — 이 ADR은 그 의존성만
+     명시하고 구현하지 않는다.
+- **근거**: 이 커널의 `thread`/`address_space` 분리 설계(M4부터
+  포인터로만 연결)가 사실 pthread에 필요한 전제를 이미 갖추고 있다는
+  것을 이번에 확인했다 — 새 address_space 복제(COW fork, 무거운 연산)
+  경로를 건드리지 않고 **기존 스레드 생성 경로를 그대로 재사용**하는
+  것만으로 진짜 POSIX 스레드의 핵심(주소공간 공유, fd 공유, 독립
+  스택/TLS)이 성립한다.
+- **영향**: `object::address_space`가 "여러 thread가 동시에 살아있는
+  채로" 존재할 수 있다는 전제가 `process_ops.cpp`의 다른 경로에도
+  영향을 준다 — 특히 `sys_exec`은 POSIX상 "그 프로세스의 모든
+  스레드를 죽이고 하나로 교체"해야 하는데, 지금은 "스레드가 항상
+  하나"라는 전제로 "그 스레드 하나만" 교체해도 충분했다. M37 착수
+  시점에 `sys_exec`의 의미론을 이 경우까지 넓혀야 한다는 점을 기록해
+  둔다.

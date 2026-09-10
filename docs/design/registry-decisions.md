@@ -101,6 +101,44 @@ cfgsrv 서브시스템(스키마·테이블 주소 체계, 권한 모델, 비밀
 - **영향**: 향후 필요해지면 개별 항목에 "연산 전용" 플래그를 추가하는
   확장은 배제하지 않는다 — 이 ADR은 v1 기본값이다.
 
+## ADR-197. 유저 서비스 유닛 레지스트리 스키마 — `@global/system/services` 테이블, 새 값 타입/프로토콜 없이 기존 모델 재사용
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [user-service-manager.md](../plan/user-service-manager.md)
+  M41 착수 전에 전략만 먼저 결정한다. [boot-and-drivers.md](boot-and-drivers.md)
+  ADR-196의 `service_unit` 구조체를 실제로 저장하는 자리를 정한다)
+- **결정**: 새 전용 테이블 종류나 새 값 타입을 만들지 않는다 —
+  **기존 레지스트리 모델(ADR-060/061)을 그대로 재사용**한다.
+  1. 테이블 하나 `@global/system/services`를 만든다. 그 안에 서비스
+     이름을 키로, ADR-196의 `service_unit` 구조체를 **바이너리
+     타입 값**(ADR-061이 이미 지원하는 값 타입)으로 그대로 저장한다.
+  2. svcmgr는 부팅 시 `list_values`(기존 `reg_op` 9종 중 하나,
+     ADR-169)로 이 테이블의 모든 키를 나열하고, 각각 `get_value`로
+     읽어 `service_unit`으로 그대로 캐스팅한다. 런타임 등록/해제
+     (ADR-196 §결정7의 `op_register`/`op_unregister`)는 각각
+     `set_value`/`delete_value`를 그대로 호출한다 — **cfgsrv 자신의
+     프로토콜(registry.md)은 이 용도로 단 한 줄도 확장되지 않는다.**
+  3. **권한**(ADR-062): 이 테이블의 owner는 root(uid 0)다. owner만
+     RW, other는 R만(일반 계정은 목록/상태를 볼 수 있지만 등록·수정은
+     못 함) — `create_user`(procsrv.md §7.1)가 이미 쓰는 "super만
+     쓰기" 검사와 같은 정신이다. 이 권한 검사는 **cfgsrv 자신이**
+     기존 ADR-062 권한 모델로 수행한다 — svcmgr가 별도로 권한을
+     검사할 필요가 없다(오히려 검사하면 cfgsrv와 판정이 어긋날
+     위험이 생긴다).
+- **근거**: 레지스트리가 이미 "타입 있는 키-값" 모델(ADR-061)이고
+  관계형 다중 행이 필요한 것도 아니다 — 서비스 목록은 정확히
+  "이름→하나의 구조화된 값"이라는 KV 그 자체다. M19(ADR-169)가
+  이미 `reg_op` 9종을 전부 구현해 뒀으므로, svcmgr 입장에서는 이미
+  존재하는 클라이언트 코드(`libmc`의 cfgsrv 프로토콜 클라이언트,
+  ADR-183 §결정4와 같은 "항상 `libmc` 경유" 원칙)를 그대로 호출하는
+  것만으로 끝난다 — 새 서브시스템을 만들 이유가 없다.
+- **영향**:
+  - [registry.md](../spec/registry.md)의 "아직 정하지 않은 것"에서
+    이 스키마를 실제 스키마로 옮겨 기록한다.
+  - `service_unit`(ADR-196)의 정본은 여전히 `libmc/include/mc/
+    svcmgr_protocol.h`다 — 레지스트리는 그 구조체를 불투명한
+    바이너리 blob으로만 다룬다(cfgsrv 자신은 그 내용을 해석하지
+    않는다, ADR-064와 같은 "raw 값 반환" 정신).
+
 ## ADR-169. M19 범위 좁힘: cfgsrv 최초 구현 — group 검증 제외 + 실제 VFS 영속화 + 프로토콜 9종 전부 + 프로토콜-레벨 정수 핸들
 
 - **상태**: 확정 (2026-09-09)

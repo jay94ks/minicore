@@ -27,6 +27,10 @@
 | [smp-fpu-bringup.md](plan/smp-fpu-bringup.md) | M9(FPU/SIMD 컨텍스트 스위칭)~M11b(lazy XSAVE/AVX 전환) — AP 기동·IPI·TLB shootdown(M10), 다중 코어/NUMA 검증+락 순서 문서화(M11) 포함, kernel-bootstrap.md 이후 계획 |
 | [system-servers-bringup.md](plan/system-servers-bringup.md) | M12(procsrv)~M20(libc 포팅+로그인 후 셸) — VFS/memfs, devmgr+PCIe+PS/2+USB, virtio-blk, FAT32+ext4, 콘솔/로그인, 보안 모델(su/sudo/jail), cfgsrv 순. libmc(네이티브 C API 라이브러리)가 전 구간 교차 트랙. **M12~M20 전부 완료** — 결과는 done 참고 |
 | [general-purpose-completion.md](plan/general-purpose-completion.md) | M21(선점형 스케줄링)~M26(실제 libc 포팅 재도전) — 프로세스 생명주기(wait/시그널), 진짜 fork/exec의 fd 상속, 유저랜드 동적 메모리, 최소 네트워킹까지. aarch64 이식보다 먼저 하기로 결정된 계획. **전체(M21~M26) 완료** — 결과는 done 참고. 이 계획에는 더 이상 다음 마일스톤이 없다 |
+| [libs-restructure.md](plan/libs-restructure.md) | M49(libk/libmc를 libs/k, libs/mc로 이동+lib 접두사 제거)~M50(uapi.hpp 폐지, mc로 흡수+MC_LAND_KERNEL 매크로) — [build-system.md](../design/build-system.md) ADR-199, [foundations.md](../design/foundations.md) ADR-200(ADR-132 보강)의 실제 적용. M50이 namespace-refactor.md의 M45(uapi→kern::proto 단순 리네임)를 대체한다. **착수 전(계획만 존재)** |
+| [namespace-refactor.md](plan/namespace-refactor.md) | M44(kern:: 최상위+커널 코어 리네임)~M48(kernsrv::proto 분리) — [foundations.md](../design/foundations.md) ADR-198(네임스페이스 컨벤션 규칙 확정)의 실제 적용. 순수 기계적 리네임(동작 변화 없음), 각 마일스톤은 5개 QEMU 스위트 회귀 없음만 확인. **M44 완료**(결과는 done 참고) — **M45는 libs-restructure.md M50으로 대체(스킵)**, M46(kern::arch::x86_64+kern::proc 경계)~M48은 착수 전 |
+| [user-service-manager.md](plan/user-service-manager.md) | M40(servers/svcmgr 골격+재부모화 완성)~M43(계정별 유저 서비스 인스턴스, 스트레치) — OPEN-51이 남긴 "유저 서비스 등록 프로토콜" 실제 구현. ADR-196(유닛 모델+시작 절차+컨트롤 프로토콜 개요), ADR-197(@global/system/services 레지스트리 스키마, 새 프로토콜 없이 기존 reg_op 재사용). svcmgr는 순수 minicore 네이티브 서버라 real-libc-syscall-layer.md와 독립적으로 진행 가능(M27만 선행 전제). **착수 전(계획만 존재)** |
+| [real-libc-syscall-layer.md](plan/real-libc-syscall-layer.md) | M27(procsrv 실제 프로세스 테이블)~M39(실제 서드파티 셸/coreutils 재포팅 시도, 스트레치) — OPEN-54·62·63·65·66 해소(65는 완료). ADR-183(syscall 번역: 커널 확장 대신 musl의 syscall_arch.h 패치, libmc를 항상 거침), ADR-189(동적 링킹을 M29로 앞당김, musl 자신의 공유 libc.so), ADR-184(LAPIC 타이머 PIT/HPET 보정, 모든 타이머는 유저모드 진입 전 보정), ADR-185/191(진짜 멀티코어 선점+timer_source_interface 추상화), ADR-188(locale), ADR-186(signal 전달, SIGKILL 즉시 unlink), ADR-187(pthread), ADR-190(minicore 타깃 SDK 내보내기), ADR-195(와이어 프로토콜 마크업+추출 도구, M27 선행 작업). **착수 전(계획만 존재)** |
 
 ## done — 완료 보고
 | 문서 | 설명 |
@@ -62,6 +66,7 @@
 | [general-purpose-completion-m24.md](done/general-purpose-completion-m24.md) | M24(완료): 유저랜드 동적 메모리(ADR-180) — 새 syscall `sys_brk`(고정 1MiB 힙 슬롯, 슬롯 5)+libmc 최소 malloc(`mc_malloc`, 순수 범프 할당자). userland/shell의 cat 빌트인이 스택 배열 대신 malloc 버퍼를 실제로 써서 파일을 정확히 읽어냄을 확인 |
 | [general-purpose-completion-m25.md](done/general-purpose-completion-m25.md) | M25(완료): 최소 네트워킹(ADR-181) — virtio-net 드라이버(legacy virtio, virtio-blk와 같은 레지스터 레이아웃 재사용)+처음으로 실제 코드를 채운 netsrv(이더넷/IP/UDP 프레이밍). ARP 없이 DHCPDISCOVER→DHCPOFFER 왕복으로 UDP 검증(QEMU SLIRP 내장 DHCP 서버 이용) — vring 베이스 오프셋 누락+RX 버퍼 페이지 정렬 버그 기록, `tools/smoke-test-net-x86_64.sh` 신설 |
 | [general-purpose-completion-m26.md](done/general-purpose-completion-m26.md) | M26(완료, 계획 최종 마일스톤): 실제 libc 포팅 재도전(ADR-182) — third_party/musl(v1.2.6, 이 저장소의 첫 실제 git submodule)의 문자열 함수 부분집합(재구현이 아니라 원본 소스)을 실제로 빌드해 셸이 링크·사용. strdup→mc_malloc 연결(libc/sysdeps/minicore/mem_shim.c), 전체 syscall 계층/동적 링커/스레드/stdio는 범위 밖(OPEN-66) — general-purpose-completion.md 전체(M21~M26) 완료 |
+| [namespace-refactor-m44.md](done/namespace-refactor-m44.md) | M44(완료): `kern::` 최상위 도입 — `object`/`ipc`/`mm`/`sched`/`klog`/`initrd` 6개 네임스페이스를 `kern::*`로 리네임(48개 파일). 실행 중 `boot`(boot_info.hpp)가 초기부터 실제로 initrun과 공유되는 ABI 헤더임을 발견해 리네임 대상에서 제외(ADR-198 매핑표 정정) — 빌드+5개 QEMU 스위트 전부 회귀 없음 확인 |
 
 ## design — 설계/상세
 

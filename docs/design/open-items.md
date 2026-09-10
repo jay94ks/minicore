@@ -3,8 +3,9 @@
 [← 설계 문서 색인](index.md)
 
 모든 카테고리 파일에 흩어진 미결정 항목을 한 곳에 모은 문서. 새
-미결정 항목은 다음 번호(`OPEN-53`부터)로 여기에 추가하고, 해당
-결정을 다루는 카테고리 파일에도 같은 번호로 언급한다. 해결되면
+미결정 항목은 다음 번호(가장 최근 OPEN 번호(이 문서에서 확인) + 1,
+2026-09-10 기준 `OPEN-67`부터)로 여기에 추가하고, 해당 결정을
+다루는 카테고리 파일에도 같은 번호로 언급한다. 해결되면
 `~~OPEN-N~~`으로 취소선 처리하고 해결한 ADR 번호를 적는다.
 
 ## 현재 열려있는 항목
@@ -12,21 +13,21 @@
 | ID | 내용 | 관련 ADR | 다루는 문서 |
 |---|---|---|---|
 | OPEN-32 | result/optional의 `[[nodiscard]]` 강제 여부 최종 확정 시점 | ADR-010, ADR-068, ADR-069 | [libk.md](libk.md) |
-| OPEN-42 | 위임의 세부 범위(특정 명령만 허용, 특정 시간대만 허용 등) 지원 여부 — 기간/영구성은 ADR-096, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112 | [security-model.md](security-model.md) |
-| OPEN-51 | initrun이 모든 서비스 기동 후 마지막으로 실행하는 "systemd류 초기 프로세스" — procsrv 등 코어 서버가 아닌 **별도의 유저랜드 서비스 관리자 데몬**(정체성 확정, Linux systemd에 대응)의 실제 이름·책임 범위와, 프로세스 트리의 새 루트가 되는 구체적 절차 — **별도 design 문서 대상**(OPEN-52와 같은 성격) | ADR-131 | [boot-and-drivers.md](boot-and-drivers.md) |
-| OPEN-52 | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — ADR-131 범위 밖으로 분리(OPEN-49 해소), 별도 설계·계획 문서가 필요(아직 미착수) | (미정) | (신규 design 문서 예정) |
-| OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 | (미정) | [procsrv.md](../spec/procsrv.md) |
+| OPEN-42 | 위임의 **시간대 단위** 제한(특정 시간대에만 위임 유효) 지원 여부만 남음 — 기간/영구성은 ADR-096, **명령 단위 범위는 ADR-194로 해결**, 재인증 요구 여부는 ADR-112로 이미 해결됨 | ADR-093, ADR-096, ADR-112, ADR-194 | [security-model.md](security-model.md) |
+| OPEN-54 | procsrv의 실제 IPC 와이어 프로토콜(메시지 레이아웃, 각 오퍼레이션의 정확한 label/파라미터) — [procsrv.md](../spec/procsrv.md)가 개념적 절차(프로세스 테이블, fork/exec 시퀀스, fd 진실 공급원)는 정했지만 바이트 단위 메시지 포맷까지는 확정하지 않았다 — **방법론은 ADR-195(서버 헤더의 @wire-op 마크업+tools/gen-wire-docs.py)로 확정, 실제 바이트 레이아웃은 [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md) M27이 해소 예정** | ADR-195 | [procsrv.md](../spec/procsrv.md) |
 | OPEN-60 | ADR-154가 "I/O 활성화 권한 부여"를 지금은 initrun의 하드코딩(스폰 시 grant_trusted)으로만 결정하도록 확정했다 — 부팅 완료 이후 cfgsrv 레지스트리를 읽어 **다른** 특수 프로세스에게도 이 권한을 동적으로 부여/회수하는 절차는 cfgsrv가 실제로 존재하는 M19 이후 재검토 대상 | ADR-154 | [boot-and-drivers.md](boot-and-drivers.md) |
-| OPEN-62 | ADR-176이 LAPIC 타이머의 initial_count/divide를 **보정 없이**(PIT/HPET 실측 없이) 고정 상수로 정했다 — `base_time_slice_us` 필드는 이름과 달리 지금 실제 마이크로초를 보장하지 않고 "타이머 틱 수"로만 쓰인다. 실제 마이크로초 단위 타임슬라이스가 필요해지면 PIT/HPET 기반 보정을 추가해야 한다(어느 시점에, 어떤 기준 클록으로 보정할지는 아직 미정) | ADR-176 | [kernel-scheduler.md](kernel-scheduler.md) |
-| OPEN-63 | ADR-176은 AP가 여전히 협조적 스케줄러/run_queue에 전혀 참여하지 않는 것을 그대로 유지한 채(M10/M11 결정) BSP 한 코어에만 선점을 추가했다 — 진짜 멀티코어 선점형 스케줄러(코어별 `g_current`/타이머, AP도 유저 스레드 실행)는 이 ADR의 범위 밖으로 남겨 뒀다. general-purpose-completion.md의 M22~M26 어디에도 아직 이 작업이 배정돼 있지 않다 | ADR-176 | [kernel-scheduler.md](kernel-scheduler.md) |
-| OPEN-64 | ADR-178은 procsrv.md §2/§6이 정의한 실제 프로세스 테이블(`process_entry`, pid 발급, parent/children 트리)과 외부에서 부를 수 있는 `OP_WAIT`/`OP_KILL`(`proc_op::wait`/`signal`) IPC 오퍼레이션을 구현하지 않았다 — procsrv가 자기 자신을 대상으로 하는 자기테스트로만 wait/kill 메커니즘 자체를 증명했다. 어느 프로세스든 임의의 다른 프로세스의 pid로 wait/kill할 수 있는 실제 프로토콜은 다음 라운드 대상. ADR-179(M23)도 같은 근본 원인으로 procsrv.md §3.6/§4.1의 완전한 fd 진실 공급원 프로토콜(`dup_for_new_client`, 발신자 신원별 접근 제한)을 구현하지 않았다 — 커널의 handle_table 통째 복제로 이번 라운드 목표만 충족 | ADR-178, ADR-179 | [kernel-scheduler.md](kernel-scheduler.md), [kernel-memory.md](kernel-memory.md), [procsrv.md](../spec/procsrv.md) |
-| OPEN-65 | ADR-178의 kill은 대상이 IPC 대기열에 갇혀 있고 아무도 다시 깨우지 않으면 영원히 폐기되지 않는다(대기 타임아웃이 없다는 기존 한계의 연장) — 대기 중인 스레드도 즉시 폐기할 수 있는 매커니즘(예: 각 대기열에서도 직접 unlink)이 필요해지면 재검토 | ADR-178 | [kernel-scheduler.md](kernel-scheduler.md) |
-| OPEN-66 | ADR-182(M26)는 musl의 문자열 함수 부분집합만 실제로 포팅했다 — 진짜 syscall 계층(open/read/write/mmap/fork/exec을 musl 자신의 경로로 감싸는 새 레이어), 동적 링커, pthread, locale, stdio(FILE/printf 계열) 포팅은 전혀 없다. 실제 포팅된 셸/coreutils로 M20의 완료 기준을 다시 달성하는 것은 이 OPEN이 해소된 뒤의 일이다 | ADR-182 | [foundations.md](foundations.md) |
+| OPEN-62 | ADR-176이 LAPIC 타이머의 initial_count/divide를 **보정 없이**(PIT/HPET 실측 없이) 고정 상수로 정했다 — `base_time_slice_us` 필드는 이름과 달리 지금 실제 마이크로초를 보장하지 않고 "타이머 틱 수"로만 쓰인다. 실제 마이크로초 단위 타임슬라이스가 필요해지면 PIT/HPET 기반 보정을 추가해야 한다(어느 시점에, 어떤 기준 클록으로 보정할지는 아직 미정) — **ADR-184 + [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md) M33이 해소 예정** | ADR-176, ADR-184 | [kernel-scheduler.md](kernel-scheduler.md) |
+| OPEN-63 | ADR-176은 AP가 여전히 협조적 스케줄러/run_queue에 전혀 참여하지 않는 것을 그대로 유지한 채(M10/M11 결정) BSP 한 코어에만 선점을 추가했다 — 진짜 멀티코어 선점형 스케줄러(코어별 `g_current`/타이머, AP도 유저 스레드 실행)는 이 ADR의 범위 밖으로 남겨 뒀다. general-purpose-completion.md의 M22~M26 어디에도 아직 이 작업이 배정돼 있지 않다 — **ADR-185+ADR-191(timer_source_interface 추상화) + [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md) M34가 해소 예정**(M37 pthread의 진짜 병렬성이 이 위에서 성립) | ADR-176, ADR-185, ADR-191 | [kernel-scheduler.md](kernel-scheduler.md) |
+| OPEN-64 | ADR-178은 procsrv.md §2/§6이 정의한 실제 프로세스 테이블(`process_entry`, pid 발급, parent/children 트리)과 외부에서 부를 수 있는 `OP_WAIT`/`OP_KILL`(`proc_op::wait`/`signal`) IPC 오퍼레이션을 구현하지 않았다 — procsrv가 자기 자신을 대상으로 하는 자기테스트로만 wait/kill 메커니즘 자체를 증명했다. 어느 프로세스든 임의의 다른 프로세스의 pid로 wait/kill할 수 있는 실제 프로토콜은 다음 라운드 대상 — **[real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md) M27이 이 부분을 해소 예정.** ADR-179(M23)도 같은 근본 원인으로 procsrv.md §3.6/§4.1의 완전한 fd 진실 공급원 프로토콜(`dup_for_new_client`, 발신자 신원별 접근 제한)을 구현하지 않았다 — 커널의 handle_table 통째 복제로 이번 라운드 목표만 충족. **이 부분(`dup_for_new_client`)은 real-libc-syscall-layer.md에서도 명시적으로 범위 밖으로 남는다** — fork는 신원 불변이라 M23의 대체로 충분하고, su/sudo 경유 실행이 실제로 필요해지는 시점까지 미룬다 | ADR-178, ADR-179 | [kernel-scheduler.md](kernel-scheduler.md), [kernel-memory.md](kernel-memory.md), [procsrv.md](../spec/procsrv.md) |
+| OPEN-66 | ADR-182(M26)는 musl의 문자열 함수 부분집합만 실제로 포팅했다 — 진짜 syscall 계층(open/read/write/mmap/fork/exec을 musl 자신의 경로로 감싸는 새 레이어), 동적 링커, pthread, locale, stdio(FILE/printf 계열) 포팅은 전혀 없다. 실제 포팅된 셸/coreutils로 M20의 완료 기준을 다시 달성하는 것은 이 OPEN이 해소된 뒤의 일이다 — **ADR-183~195 + [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md) M27~M39가 착수 예정**(M28·M30~M32 syscall 계층, M29 동적 링킹, M35 locale, M36 signal, M37 pthread, M38 SDK 내보내기). 각 항목의 범위가 의도적으로 좁아(musl 자신의 공유 libc.so 하나만, 표준 시그널만, futex 기초 연산만 등) 완료돼도 OPEN-66은 완전히는 해소되지 않는다 — 완료 시점에 남는 세부(다중 `.so` 일반화, 실시간 시그널, job control 등)를 새 OPEN 번호로 분리한다 | ADR-182~195 | [foundations.md](foundations.md) |
 
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
 |---|---|---|
+| ~~OPEN-65~~ | ADR-178의 kill은 대상이 IPC 대기열에 갇혀 있고 아무도 다시 깨우지 않으면 영원히 폐기되지 않음 — `SIGKILL` 한정으로 대기열에서 즉시 `unlink`하는 메커니즘으로 해소(POSIX SIGKILL이 인터럽터블 슬립도 즉시 깨우는 것과 같은 동작). 일반 시그널은 여전히 "다음 실행 시점"에만 전달됨(그대로 유지) | ADR-186 |
+| ~~OPEN-52~~ | 프로세스/서비스의 "초기화 완료(준비됨)" 신호 프로토콜 — 새 커널 프리미티브 없이, spawn 시점에 이미 만들어지는 전용 endpoint 위의 예약 label(`k_service_ready_label`) Call/Reply로 통일(종료 회수의 `OP_WAIT`와 정확히 같은 모양) | ADR-193 |
+| ~~OPEN-51~~ | initrun이 마지막으로 실행하는 "systemd류 초기 프로세스"의 정체성·책임 범위 — 존재는 유지, 역할을 두 계층으로 분리해 해소: "커널 서버"(procsrv/vfs/devmgr 등)는 initrun이 하드코딩된 이름으로 직접 실행하고, 이 데몬(`servers/svcmgr`)은 그와 겹치지 않는 "유저 서비스"만 관리한다. 프로세스 트리의 영구 루트는 이 데몬이고, initrun 종료 시 남은 커널 서버들은 이 데몬으로 재부모화된다. 유닛 모델·시작 절차·컨트롤 프로토콜 개요는 ADR-196, 레지스트리 스키마(@global/system/services)는 ADR-197로 설계 완료 — 실제 구현은 [user-service-manager.md](../plan/user-service-manager.md) M40~M43 | ADR-192, ADR-196, ADR-197 |
 | ~~OPEN-61~~ | ADR-155 §2의 매핑 해제 시점(다음 sys_recv 직전 자동 해제, 스레드별)과 배치 위치(`k_user_stack_top` 위쪽 고정 슬롯 사다리의 다음 자리) 확정 | ADR-159 |
 | ~~OPEN-58~~ | TSS IOPB가 코어당 전역 공유 — 스레드별 활성 I/O 범위(`io_port_base`/`count`) + `sys_io_activate`/`sys_io_deactivate` + 컨텍스트 스위치 시 diff 기반 재프로그래밍으로 설계 확정(구현은 M14 착수 시점) | ADR-154 |
 | ~~OPEN-59~~ | IPC `pages[]` 페이로드의 cross-address-space 전달 — 수신자가 커널(스레드)이면 ADR-151과 같은 방식의 페이지 단위 번역, 수신자가 유저 프로세스면 참조 카운트+공유 매핑(유저에게 번역 API를 노출하지 않음)으로 설계 확정(구현은 §1은 M14, §2는 M16 전후) | ADR-155 |

@@ -86,7 +86,7 @@ public:
 ## 5. 예시: 이 컨벤션을 따르는 작은 선언
 
 ```cpp
-namespace mm {
+namespace kern::mm {
 
 enum class alloc_error : uint32_t {
     out_of_memory,
@@ -101,12 +101,32 @@ public:
     virtual void free_pages(uint64_t physical_address, uint32_t order) = 0;
 };
 
-}  // namespace mm
+}  // namespace kern::mm
 ```
+
+## 6. 네임스페이스 계층 (ADR-198)
+
+- 커널(및 커널과 함께 컴파일되는 코드)은 `kern` 최상위 아래
+  서브시스템별로 세분화한다 — `kern::arch`/`kern::arch::x86_64`/
+  `kern::ipc`/`kern::mm`/`kern::proc` 등, 원칙적으로
+  `kernel/core/*` 디렉터리 하나당 `kern::<모듈>` 하나.
+- 외부에 노출하지 않을 하위 네임스페이스는 `__internals__`로
+  표시한다(예: `kern::ipc::__internals__`) — 파일 단위로만 숨기는
+  익명 네임스페이스(`namespace {}`)와는 다른, 모듈 단위 은닉이다.
+  둘 다 계속 쓴다 — 대체 관계가 아니다.
+- 커널 서버(`servers/*`)는 `kernsrv::<서버명>`(예: `kernsrv::procsrv`,
+  `kernsrv::devmgr`)에 둔다.
+- **예외**: 프로토콜(와이어 포맷) 정의는 소유 모듈이 아니라
+  `kern::proto`(커널이 정의)/`kernsrv::proto`(서버가 정의)에 둔다 —
+  IPC 메시지 포맷, TCP/UDP/IP 같은 "클라이언트·서버가 함께 합의해야
+  하는 레이아웃"이 대상이다.
+- `libk`/`libmc`/포팅된 `libc`·`userland`는 이 계층의 적용 대상이
+  아니다(ADR-198 §결정5) — 각자의 기존 컨벤션을 유지한다.
+- **기존 코드 리네임은 아직 실행되지 않았다** — ADR-198은 규칙만
+  확정했다. 실제 적용 범위/시점은 별도 결정 대상([open-items.md](../design/open-items.md)
+  참고 필요 시).
 
 ## 아직 정하지 않은 것
 
-- 네임스페이스 분할 규칙(서브시스템당 하나의 네임스페이스인지,
-  더 세분화할지)은 실제 코드량이 늘어나면서 정한다.
 - `k_` 프리픽스 외의 상수 명명(예: 전역 싱글턴 접근자 이름)은
   구현 시 선례로 정착시킨다.

@@ -1333,9 +1333,63 @@ ADR-011/023)만으로 표현한다.
     한번 확인했을 뿐, 새 미결정 항목을 추가하지는 않는다(M18의
     기존 범위 밖 항목과 같다).
 
+## ADR-194. 위임의 명령 단위 세부 범위: `delegation_entry`에 허용 명령 목록 추가 (OPEN-42 명령 범위 부분 해결)
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — 실제 구현은 procsrv.md
+  §10의 su/sudo IPC 오퍼레이션이 정의되는 시점에 한다)
+- **결정**: ADR-096의 `delegation_entry`(기간 3모드)에 명령 범위
+  제한 필드를 추가한다:
+
+  ```cpp
+  inline constexpr uint32_t k_max_delegation_commands = 8;
+
+  struct delegation_entry {
+      uint64_t            granted_at;
+      delegation_ttl_kind ttl_kind;
+      uint64_t            period_seconds;
+      bool                requires_confirmation;
+      bool                confirmed;
+      // OPEN-42 명령 범위(신규)
+      bool                restrict_commands;   // false = 무제한(ADR-093 기존 동작)
+      uint32_t            allowed_command_count;
+      char                allowed_command_paths[k_max_delegation_commands][256];  // 정규화된 절대경로
+  };
+  ```
+
+  1. `restrict_commands == false`(기본값)면 ADR-093의 기존 동작과
+     동일하게 위임이 모든 명령에 적용된다 — 기존 호환성을 그대로
+     유지한다.
+  2. `restrict_commands == true`면, B가 A의 위임으로 su/sudo(§10의
+     `op_su`/`op_sudo` 계열)를 요청할 때 procsrv는 요청된 명령
+     경로를 **심볼릭 링크까지 모두 해석한 정규화된 절대경로**로
+     바꾼 뒤(ADR-082의 guest/jail 실행 제한 검사가 이미 쓰는 것과
+     같은 정규화 절차 재사용) `allowed_command_paths` 목록에
+     정확히 일치하는 항목이 있는지 확인한다. 없으면
+     `proc_error::exec_not_permitted`로 그 요청만 거부한다(위임
+     자체를 무효화하지 않는다 — 다른 허용된 명령은 여전히 통과).
+  3. **명령 목록은 경로 문자열의 정확한 일치만 지원한다** — glob이나
+     인자 패턴 매칭(`ls *`처럼 인자까지 제한)은 범위 밖이다(YAGNI,
+     v1은 "이 바이너리 자체를 실행해도 되는가"만 판단).
+  4. **시간대 단위 제한(특정 시간대에만 위임 유효)은 이 ADR의 범위
+     밖이다** — OPEN-42는 이 ADR로 "명령 단위"만 해소되고, "시간대
+     단위"는 계속 열려 있다(아래 갱신된 OPEN-42 참고).
+- **근거**: `restrict_commands` 플래그로 기존/신규 동작을 명확히
+  분기해, ADR-093이 이미 검증한 "위임=전부 허용" 기본 경로를 건드리지
+  않는다. 경로 정규화 절차를 ADR-082에서 재사용하는 이유는 이미
+  "심볼릭 링크로 제한을 우회하는" 같은 종류의 문제를 그 ADR이 먼저
+  풀어 뒀기 때문이다 — 같은 문제를 두 번 다르게 풀 이유가 없다.
+- **영향**:
+  - [procsrv.md](../spec/procsrv.md) §10의 su/sudo 오퍼레이션
+    정의 시점에 `allowed_command_paths` 검사 단계를 추가해야 한다.
+  - `@global/system/delegates/<A>` 레지스트리 값의 스키마
+    ([registry.md](../spec/registry.md))가 이 필드들을 포함하도록
+    갱신돼야 한다.
+  - OPEN-42는 "명령 단위" 부분만 이 ADR로 해소된다 — "시간대 단위"
+    부분은 여전히 미결정으로 남는다(아래 갱신된 OPEN-42).
+
 ## 아직 정하지 않은 것
 
-- **OPEN-42**: 위임의 세부 범위(특정 명령만 허용, 특정 시간대만
-  허용 등) 지원 여부 — 기간/영구성은 ADR-096으로, 위임 시 재인증
-  요구 여부는 ADR-112로 해결되었으므로, 이 항목은 이제 "명령
-  단위·시간대 단위 제한"으로 범위가 좁혀진다.
+- **OPEN-42**(범위 좁혀짐, ADR-194로 명령 단위는 해결): 위임의
+  **시간대 단위** 제한(특정 시간대에만 위임이 유효) 지원 여부만
+  남는다 — 기간/영구성은 ADR-096, 명령 단위 범위는 ADR-194, 위임 시
+  재인증 요구 여부는 ADR-112로 각각 해결되었다.

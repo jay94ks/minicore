@@ -220,6 +220,25 @@ seek/truncate를 지원하지 않으므로(fs-protocol.md v3), 직렬화 포맷
 로드 시 이전 라운드의 더 길었던 내용이 파일 뒤쪽에 남아 있어도
 `payload_len`만큼만 유효하다고 취급한다.
 
+## 8. `@global/system/services` — 유저 서비스 유닛 테이블 (registry-decisions.md ADR-196/197)
+
+새 값 타입이나 새 프로토콜을 요구하지 않는 스키마 예시다 — §2/§5의
+기존 모델(바이너리 타입 값)을 그대로 쓴다.
+
+- **테이블**: `@global/system/services`(단 하나) — 키는 서비스
+  이름(최대 32바이트), 값은 [boot-and-drivers.md](../design/boot-and-drivers.md)
+  ADR-196의 `service_unit` 구조체를 그대로 담은 **바이너리 타입**
+  값이다. cfgsrv 자신은 이 값의 내부 구조를 해석하지 않는다(§6.1
+  "raw 값 반환"과 같은 정신) — 해석은 `servers/svcmgr`(소비자)의
+  몫이다.
+- **권한**(§3): owner = root(uid 0), owner만 RW, other는 R만 —
+  일반 계정은 목록/내용을 조회할 수 있지만 등록·수정·삭제는
+  root(또는 root의 위임을 받은 프로세스)만 가능하다.
+- **소비자**: `servers/svcmgr`가 부팅 시 `list_values`+`get_value`로
+  전체를 읽고, 런타임 등록/해제는 `set_value`/`delete_value`를
+  그대로 쓴다(§5의 기존 `reg_op` 9종 중 4개만으로 충분하다) — 이
+  용도로 registry.md 프로토콜 자체를 확장하는 부분은 없다.
+
 ## 아직 정하지 않은 것
 
 - `owner_uid`/`group_gid`는 [security-model.md](../design/security-model.md)

@@ -442,3 +442,270 @@
     필요해지는 다음 기회로 미룬다).
   - **OPEN-66**: 전체 syscall 계층/동적 링커/스레드/stdio 포팅은
     여전히 없다 — [open-items.md](open-items.md) 참고.
+
+## ADR-183. 실제 musl syscall 계층 포팅 전략: 커널이 아니라 musl 자신의 syscall 진입점을 패치해 유저랜드에서 우회
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  전체(M27~M39) 착수 전에 전략만 먼저 결정한다)
+- **결정**:
+  1. OPEN-66(진짜 syscall 계층)을 풀기 위해 **커널에 Linux 호환
+     syscall ABI 진입점을 새로 추가하지 않는다.** 대신 musl 소스
+     자신의 `arch/x86_64/syscall_arch.h`(모든 `__syscall0`~`__syscall6`
+     호출이 반드시 거치는 단일 지점)를 `third_party/patches/musl/`의
+     실제 패치(ADR-022가 예약해 둔 자리, M26까지는 한 번도 쓰이지
+     않았다)로 재작성해, 원래 raw `syscall` 어셈블리 명령 대신 새
+     C 디스패처 `long __minicore_syscall_dispatch(long n, ...)`
+     (`libc/sysdeps/minicore/syscall_shim.c`, `extern "C"`)를
+     호출하게 만든다. 이 디스패처가 Linux syscall 번호(musl이 그대로
+     쓰는 표준 x86_64 Linux ABI 번호)를 보고 필요한 최소 집합만
+     실제 동작(`libmc`의 VFS/FS/procsrv 클라이언트 호출, 또는 기존
+     14개 커널 syscall 중 하나)으로 번역하고, 나머지는 `-ENOSYS`를
+     반환한다.
+  2. **정적 링킹이 기본값이다** — 동적 링커(`ld.so`)는 이 ADR
+     시점에는 포팅 대상이 아니다(musl은 정적으로 링크된 실행파일만
+     만든다). 이후 ADR-189(kernel-memory.md)가 "단일 `.so` 최소
+     증명"만 범위를 좁혀 별도로 다룬다 — 일반적인 동적 링킹까지
+     지원하는 것으로 이 결정을 번복하지는 않는다.
+  3. `tools/apply-patches.sh`(M26까지 TODO 스텁이었다 — 패치가
+     필요 없어서 구현되지 않았다)를 이 전략을 위해 실제로 구현한다.
+  4. **`syscall_shim.c`는 항상 `libmc`를 거쳐서만 커널/서버와
+     통신한다 — 절대 새 IPC/프로토콜 로직을 직접 구현하지 않는다.**
+     구현해야 할 Linux syscall 번호에 대응하는 `libmc` 함수(예:
+     `mc_open`/`mc_read`/`mc_arch_prctl`/`mc_thread_create`/
+     `mc_futex_wait` 등)가 아직 없으면, **`syscall_shim.c`를 고치기
+     전에 먼저 `libmc`에 그 함수를 추가**한다(헤더는
+     `libmc/include/mc/`, 구현은 `libmc/src/`) — ADR-132가 이미
+     정한 "0단 커널 syscall의 1:1 C 래퍼 + 서버별 프로토콜 클라이언트는
+     전부 `libmc` 한 곳에만 둔다"는 원칙을 musl 포팅에도 예외 없이
+     적용한다. `libc/CMakeLists.txt`의 `minicore_libc`(정적)/
+     `minicore_libc_dynamic`(동적, M29~)는 항상 `libmc`와 링크해
+     빌드한다(M26이 `mem_shim.c`→`mc_malloc`으로 이미 시작한 패턴을
+     이 계획 전체로 일반화한다).
+- **근거**: ADR-006/007("커널 내부는 최소한만 직접 구현, 나머지는
+  유저랜드로 미룬다")과 정확히 같은 논리다 — "Linux syscall 번호를
+  minicore IPC로 번역하는 것"은 순전히 유저랜드 문제(어떤 번호가
+  어떤 VFS/procsrv 오퍼레이션에 대응하는가)이고, 커널이 새로 알아야
+  할 것이 없다. 이 커널의 기존 14개 syscall과 IPC 프로토콜은 이미
+  이 번역에 필요한 능력(open/read/write→VFS/FS IPC, fork/exec→
+  sys_fork/sys_exec, brk→sys_brk)을 제공한다 — "새 커널 syscall ABI"를
+  또 하나 만드는 것은 이미 있는 능력의 중복이자, 커널이 영구히
+  떠안을 "다른 커널을 흉내 내는 코드"가 된다. 정적 링킹만 지원하는
+  이유는 동적 링커가 이 문제와 독립적으로 크고(ELF 로더 확장, PLT/GOT,
+  `dlopen` 류) 이 계획의 핵심 목표(syscall 계층 자체를 증명)와
+  직접 관련이 없기 때문이다.
+- **영향**:
+  - `libc/sysdeps/minicore/syscall_shim.c`(신규, M28)가 "POSIX
+    syscall 번호 → `libmc` 호출" 번역의 단일 출처가 된다 — 이
+    파일 자체는 최대한 얇게 유지되고(번호별 `switch`+`libmc` 호출
+    한 줄), 실제 로직은 항상 `libmc` 쪽에 쌓인다.
+  - `libmc`가 이 계획(M28~M39) 전체에 걸쳐 실질적으로 성장한다 —
+    ADR-132(M12 착수 시점 기준)가 예상한 범위보다 훨씬 넓은 syscall
+    집합(파일 I/O, 메모리 매핑, 스레드/futex, signal)까지 `libmc`
+    함수로 채워진다. 이는 ADR-132의 원래 의도("어떤 libc를 포팅하든
+    같은 `libmc`를 재사용")를 그대로 실현하는 것이다 — 나중에 다른
+    libc(newlib 등)를 시도해도 이 `libmc` 확장을 그대로 재사용할 수
+    있다.
+  - `third_party/patches/musl/`가 이 저장소에서 처음으로 실제
+    내용을 갖는다(M26은 무수정으로 충분했다) — repo-layout.md가
+    이미 예약해 둔 자리다.
+  - 실제 어떤 Linux syscall 번호를 언제 구현할지는 각 마일스톤
+    (M28, M30~M32) 착수 시점에 필요한 만큼만 추가한다(YAGNI, 이전
+    라운드들과 같은 패턴) — 이 ADR은 전략만 정하고 구체적인 번호
+    목록은 정하지 않는다.
+  - pthread/동적 링커/locale/완전한 signal 의미론은 이 ADR의
+    범위 밖으로 남는다 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+    참고(단, 이 넷 모두 이후 이 계획에 편입됐다 — 동적 링커는
+    ADR-189(kernel-memory.md)로 오히려 M29로 앞당겨졌고, locale은
+    ADR-188(이 문서)의 M35, signal은 ADR-186(kernel-scheduler.md)의
+    M36, pthread는 ADR-187(kernel-scheduler.md)의 M37이 각각 다룬다).
+
+## ADR-188. musl locale: "C"/"POSIX" 고정, 실제 로케일 데이터 없음
+
+- **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M35 착수 전에 범위만 먼저 결정한다)
+- **결정**: musl의 locale 서브시스템 중 **"C"/"POSIX" 로케일 하나만**
+  실제로 동작하게 한다. `setlocale()`이 다른 이름을 요청하면 실패
+  (`NULL`) 반환, `nl_langinfo`/`ctype`/`toupper` 등은 musl이 기본
+  제공하는 C 로케일 테이블(문자열 함수처럼 이미 syscall-free)을
+  그대로 쓴다. 실제 로케일 데이터 파일(`/usr/share/locale` 류)이나
+  `LC_*` 환경변수 기반 전환, `iconv` 다국어 인코딩 변환은 범위 밖이다.
+- **근거**: musl의 기본 동작이 이미 "C" 로케일을 syscall 없이
+  제공하므로, 이 범위는 사실상 "아무것도 깨지지 않게 두는 것"에
+  가깝다 — 실제 다국어 지원 수요가 생기기 전에는 이보다 넓힐 이유가
+  없다(YAGNI, ADR-001의 "정확성 우선, 나중에 확장 가능한 구조만
+  확보"와 일치).
+  - **영향**: 거의 없음 — M35의 검증 프로그램에 `setlocale(LC_ALL, "")`
+    (POSIX 관례상 항상 성공해야 하는 호출)를 넣어 깨지지 않는지
+    확인하는 정도만 추가한다.
+
+## ADR-198. 네임스페이스 컨벤션: `kern::*` 계층(커널)·`kernsrv::<서버명>`(서버)·`__internals__` 은닉 마커·`proto` 예외 (ADR-042 보강)
+
+- **상태**: 확정 (2026-09-10, 사용자 지시. **규칙만 확정** — 기존
+  코드에 실제로 적용(리네임)하는 작업은 이 ADR의 범위 밖이며 별도
+  실행 여부를 사용자에게 확인한다, 아래 "영향" 참고)
+- **결정**:
+  1. **커널(및 커널과 함께 컴파일되는 코드)은 `kern` 최상위
+     네임스페이스 아래, 모듈별로 세분화된 하위 네임스페이스에
+     둔다.** 예:
+     ```
+     kern            // 최상위
+     kern::arch      // arch 공통(HAL 경계, ADR-002)
+     kern::arch::x86_64
+     kern::ipc
+     kern::mm
+     kern::proc
+     ```
+     정확히 이 넷만이 아니라, 커널 코어의 각 서브시스템(`kernel/core/*`
+     디렉터리 하나당 하나씩이 기본 원칙)마다 하나의 `kern::<모듈>`을
+     둔다.
+  2. **외부(다른 `kern::*` 하위 모듈, 혹은 커널 밖)에 노출되길
+     원하지 않는 네임스페이스는 `__internals__`로 명명해 그 모듈
+     밑에 둔다** — 예: `kern::ipc::__internals__`. 이는 **익명
+     네임스페이스(`namespace {}`)를 대체하지 않는다** — 둘은 은닉
+     범위가 다르다:
+     - 익명 네임스페이스: 그 `.cpp` 파일 **하나**에서만 보인다(외부
+       링크 자체가 없음) — 지금처럼 그대로 유지한다.
+     - `__internals__`: 한 모듈의 **여러** `.cpp`/헤더가 서로 호출해야
+       하지만, 그 모듈 밖(다른 `kern::*` 서브모듈, 서버, 외부
+       소비자)에는 "이건 계약이 아니라 구현 세부"라고 신호하고 싶을
+       때 쓴다.
+  3. **커널 서버(`servers/*`, ADR-006/007)는 `kernsrv::<서버명>`
+     네임스페이스에 둔다** — 예:
+     ```
+     kernsrv::devmgr
+     kernsrv::procsrv
+     ```
+     각 서버는 자기 실행파일 하나이므로 `kern`처럼 깊게 세분화할
+     필요는 없다 — 서버 내부에서 더 나누고 싶으면 그 서버 재량으로
+     `kernsrv::<서버명>::<하위모듈>`을 추가할 수 있다(강제하지 않음).
+  4. **예외 — 프로토콜(와이어 포맷) 정의는 별도 네임스페이스**를
+     쓴다. IPC 데이터 포맷, TCP/UDP/IP 같은 네트워크 프로토콜 등
+     "여러 소비자가 합의해야 하는 레이아웃"을 담는 코드는 그 코드가
+     속한 모듈의 네임스페이스가 아니라:
+     - 커널이 정의하는 프로토콜 → `kern::proto`
+     - 서버가 정의하는 프로토콜 → `kernsrv::proto`
+     여기 둔다 — 어느 특정 서버/모듈 소유가 아니라 "클라이언트와
+     서버가 함께 참조하는 계약"이라는 성격을 이름으로도 드러낸다.
+  5. **이 규칙의 적용 범위가 아닌 것**:
+     - **`libk/`** — 커널과 서버 양쪽이 공유하는 크로스컷 유틸리티
+       라이브러리라 "커널"도 "커널서버"도 아니다. 이 ADR은 `libk`를
+       건드리지 않는다 — 기존 `libk_detail`(사실상 이미
+       `__internals__`와 같은 역할을 해 온 이름)을 그대로 두거나,
+       일관성을 위해 `libk::__internals__`로 다시 쓸지는 별도 결정
+       대상으로 남긴다.
+     - **`libmc/`**(ADR-132) — 순수 C+어셈블러라 네임스페이스 자체가
+       문법적으로 없다. `mc_` 접두사 컨벤션을 그대로 유지한다.
+     - **`libc/`/`userland/`**(ADR-005/022, 포팅 코드) — 원본 프로젝트
+       컨벤션을 따르며 이 규칙의 적용 대상이 아니다(ADR-042가 이미
+       정한 예외와 동일).
+- **근거**: 사용자가 명시적으로 이 계층 구조를 지정했다. 기존
+  네임스페이스(`object`/`ipc`/`mm`/`sched`/`arch_x86_64`/`uapi` 등)는
+  전부 최상위 평면에 나란히 떠 있어서, 이름만 보고는 "이게 커널
+  코드인지, 서버 코드인지, 프로토콜 정의인지"를 구분할 수 없었다 —
+  특히 `uapi`(커널·유저 공유 syscall ABI 헤더)처럼 실질적으로
+  "프로토콜"인 것이 다른 커널 코어 모듈과 구분 없이 같은 층위에
+  있었다. `kern::`/`kernsrv::` 프리픽스와 `proto` 예외는 이런 혼선을
+  이름 자체로 없앤다.
+- **기존 코드 매핑(제안, 실제 적용 전 확인용)** — 현재
+  `kernel/`·`libk/`·`servers/`에 실제로 존재하는 네임스페이스를
+  조사해 만든 표다:
+
+  | 현재 | 새 이름(제안) | 비고 |
+  |---|---|---|
+  | `object`(`kernel/core/object/`, `kernel/arch/x86_64/{fpu,process_ops,tss}.hpp`) | `kern::object` | |
+  | `ipc`(`kernel/core/ipc/`) | `kern::ipc` | |
+  | `mm`(`kernel/core/mm/`) | `kern::mm` | |
+  | `sched`(`kernel/core/sched/`) | `kern::sched` | |
+  | `arch_x86_64`(`kernel/arch/x86_64/`) | `kern::arch::x86_64` | |
+  | `boot`(`kernel/core/boot_info_dump.cpp`, `kernel/include/boot_info.hpp`) | **변경 없음(`boot`로 유지)** | M44 실행 중 발견 — `kernel/include/boot_info.hpp`는 `kernel/include/`(유저랜드와 공유하는 ABI 헤더 자리)에 있고 실제로 `init/initrun/main.cpp`가 직접 include해 쓴다. `uapi.hpp`와 같은 "커널·유저 공유 ABI"라 `kern::`(커널 전용) 대상이 아니다 — ADR-200이 `uapi.hpp`에 적용한 것과 같은 처리(궁극적으로 `mc`로 흡수)가 맞는 방향이나, 이 ADR/M44는 범위를 넓히지 않고 이름을 그대로 둔다. 후속 결정 대상 |
+  | `initrd`(`kernel/core/initrd/mcpack.*`) | `kern::initrd`(최상위) | M44 실행 시점에 확정 — `kern::boot`를 새로 만들지 않기로 했으므로(위 `boot` 행) 그 하위에 둘 이유도 없다. `initrd` 사용은 순수 커널 내부(`kernel_main.cpp`, `mcpack.*`)로 확인됨 |
+  | `klog`(`kernel/core/klog.cpp`, `kernel/arch/x86_64/klog_uart.cpp`) | `kern::klog` | |
+  | `uapi`(`kernel/include/uapi.hpp`) | **`kern::proto`** | 이 예외 규칙이 정확히 겨냥하는 대상 — syscall ABI/메시지 레이아웃, 유저랜드와 공유 |
+  | (없음 — 현재 `arch_x86_64` 소속) `kernel/arch/x86_64/process_ops.*`의 fork/exec/spawn/kill 의미론 | `kern::proc`(신설) | 사용자 예시가 `kern::arch`의 형제로 `kern::proc`을 들었으므로 새로 만든다 — 다만 지금 구현이 arch 코드 안에 있어(레지스터 수준 fork), "arch 독립 인터페이스는 `kern::proc`, 레지스터 세부는 `kern::arch::x86_64`"로 실제로 나누는 건 이 리네임과는 별개인 ADR-002 경계 정리 작업이다. 이 ADR은 이름 자리만 만든다 |
+  | `libk_detail`(`libk/include/libk/*.hpp`) | 이 ADR 범위 밖(위 §결정5) — 제안: `libk::__internals__` | |
+  | `servers/*`의 각 서버(현재 전부 무네임스페이스, 파일 내부 익명 네임스페이스만 존재) | `kernsrv::<서버명>` — `procsrv`/`vfs`/`devmgr`/`cfgsrv`/`login`/`netsrv`/`fs::memfs`/`fs::fat32`/`fs::ext4`/`drivers::ps2`/`drivers::usb`/`drivers::console`/`drivers::virtio_blk`/`drivers::virtio_net`/`svcmgr`(계획 단계, [user-service-manager.md](../plan/user-service-manager.md)) | 서버 내부 세분화(`kernsrv::fs::memfs`류)는 이 표에서 제안하는 것일 뿐 강제 아님(§결정3) |
+  | (아직 없음) 서버 내부의 순수 C++ 프로토콜/와이어 포맷 코드 — 예: netsrv의 이더넷/IP/UDP 헤더 구조체(M25) | `kernsrv::proto` | `libmc`가 정본인 프로토콜(procsrv/fs 등, ADR-132)은 C 헤더라 이 규칙 대상이 아니다 — `kernsrv::proto`는 libmc로 노출되지 않는, 서버 내부 전용 C++ 프로토콜 포맷 코드 자리다 |
+- **영향**:
+  - **이 ADR은 규칙만 확정한다 — 기존 코드에 실제로 적용(전면
+    리네임)하는 작업은 아직 실행하지 않았다.** 위 매핑표에 표시한
+    두 판단 지점(`initrd`의 정확한 자리, `kern::proc`과
+    `kern::arch::x86_64`의 경계)은 실제 적용 시점에 확정한다.
+  - 실제 적용은 별도 계획 [namespace-refactor.md](../plan/namespace-refactor.md)
+    (M44~M48, 사용자가 "별도 계획으로 분리해서 지금 세우기"를
+    선택)로 분리했다 — 순수 기계적 리네임이라 이 프로젝트가 지금까지
+    지켜온 "바꾼 뒤 QEMU 5개 스위트로 회귀 확인" 원칙을 마일스톤마다
+    그대로 적용한다.
+  - `docs/spec/cxx-conventions.md`§6을 이미 목표 상태로 갱신해
+    뒀다(신규 코드는 지금부터 이 컨벤션을 따른다) — 기존 코드
+    리네임 완료 여부는 그 문서의 "아직 실행되지 않았다" 문구로
+    추적한다.
+- **M44 실행 결과(2026-09-10, [done](../done/namespace-refactor-m44.md))**:
+  `object`/`ipc`/`mm`/`sched`/`klog`/`initrd` 6개 네임스페이스를
+  실제로 `kern::*`로 리네임했다(총 48개 파일). 이 과정에서 위
+  `boot` 행의 발견(커널·유저 공유 ABI라 `kern::` 대상이 아님)을
+  했고, `initrd`는 `kern::initrd`(최상위)로 확정했다. 빌드 성공+
+  smoke/SMP/NUMA/AVX/net 5개 스위트 전부 회귀 없음(SMP 11, NUMA 24,
+  AVX 12, net 6개 확인 문자열 전부 통과) 확인.
+
+## ADR-200. `mc`(구 `libmc`)를 커널·유저 공용으로 통합 — 전처리기 매크로로 kernel-land/user-land 구분, `uapi.hpp`의 손 복제를 폐지 (ADR-132 보강)
+
+- **상태**: 확정 (2026-09-10, 사용자 지시. 규칙만 확정 — 실제 구현은
+  [libs-restructure.md](../plan/libs-restructure.md) M50이 다룬다)
+- **결정**:
+  1. **`mc`(ADR-199로 `libmc`에서 개명)의 헤더가 커널과 유저랜드
+     양쪽이 공유하는 단일 출처가 된다.** 지금 `kernel/include/uapi.hpp`
+     가 `kernel/core/ipc/message.hpp`의 `ipc::message`를 "필드
+     순서·타입이 완전히 동일해야 한다"는 주석만 믿고 손으로 복제해
+     유지하는 상태(그 파일 자신의 상단 주석이 이미 이 위험을
+     스스로 지적하고 있었다)를 폐지한다 — `uapi.hpp`는 사라지고,
+     그 내용(message 레이아웃, syscall 번호, 각종 요청/응답 구조체)
+     은 `mc`의 헤더로 옮겨진다.
+  2. **커널-랜드/유저-랜드 구분은 소비자가 선언하는 전처리기
+     매크로로 한다** — `mc`의 헤더를 include하기 전에 소비자가
+     자신이 "커널-랜드"임을 밝히는 매크로(가칭 `MC_LAND_KERNEL`,
+     정확한 이름은 착수 시점에 확정)를 정의하면 헤더 내용이
+     조건부로 달라진다:
+     - **커널-랜드**(`kernel/`이 정의): 구조체·enum·상수(메시지
+       레이아웃, syscall 번호, 프로토콜 label 값)만 노출한다.
+       syscall 트램폴린(실제 `syscall` 명령을 실행하는 함수)이나
+       IPC/서버 프로토콜 **클라이언트** 함수는 노출하지 않는다 —
+       커널은 자기 자신을 syscall로 호출할 이유가 없다.
+     - **유저-랜드**(매크로 미정의가 기본값 — 지금까지의 동작과
+       동일): 구조체+syscall 트램폴린+프로토콜 클라이언트 함수
+       전부 노출한다.
+  3. **`mc`의 헤더는 C와 C++ 양쪽에서 유효해야 한다** — 커널은
+     C++(ADR-010)이고 유저랜드 소비자(포팅된 libc 포함, ADR-183)는
+     C다. ADR-132 §결정2가 이미 확립한 패턴(POD 구조체+`extern "C"`)
+     을 그대로 유지하면 이 요구사항은 이미 충족된다 — 새 기법이
+     필요하지 않다.
+  4. **`mc`의 구현(.c) 파일은 여전히 유저-랜드 전용이다** — 이
+     ADR은 헤더(선언)만 커널-랜드에 공유한다. syscall 트램폴린/
+     프로토콜 클라이언트의 실제 구현은 커널이 링크하지 않는다
+     (커널은 그 함수들을 애초에 호출하지 않으므로 필요 없다).
+- **근거**: `uapi.hpp`는 ADR-132가 "프로토콜 와이어 포맷의 단일
+  출처는 `libmc`(→`mc`)의 C 헤더로 삼는다"고 이미 정한 원칙에서
+  유일하게 벗어나 있던 예외였다 — 커널 ABI만은 그 원칙을 따르지
+  못하고 "커널-internal 헤더를 유저 실행파일에 직접 include하는
+  대신 복제한다"는 실용적이지만 위험한 타협을 했었다(동기화가
+  깨지면 컴파일 에러 없이 조용히 잘못된 메모리를 읽는 사고로
+  이어진다 — ADR-195가 프로토콜 일반에 대해 지적한 것과 정확히
+  같은 위험). 전처리기 매크로로 "누가 소비하는가"만 가르면 복제
+  없이 하나의 정본으로 양쪽을 만족시킬 수 있다.
+- **영향**:
+  - `kernel/include/uapi.hpp`는 폐지된다 — `kernel/`이 이제
+    (헤더만) `mc`를 참조한다. 지금까지 `kernel/`은 `libmc`를 전혀
+    참조하지 않았다(유저 전용이었다)는 점에서 저장소 의존관계
+    그래프의 실질적 변화다.
+  - `kernel/arch/x86_64/{syscall.cpp,process_ops.*,kernel_main.cpp}`
+    가 `uapi::`(ADR-198/[namespace-refactor.md](../plan/namespace-refactor.md)
+    M45가 계획했던 `kern::proto::`)로 참조하던 것을 `mc::`(커널-랜드
+    매크로 하에 노출된 것)로 바꿔야 한다 — **이 작업은
+    namespace-refactor.md M45의 범위와 겹친다.** M45("uapi를
+    `kern::proto`로 리네임")는 이 ADR로 **대체된다** — 단순 리네임이
+    아니라 폐지+`mc` 흡수로 목표가 바뀌었다. namespace-refactor.md
+    자체는 수정하지 않고(문서 체계 원칙), [libs-restructure.md](../plan/libs-restructure.md)
+    M50이 이 대체를 실행한다.
+  - 정확한 매크로 이름과, 커널-랜드에서 정확히 어떤 대상까지
+    숨길지(예: 프로토콜 클라이언트 함수의 시그니처 선언만 숨길지,
+    아예 그 헤더 파일 전체를 안 보이게 할지)의 세부는 실행 착수
+    시점에 확정한다.

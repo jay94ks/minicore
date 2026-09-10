@@ -81,6 +81,18 @@ struct process_entry {
   같은 맥락으로, "프로세스 계보"는 POSIX 의미론이므로 procsrv 소관).
   ADR-083의 guest 가시성 범위("자기 자신과 자손")는 이 트리를 그대로
   순회해 계산한다.
+- **initrun 종료 시 재부모화**([boot-and-drivers.md](../design/boot-and-drivers.md)
+  ADR-192, OPEN-51 해소) — initrun은 "커널 서버"(procsrv/vfs/devmgr
+  등, 하드코딩된 이름으로 직접 spawn)를 전부 기동한 뒤, **유저
+  서비스 관리자 데몬**(systemd류, 커널 서버가 아닌 유저 서비스만
+  관리 — 이 데몬 자체는 procsrv.md 범위 밖의 별도 설계 대상)을
+  마지막으로 하나 더 spawn하고서야 스스로 사라진다. 이 시점에
+  procsrv는 initrun의 나머지 살아있는 자식(커널 서버들)의
+  `parent_pid`/`parent`를 **그 유저 서비스 관리자 데몬**을 가리키도록
+  갈아치운다 — 프로세스 트리의 영구 루트는 procsrv 자신이 아니라
+  이 데몬이다. (이 데몬이 아직 구현되지 않은 동안에는 잠정적으로
+  `parent_pid = 0`으로 둔다 — 재부모화 메커니즘 자체는 대상을
+  매개변수로 받으므로, 데몬이 생기면 그 잠정 처리만 교체하면 된다.)
 
 ## 3. 프로세스 생성 — `fork()`
 
@@ -431,5 +443,9 @@ ADR-088 §결정 4의 절차를 그대로 구현한다:
   `delegation_timeout_seconds` 비교 단계를 위임 조회 절차에 추가해야
   한다. 영구 위임의 확인(수락) 절차(B가 대기 중인 위임을 조회·수락하는
   방법)도 함께 정의해야 한다.
-- **위임 세부 범위**(ADR-093) — 명령 단위·시간대 단위 제한 등은
-  v1 범위 밖이다(기간/영구성은 ADR-096으로 이미 해결) → **OPEN-42**.
+- **위임 세부 범위**(ADR-093) — 명령 단위 제한은
+  [security-model.md](../design/security-model.md) ADR-194로
+  `delegation_entry`에 `allowed_command_paths`가 추가돼 해결됐다
+  (§10 나머지 미결 항목과 함께 §6 `proc_op`에 반영해야 한다). 시간대
+  단위 제한은 여전히 v1 범위 밖이다(기간/영구성은 ADR-096, 명령
+  단위는 ADR-194로 해결) → **OPEN-42**(시간대 단위만 남음).
