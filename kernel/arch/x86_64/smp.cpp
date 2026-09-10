@@ -11,6 +11,7 @@
 #include <k/atomic.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
+#include <sched/scheduler.hpp>
 
 // ap_trampoline.S가 .rodata.ap_trampoline에 채운 바이트 범위 — bring_up_aps가
 // 이 전체를 물리주소 k_ap_trampoline_phys로 복사한다.
@@ -195,12 +196,26 @@ extern "C" void ap_main(uint32_t cpu_index) {
     kern::arch::x86_64::init_fpu();
 
     kern::arch::x86_64::lapic_enable_this_core();
+
+    // M33(real-libc-syscall-layer.md §M33, ADR-184 §결정1) — 이 AP도
+    // 자기 LAPIC 타이머를 실측 보정한다("코어마다 1회"). BSP가 이미
+    // find_and_parse_hpet/hpet_init을 부팅 극초반 한 번만 마쳐 뒀고
+    // (kernel_main.cpp::demo_acpi_lapic()) HPET MMIO는 코어 공용이라
+    // 이 AP는 hpet_available()로 그 결정을 그대로 물려받는다 — 다시
+    // 초기화할 필요가 없다. 계산된 initial_count는 로그로만 남긴다 —
+    // M21(ADR-176)이 이미 정한 대로 AP는 아직 자기 주기 타이머를
+    // 실제로 켜지 않는다(lapic_start_periodic_timer() 미호출, 아래
+    // 주석) — 그건 AP가 run_queue에 참여하는 M34(ADR-185)의 몫이다.
+    uint32_t ap_calibrated_initial_count =
+        kern::arch::x86_64::calibrate_lapic_timer(kern::sched::k_timer_tick_period_us);
+
     // M21(ADR-176) — 일부러 lapic_start_periodic_timer()를 여기서
     // 부르지 않는다(lapic.hpp 그 함수 주석 참고) — AP는 run_queue에
     // 참여하지 않아, 이 코어에서 타이머가 울려도 kern::sched::on_timer_tick()
     // 이 건드릴 g_current는 BSP의 것뿐이다.
     uint32_t apic_id = kern::arch::x86_64::lapic_id();
-    kern::klog::printf("[smp] AP apic_id=%u online cpu_index=%u\n", apic_id, cpu_index);
+    kern::klog::printf("[smp] AP apic_id=%u online cpu_index=%u calibrated_initial_count=%u\n",
+                 apic_id, cpu_index, ap_calibrated_initial_count);
     kern::arch::x86_64::g_online_count.fetch_add_relaxed(1);
 
     // ap_trampoline.S가 진입 내내 인터럽트를 켜지 않았다(cli 상태 그대로

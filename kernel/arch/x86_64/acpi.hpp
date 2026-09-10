@@ -95,4 +95,18 @@ struct mcfg_result {
 // 제공한다).
 bool find_and_parse_mcfg(uint64_t arch_data_addr, mcfg_result& out);
 
+// M33(real-libc-syscall-layer.md §M33, ADR-184) — HPET(High Precision
+// Event Timer) 테이블(ACPI 6.5 §5.2.9, signature="HPET") 파싱. LAPIC
+// 타이머를 실측 보정하는 기준시계로 쓴다(devmgr의 유저랜드 ACPI 열거
+// 보다 훨씬 앞선 부팅 극초반, 유저모드 진입 전에 끝나야 한다 —
+// find_and_parse_mcfg/madt와 완전히 같은 RSDP 검색 경로를 재사용).
+struct hpet_result {
+    uint64_t base_phys;  // HPET MMIO 베이스(Generic Address Structure의 address 필드).
+    bool ok;
+};
+
+// HPET 테이블 자체가 없으면(QEMU에 -no-hpet를 준 경우 등) false —
+// 호출자는 PIT(8254) 채널2 폴링으로 폴백해야 한다(ADR-184 §결정2).
+bool find_and_parse_hpet(uint64_t arch_data_addr, hpet_result& out);
+
 }  // namespace kern::arch::x86_64

@@ -24,6 +24,7 @@
 #include "boot_info_x86_64.hpp"
 #include "elf_loader.hpp"
 #include "fpu.hpp"
+#include "hpet.hpp"
 #include "idt.hpp"
 #include "klog.hpp"
 #include "lapic.hpp"
@@ -141,14 +142,37 @@ acpi_topology demo_acpi_lapic(uint64_t real_arch_data_addr) {
     kern::arch::x86_64::lapic_init(madt_ok ? s.madt.lapic_base_phys : k_default_lapic_base);
     kern::klog::printf("[smp] BSP apic_id=%u\n", kern::arch::x86_64::lapic_id());
 
+    // M33(real-libc-syscall-layer.md §M33, ADR-184, OPEN-62 해소) —
+    // BSP의 LAPIC 타이머를 실측 보정한다. HPET ACPI 테이블을 먼저
+    // 찾는다(devmgr의 유저랜드 PCIe/ACPI 열거보다 훨씬 앞선 자리 —
+    // ADR-184 §결정4 "어떤 코어에서도 첫 유저모드 진입 전에 보정이
+    // 끝나 있어야 한다"를 만족해야 한다, initrun은 M8부터 이미 이
+    // 시점 이후 곧바로 유저모드로 진입한다). 없으면(예: QEMU
+    // `-no-hpet`) PIT(8254) 채널2 폴링으로 자동 폴백한다
+    // (calibrate_lapic_timer() 내부, hpet_available() 분기).
+    kern::arch::x86_64::hpet_result hpet{};
+    if (kern::arch::x86_64::find_and_parse_hpet(real_arch_data_addr, hpet)) {
+        kern::arch::x86_64::hpet_init(hpet.base_phys);
+        kern::klog::printf("[acpi] hpet_ok=1 base_phys=0x%lx period_fs=%lu\n",
+                     static_cast<unsigned long>(hpet.base_phys),
+                     static_cast<unsigned long>(kern::arch::x86_64::hpet_period_femtoseconds()));
+    } else {
+        kern::klog::printf("[acpi] hpet_ok=0 (PIT 폴백)\n");
+    }
+
+    // 보정 전/후 값을 함께 로그로 남긴다(M33 목표 — 대조 확인).
+    constexpr uint32_t k_uncalibrated_initial_count = 0x200000;  // M21이 쓰던 예전 고정값.
+    uint32_t calibrated_initial_count =
+        kern::arch::x86_64::calibrate_lapic_timer(kern::sched::k_timer_tick_period_us);
+    kern::klog::printf("[lapic] BSP calibrated initial_count=%lu (uncalibrated was %lu)\n",
+                 static_cast<unsigned long>(calibrated_initial_count),
+                 static_cast<unsigned long>(k_uncalibrated_initial_count));
+
     // M21(general-purpose-completion.md §M21, ADR-176) — BSP에서만
     // 선점 타이머를 켠다(lapic.hpp::lapic_start_periodic_timer 주석 —
-    // AP는 아직 스케줄러에 참여하지 않는다). k_timer_initial_count는
-    // 보정 없는 값이다 — QEMU 실측(docs/done/general-purpose-completion-m21.md)
-    // 으로 "데모가 합리적인 시간 안에 여러 번 선점됨"을 확인한 값일 뿐,
-    // 실제 마이크로초 단위를 보장하지 않는다.
-    constexpr uint32_t k_timer_initial_count = 0x200000;
-    kern::arch::x86_64::lapic_start_periodic_timer(kern::arch::x86_64::k_vector_timer, k_timer_initial_count);
+    // AP는 아직 스케줄러에 참여하지 않는다, M34 대상).
+    kern::arch::x86_64::lapic_start_periodic_timer(kern::arch::x86_64::k_vector_timer,
+                                                    calibrated_initial_count);
 
     // M12(ADR-147) — initrun의 임베디드 virtio-blk 클라이언트가 필요로
     // 하는 ECAM 베이스를 여기서 미리 확인해 둔다(부팅 초기 진단 —

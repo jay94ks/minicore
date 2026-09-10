@@ -113,16 +113,17 @@ void sync_syscall_kernel_rsp(const kern::object::thread& next) {
 // 승격 syscall이 생기면 별도 배선 없이 바로 작동한다).
 uint64_t slice_multiplier(uint32_t boost_level) { return static_cast<uint64_t>(boost_level) + 1; }
 
-// M21(ADR-176) — LAPIC 타이머를 실제 마이크로초 단위로 보정하지
-// 않았다(PIT/HPET 기반 보정은 이 마일스톤 범위 밖, YAGNI — lapic.cpp의
-// busy_delay()가 AP 기동 지연을 보정 없이 흉내내는 것과 같은 정신).
-// 그래서 base_time_slice_us(단위는 필드 이름 그대로 "마이크로초"이지만
-// 실제로는)의 값을 그대로 "타이머 틱 수"로 소비한다 — 실제 보정이
-// 필요해지면(PIT/HPET로 LAPIC 타이머 주파수를 재보고) 이 함수 하나만
-// 고치면 된다.
+// M33(real-libc-syscall-layer.md §M33, ADR-184, OPEN-62 해소) — 이제
+// base_time_slice_us는 정말로 마이크로초다(arch 계층이 부팅 극초반
+// k_timer_tick_period_us에 맞춰 하드웨어 타이머를 실측 보정해 둔
+// 덕분 — kernel_main.cpp::demo_acpi_lapic()의
+// calibrate_lapic_timer() 호출 참고). "몇 번의
+// 틱을 기다려야 하는지"만 이 함수가 계산한다(M21 시절엔 이 나눗셈이
+// 없었다 — base_time_slice_us 값을 그대로 "틱 수"로 잘못 소비했다).
 uint64_t ticks_for(const kern::object::thread_sched_fields& sched) {
-    uint64_t budget = sched.base_time_slice_us * slice_multiplier(sched.boost_level);
-    return budget == 0 ? 1 : budget;  // 0이면 매 틱마다 선점(최소 보장, 굶지 않음).
+    uint64_t budget_us = sched.base_time_slice_us * slice_multiplier(sched.boost_level);
+    uint64_t ticks = budget_us / k_timer_tick_period_us;
+    return ticks == 0 ? 1 : ticks;  // 0이면 매 틱마다 선점(최소 보장, 굶지 않음).
 }
 
 // M21(ADR-176) — t가 (다시) g_current가 될 때마다 호출해 새 슬라이스
@@ -131,12 +132,13 @@ uint64_t ticks_for(const kern::object::thread_sched_fields& sched) {
 // "이번 슬라이스에서 남은 틱"을 정확히 추적한다.
 void reset_preempt_budget(kern::object::thread& t) { t.preempt_ticks_remaining = ticks_for(t.sched); }
 
-// M21(ADR-176) — 새로 만든 스레드의 기본 타임슬라이스(틱 수, 위
-// ticks_for() 주석 참고). 특별한 근거로 고른 값은 아니다 — 고전적인
-// 라운드로빈 스케줄러의 "적당한 퀀텀" 감각을 재현하는 잠정치일 뿐이라
-// (관찰 기반으로 조정 가능, docs/design/open-items.md 참고),
-// scheduler.md §4가 요구하는 "실제로 소비"만 충족하면 된다.
-constexpr uint64_t k_default_time_slice_ticks = 20;
+// M21(ADR-176)이 "20"을 고른 근거는 특별하지 않다 — 고전적인
+// 라운드로빈 스케줄러의 "적당한 퀀텀" 감각을 재현하는 잠정치일 뿐
+// (관찰 기반으로 조정 가능, docs/design/open-items.md 참고). M33이
+// 그 20을 "틱 수"에서 "실제 마이크로초"로 바꾼다 — 20 * 1ms(
+// k_timer_tick_period_us) = 20ms로, 보정 전과 수치상 같은 "20틱"
+// 감각을 그대로 유지한다.
+constexpr uint64_t k_default_time_slice_us = 20 * k_timer_tick_period_us;
 
 // kernel_band이 true면 kernel_band에서만, false면 user_band에서만 꺼낸다
 // — pick_next_with_stealing()이 "커널 밴드는 노드 경계를 넘어서도
@@ -284,7 +286,7 @@ kern::object::thread* create_kernel_thread(void (*entry)(), kern::object::priori
     auto* t = new (mem) kern::object::thread();
     t->sched.band = band;
     t->sched.preferred_node = preferred_node;
-    t->sched.base_time_slice_us = k_default_time_slice_ticks;
+    t->sched.base_time_slice_us = k_default_time_slice_us;
 
     // enqueue()는 이미 preferred_node를 g_node_count로 감싼다(존재하지
     // 않는 노드를 요청해도 항상 유효한 큐에 들어가도록) — 여기서도
@@ -341,7 +343,7 @@ kern::object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, 
     auto* t = new (mem) kern::object::thread();
     t->sched.band = kern::object::priority_band::user;
     t->sched.preferred_node = 0;
-    t->sched.base_time_slice_us = k_default_time_slice_ticks;
+    t->sched.base_time_slice_us = k_default_time_slice_us;
     if (!alloc_fpu_save_area(t, 0)) {
         kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;
@@ -404,7 +406,7 @@ kern::object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t sav
     auto* t = new (mem) kern::object::thread();
     t->sched.band = kern::object::priority_band::user;
     t->sched.preferred_node = 0;
-    t->sched.base_time_slice_us = k_default_time_slice_ticks;
+    t->sched.base_time_slice_us = k_default_time_slice_us;
     if (!alloc_fpu_save_area(t, 0)) {
         kern::mm::slab_free(t, sizeof(kern::object::thread));
         return nullptr;

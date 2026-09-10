@@ -29,6 +29,17 @@
 
 namespace kern::sched {
 
+// M33(real-libc-syscall-layer.md §M33, ADR-184, OPEN-62 해소) — 이
+// 스케줄러가 목표로 하는 "타이머 틱 하나"의 실제 시간(마이크로초).
+// arch 계층(x86_64: kernel_main.cpp)이 부팅 극초반(코어별로, 첫
+// 유저모드 진입 전) 실제 하드웨어 타이머(LAPIC)를 이 값에 맞춰
+// 보정한다(kern::arch::x86_64::calibrate_lapic_timer) — core는 이
+// 상수 하나만 알고, "어떤 하드웨어로 어떻게 보정하는지"는 전혀
+// 모른다(ADR-002 HAL 경계). ticks_for()가 스레드의
+// base_time_slice_us(실제 마이크로초)를 이 값으로 나눠 "몇 번의
+// 틱을 기다려야 하는지"를 계산한다.
+constexpr uint64_t k_timer_tick_period_us = 1000;  // 1ms/틱.
+
 struct run_queue {
     // M21(ADR-176) — 이 락을 쥔 코드가 이제 (BSP 한정) 타이머 인터럽트
     // 핸들러에서도 호출된다(on_timer_tick() -> yield() -> enqueue()/

@@ -920,6 +920,71 @@
   수정할 필요가 없다 — 이 이점이 이 ADR의 실질적 검증 기준이다
   (다음 방향인 aarch64 이식 착수 시 실제로 확인한다).
 
+## ADR-208. M33 완성: LAPIC 타이머 실측 보정(HPET 1순위/PIT 폴백) — `timer_source_interface`(ADR-191) 도입은 M34로 미룸
+
+- **상태**: 확정 (2026-09-10, [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)
+  M33 실행 중 확정)
+- **배경**: ADR-184의 전략(HPET 1순위/PIT 폴백으로 코어별 LAPIC
+  타이머를 실측 보정)을 실제로 구현한다.
+- **결정**:
+  1. `kernel/arch/x86_64/hpet.cpp/.hpp`(신규) — HPET MMIO 최소
+     드라이버. 메인 카운터를 프리러닝으로 켜고 읽기만 한다(자체
+     인터럽트/비교기는 쓰지 않는다). `kernel/arch/x86_64/acpi.cpp`가
+     HPET ACPI 테이블(signature="HPET")도 찾도록 확장했다
+     (`find_and_parse_hpet`, 기존 `find_and_parse_mcfg`와 완전히
+     같은 RSDP 검색 경로 재사용).
+  2. `kernel/arch/x86_64/pit.cpp/.hpp`(신규) — PIT(8254) 채널2를
+     모드0+포트 0x61 bit5(OUT2 상태) 폴링으로 쓰는 최소 드라이버
+     (HPET 없을 때만 쓰인다 — QEMU는 기본으로 HPET을 제공해 이
+     경로는 실측 검증하지 못했다, 아래 "검증" 참고).
+  3. `kernel/arch/x86_64/lapic.cpp`에 `calibrate_lapic_timer(target_time_slice_us)`
+     추가 — LVT Timer를 마스크(실제 인터럽트 없이)+최대
+     initial_count로 잰 뒤, HPET/PIT로 측정한 고정 10ms 창 동안
+     LAPIC이 실제로 감소시킨 틱 수로 주파수를 역산해 목표
+     마이크로초에 대응하는 initial_count를 계산한다.
+  4. `kernel/core/sched/scheduler.hpp`에 공개 상수
+     `k_timer_tick_period_us`(=1000, 1ms/틱)를 추가하고,
+     `kernel_main.cpp`(BSP, 부팅 극초반 — devmgr의 유저랜드 ACPI
+     열거보다 훨씬 앞선 자리, 유저모드 진입 전)와 `smp.cpp`(각 AP,
+     기동 시퀀스 끝에서)가 이 상수를 목표로 `calibrate_lapic_timer()`
+     를 호출한다. AP는 계산된 값을 로그로만 남기고 자기 주기
+     타이머를 실제로 켜지 않는다(M21/ADR-176이 이미 정한 "AP는
+     아직 run_queue에 참여하지 않는다"를 그대로 유지 — 활성화는
+     M34/ADR-185의 몫).
+  5. **ADR-191이 예정한 `timer_source_interface` 추상화는 이번
+     라운드에 만들지 않는다** — `calibrate_lapic_timer()`/
+     `lapic_start_periodic_timer()`를 호출부(kernel_main.cpp/
+     smp.cpp)가 그대로 직접 부른다. ADR-191 §영향은 "M33이 먼저
+     인터페이스를 만들고 M34가 코어별 인스턴스 배열로 완성한다"고
+     정했지만, 이 시점엔 소비자가 BSP 하나뿐이라(AP는 아직 자기
+     타이머를 켜지 않는다) 구현체 하나·호출자 하나짜리 인터페이스는
+     조기 추상화다 — M34가 실제로 "코어별 인스턴스"가 필요해지는
+     순간(AP도 자기 주기 타이머를 켜는 순간)에 인터페이스를
+     만드는 쪽이 그 설계를 실제 요구사항에 맞춰 검증할 수 있다.
+- **실행 중 발견**: `ticks_for()`(scheduler.cpp)가 `base_time_slice_us`
+  를 그대로 "타이머 틱 수"로 소비하고 있었다(그 필드의 주석이
+  이미 정확히 이 사실과 "실제 보정이 필요해지면 이 함수 하나만
+  고치면 된다"를 예고해 뒀다) — 계산된 `initial_count`가 실제
+  마이크로초에 맞아도, `ticks_for()`가 나누기를 하지 않으면
+  `base_time_slice_us=20`이 "20 틱"으로 오독되어 여전히 보정 전과
+  똑같이 부정확한 슬라이스가 나온다. `ticks_for()`를
+  `budget_us / k_timer_tick_period_us`로 고치고,
+  `k_default_time_slice_ticks`(값 20)를
+  `k_default_time_slice_us`(값 20*1000=20000, 20ms)로 재해석해
+  이름과 의미를 일치시켰다 — OPEN-62가 지적한 "이름은 마이크로초,
+  실제로는 틱 수"라는 불일치가 이 두 변경으로 함께 해소된다.
+- **검증**: QEMU(HPET 항상 제공, `-no-hpet` 없이 실행)에서 확인 —
+  BSP: `elapsed_ticks≈62~64만/10ms` → `initial_count≈6.2~6.5만`
+  (target=1000us). SMP 4코어에서 BSP+AP 3개 전부 비슷한 자릿수로
+  계산됨(예: 64226/62675/62596/62616 — 코어 간 편차 ~3% 이내, ADR-185
+  가 요구하는 "코어마다 비슷한 틱 수" 전제를 만족). PIT 폴백 경로는
+  QEMU가 기본으로 HPET을 제공해 이 라운드에서 실측 검증하지
+  못했다(정직하게 보고 — 코드 리뷰로만 확인됨, 아래 "남겨 둔 것"
+  참고).
+- **영향**: OPEN-62는 이 ADR로 해소된다(`base_time_slice_us`가 이제
+  진짜 마이크로초). `timer_source_interface`(ADR-191)는 여전히
+  M34 착수 시점에 만든다 — 이 ADR이 그 순서를 재확인한다.
+
 ## ADR-186. 완전한 signal 전달: `pending_signals` 비트마스크 + return-to-user 트램폴린 주입
 
 - **상태**: 확정 (2026-09-10, 계획 단계 — [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md)

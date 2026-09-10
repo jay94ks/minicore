@@ -3,6 +3,9 @@
 
 #include <cstdint>
 
+#include "hpet.hpp"
+#include "pit.hpp"
+
 #include <klog.hpp>
 #include <mm/phys_map.hpp>
 
@@ -22,9 +25,11 @@ constexpr uint32_t k_reg_icr_high = 0x310;
 // (Intel SDM Vol.3 §11.5.4, 표 11-2/11-11).
 constexpr uint32_t k_reg_lvt_timer = 0x320;
 constexpr uint32_t k_reg_timer_initial_count = 0x380;
+constexpr uint32_t k_reg_timer_current_count = 0x390;  // M33 — 보정 측정에만 쓴다.
 constexpr uint32_t k_reg_timer_divide_config = 0x3E0;
 
 constexpr uint32_t k_lvt_timer_mode_periodic = 1u << 17;  // 0=one-shot, 1=periodic.
+constexpr uint32_t k_lvt_masked = 1u << 16;  // M33 — 보정 중 실제 인터럽트가 걸리지 않게 막는다.
 // Divide Configuration Register 인코딩(표 11-11) — bit0,1,3이 실제
 // 값이고 bit2는 항상 0이다. 0b0011 = divide by 16.
 constexpr uint32_t k_timer_divide_by_16 = 0b0011;
@@ -142,6 +147,49 @@ void lapic_start_periodic_timer(uint8_t vector, uint32_t initial_count) {
     // §11.5.4) — LVT_Timer를 먼저 걸어 둬야 이 첫 카운트다운이 끝나는
     // 순간부터 곧바로 vector가 걸린다.
     reg(k_reg_timer_initial_count) = initial_count;
+}
+
+// M33(real-libc-syscall-layer.md §M33, ADR-184) — 보정 측정 창(고정
+// 10ms, ADR-184 §결정2 예시값 그대로).
+constexpr uint64_t k_calibration_window_us = 10'000;
+
+uint32_t calibrate_lapic_timer(uint32_t target_time_slice_us) {
+    // 측정 동안 실제 인터럽트가 걸리면 안 된다(마스크) — 이 시점은
+    // AP라면 아직 sti 이전(smp.cpp), BSP라면 idt/pic 설정 이후지만
+    // 스케줄러가 아직 돌기 전이라 어차피 안전하지만, 방어적으로도
+    // 마스크해 둔다. one-shot(주기 비트 없음)+최대 initial_count로
+    // 측정 창 동안 절대 0까지 내려가지 않게 한다.
+    reg(k_reg_timer_divide_config) = k_timer_divide_by_16;
+    reg(k_reg_lvt_timer) = k_lvt_masked;
+    constexpr uint32_t k_max_count = 0xFFFFFFFFu;
+    reg(k_reg_timer_initial_count) = k_max_count;
+
+    if (hpet_available()) {
+        hpet_wait_us(k_calibration_window_us);
+    } else {
+        // PIT 채널2는 16비트 카운터(k_pit_frequency_hz≈1.193182MHz) —
+        // 10ms는 11932틱으로 오버플로 없이 표현된다.
+        uint64_t ticks = (static_cast<uint64_t>(k_pit_frequency_hz) * k_calibration_window_us) /
+                          1'000'000ull;
+        pit_wait_ticks(static_cast<uint16_t>(ticks));
+    }
+
+    uint32_t current = reg(k_reg_timer_current_count);
+    uint32_t elapsed_ticks = k_max_count - current;  // 측정 창 동안 LAPIC 타이머가 실제로 감소한 양.
+
+    // 다시 마스크된 정지 상태로 되돌린다 — 실제 주기 타이머 시작은
+    // 호출자(lapic_start_periodic_timer())의 몫이다.
+    reg(k_reg_timer_initial_count) = 0;
+
+    uint64_t calibrated = (static_cast<uint64_t>(elapsed_ticks) * target_time_slice_us) /
+                           k_calibration_window_us;
+    kern::klog::printf(
+        "[lapic] calibrate source=%s elapsed_ticks=%lu window_us=%lu -> initial_count=%lu "
+        "(target=%luus)\n",
+        hpet_available() ? "hpet" : "pit", static_cast<unsigned long>(elapsed_ticks),
+        static_cast<unsigned long>(k_calibration_window_us), static_cast<unsigned long>(calibrated),
+        static_cast<unsigned long>(target_time_slice_us));
+    return static_cast<uint32_t>(calibrated);
 }
 
 }  // namespace kern::arch::x86_64

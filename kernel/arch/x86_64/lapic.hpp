@@ -51,6 +51,20 @@ void lapic_send_fixed_ipi(uint32_t target_apic_id, uint8_t vector);
 // 마일스톤 범위 밖(docs/design/open-items.md 참고).
 void lapic_start_periodic_timer(uint8_t vector, uint32_t initial_count);
 
+// M33(real-libc-syscall-layer.md §M33, ADR-184) — 이 코어의 LAPIC
+// 타이머(divide=16 고정, 기존 lapic_start_periodic_timer()와 같은
+// 전제)를 실측해, target_time_slice_us에 정확히 대응하는
+// initial_count를 계산해 반환한다. hpet_available()(hpet.hpp)이면
+// HPET을, 아니면 PIT(8254) 채널2 폴링(pit.hpp)을 기준시계로 삼는다.
+// 이 함수 자신은 LVT_Timer/Initial_Count 레지스터를 측정이 끝나면
+// 그대로 남겨 두지 않고 마스크(비활성)한 채로 되돌린다 — 실제로
+// 주기 타이머를 켜고 끄는 것은 호출자(lapic_start_periodic_timer())
+// 몫이다. 코어마다 1회 호출한다(BSP+각 AP, ADR-184 §결정1) — 이
+// 함수 자신은 멀티코어 상태를 공유하지 않는다(레지스터가 코어별로
+// 라우팅되는 LAPIC MMIO 특성 그대로, lapic_enable_this_core()와
+// 같은 정신).
+uint32_t calibrate_lapic_timer(uint32_t target_time_slice_us);
+
 }  // namespace kern::arch::x86_64
 
 // idt.cpp(interrupt_dispatch)가 부르는 EOI — extern "C"로 벡터 라우팅과

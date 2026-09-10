@@ -286,4 +286,14 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   자식이 exec 전에 죽는 진짜 버그를 발견해 고쳤다(ADR-207,
   `io_port_base`/`count`와 같은 자리에 한 줄 추가) — musl 프로그램이
   `fork()`한 것은 이번이 처음이라 지금까지 드러나지 않았던 간극이다.
-  다음은 M33(LAPIC 타이머 보정)이다.
+  **M33(완료)**(결과는
+  [docs/done/real-libc-syscall-layer-m33.md](docs/done/real-libc-syscall-layer-m33.md),
+  [ADR-208](docs/design/kernel-scheduler.md) 참고, OPEN-62 해소):
+  HPET(1순위)/PIT(폴백) 실측으로 LAPIC 타이머를 코어마다(BSP+각 AP)
+  보정하는 `calibrate_lapic_timer()`를 만들었다. 실행 중 발견:
+  `ticks_for()`(scheduler.cpp)가 계산된 initial_count와 무관하게
+  `base_time_slice_us`를 그대로 "틱 수"로 소비해 왔다는 것을
+  발견해, 진짜 나눗셈으로 고쳐야 OPEN-62가 완전히 해소됨을
+  확인했다. ADR-191이 예정한 `timer_source_interface` 추상화는
+  소비자가 BSP 하나뿐인 이 시점엔 조기 추상화라 판단해 M34(진짜
+  멀티코어 선점)로 미뤘다. 다음은 M34다.

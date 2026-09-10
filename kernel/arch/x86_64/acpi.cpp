@@ -323,7 +323,36 @@ bool parse_mcfg_body(uint64_t mcfg_phys, mcfg_result& out) {
     return false;
 }
 
+// M33(real-libc-syscall-layer.md §M33, ADR-184) — HPET(ACPI 6.5 §5.2.9)
+// 헤더: SDT(36) + event_timer_block_id(u32, offset 36) + base_address
+// (Generic Address Structure 12바이트, offset 40 — address_space_id(u8)/
+// register_bit_width(u8)/register_bit_offset(u8)/reserved(u8)/address(u64),
+// 실제 MMIO 물리주소는 이 GAS의 address 필드=offset 44) + hpet_number
+// (u8, offset 52) + minimum_tick(u16, offset 53) + page_protection(u8,
+// offset 55). 최소 56바이트.
+bool parse_hpet_body(uint64_t hpet_phys, hpet_result& out) {
+    sdt_view hpet = read_sdt(hpet_phys);
+    constexpr uint32_t k_min_length = 56;
+    if (hpet.length < k_min_length) {
+        return false;
+    }
+    out.base_phys = read_u64(hpet.base + 44);
+    out.ok = true;
+    return true;
+}
+
 }  // namespace
+
+bool find_and_parse_hpet(uint64_t arch_data_addr, hpet_result& out) {
+    out.base_phys = 0;
+    out.ok = false;
+
+    uint64_t hpet_phys = find_acpi_table(arch_data_addr, "HPET");
+    if (hpet_phys == 0) {
+        return false;
+    }
+    return parse_hpet_body(hpet_phys, out);
+}
 
 bool find_and_parse_mcfg(uint64_t arch_data_addr, mcfg_result& out) {
     out.ecam_base_phys = 0;

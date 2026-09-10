@@ -37,6 +37,7 @@ add_executable(minicore_kernel_x86_64
     context_switch.S
     elf_loader.cpp
     fpu.cpp
+    hpet.cpp
     idle.S
     idt.cpp
     irq.cpp
@@ -47,6 +48,7 @@ add_executable(minicore_kernel_x86_64
     page_fault.cpp
     page_table.cpp
     pci_bringup.cpp
+    pit.cpp
     process_ops.cpp
     smp.cpp
     syscall.cpp
