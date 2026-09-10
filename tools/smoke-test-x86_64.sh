@@ -291,6 +291,59 @@
 #     새 open이 그 슬롯(16개)을 부팅 한 번 안에 실제로 바닥냈다,
 #     즉시는 64로 늘려 막고 근본 수정(close 신설)은 범위 밖으로
 #     남김.
+#   M42 (user-service-manager.md §M42, kernel-ipc-objects.md ADR-216):
+#     svcmgr 자신의 endpoint 위에서 컨트롤 프로토콜(mc/svcmgr_protocol.h,
+#     list/status/start/stop/restart/register/unregister)을 실제로
+#     처리한다 — 별도 최소 클라이언트(userland/svcmgr-ctl-test)가
+#     M41이 부팅 시 띄운 svc-a를 대상으로 status→stop→status→
+#     start→status를 왕복하고("[svcmgr-ctl-test] status svc-a
+#     running=1" → "stop svc-a ok=1" → "status svc-a stopped=1" →
+#     "start svc-a ok=1" → "status svc-a running again=1"), op_register로
+#     새 유닛(svc-c)을 추가한 뒤("[svcmgr-ctl-test] register svc-c
+#     ok=1") svcmgr를 거치지 않고 cfgsrv에 직접 물어 실제로 등록됐는지
+#     확인한다("[svcmgr-ctl-test] cfgsrv sees svc-c ok=1"). op_stop/
+#     restart는 기존 sys_process_kill(ADR-178)을, op_register/
+#     unregister는 M41의 cfgsrv 클라이언트(set_value/delete_value)를
+#     그대로 재사용한다(ADR-196 §결정7 — 새 종료/저장 메커니즘을
+#     만들지 않는다). 실행 중 진짜 버그 2건 발견: (1) init/initrun/
+#     main.cpp의 이름→핸들 레지스트리(k_max_registered_services=16)가
+#     서비스 18개(svcmgr가 17번째)를 넘겨 svcmgr가 등록되지 못했고,
+#     그 결과 svcmgr-ctl-test의 --depends=svcmgr-ctl-test:svcmgr,cfgsrv
+#     에서 "svcmgr"만 조용히 빠진 채 "cfgsrv"가 handle 2로 밀려
+#     들어가(K_SVCMGR_HANDLE=2 관례가 실제로는 cfgsrv를 가리키게 됨)
+#     op_status(label=2)가 cfgsrv 자신의 op 2(create_table)로
+#     오해석돼 진짜 페이지폴트로 죽었다 — 32로 올려 해결(여유를 크게
+#     둔 이유: 이름→핸들 레지스트리는 부팅 시 스폰되는 서비스 전체가
+#     쓰는 것이라 앞으로도 계속 늘어날 여지가 있다). (2) 더 심각한
+#     것: op_start 처리 중(handle_start가 spawn_unit_and_wait_ready로
+#     자식의 준비완료를 기다리는 동안) svcmgr 스레드가 ctl-test의
+#     호출에 아직 회신하지 않은 채로 스스로 클라이언트가 되어 자식과
+#     또 한 번의 sys_call/sys_recv+sys_reply 왕복을 했다 — 커널의
+#     `thread::ipc.reply_target`이 스레드당 슬롯 하나뿐이라 이 안쪽
+#     왕복이 바깥쪽(ctl-test) 호출의 회신 대상을 덮어썼고, 안쪽
+#     sys_reply가 그 슬롯을 그대로 비워 버려 바깥쪽 sys_reply가
+#     "대응하는 sys_recv가 없다"(ipc.md §3의 무동작 규칙)로 조용히
+#     아무 일도 하지 않는 진짜 교착을 만들었다 — ctl-test는 영원히
+#     블록된 채, svcmgr는 다음 sys_recv에서 새 메시지를 기다리며
+#     겉으로는 "멈춘 적 없는" 것처럼 보였다(디버그 로그로 안쪽
+#     왕복 자체는 매번 정상 완료됨을 먼저 확인해야 했다). M27~M41은
+#     spawn_unit_and_wait_ready를 항상 메인 루프 시작 전(부팅
+#     시퀀스)에서만 불러 이 경합이 한 번도 드러나지 않았다 — M42가
+#     그 함수를 살아있는 컨트롤 호출 처리 도중 처음으로 재진입
+#     호출한 첫 소비자다. 커널에 재진입 보존 스택을 추가해 해결
+#     (ADR-216, kernel/core/ipc/endpoint.cpp push_reply_target/
+#     pop_reply_target — 덮어쓰기 직전 값을 스택에 밀어 두고 안쪽
+#     sys_reply가 끝날 때 되돌린다). 이 수정 후 op_start는 통과했지만
+#     곧이어 op_register에서 두 번째 버그가 드러났다: handle_register가
+#     `in.pages[0].vaddr`(수신 메시지의 IPC 매핑 슬롯)를 가리키는
+#     원시 포인터를 nested mc_reg_set_binary 호출 뒤까지 들고 있다가
+#     `alloc_runtime(unit->name)`에서 다시 읽었는데, 그 nested 호출이
+#     cfgsrv의 응답을 받는 순간 이 스레드가 다시 deliver_message의
+#     목적지가 돼(ADR-159/161의 release_previous_ipc_mapping) 그
+#     매핑이 이미 해제된 뒤였다 — 진짜 페이지폴트로 죽었다.
+#     mc/cfgsrv_client.c가 이미 쓰고 있던 관례(nested 호출 전에 값을
+#     자기 정적 버퍼로 복사)를 그대로 따라 수신 즉시 구조체 전체를
+#     로컬로 복사하도록 고쳤다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -539,6 +592,13 @@ declare -a EXPECTED=(
   "[svcmgr] unit start name=svc-a"
   "[svcmgr] unit start name=svc-b"
   "[svcmgr] delete_value svc-b ok=1"
+  "[svcmgr-ctl-test] status svc-a running=1"
+  "[svcmgr-ctl-test] stop svc-a ok=1"
+  "[svcmgr-ctl-test] status svc-a stopped=1"
+  "[svcmgr-ctl-test] start svc-a ok=1"
+  "[svcmgr-ctl-test] status svc-a running again=1"
+  "[svcmgr-ctl-test] register svc-c ok=1"
+  "[svcmgr-ctl-test] cfgsrv sees svc-c ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

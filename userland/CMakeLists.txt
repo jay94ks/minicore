@@ -14,3 +14,7 @@ add_subdirectory(musl-exec-target)
 
 # user-service-manager.md §M40 — svcmgr가 스폰할 하드코딩된 데모 유닛.
 add_subdirectory(svcmgr-demo-unit)
+
+# user-service-manager.md §M42 — svcmgr 컨트롤 프로토콜 검증용
+# 최소 테스트 프로그램.
+add_subdirectory(svcmgr-ctl-test)

@@ -245,7 +245,18 @@ constexpr uint8_t k_service_argv_marker[] = {'x'};
 // 않아(vfs/procsrv가 딱 8번째를 넘긴 자리라 실제로 겪은 버그,
 // 2026-09-09) 그걸 가리키는 `depends=`가 전부 조용히 핸들 0(없음)
 // 으로 실패한다 — 여유를 넉넉히 둔다.
-constexpr uint32_t k_max_registered_services = 16;
+// user-service-manager.md §M42 실행 중 다시 겪음(2026-09-10) — 16으로
+// 올린 뒤로도 서비스가 계속 늘어(svcmgr이 17번째, svcmgr-ctl-test가
+// 18번째) svcmgr 자신이 이 배열에 등록되지 못했다. svcmgr-ctl-test가
+// --depends=svcmgr-ctl-test:svcmgr,cfgsrv로 "svcmgr"을 이름으로
+// 찾으려 했지만 못 찾아 그 핸들 슬롯이 조용히 빠지고, 그 뒤에 오는
+// "cfgsrv"만 남은 유일한 inherited_handle이 돼 handle 2 자리로
+// 밀려 올라왔다 — svcmgr-ctl-test는 자기가 svcmgr에게 말 거는 줄
+// 알고 실제로는 cfgsrv에게 완전히 엉뚱한 label로 IPC를 걸어(label=2
+// 가 cfgsrv에서는 create_table 오퍼레이션이라 "svc-a"를 테이블
+// 경로로 오인) 결국 usermode page fault로 죽었다. 같은 부류의
+// 버그가 서비스 수가 늘 때마다 반복되므로, 이번엔 32로 두 배 올린다.
+constexpr uint32_t k_max_registered_services = 32;
 
 struct service_registry_entry {
     char name[32] = {};

@@ -30,7 +30,7 @@
 |---|---|---|---|
 | `sys_call` | `handle`, `const message* msg_in`, `message* msg_out` | `result<void, ipc_error>` | 송신 + 응답 대기(블록) |
 | `sys_recv` | `handle`, `message* msg_out` | `result<badge, ipc_error>` | 호출 수신 대기(블록) |
-| `sys_reply` | `const message* msg_in` | `result<void, ipc_error>` | 가장 최근 `sys_recv`로 받은 호출에 응답(M13, ADR-151 — `handles[]` 위임까지 지원하도록 확장, §3.1 참고) |
+| `sys_reply` | `const message* msg_in` | `result<void, ipc_error>` | 가장 최근 `sys_recv`로 받은 호출에 응답(M13, ADR-151 — `handles[]` 위임까지 지원하도록 확장, §3.1 참고; M42, ADR-216 — "가장 최근"이 재진입 스택으로 관리되도록 확장, §3.2 참고) |
 | `sys_notify` | `handle`, `u64 bits` | `void` | 대상 비트셋에 OR, 실패 없음 |
 | `sys_wait` | `handle` | `u64` | 비트셋이 0이 아니면 즉시 반환 후 원자적 clear, 0이면 블록 |
 
@@ -70,6 +70,21 @@ handle_count)를 상대 스레드의 `reply_dest`/`recv_dest` 포인터에 그�
 `sys_reply`는 이제 호출자 자신의 `handle_table`도 받고(핸들 위임의
 소스 테이블), `result<void, ipc_error>`를 반환한다(전달 실패 시에도
 블록하지 않고 caller를 깨우는 동작은 그대로다).
+
+### 3.2. M42 갱신 — 재진입(nested) IPC 왕복 지원 (ADR-216)
+
+서버 스레드가 아직 자신이 받은 호출에 회신하지 않은 채로 스스로
+클라이언트가 되어 또 다른 `sys_call`/`sys_recv`+`sys_reply` 왕복을
+할 수 있다(예: 한 호출을 처리하는 도중 다른 프로세스에게 요청을
+보내고 그 응답을 직접 받는 경우) — "가장 최근 `sys_recv`로 받은
+호출"이라는 §3의 규칙은 여전히 그대로지만, "가장 최근"이 단일
+슬롯이 아니라 스레드당 재진입 스택(깊이 4)으로 관리된다. 안쪽
+왕복이 그 스레드의 회신 대상을 밀어두고 새 값으로 바꾸며,
+안쪽 `sys_reply`가 회신을 마치면 이전 값(바깥쪽 호출)을 되돌린다
+— 그래서 재진입 왕복이 끝난 뒤 바깥쪽 `sys_reply`는 여전히 올바른
+대상에게 응답한다. 스택 상한(4)을 넘는 재귀는 가장 오래된 값을
+버린다(그 호출은 다시는 회신받지 못한다 — 설계상 상정하지 않은
+깊이).
 
 ## 4. message 구조
 

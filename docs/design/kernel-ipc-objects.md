@@ -434,3 +434,87 @@
   v2의 `OP_READ` 응답이 procsrv→memfs(M13 회귀 확인)/vfs→fat32/
   vfs→ext4 세 조합 모두에서 정확한 내용을 전달함을 확인했다(M16
   검증 결과, docs/done/system-servers-bringup-m16.md 참고).
+
+## ADR-216. `thread::ipc.reply_target`을 스택으로 확장 — 서버 스레드의 재진입(nested) IPC 왕복 지원
+
+- **상태**: 확정 (2026-09-10), user-service-manager.md §M42 구현 중
+  발견한 진짜 교착을 고치며 반영.
+- **문제**: `sys_reply`는 §3이 정한 대로 "가장 최근 `sys_recv`로 받은
+  호출에 응답"하며, 이 대상은 스레드당 필드 하나(`ipc.reply_target`)
+  뿐이다. 지금까지(M6~M41)는 어느 서버 스레드도 "아직 회신하지 않은
+  호출을 들고 있는 채로 스스로 클라이언트가 되어 또 다른 `sys_call`/
+  `sys_recv`+`sys_reply` 왕복을 하는" 경우가 없어 이 단일 슬롯으로
+  충분했다. M42의 `servers/svcmgr`가 처음으로 이 패턴을 요구했다 —
+  컨트롤 클라이언트(svcmgr-ctl-test)의 `op_start` 호출을 처리하는
+  `handle_start`가, 아직 그 호출에 회신하지 않은 채로
+  `spawn_unit_and_wait_ready()`(자식 프로세스를 spawn하고 ADR-193의
+  준비완료 신호를 그 자식의 전용 endpoint에서 `sys_recv`+`sys_reply`
+  로 직접 받는다)를 불렀다. 이 안쪽 `sys_recv`가 같은 스레드의
+  `ipc.reply_target`을 (바깥쪽 호출자인 ctl-test에서) 자식 스레드로
+  덮어썼고, 안쪽 `sys_reply`가 그 슬롯을 `nullptr`로 비웠다 — 바깥쪽
+  루프가 나중에 `sys_reply`를 불렀을 때는 "대응하는 sys_recv가
+  없다"(§3의 무동작 규칙)에 걸려 조용히 아무 일도 하지 않았다.
+  ctl-test는 응답을 영원히 받지 못해 블록된 채 남았고, svcmgr는
+  다음 `sys_recv`에서 새 메시지를 기다리며 겉보기엔 멈춘 적이 없는
+  것처럼 보였다 — 진짜 교착이었다. 실행 중 임시 디버그 로그로
+  안쪽 spawn+wait_ready 왕복 자체는 매번 정상 완료됨을 먼저 확인한
+  뒤에야, 문제가 그 왕복이 끝난 **뒤** 바깥쪽 회신이 사라지는
+  지점에 있음을 좁혀 찾았다.
+- **결정**:
+  1. `ipc_state`에 스레드당 `reply_target` 하나 대신, 그 값을
+     덮어쓰기 직전 상태로 보존하는 고정 크기 스택
+     (`reply_target_saved[4]`+`reply_target_saved_count`)을 추가한다.
+     `kernel/core/ipc/endpoint.cpp`의 `push_reply_target(t, new_target)`
+     이 `t.ipc.reply_target`이 이미 `nullptr`이 아니면 그 값을
+     스택에 밀어 넣은 뒤 새 값으로 덮어쓴다 — `sys_call`(§5 1단계,
+     이미 대기 중인 서버에게 즉시 핸드오프)과 `sys_recv`(이미 대기
+     중인 호출자와 즉시 페어링)의 두 "회신 대상 확정" 지점 모두
+     이 헬퍼를 거친다. `pop_reply_target(t)`는 `sys_reply`가 회신을
+     전달한 뒤 `nullptr`로 지우는 대신 불러 스택이 비어 있지 않으면
+     그 이전 값을 되돌린다.
+  2. 깊이 상한은 4로 둔다 — 기존 `MC_MAX_SPAWN_INHERITED_HANDLES`류
+     상수들과 같은 임의의 작은 여유(YAGNI, 지금 실제로 필요한 깊이는
+     1뿐이다: 바깥쪽 클라이언트 호출 + 안쪽 자식-준비완료 왕복).
+     초과분은(설계상 상정하지 않은 깊이의 재귀) 가장 오래된 값을
+     버린다 — 그 호출은 다시는 회신받지 못하지만, 패닉으로 커널
+     전체를 멈추기보다는 낫다고 판단했다.
+  3. `docs/spec/ipc.md` §3의 "가장 최근 `sys_recv`로 받은 호출에
+     응답"이라는 문구는 여전히 맞다 — 이 ADR은 그 규칙을 어기지
+     않는다(`sys_reply`는 지금도 정확히 "가장 최근" 대상에게
+     회신한다). 다만 "가장 최근"이 이제 **재진입 스택**으로
+     관리된다는 점, 그리고 서버 스레드가 아직 회신하지 않은 호출을
+     들고 재진입 왕복을 해도 바깥쪽 호출의 회신 대상이 더 이상
+     사라지지 않는다는 점을 스펙에 명시했다.
+- **관련해서 발견한 별개 버그(새 ADR 불필요, 기존 ADR-161 규칙
+  위반)**: 위 수정 후 `op_start`는 통과했지만 `op_register`에서
+  진짜 페이지폴트가 새로 드러났다. `servers/svcmgr::handle_register`
+  가 수신 메시지의 IPC 매핑 슬롯(`in.pages[0].vaddr`)을 가리키는
+  원시 포인터(`unit`)를 nested `mc_reg_set_binary()` 호출(cfgsrv에게
+  `sys_call`로 등록을 요청) **뒤까지** 들고 있다가
+  `alloc_runtime(unit->name)`에서 다시 읽었다 — 그 nested 호출이
+  cfgsrv의 응답을 받는 순간 이 스레드가 다시 `deliver_message`의
+  목적지가 되어(ADR-161의 `release_previous_ipc_mapping`) 그 매핑이
+  이미 해제된 뒤였다. 이건 커널 설계의 간극이 아니라 ADR-161이
+  이미 명시한 "이 스레드가 다시 배달 목적지가 되는 시점"이라는
+  규칙을 svcmgr 쪽 코드가 어긴 것이다 — `mc/cfgsrv_client.c`가
+  `mc_reg_set_binary`/`mc_reg_open_or_create` 등에서 이미 지키고
+  있는 관례(nested 호출 전에 값을 자기 정적 버퍼로 복사)를 그대로
+  따라, 수신 즉시 `mc_svcmgr_service_unit` 구조체 전체를 로컬
+  변수로 복사하도록 고쳤다.
+- **근거**: M27~M41의 `spawn_unit_and_wait_ready`류 준비완료 대기는
+  전부 서버의 메인 IPC 루프가 시작되기 **전**(부팅 시퀀스)에서만
+  불렸다 — 그 시점엔 애초에 회신할 바깥쪽 호출이 없어 이 경합이
+  드러날 수 없었다. M42가 그 함수를 살아있는 컨트롤 호출 처리
+  도중 처음으로 재진입 호출한 첫 소비자였고, 이 프로젝트가 반복해
+  겪은 "X가 Y의 첫 실제 소비자가 나타나기 전까지는 멀쩡했다" 패턴의
+  가장 최근 사례다.
+- **영향**: `kernel/core/object/kernel_objects.hpp::ipc_state`에
+  `k_max_reply_nesting`(=4)/`reply_target_saved[4]`/
+  `reply_target_saved_count` 추가. `kernel/core/ipc/endpoint.cpp`에
+  `push_reply_target`/`pop_reply_target` 신설, `sys_call`/`sys_recv`의
+  두 `reply_target =` 대입을 `push_reply_target`으로, `sys_reply`의
+  `reply_target = nullptr`를 `reply_target = pop_reply_target(*self)`
+  로 교체. `servers/svcmgr/main.cpp::handle_register`가 수신 페이지를
+  즉시 로컬 복사. 실측(QEMU): `svcmgr-ctl-test`의 status→stop→
+  status→start→status→register→cfgsrv 직접 확인 7단계 전부 통과
+  (docs/done/user-service-manager-m42.md 참고).

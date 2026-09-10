@@ -482,6 +482,37 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   memfs의 열린 파일 슬롯을 영구히 소비한다는 것도 발견 — cfgsrv의
   매 저장마다의 새 open이 그 슬롯(16개)을 부팅 한 번 안에 실제로
   바닥내 무관한 shell의 cat 자기테스트까지 실패시켰다, 즉시는
-  64로 늘려 막고 근본 수정(close 신설)은 OPEN-70으로 남김. 다음은
-  M42(svcmgr 컨트롤 프로토콜 — start/stop/restart/status/register)
-  이다.
+  64로 늘려 막고 근본 수정(close 신설)은 OPEN-70으로 남김.
+  **M42(완료)**(결과는
+  [docs/done/user-service-manager-m42.md](docs/done/user-service-manager-m42.md),
+  [ADR-216](docs/design/kernel-ipc-objects.md) 참고): svcmgr가
+  자기 endpoint 위에서 컨트롤 프로토콜(`mc/svcmgr_protocol.h`,
+  list/status/start/stop/restart/register/unregister)을 실제로
+  처리한다 — 와이어 마크업 먼저(ADR-195, M27에 이은 두 번째 적용)
+  달고 `tools/gen-wire-docs.py`로 [docs/spec/generated/svcmgr-wire.md](docs/spec/generated/svcmgr-wire.md)
+  를 뽑았다. 별도 최소 검증 클라이언트(`userland/svcmgr-ctl-test`,
+  계획이 "착수 시점에 확정"이라 남긴 자리)가 M41이 부팅 시 띄운
+  svc-a를 stop→start로 왕복시키고 register로 svc-c를 추가한 뒤
+  cfgsrv에 직접 물어 등록을 확인한다. op_stop/restart는 기존
+  `sys_process_kill`(ADR-178), op_register/unregister는 M41의
+  cfgsrv 클라이언트를 그대로 재사용한다(ADR-196 §결정7). 실행 중
+  발견한 진짜 버그 3건: (1) initrun의 이름→핸들 레지스트리 크기
+  (16)를 서비스 18개가 넘겨 svcmgr가 등록되지 못했고, ctl-test의
+  고정 핸들 관례가 조용히 다른 서버(cfgsrv)를 가리켜 진짜
+  페이지폴트로 죽음 — 32로 상향, (2) **가장 심각한 발견**:
+  `thread::ipc.reply_target`이 스레드당 슬롯 하나뿐이라, op_start가
+  아직 ctl-test의 호출에 회신하지 않은 채로 자식 프로세스의
+  준비완료를 기다리는 재진입 `sys_recv`+`sys_reply` 왕복을 하면
+  그 슬롯이 덮어써지고, 안쪽 회신이 그 슬롯을 비워 바깥쪽 회신이
+  "대응하는 recv 없음"(ipc.md §3의 무동작 규칙)으로 조용히 사라지는
+  진짜 교착이 났다 — M27~M41은 이 준비완료 대기 패턴을 항상 부팅
+  시퀀스(메인 IPC 루프 시작 **전**)에서만 써서 한 번도 드러나지
+  않았던 것이었다. 커널에 재진입 보존 스택을 추가해 해결했다
+  (ADR-216 — `push_reply_target`/`pop_reply_target`, 스펙도
+  `docs/spec/ipc.md` §3.2로 갱신), (3) 그 수정 후 op_register에서
+  새 페이지폴트 — `handle_register`가 nested cfgsrv 호출 뒤까지
+  들고 있던 IPC 수신 매핑 포인터가 이미 해제된 뒤였음(기존
+  ADR-161 규칙을 svcmgr 코드가 어긴 것) — 수신 즉시 구조체 전체를
+  로컬로 복사하도록 수정. user-service-manager.md는 이제
+  M40~M42(완료)+M43(계정별 유저 서비스 인스턴스, 계획 자신이
+  스트레치로 표시)만 남았다.

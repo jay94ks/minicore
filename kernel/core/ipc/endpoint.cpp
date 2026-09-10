@@ -260,6 +260,28 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, kern::object::addres
     return result<void, ipc_error>::ok();
 }
 
+// M42(user-service-manager.md, ADR-216) — reply_target 재진입 보존/복원.
+// t.ipc.reply_target에 이미 값이 있는데(자신이 아직 회신하지 않은 바깥쪽
+// 호출) 새 값을 덮어써야 하는 경우(스스로 서버가 되어 안쪽 sys_call/
+// sys_recv 왕복을 하는 경우) 이전 값을 스택에 밀어 두고, sys_reply가
+// 안쪽 왕복을 마칠 때 되돌린다. 스택이 가득 차면(설계상 상정하지 않은
+// 깊이의 재귀) 가장 바깥쪽 값을 버린다 — 그 호출은 다시는 회신받지
+// 못하지만 패닉보다는 낫다.
+void push_reply_target(kern::object::thread& t, kern::object::thread* new_target) {
+    if (t.ipc.reply_target != nullptr &&
+        t.ipc.reply_target_saved_count < kern::object::ipc_state::k_max_reply_nesting) {
+        t.ipc.reply_target_saved[t.ipc.reply_target_saved_count++] = t.ipc.reply_target;
+    }
+    t.ipc.reply_target = new_target;
+}
+
+kern::object::thread* pop_reply_target(kern::object::thread& t) {
+    if (t.ipc.reply_target_saved_count > 0) {
+        return t.ipc.reply_target_saved[--t.ipc.reply_target_saved_count];
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 result<void, ipc_error> sys_call(kern::object::handle_table& table, kern::object::handle h,
@@ -302,7 +324,7 @@ result<void, ipc_error> sys_call(kern::object::handle_table& table, kern::object
 
         // 도네이션(ipc.md §5 1단계, ADR-028).
         server->ipc.recv_badge = badge;
-        server->ipc.reply_target = caller;
+        push_reply_target(*server, caller);
         server->ipc.saved_boost_level = server->sched.boost_level;
         server->sched.boost_level = caller->sched.boost_level;
         kern::sched::enqueue(*server);
@@ -350,7 +372,7 @@ result<uint64_t, ipc_error> sys_recv(kern::object::handle_table& table, kern::ob
 
         // 도네이션 적용. 이 스레드(서버)는 블록하지 않고 바로 반환한다.
         uint64_t badge = caller->ipc.pending_call_badge;
-        self->ipc.reply_target = caller;
+        push_reply_target(*self, caller);
         self->ipc.saved_boost_level = self->sched.boost_level;
         self->sched.boost_level = caller->sched.boost_level;
         return result<uint64_t, ipc_error>::ok(badge);
@@ -370,7 +392,9 @@ result<void, ipc_error> sys_reply(kern::object::handle_table& table, const messa
         // 동작도 하지 않는다.
         return result<void, ipc_error>::ok();
     }
-    self->ipc.reply_target = nullptr;
+    // M42(ADR-216) — 단순히 nullptr로 지우지 않고, 이 왕복이 다른 왕복을
+    // 덮어쓴 것이었다면(push_reply_target) 그 이전 값을 되돌린다.
+    self->ipc.reply_target = pop_reply_target(*self);
 
     // M13(ADR-151) — 이제 handles[]까지 옮긴다(ADR-018이 요구하는
     // "VFS가 open() 응답에서 FS 서버 핸들을 위임"이 이 방향이라야

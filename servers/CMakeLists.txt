@@ -70,6 +70,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --service=login=$<TARGET_FILE:minicore_login_elf>
               --service=musl-hello=$<TARGET_FILE:minicore_musl_hello_elf>
               --service=svcmgr=$<TARGET_FILE:minicore_svcmgr_elf>
+              --service=svcmgr-ctl-test=$<TARGET_FILE:minicore_svcmgr_ctl_test_elf>
               # user-service-manager.md §M40, ADR-192 §결정2 — svcmgr가
               # "모든 커널 서버 기동 후 마지막으로" 스폰되는 보장은
               # --service= 목록에서 이게 **가장 마지막 줄**이라는
@@ -108,6 +109,11 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=login:console,ps2,procsrv
               --depends=musl-hello:vfs,procsrv
               --depends=svcmgr:procsrv,cfgsrv
+              # M42(user-service-manager.md §M42) — "새 컨트롤
+              # 클라이언트"(계획 문서가 착수 시점에 확정하라고 남긴
+              # 것)를 별도 최소 테스트 프로그램으로 구현했다 — svcmgr
+              # 뒤에 스폰되고 svcmgr/cfgsrv 둘 다에 핸들이 필요하다.
+              --depends=svcmgr-ctl-test:svcmgr,cfgsrv
               --linux-abi-stack=musl-hello
               --trusted=devmgr
               --trusted=ps2
@@ -126,8 +132,9 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               minicore_drv_console_elf minicore_login_elf
               minicore_musl_hello_elf
               minicore_svcmgr_elf
+              minicore_svcmgr_ctl_test_elf
               ${CMAKE_SOURCE_DIR}/tools/mkbootdisk.py
-      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello+svcmgr"
+      COMMENT "Packaging bootdisk.img (cpio newc) from memfs+devmgr+ps2+console+usb+virtio-blk+virtio-net+fat32+ext4+vfs+cfgsrv+netsrv+shell+procsrv+login+musl-hello+svcmgr+svcmgr-ctl-test"
       VERBATIM
   )
   add_custom_target(minicore_bootdisk_image DEPENDS ${MINICORE_BOOTDISK_IMAGE})

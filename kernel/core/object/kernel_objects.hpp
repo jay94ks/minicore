@@ -54,12 +54,24 @@ struct thread;  // ipc_state가 포인터로만 참조 — 아래 thread 정의�
 // 하는 상태. sys_reply가 handle을 받지 않고 "가장 최근 sys_recv로 받은
 // 호출"에 답하는 스펙 규칙(ipc.md §3) 자체가 이 상태를 요구한다.
 struct ipc_state {
+    // M42(user-service-manager.md, ADR-216) — 서버 스레드가 아직 자신의
+    // 호출(reply_target != nullptr)에 회신하지 않은 채로 스스로 클라이언트가
+    // 되어 또 다른 sys_call/sys_recv+sys_reply 왕복을 하는 경우(예: svcmgr가
+    // 컨트롤 호출 하나를 처리하는 도중 자식 프로세스의 준비완료 신호를
+    // 기다리는 것) reply_target 슬롯이 하나뿐이면 안쪽 왕복이 바깥쪽 호출의
+    // 회신 대상을 덮어써 영영 잃어버린다 — 이 스택이 덮어쓰기 직전 값을
+    // 보존해 안쪽 sys_reply가 끝날 때 되돌린다(kernel/core/ipc/endpoint.cpp
+    // push_reply_target/pop_reply_target).
+    static constexpr uint32_t k_max_reply_nesting = 4;
+
     const kern::ipc::message* pending_call_msg = nullptr;  // sys_call이 서버 대기 중 blocked일 때: 보낼 메시지
     uint64_t pending_call_badge = 0;                 // 위와 짝 — 이 호출에 쓰인 handle의 badge
     kern::ipc::message* recv_dest = nullptr;               // sys_recv가 caller 대기 중 blocked일 때: 받을 목적지
     uint64_t recv_badge = 0;                          // 위와 짝 — sys_recv가 반환할 badge
     kern::ipc::message* reply_dest = nullptr;               // sys_call 완료 대기 중: 응답을 받을 목적지
     thread* reply_target = nullptr;                    // sys_recv로 받은 뒤: sys_reply가 깨울 대상
+    thread* reply_target_saved[k_max_reply_nesting] = {};  // 위 재진입 보존 스택
+    uint32_t reply_target_saved_count = 0;
     uint32_t saved_boost_level = 0;                     // 도네이션 복원용(ADR-028)
 };
 
