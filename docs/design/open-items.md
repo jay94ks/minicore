@@ -4,7 +4,7 @@
 
 모든 카테고리 파일에 흩어진 미결정 항목을 한 곳에 모은 문서. 새
 미결정 항목은 다음 번호(가장 최근 OPEN 번호(이 문서에서 확인) + 1,
-2026-09-10 기준 `OPEN-69`부터)로 여기에 추가하고, 해당 결정을
+2026-09-10 기준 `OPEN-70`부터)로 여기에 추가하고, 해당 결정을
 다루는 카테고리 파일에도 같은 번호로 언급한다. 해결되면
 `~~OPEN-N~~`으로 취소선 처리하고 해결한 ADR 번호를 적는다.
 
@@ -19,6 +19,7 @@
 | OPEN-66 | ADR-182(M26)는 musl의 문자열 함수 부분집합만 실제로 포팅했다 — 진짜 syscall 계층(open/read/write/mmap/fork/exec을 musl 자신의 경로로 감싸는 새 레이어), 동적 링커, pthread, locale, stdio(FILE/printf 계열) 포팅은 전혀 없다. 실제 포팅된 셸/coreutils로 M20의 완료 기준을 다시 달성하는 것은 이 OPEN이 해소된 뒤의 일이다 — **ADR-183~195 + [real-libc-syscall-layer.md](../plan/real-libc-syscall-layer.md) M27~M39가 착수 예정**(M28·M30~M32 syscall 계층, M29 동적 링킹, M35 locale, M36 signal, M37 pthread, M38 SDK 내보내기). 각 항목의 범위가 의도적으로 좁아(musl 자신의 공유 libc.so 하나만, 표준 시그널만, futex 기초 연산만 등) 완료돼도 OPEN-66은 완전히는 해소되지 않는다 — 완료 시점에 남는 세부(다중 `.so` 일반화, 실시간 시그널, job control 등)를 새 OPEN 번호로 분리한다 | ADR-182~195 | [foundations.md](foundations.md) |
 | OPEN-67 | ADR-201(M27)이 procsrv의 실제 process_entry 테이블+범용 proc_op::wait/kill을 만들면서 의도적으로 남긴 두 가지 — (1) 호출자가 자신의 pid를 메시지 필드로 스스로 주장한다(커널 badge로 검증하지 않는다, 위조 가능), (2) wait는 진짜 블로킹이 아니라 비블로킹 폴링이다(procsrv가 단일 요청-응답 루프라 Call을 붙들고 대기할 수 없다). 각각 badge에 pid를 인코딩하는 커널 캐패빌리티 확장과 procsrv의 동시성/비동기 응답 모델이 필요하다 — musl `SYS_wait4`(M32) 착수 시점에 재검토했으나(ADR-206), self_register/fork_register로 pid 자기주장 모델을 procsrv 직접 스폰 프로세스 너머로 확장하기만 했을 뿐 badge 검증/진짜 블로킹은 여전히 다루지 않았다 — user-service-manager.md 착수 시점에 다시 재검토 대상 | ADR-201, ADR-206 | [security-model.md](security-model.md) |
 | OPEN-68 | ADR-136(M11)이 이미 지적해 둔 대로 `object::handle_table`은 자체 락이 없다 — M1~M33까지는 이 함수들을 부르는 코드가 논리적으로 1코어에서만 실행돼 안전했다. M34(ADR-209)로 AP가 진짜 유저 스레드를 실행하게 됐지만, 이번 라운드가 실제로 exercise한 시나리오(busy/counter, IPC 없음)는 이 경로를 건드리지 않아 여전히 미검증이다 — 한 코어의 `sys_call`이 다른 코어에서 지금 막 실행 중인 프로세스의 handle_table에 `create_proxy`로 쓰는 것처럼 진짜 다중 코어 IPC 동시 접근이 생기는 시점(M37 pthread 또는 그 이전 실사용)에 재검토 대상 | ADR-136, ADR-209 | [kernel-memory.md](kernel-memory.md) |
+| OPEN-70 | fs-protocol(v3/v4)에 `open_file_id`를 반환하는 close/release 오퍼레이션이 애초에 없다 — VFS를 거쳐 open()한 모든 소비자(procsrv/cfgsrv/shell/musl의 fopen 등)가 open할 때마다 memfs/fat32/ext4 각 서버의 open 테이블 슬롯을 영구히 하나씩 소비하고 절대 반환하지 않는다. cfgsrv가 상태가 바뀔 때마다 전체를 다시 저장하는 persist_save()에서 매번 새로 open해 이 누수가 특히 빠르게 쌓인다는 것을 user-service-manager.md M41 실행 중 실제로 겪었다(memfs `k_max_open_files`가 부팅 한 번 안에 바닥나 cfgsrv 자신의 저장뿐 아니라 무관한 shell의 cat 자기테스트까지 실패했다) — 즉시는 `k_max_open_files`를 16→64로 늘려 막았을 뿐, 근본 수정(close 오퍼레이션 신설+모든 클라이언트가 다 쓴 뒤 실제로 부르게 하기)은 하지 않았다 | - | [fs-protocol.md](../spec/fs-protocol.md), [registry-decisions.md](registry-decisions.md) |
 | OPEN-65 (재오픈) | 아래 "해결된 항목"에 ADR-186으로 해소 표시가 있었으나, 그건 M36 착수 **전** 계획 단계의 결정(§결정6, `SIGKILL`을 대기열에서 즉시 `unlink`)이었을 뿐 실제로 구현되지 않았다 — M36 실행(ADR-211)은 syscall 리턴 시점의 일반 시그널 전달(`pending_signals`+핸들러 등록/`sigreturn`)만 실제로 만들고, §결정3(IRETQ 리턴 경로)·§결정5(`SIGCHLD` 자동 전달)·§결정6(SIGKILL 즉시 unlink)은 전부 범위 밖으로 남겼다(ADR-186이 이미 예정해 둔 "각 항목의 범위가 의도적으로 좁다"는 패턴과 같은 정신). `sys_process_kill`(ADR-178)의 기존 한계 — 대상이 대기열에 갇혀 있으면 다시 깨우지 않는 한 폐기되지 않음 — 는 여전히 그대로다. 진짜 unlink 메커니즘이 실제로 구현되는 시점까지 다시 열어 둔다 | ADR-178, ADR-186, ADR-211 | [kernel-scheduler.md](kernel-scheduler.md) |
 
 ## 해결된 항목 (이력)

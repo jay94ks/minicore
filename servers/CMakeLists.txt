@@ -90,7 +90,11 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               # 핸들조차 못 받음) svcmgr의 self_register가 엉뚱한
               # (존재하지 않는) 핸들로 IPC를 걸어 즉시 실패했다 — 실제
               # 필요한 건 순서 보장(이미 위 --service= 위치로 충족)이
-              # 아니라 핸들 하나(procsrv)뿐이었다.
+              # 아니라 필요한 핸들뿐이었다. M41(user-service-manager.md
+              # §M41)이 cfgsrv도 실제로 쓰게 돼(@global/system/services
+              # 테이블) procsrv,cfgsrv 둘로 늘렸다 — 여전히
+              # MC_MAX_SPAWN_INHERITED_HANDLES(=4)와 96바이트 파싱
+              # 버퍼 둘 다 안전하게 여유가 있다.
               --depends=vfs:memfs,fat32,ext4
               --depends=cfgsrv:vfs
               --depends=netsrv:virtio-net
@@ -103,7 +107,7 @@ if(MINICORE_ARCH STREQUAL "x86_64")
               --depends=ext4:devmgr
               --depends=login:console,ps2,procsrv
               --depends=musl-hello:vfs,procsrv
-              --depends=svcmgr:procsrv
+              --depends=svcmgr:procsrv,cfgsrv
               --linux-abi-stack=musl-hello
               --trusted=devmgr
               --trusted=ps2

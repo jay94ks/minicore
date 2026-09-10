@@ -38,7 +38,18 @@ constexpr uint32_t k_max_files = 8;
 // 왕복이 실패하지 않을 만큼 여유를 둔 것뿐, 정확한 크기 계산에
 // 기반한 값은 아니다.
 constexpr uint32_t k_max_file_bytes = 262144;
-constexpr uint32_t k_max_open_files = 16;
+// M41(user-service-manager.md §M41) 실행 중 발견 — fs-protocol에
+// close(open_file_id 반환)가 애초에 없어(OPEN-70 신규 등록,
+// docs/design/open-items.md) 모든 소비자가 open()할 때마다 이
+// 슬롯을 영구히 하나씩 쓴다. cfgsrv가 persist_save()(테이블/값이
+// 바뀔 때마다 전체 상태를 다시 쓴다, servers/cfgsrv/main.cpp)를
+// 부를 때마다 새 open을 하나씩 새로 만들면서 16개가 부팅 한 번
+// 안에 실제로 바닥나(svcmgr의 M41 자기테스트가 set_value를 몇 번
+// 더 부르면서 처음 드러났다), cfgsrv 자신의 저장뿐 아니라 이후
+// 아무 관계 없는 shell의 cat 자기테스트까지 open 실패로 덩달아
+// 깨졌다(같은 고갈된 풀을 공유하기 때문). 근본 수정(close 프로토콜
+// 추가)은 이 라운드 범위 밖 — 즉시는 여유를 4배로 늘려 막는다.
+constexpr uint32_t k_max_open_files = 64;
 constexpr uint64_t k_page_size = 4096;
 
 // M16(fs-protocol.md v2 §2.3, ADR-155 §2/ADR-159/ADR-161) — OP_READ

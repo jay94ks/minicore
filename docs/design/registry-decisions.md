@@ -195,3 +195,90 @@ cfgsrv 서브시스템(스키마·테이블 주소 체계, 권한 모델, 비밀
     새 OPEN 항목을 추가하지 않는다(둘 다 registry.md/procsrv.md가
     이미 "아직 정하지 않은 것"으로 표시해 둔 항목의 연장이라 새
     항목이 아니다).
+
+## ADR-215. M41 완성: svcmgr가 `@global/system/services`를 실제로 읽음 — cfgsrv 값 저장 한도·영속화 버퍼가 예상보다 훨씬 작았음을 발견
+
+- **상태**: 확정 (2026-09-10, [user-service-manager.md](../plan/user-service-manager.md)
+  M41 실행 중 확정)
+- **배경**: ADR-197(계획 단계)의 결정을 실제로 구현한다. 계획이
+  예정한 것(svcmgr가 하드코딩 목록 대신 `list_values`+`get_value`
+  로 테이블을 읽음, `depends_on` 위상정렬)은 전부 완성했지만, 실행
+  중 cfgsrv의 기존 저장 한도가 `service_unit` 하나도 못 담을 만큼
+  작다는 것과, 그걸 고치는 과정에서 훨씬 더 심각한 기존 메모리
+  손상 버그를 발견했다.
+- **결정**:
+  1. `libs/mc/include/mc/cfgsrv_client.h`+`src/ipc/cfgsrv_client.c`
+     (신규) — `open_table`/`create_table`/`get_value`/`set_value`
+     (binary 타입)/`delete_value`/`list_values`의 얇은 클라이언트.
+     procsrv 자신의 self-test가 M19부터 이 프로토콜을 인라인으로만
+     썼던 것을 처음으로 재사용 가능한 `libmc` 모듈로 뽑았다(ADR-197
+     이 예정해 둔 "이미 존재하는 클라이언트 코드" 자리를 실제로
+     채운다).
+  2. `libs/mc/include/mc/svcmgr_protocol.h`(신규) — ADR-196 §결정2의
+     `service_unit` 구조체를 그대로 옮겼다(`mc_svcmgr_service_unit`).
+  3. svcmgr는 부팅 시 `@global/system/services`를 열고(없으면
+     만들고), 비어 있으면 자기테스트 유닛 둘(`svc-b`가 `svc-a`에
+     `depends_on`)을 등록한다(M42의 `op_register`가 아직 없어서) —
+     이후 `list_values`+`get_value`로 실제 테이블을 읽어
+     `depends_on`을 단순 위상정렬해 순서대로 spawn하고, 각각
+     ADR-193 준비완료 신호를 기다린다.
+  4. `delete_value`로 `svc-b`를 지우고 다시 `list_values`를 불러
+     실제로 목록에서 빠졌는지 확인한다 — 계획의 "지우고 재부팅해
+     확인" 중 "재부팅" 부분은 범위를 좁혔다(cfgsrv의 저장 파일이
+     기본적으로 memfs에 떨어져 진짜 재부팅을 거치면 사라진다,
+     registry-decisions.md ADR-169 §결정2 — 디스크 기반 경로로
+     바꾸는 것은 이 ADR의 범위 밖인 별개 결정이다). 같은 부팅 안에서
+     "등록→소비→삭제→재조회"로 메커니즘 자체만 증명한다.
+  5. `exec_path`(VFS 경로) 필드는 저장/조회는 되지만 아직 읽지
+     않는다 — 등록된 유닛이 몇 개든 전부 M40과 같은 임베딩된 데모
+     ELF를 실행한다. 서로 다른 실행 이미지를 VFS에서 읽어 오려면
+     `mc/fs_client.h`에 쓰기 클라이언트(그 이미지들을 VFS에 미리
+     심을 방법)까지 새로 필요해 이번 라운드 범위를 벗어난다고
+     판단했다.
+- **실행 중 발견 1 — `mc/cfgsrv_client.c`의 페이지 버퍼에 정렬이
+  없어 커널이 즉시 패닉했다**: `kernel/core/ipc/endpoint.cpp`가
+  `page_descriptor.vaddr`을 4096바이트 경계로 강제하는데(M13/
+  ADR-151), 새로 만든 클라이언트의 정적 버퍼 3개(경로/키/값)에
+  `alignas`를 빠뜨려 "page_descriptor not page-aligned"로 즉시
+  패닉했다 — `servers/procsrv/main.cpp`의 같은 용도 버퍼들이 이미
+  `alignas(k_page_size)`를 쓰고 있던 이유가 정확히 이거였다. 셋
+  다 `_Alignas(MC_CFG_PAGE_SIZE)`를 추가해 고쳤다.
+- **실행 중 발견 2 — cfgsrv의 값 저장 한도(256바이트)가
+  `service_unit`(~616바이트)보다 훨씬 작았다**: `k_max_value_len`
+  이 M19 시점 문자열 값(계정 설정 정도)만 염두에 두고 정해진
+  256바이트였다 — 실제 길이가 이를 넘으면 조용히 잘려 저장되고,
+  다시 읽었을 때 길이가 기대와 안 맞아 svcmgr의 `load_units`가
+  매번 실패했다. 1024로 올렸다.
+- **실행 중 발견 3 — cfgsrv의 영속화 버퍼가 그 한도 상승 후
+  진짜로 넘칠 수 있었고, 실제로 다른 정적 변수를 덮어써
+  `[shell] cat` 자기테스트까지 깨뜨렸다**: `persist_save()`가
+  전체 테이블 상태를 8KiB 정적 버퍼(`g_persist_buf`)에 경계 검사
+  없이(`w_bytes` 등이 그냥 계속 쓰기만 한다) 직렬화하고 있었다 —
+  `k_max_value_len`을 올린 뒤로는 이론상 필요한 최대 크기
+  (8테이블×8값×1KiB ≈ 64KiB)가 그 버퍼를 훨씬 넘어, 실제로 그
+  경계를 넘겨써 버퍼 뒤의 다른 정적 변수를 조용히 손상시켰다 —
+  이 세션의 M41 자기테스트 값 두 개만으로도 그 순간이 실제로
+  왔고, `[shell] cat ok=0`이라는 **완전히 무관해 보이는 회귀**로
+  처음 드러났다(메모리 손상이 다른 전역 상태를 건드린 결과). 버퍼를
+  32KiB로 늘리고, `persist_save()` 자신이 실제로 쓰기 **전에**
+  필요한 전체 크기를 먼저 계산해 넘치면 아예 쓰지 않고 실패로
+  처리하는 방어 코드를 추가했다 — 버퍼를 키우는 것만으로는 "더 큰
+  상황에서 또 넘칠 수 있다"는 근본 문제를 없애지 못하기 때문이다.
+- **실행 중 발견 4 — fs-protocol에 close가 없어 memfs의 열린 파일
+  슬롯이 부팅 한 번 안에 바닥났다**(신규 OPEN-70): 위 발견 3을
+  고치는 과정에서, cfgsrv가 상태가 바뀔 때마다(`persist_save()`)
+  매번 새로 `vfs_open()`하면서 절대 close하지 않는다는 것을
+  발견했다 — 사실은 fs-protocol(v3/v4) 자체에 open_file_id를
+  반환하는 오퍼레이션이 애초에 없다(VFS를 거치는 모든 소비자가
+  똑같이 겪는 근본 문제). memfs의 `k_max_open_files`(16)가 이
+  라운드의 추가 `persist_save()` 호출 몇 번만으로 실제로 바닥나,
+  cfgsrv 자신의 저장뿐 아니라 완전히 무관한 shell의 cat
+  자기테스트까지(같은 고갈된 풀을 공유해서) 실패했다 — 즉시는
+  64로 늘려 막고, 근본 수정(close 오퍼레이션 신설)은
+  [open-items.md](open-items.md) OPEN-70으로 남겼다.
+- **영향**: M42(컨트롤 프로토콜)의 `op_register`/`op_unregister`가
+  이 클라이언트(`mc_reg_set_binary`/`mc_reg_delete_value`)를 그대로
+  재사용할 수 있다 — 이번 라운드가 그 배선을 이미 검증해 뒀다.
+  OPEN-70(fs-protocol close 부재)은 VFS를 쓰는 모든 서버에 영향을
+  주는 더 큰 항목이라, 다음에 파일을 자주 열고 닫는 소비자가
+  생기면 다시 마주칠 가능성이 높다.

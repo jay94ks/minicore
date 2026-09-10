@@ -244,17 +244,53 @@
 #     자기 자신을 pid=1로 무조건 등록하도록 바꿔 최소한 하나의 실제
 #     대상을 만들었다)을 자신에게 재부모화한다("[svcmgr] adopt_orphans
 #     ok=1"). 하드코딩된 데모 유닛 하나(userland/svcmgr-demo-unit)를
-#     spawn하고("[svcmgr] demo unit spawn ok=1"), ADR-193의 준비완료
-#     신호(spawn 시점 전용 endpoint의 Call/Reply, 방향은 M22의 wait
-#     회수와 반대 — 자식이 Call, 부모가 Recv+즉시 Reply)를 받을 때까지
-#     블록했다가 받으면 통과한다("[svcmgr] demo unit ready ok=1"). 실행
-#     중 진짜 버그 발견: 처음엔 svcmgr의 --depends=에 커널 서버 15개를
-#     전부 나열했다가 (1) MC_MAX_SPAWN_INHERITED_HANDLES(=4)를 넘는
-#     이름은 핸들을 못 받고 (2) initrun의 depends= 파싱 버퍼(96바이트)
-#     보다 그 문자열이 길어 파싱 자체가 통째로 실패해 procsrv 핸들도
-#     못 받았다 — svcmgr가 스폰 순서("--service= 목록의 마지막"으로
-#     이미 충족)와 핸들 상속(별개 메커니즘)을 혼동한 것이었다.
+#     spawn하고 ADR-193의 준비완료 신호(spawn 시점 전용 endpoint의
+#     Call/Reply, 방향은 M22의 wait 회수와 반대 — 자식이 Call, 부모가
+#     Recv+즉시 Reply)를 받을 때까지 블록했다가 받으면 통과한다(M40
+#     당시의 "demo unit spawn/ready ok=1" 로그는 M41이 그 스폰
+#     경로를 유닛 레지스트리 기반 루프로 일반화하며 "[svcmgr] unit
+#     start name=..."로 대체했다 — 아래 M41 참고, 같은 메커니즘을
+#     계속 확인한다). 실행 중 진짜 버그 발견: 처음엔 svcmgr의
+#     --depends=에 커널 서버 15개를 전부 나열했다가 (1)
+#     MC_MAX_SPAWN_INHERITED_HANDLES(=4)를 넘는 이름은 핸들을 못 받고
+#     (2) initrun의 depends= 파싱 버퍼(96바이트)보다 그 문자열이
+#     길어 파싱 자체가 통째로 실패해 procsrv 핸들도 못 받았다 —
+#     svcmgr가 스폰 순서("--service= 목록의 마지막"으로 이미 충족)와
+#     핸들 상속(별개 메커니즘)을 혼동한 것이었다.
 #     depends=svcmgr:procsrv 하나로 줄여 해결했다.
+#   M41 (user-service-manager.md §M41, registry-decisions.md ADR-215):
+#     svcmgr가 하드코딩된 데모 유닛 목록을 실제 `@global/system/
+#     services` cfgsrv 테이블로 대체한다 — 새 `mc/cfgsrv_client.h`
+#     (list_values/get_value 등)+`mc/svcmgr_protocol.h`
+#     (mc_svcmgr_service_unit)로 테이블을 열고("[svcmgr] services
+#     table open ok=1") 읽는다("[svcmgr] load_units ok=1"). M42의
+#     op_register가 아직 없어 테이블이 비어 있으면 svcmgr 자신이
+#     자기테스트 유닛 둘(svc-b가 svc-a에 depends_on)을 등록한다.
+#     depends_on을 단순 위상정렬해 svc-a가 먼저("[svcmgr] unit start
+#     name=svc-a"), 그다음 svc-b가("[svcmgr] unit start name=svc-b")
+#     ADR-193 준비완료 신호를 받은 뒤에야 시작됨을 순서로 확인한다.
+#     delete_value로 svc-b를 지우고 다시 list_values로 실제로
+#     빠졌는지 확인한다("[svcmgr] delete_value svc-b ok=1" — "재부팅
+#     후 확인"은 cfgsrv 저장 파일이 기본적으로 memfs에 떨어져
+#     재부팅을 거치면 사라지므로 이번 라운드는 같은 부팅 안에서
+#     등록→소비→삭제→재조회로 범위를 좁혔다). exec_path(VFS 경로)는
+#     아직 읽지 않는다 — 등록된 유닛이 몇 개든 전부 같은 임베딩된
+#     데모 ELF를 실행한다. 실행 중 진짜 버그 3건 발견: (1)
+#     `mc/cfgsrv_client.c`의 페이지 전송 버퍼에 정렬(alignas)이
+#     없어 커널이 "page_descriptor not page-aligned"로 패닉 (2)
+#     `mc_svcmgr_service_unit`(~616바이트)이 cfgsrv의 값 저장
+#     한도(256바이트)를 넘어 매번 잘린 값만 돌아옴 — 1024로 올림
+#     (3) cfgsrv의 영속화 버퍼(8KiB)가 그 한도 상승 후 이론상 필요한
+#     크기(최대 64KiB)보다 훨씬 작아 실제로 그 뒤의 다른 정적
+#     변수를 조용히 덮어쓰는 메모리 손상까지 겪었다("[shell] cat
+#     ok=0" 회귀로 처음 드러남) — 버퍼를 32KiB로 늘리고 실제로 쓰기
+#     전에 필요한 크기를 계산해 넘치면 아예 쓰지 않는 방어 코드를
+#     추가. 그 과정에서 fs-protocol에 close 오퍼레이션이 애초에
+#     없어(OPEN-70 신규) 모든 소비자가 open할 때마다 memfs의 열린
+#     파일 슬롯을 영구히 소비한다는 것도 발견 — cfgsrv의 매 저장마다
+#     새 open이 그 슬롯(16개)을 부팅 한 번 안에 실제로 바닥냈다,
+#     즉시는 64로 늘려 막고 근본 수정(close 신설)은 범위 밖으로
+#     남김.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -498,8 +534,11 @@ declare -a EXPECTED=(
   "musl pthread mutex counter ok=1"
   "[svcmgr] self_register ok=1"
   "[svcmgr] adopt_orphans ok=1"
-  "[svcmgr] demo unit spawn ok=1"
-  "[svcmgr] demo unit ready ok=1"
+  "[svcmgr] services table open ok=1"
+  "[svcmgr] load_units ok=1"
+  "[svcmgr] unit start name=svc-a"
+  "[svcmgr] unit start name=svc-b"
+  "[svcmgr] delete_value svc-b ok=1"
   "[shell] session started"
   "[procsrv] shell session start ok=1"
   "[shell] no keyboard input, running self-test commands"

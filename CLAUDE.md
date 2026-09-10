@@ -450,5 +450,38 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   (procsrv 자신의 pid=1 등록조차 self-test 전용이었다) 재부모화를
   관찰할 실제 대상이 하나도 없었음 — procsrv가 `_start()` 맨 앞에서
   무조건 자기 자신을 pid=1로 등록하도록 고쳐 최소 하나의 관찰
-  가능한 대상을 만들었다. 다음은 M41(cfgsrv 기반 유닛 레지스트리)
+  가능한 대상을 만들었다.
+  **M41(완료)**(결과는
+  [docs/done/user-service-manager-m41.md](docs/done/user-service-manager-m41.md),
+  [ADR-215](docs/design/registry-decisions.md) 참고): svcmgr가
+  하드코딩 유닛 목록을 실제 `@global/system/services` cfgsrv
+  테이블로 대체 — 새 `mc/cfgsrv_client.h`(재사용 가능한 레지스트리
+  클라이언트, procsrv의 M19 self-test가 인라인으로만 쓰던 것을
+  처음 뽑음)+`mc/svcmgr_protocol.h`(`mc_svcmgr_service_unit`).
+  M42의 `op_register`가 아직 없어 테이블이 비어 있으면 svcmgr
+  자신이 자기테스트 유닛 둘(`svc-b`가 `svc-a`에 `depends_on`)을
+  등록, `depends_on` 위상정렬로 `svc-a`→`svc-b` 순서를 확인하고
+  `delete_value`+재조회로 삭제도 확인했다(계획의 "재부팅 후 확인"
+  중 재부팅 부분은 cfgsrv 저장 파일이 기본 memfs라 진짜 재부팅을
+  못 버텨 범위 밖으로 좁혔다 — 같은 부팅 안에서만 증명). `exec_path`
+  (VFS 경로)는 저장/조회는 되지만 아직 읽지 않는다(모든 유닛이
+  여전히 같은 임베딩된 데모 ELF를 실행 — VFS 쓰기 클라이언트가
+  더 필요해 범위 밖). 실행 중 발견한 진짜 버그 4건, 그중 하나는
+  실제 메모리 손상이었다: (1) 새 클라이언트의 페이지 버퍼에 정렬
+  (`alignas`)이 없어 커널이 "page_descriptor not page-aligned"로
+  즉시 패닉, (2) cfgsrv의 값 저장 한도가 256바이트뿐이라
+  `service_unit`(~616바이트)이 매번 잘려 저장돼 다시 읽으면 길이가
+  안 맞아 실패 — 1024로 상향, (3) cfgsrv의 영속화 버퍼(8KiB)가 그
+  한도 상승 후 이론상 필요한 최대 크기(~64KiB)보다 훨씬 작아
+  실제로 경계를 넘겨써 버퍼 뒤의 다른 정적 변수를 손상시켰다 —
+  이 손상이 **완전히 무관해 보이는 "[shell] cat ok=0" 회귀**로
+  처음 드러났다(다른 전역 상태가 오염된 결과) — 32KiB로 늘리고
+  쓰기 전에 필요한 크기를 먼저 계산해 넘치면 아예 안 쓰는 방어
+  코드를 추가, (4) 그 과정에서 fs-protocol에 close 오퍼레이션이
+  애초에 없어(OPEN-70 신규 등록) 모든 VFS 소비자가 open할 때마다
+  memfs의 열린 파일 슬롯을 영구히 소비한다는 것도 발견 — cfgsrv의
+  매 저장마다의 새 open이 그 슬롯(16개)을 부팅 한 번 안에 실제로
+  바닥내 무관한 shell의 cat 자기테스트까지 실패시켰다, 즉시는
+  64로 늘려 막고 근본 수정(close 신설)은 OPEN-70으로 남김. 다음은
+  M42(svcmgr 컨트롤 프로토콜 — start/stop/restart/status/register)
   이다.

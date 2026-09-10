@@ -84,7 +84,14 @@ constexpr uint32_t k_max_tables = 8;
 constexpr uint32_t k_max_values_per_table = 8;
 constexpr uint32_t k_max_path_len = 96;
 constexpr uint32_t k_max_key_len = 24;
-constexpr uint32_t k_max_value_len = 256;
+// M41(user-service-manager.md §M41) 실행 중 발견 — 256바이트로는
+// docs/design/boot-and-drivers.md ADR-196 §결정2가 정한
+// mc_svcmgr_service_unit(name[32]+exec_path[256]+args[192]+...,
+// 약 616바이트) 하나도 못 담아 svcmgr의 get_value가 매번 잘린 값을
+// 돌려줬다(길이가 안 맞아 호출자가 실패로 인식) — 원래 256이던 값을
+// 4배로 올렸다. k_max_values_per_table(8)×k_max_tables(8) 기준
+// 최대 64KiB 정적 배열이라(1024*8*8) 이 정도 여유는 비용이 없다.
+constexpr uint32_t k_max_value_len = 1024;
 
 uint64_t do_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3) {
     uint64_t ret;
@@ -299,7 +306,18 @@ bool any_access(const table_entry& t, uint32_t caller_uid) {
 // ---------- VFS 클라이언트(영속화 전용, servers/procsrv/main.cpp와 같은 패턴) ----------
 
 alignas(k_page_size) uint8_t g_io_scratch[k_page_size] = {};
-alignas(k_page_size) uint8_t g_persist_buf[2 * k_page_size] = {};
+// M41(user-service-manager.md §M41) 실행 중 발견 — k_max_value_len을
+// 256에서 1024로 올린 뒤(위 주석 참고) 8개 테이블×8개 값이 전부
+// 거의 최대 크기면 이론상 66KiB 가까이 필요한데, 이 버퍼는 여전히
+// 8KiB(2*k_page_size)뿐이었다 — `persist_save()`의 `w_bytes` 등이
+// 경계 검사 없이 그냥 계속 쓰기만 해서, 실제로 겪은 대로 조용히
+// 이 버퍼 뒤의 다른 정적 변수를 덮어쓸 수 있었다(진짜 메모리
+// 손상 버그, "[shell] cat ok=0" 회귀로 처음 드러남 — 원인을 여기까지
+// 추적). 8배(32KiB)로 늘리고, persist_save() 자신에도 실제로 쓰기
+// 전에 전체 필요 크기를 먼저 계산해 넘치면 아예 쓰지 않고 실패
+// 처리하는 방어 코드를 추가했다(아래 참고) — 버퍼를 키우는 것만으로는
+// "더 큰 상황에서 또 넘칠 수 있다"는 근본 문제를 안 없앤다.
+alignas(k_page_size) uint8_t g_persist_buf[8 * k_page_size] = {};
 
 void vfs_open(const char* path, uint64_t& out_open_file_id, uint32_t& out_fs_handle) {
     mc_message req{};
@@ -453,6 +471,34 @@ void r_bytes(const uint8_t*& p, void* dst, uint64_t n) {
 // 프로토콜 응답 자체는 계속 진행한다(영속화는 내부 최선노력 —
 // registry.md §7이 프로토콜 사용자에게 비가시라고 정한 그대로).
 void persist_save() {
+    // M41 실행 중 발견(g_persist_buf 주석 참고) — 실제로 쓰기
+    // **전에** 필요한 전체 크기를 먼저 계산해, 버퍼를 넘기면 아예
+    // 아무것도 쓰지 않고 실패 처리한다(w_bytes 등에 경계 검사를
+    // 넣는 대신 이 방법을 골랐다 — 그 함수들은 다른 자리에서도
+    // "이미 공간이 있다고 보장된 채" 쓰는 저수준 유틸이라, 경계
+    // 검사를 여기저기 흩어 두는 대신 호출 전에 한 번 계산해 두는
+    // 쪽이 더 명확하다).
+    uint64_t needed = 16;  // 헤더(매직4+버전4+길이8).
+    needed += 4;           // table_count.
+    for (uint32_t i = 0; i < k_max_tables; ++i) {
+        table_entry& t = g_tables[i];
+        if (!t.used) {
+            continue;
+        }
+        needed += 2 + cstr_len(t.path) + 4 + 4 + 1 + 1 + 1 + 1 + 4;
+        for (uint32_t v = 0; v < k_max_values_per_table; ++v) {
+            kv_entry& e = t.values[v];
+            if (!e.used) {
+                continue;
+            }
+            needed += 2 + cstr_len(e.key) + 1 + 4 + e.len;
+        }
+    }
+    if (needed > sizeof(g_persist_buf)) {
+        debug_log("[cfgsrv] persist write ok=0 (payload too large)\n");
+        return;
+    }
+
     uint8_t* p = g_persist_buf + 16;  // 헤더(매직4+버전4+길이8) 자리는 나중에 채운다.
     uint32_t table_count = 0;
     for (uint32_t i = 0; i < k_max_tables; ++i) {

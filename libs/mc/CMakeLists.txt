@@ -21,6 +21,7 @@ add_library(minicore_libmc STATIC
     src/ipc/ps2_client.c
     src/ipc/procsrv_client.c
     src/ipc/lifecycle_client.c
+    src/ipc/cfgsrv_client.c
     src/mem/heap.c
     src/x86_64/start.c
     src/freestanding_mem.c
