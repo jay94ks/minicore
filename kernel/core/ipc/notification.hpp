@@ -8,7 +8,7 @@
 // 표현한다(핸들이 유효한 뒤부터는 spec 그대로 절대 실패하지 않는다).
 #pragma once
 
-#include <libk/result.hpp>
+#include <k/result.hpp>
 
 #include "ipc/message.hpp"
 #include "object/handle_table.hpp"

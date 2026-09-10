@@ -4,7 +4,7 @@
 // 심벌을 정의하지 않는다 — irq_safe<Lock>은 커널 전용이다.
 #include <cstdint>
 
-#include <libk/irq_safe.hpp>
+#include <k/irq_safe.hpp>
 
 namespace libk_detail {
 

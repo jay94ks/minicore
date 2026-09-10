@@ -9,8 +9,8 @@
 
 #include <cstdint>
 
-#include <libk/irq_safe.hpp>
-#include <libk/spinlock.hpp>
+#include <k/irq_safe.hpp>
+#include <k/spinlock.hpp>
 
 namespace kern::klog {
 

@@ -6,7 +6,7 @@
 #include <cstdint>
 
 #include <klog.hpp>
-#include <libk/panic.hpp>
+#include <k/panic.hpp>
 #include <object/kernel_objects.hpp>
 #include <sched/scheduler.hpp>
 

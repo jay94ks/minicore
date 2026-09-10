@@ -2,7 +2,7 @@
 // 참고.
 #include "ipc/notification.hpp"
 
-#include <libk/irq_safe.hpp>  // scoped_lock
+#include <k/irq_safe.hpp>  // scoped_lock
 
 #include "sched/scheduler.hpp"
 

@@ -3,7 +3,7 @@
 #include "mm/page_allocator.hpp"
 #include "mm/phys_map.hpp"
 
-#include <libk/irq_safe.hpp>  // scoped_lock
+#include <k/irq_safe.hpp>  // scoped_lock
 
 namespace kern::mm {
 

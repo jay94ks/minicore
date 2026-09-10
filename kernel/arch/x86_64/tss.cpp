@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-#include <libk/panic.hpp>
+#include <k/panic.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
 #include <object/kernel_objects.hpp>

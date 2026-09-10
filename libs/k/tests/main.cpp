@@ -4,13 +4,13 @@
 #include <cstdio>
 #include <utility>
 
-#include <libk/intrusive_list.hpp>
-#include <libk/mcs_lock.hpp>
-#include <libk/optional.hpp>
-#include <libk/result.hpp>
-#include <libk/span.hpp>
-#include <libk/spinlock.hpp>
-#include <libk/ticket_lock.hpp>
+#include <k/intrusive_list.hpp>
+#include <k/mcs_lock.hpp>
+#include <k/optional.hpp>
+#include <k/result.hpp>
+#include <k/span.hpp>
+#include <k/spinlock.hpp>
+#include <k/ticket_lock.hpp>
 
 namespace {
 

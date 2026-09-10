@@ -181,17 +181,24 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   답변("fork 특수 변형 한정")은 태그 오기였음을 사용자가 확인했다
   (2026-09-10, M32/M37의 확인사항으로만 반영).
 - 네임스페이스 컨벤션도 정리했다 — 커널(및 커널과 함께 컴파일되는
-  코드)은 `kern::*` 계층(`kern::arch::x86_64`/`kern::ipc`/`kern::mm`/
-  `kern::proc` 등, 서브시스템당 하나), 커널 서버는 `kernsrv::<서버명>`,
-  외부 비노출 하위 네임스페이스는 `__internals__`, 프로토콜(와이어
-  포맷) 정의는 예외로 `kern::proto`/`kernsrv::proto`
+  코드)은 `kern::*` 계층(`kern::arch::x86_64`/`kern::ipc`/`kern::mm`
+  등, 서브시스템당 하나), 커널 서버는 `kernsrv::<서버명>`, 외부
+  비노출 하위 네임스페이스는 `__internals__`, 프로토콜(와이어 포맷)
+  정의는 예외로 `kern::proto`/`kernsrv::proto`
   ([ADR-198](docs/design/foundations.md), [cxx-conventions.md](docs/spec/cxx-conventions.md)
-  §6에 목표 상태 반영 완료). **규칙만 확정, 기존 코드 리네임은 아직
-  실행 전** — 사용자가 "별도 계획으로 분리해서 지금 세우기"를
-  선택해 [docs/plan/namespace-refactor.md](docs/plan/namespace-refactor.md)
-  (M44~M48, 전부 순수 기계적 리네임+5개 QEMU 스위트 회귀 확인)를
-  만들었다. M45(`uapi`→`kern::proto`)는 이후 아래 라이브러리
-  재배치 작업으로 대체됐다.
+  §6). [docs/plan/namespace-refactor.md](docs/plan/namespace-refactor.md)
+  (M44~M48)로 **실제 적용까지 전부 완료됐다**(결과는 done 참고,
+  이 계획에는 더 이상 다음 마일스톤이 없다) — `object`/`ipc`/`mm`/
+  `sched`/`klog`/`initrd`→`kern::*`(M44), `arch_x86_64`→
+  `kern::arch::x86_64`(M46, `kern::proc`은 비용 대비 가치 부족으로
+  안 만듦), 서버 14개 전부 `kernsrv::<이름>`으로 감쌈(M47),
+  netsrv의 IEEE/IANA/RFC 표준 상수 5개를 `kernsrv::proto`로
+  분리(M48). M45(`uapi`→`kern::proto` 단순 리네임)는 아래 라이브러리
+  재배치 작업(M50)으로 대체돼 스킵했다. 매 마일스톤 빌드+QEMU
+  5개 스위트 회귀 없음 확인. 실행 중 발견한 것: `boot_info.hpp`가
+  이미 initrun과 공유되는 ABI라 `kern::` 대상이 아님(M44),
+  `process_ops.*`는 분리 비용이 커서 `kern::arch::x86_64`에 유지
+  (M46), netsrv엔 애초에 "헤더 구조체"가 없었음(M48).
 - 이 저장소가 직접 만들고 유지·관리하는 라이브러리(`libk`/`libmc`)
   경로와 명명 규칙도 정리했다 — `libs/` 하위로 옮기고 `lib` 접두사를
   뗀다(`libk`→`k`→`libs/k/`, `libmc`→`mc`→`libs/mc/`,

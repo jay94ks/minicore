@@ -20,7 +20,7 @@
 // 아직 유저모드/트랩이 없어 평범한 커널 내부 함수로 구현한다.
 #pragma once
 
-#include <libk/result.hpp>
+#include <k/result.hpp>
 
 #include "ipc/message.hpp"
 #include "object/handle_table.hpp"

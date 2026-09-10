@@ -13,7 +13,7 @@
 #include <cstdint>
 
 #include <arch_mm_defs.hpp>
-#include <libk/panic.hpp>
+#include <k/panic.hpp>
 
 namespace kern::mm {
 

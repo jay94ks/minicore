@@ -7,9 +7,9 @@
 
 #include <cstdint>
 
-#include <libk/atomic.hpp>
-#include <libk/intrusive_list.hpp>
-#include <libk/spinlock.hpp>
+#include <k/atomic.hpp>
+#include <k/intrusive_list.hpp>
+#include <k/spinlock.hpp>
 
 // kern::ipc::message는 kernel/core/ipc(레이어상 object 위에 있음)가 정의한다 —
 // 여기서는 포인터만 보관하므로 전방 선언으로 충분하다(ADR-002와 같은

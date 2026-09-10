@@ -11,7 +11,7 @@
 
 #include <cstdint>
 
-#include <libk/panic.hpp>
+#include <k/panic.hpp>
 
 namespace libk_detail {
 

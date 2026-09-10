@@ -5,7 +5,7 @@
 // 않는다)만, 링크가 성립하려면 심벌이 있어야 한다. 조용히 멈춘다
 // (main.cpp의 quiet_exit()과 같은 이유로 hlt 대신 pause — ring3에서
 // hlt는 특권 명령이라 쓸 수 없다).
-#include <libk/panic.hpp>
+#include <k/panic.hpp>
 
 namespace libk_detail {
 

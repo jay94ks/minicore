@@ -14,9 +14,9 @@
 
 #include <cstdint>
 
-#include <libk/irq_safe.hpp>
-#include <libk/panic.hpp>
-#include <libk/spinlock.hpp>
+#include <k/irq_safe.hpp>
+#include <k/panic.hpp>
+#include <k/spinlock.hpp>
 
 #include "mm/page_allocator.hpp"
 #include "mm/phys_map.hpp"

@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <libk/result.hpp>
+#include <k/result.hpp>
 
 namespace kern::initrd {
 

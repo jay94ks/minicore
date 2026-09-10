@@ -1,7 +1,7 @@
 // Call/Reply 구현 (docs/spec/ipc.md §3~5). endpoint.hpp 상단 주석 참고.
 #include "ipc/endpoint.hpp"
 
-#include <libk/irq_safe.hpp>  // scoped_lock
+#include <k/irq_safe.hpp>  // scoped_lock
 
 #include <mm/page_allocator.hpp>  // kern::mm::k_page_size (페이지 정렬 검사)
 #include <mm/phys_map.hpp>        // kern::mm::phys_to_virt(cross-address-space 메시지 번역)

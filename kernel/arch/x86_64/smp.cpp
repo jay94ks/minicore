@@ -8,7 +8,7 @@
 #include <cstdint>
 
 #include <klog.hpp>
-#include <libk/atomic.hpp>
+#include <k/atomic.hpp>
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>
 

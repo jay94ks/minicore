@@ -19,8 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <libk/result.hpp>
-#include <libk/spinlock.hpp>
+#include <k/result.hpp>
+#include <k/spinlock.hpp>
 
 #include "boot_info.hpp"
 

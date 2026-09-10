@@ -12,8 +12,8 @@
 
 #include <cstdint>
 
-#include <libk/intrusive_list.hpp>
-#include <libk/result.hpp>
+#include <k/intrusive_list.hpp>
+#include <k/result.hpp>
 
 namespace kern::object {
 

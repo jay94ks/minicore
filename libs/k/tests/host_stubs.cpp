@@ -6,8 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include <libk/irq_safe.hpp>
-#include <libk/panic.hpp>
+#include <k/irq_safe.hpp>
+#include <k/panic.hpp>
 
 namespace libk_detail {
 

@@ -21,9 +21,9 @@
 
 #include <cstdint>
 
-#include <libk/intrusive_list.hpp>
-#include <libk/irq_safe.hpp>
-#include <libk/spinlock.hpp>
+#include <k/intrusive_list.hpp>
+#include <k/irq_safe.hpp>
+#include <k/spinlock.hpp>
 
 #include "object/kernel_objects.hpp"
 

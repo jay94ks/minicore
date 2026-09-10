@@ -10,8 +10,8 @@
 
 #include <cstdint>
 
-#include <libk/result.hpp>
-#include <libk/span.hpp>
+#include <k/result.hpp>
+#include <k/span.hpp>
 
 namespace ini {
 

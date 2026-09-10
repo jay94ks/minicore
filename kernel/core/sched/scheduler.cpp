@@ -5,8 +5,8 @@
 #include <new>
 
 #include <klog.hpp>
-#include <libk/irq_safe.hpp>  // scoped_lock
-#include <libk/panic.hpp>
+#include <k/irq_safe.hpp>  // scoped_lock
+#include <k/panic.hpp>
 
 #include <mm/page_allocator.hpp>
 #include <mm/phys_map.hpp>

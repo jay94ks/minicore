@@ -1,7 +1,8 @@
-# libmc — minicore 네이티브 유저랜드 API, 순수 C+어셈블러
-# (docs/design/foundations.md ADR-132/170). x86_64 전용
-# (init/initrun/CMakeLists.txt와 같은 이유 — 다른 아키텍처의
-# syscall 트램폴린은 아직 없다).
+# mc(구 libmc) — minicore 네이티브 유저랜드 API, 순수 C+어셈블러
+# (docs/design/foundations.md ADR-132/170, 저장소 배치는 ADR-199 —
+# libs/mc). x86_64 전용(init/initrun/CMakeLists.txt와 같은 이유 —
+# 다른 아키텍처의 syscall 트램폴린은 아직 없다). `#include <mc/...>`
+# 경로 자체는 안 바뀌었다 — 내부 세그먼트 이름이 이미 `mc`였다.
 #
 # ADR-170이 확정한 이번 라운드의 범위: syscall 1:1 래퍼(mc/syscall.h,
 # 헤더 전용)+VFS/FS 공통 프로토콜·콘솔·ps2 클라이언트+_start 진입점

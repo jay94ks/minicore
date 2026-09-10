@@ -20,7 +20,7 @@ endif()
 # GLOBAL PROPERTY(init/initrun/CMakeLists.txt가 설정)를 kernel/arch/x86_64가
 # configure_file 시점에 읽어야 하므로, 이 순서가 아니면 아직 설정되지
 # 않은 프로퍼티를 읽게 된다.
-add_subdirectory(libk)
+add_subdirectory(libs/k)
 add_subdirectory(init/initrun)
 
 # M21(선점형 스케줄링, docs/plan/general-purpose-completion.md) 검증용
@@ -35,7 +35,7 @@ add_subdirectory(kernel)
 # 1차 타겟(x86_64)만 전체 스택(시스템 서버·libc·유저랜드)을 빌드 대상으로 삼는다.
 # aarch64는 현재 범위에서 커널 컴파일 검증까지만 다룬다 (ADR-009).
 if(MINICORE_ARCH STREQUAL "x86_64")
-  add_subdirectory(libmc)
+  add_subdirectory(libs/mc)
   # userland를 servers보다 먼저 추가한다 — M20(system-servers-bringup.md
   # §M20)부터 부트 디스크 조립(servers/CMakeLists.txt)이 userland/shell의
   # $<TARGET_FILE:minicore_shell_elf>를 참조한다(그 반대 참조는 없다).
