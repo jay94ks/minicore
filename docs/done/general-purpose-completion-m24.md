@@ -9,8 +9,8 @@
 
 ### D1. 커널 — `sys_brk`
 
-새 syscall `sys_brk`(번호 13, [uapi.hpp](../../kernel/include/uapi.hpp)::`brk_request`)
-를 추가했다. `object::address_space`에 `heap_top`(정확한 brk
+새 syscall `sys_brk`(번호 13, 당시 `uapi.hpp::brk_request` — M50/
+ADR-200 이후 `libs/mc/include/mc/syscall.h`)를 추가했다. `object::address_space`에 `heap_top`(정확한 brk
 포인터)/`heap_mapped_top`(지금까지 실제로 페이지를 매핑해 둔
 경계) 두 필드를 추가하고, [process_ops.cpp::brk()](../../kernel/arch/x86_64/process_ops.cpp)
 가 첫 호출에서 지연 초기화(`heap_top = heap_mapped_top =
@@ -25,15 +25,16 @@ k_heap_user_vaddr`)한 뒤, `increment>0`이면 필요한 페이지만
 
 ### D2. libmc — 최소 malloc/free
 
-[libmc/include/mc/heap.h](../../libmc/include/mc/heap.h)/
-[libmc/src/mem/heap.c](../../libmc/src/mem/heap.c)에 `mc_malloc`/
+[mc/heap.h](../../libs/mc/include/mc/heap.h)/
+[heap.c](../../libs/mc/src/mem/heap.c)에 `mc_malloc`/
 `mc_free`를 추가했다 — `sys_brk` 위의 순수 범프 할당자(4페이지
 단위로 미리 확보해 syscall 왕복을 줄인다, `mc_free`는 회수하지
 않는 no-op).
 
 ### D3. userland/shell — malloc 왕복 검증
 
-[userland/shell/main.c](../../userland/shell/main.c)의 `cat` 빌트인이
+`userland/shell/main.c`(이 minicore 네이티브 셸 자체는 M53/ADR-224가
+`msh`로 교체하며 저장소에서 완전히 제거했다)의 `cat` 빌트인이
 쓰던 스택 배열(`char content[MAX_CAT_LEN]`)을 `mc_malloc(MAX_CAT_LEN)`
 으로 받은 버퍼로 바꿨다. 버퍼 확보 자체(`"[shell] malloc buffer
 ok=1"`)와 그 버퍼로 `test.txt`를 읽은 내용이 여전히 정확함

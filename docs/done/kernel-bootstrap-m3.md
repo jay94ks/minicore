@@ -30,21 +30,22 @@ cmake --build build/libk-tests
 
 ### 1. libk (cxx-conventions.md §4, ADR-066~077)
 
-`libk/include/libk/`에 10개 헤더 전부 작성(ADR-066: 헤더 전용,
+`libk/include/libk/`(M49/ADR-199 이후 `libs/k/include/k/`로 이동+
+`lib` 접두사 제거)에 10개 헤더 전부 작성(ADR-066: 헤더 전용,
 전역 스코프, 타입 1개당 헤더 1개):
 
 | 헤더 | 내용 |
 |---|---|
-| [panic.hpp](../../libk/include/libk/panic.hpp) | `libk_detail::panic_hook` 선언 + `LIBK_PANIC` 매크로(ADR-067) |
-| [result.hpp](../../libk/include/libk/result.hpp) | `result<T,E>` + `result<void,E>` 특수화(ADR-068) |
-| [optional.hpp](../../libk/include/libk/optional.hpp) | `optional<T>`(ADR-069) |
-| [span.hpp](../../libk/include/libk/span.hpp) | `span<T>`(ADR-070) |
-| [intrusive_list.hpp](../../libk/include/libk/intrusive_list.hpp) | `list_hook` + `intrusive_list<T,Hook>`(ADR-071) |
-| [atomic.hpp](../../libk/include/libk/atomic.hpp) | `atomic<T>`(ADR-072, 아래 ADR-118 참고) |
-| [spinlock.hpp](../../libk/include/libk/spinlock.hpp) | TTAS `spinlock` + `libk_detail::cpu_relax()`(ADR-076) |
-| [ticket_lock.hpp](../../libk/include/libk/ticket_lock.hpp) | FIFO `ticket_lock`(ADR-076) |
-| [mcs_lock.hpp](../../libk/include/libk/mcs_lock.hpp) | `mcs_lock` + `qnode`(ADR-076) |
-| [irq_safe.hpp](../../libk/include/libk/irq_safe.hpp) | `irq_safe<Lock>` + `scoped_lock<Lock>` + `arch_irq_save/restore` 선언(ADR-076) |
+| [panic.hpp](../../libs/k/include/k/panic.hpp) | `libk_detail::panic_hook` 선언 + `LIBK_PANIC` 매크로(ADR-067) |
+| [result.hpp](../../libs/k/include/k/result.hpp) | `result<T,E>` + `result<void,E>` 특수화(ADR-068) |
+| [optional.hpp](../../libs/k/include/k/optional.hpp) | `optional<T>`(ADR-069) |
+| [span.hpp](../../libs/k/include/k/span.hpp) | `span<T>`(ADR-070) |
+| [intrusive_list.hpp](../../libs/k/include/k/intrusive_list.hpp) | `list_hook` + `intrusive_list<T,Hook>`(ADR-071) |
+| [atomic.hpp](../../libs/k/include/k/atomic.hpp) | `atomic<T>`(ADR-072, 아래 ADR-118 참고) |
+| [spinlock.hpp](../../libs/k/include/k/spinlock.hpp) | TTAS `spinlock` + `libk_detail::cpu_relax()`(ADR-076) |
+| [ticket_lock.hpp](../../libs/k/include/k/ticket_lock.hpp) | FIFO `ticket_lock`(ADR-076) |
+| [mcs_lock.hpp](../../libs/k/include/k/mcs_lock.hpp) | `mcs_lock` + `qnode`(ADR-076) |
+| [irq_safe.hpp](../../libs/k/include/k/irq_safe.hpp) | `irq_safe<Lock>` + `scoped_lock<Lock>` + `arch_irq_save/restore` 선언(ADR-076) |
 
 **알려진 단순화**: `result<T,E>`의 복사 생성자는 ADR-068이 요구한
 "T/E가 둘 다 복사 가능할 때만 SFINAE로 활성화"를 하지 않고 무조건
@@ -54,7 +55,7 @@ cmake --build build/libk-tests
 
 ### 2. 호스트 네이티브 단위 테스트 (ADR-077)
 
-[libk/tests/](../../libk/tests/) — 크로스 빌드 트리와 독립된 별도
+[libs/k/tests/](../../libs/k/tests/) — 크로스 빌드 트리와 독립된 별도
 CMake 프로젝트. `result`/`optional`/`span`/`intrusive_list`/
 `spinlock`/`ticket_lock`/`mcs_lock` 39개 체크. `panic_hook`은
 테스트 실패(`abort()`)로, `arch_irq_save/restore`는 no-op으로

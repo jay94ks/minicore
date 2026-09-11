@@ -385,9 +385,11 @@
      셸 의존성을 통일하는 김에).
   3. **`strdup`이 요구하는 `malloc`/`free`/`calloc`/`realloc`은
      M24(ADR-180)의 `mc_malloc`/`mc_free`로 연결한다**
-     ([libc/sysdeps/minicore/mem_shim.c](../../libc/sysdeps/minicore/mem_shim.c)
-     — repo-layout.md가 이미 예약해 둔 "libc 내부 훅을 libmc의
-     mc_* 호출로 연결하는 얇은 어댑터" 자리를 처음으로 채운다).
+     (`libc/sysdeps/minicore/mem_shim.c` — repo-layout.md가 이미
+     예약해 둔 "libc 내부 훅을 libmc의 mc_* 호출로 연결하는 얇은
+     어댑터" 자리를 처음으로 채운다. 이 파일 자체는 M30/ADR-204가
+     musl 자신의 malloc으로 대체하며 없어졌다 — 현재는
+     `libc/sysdeps/minicore/malloc_shim.c` 참고).
   4. **진짜 syscall 계층(open/read/write/mmap/fork/exec을 musl
      자신의 경로로), 동적 링커, 스레드(pthread), locale, stdio
      (FILE/printf 계열)는 이번 라운드에 포함하지 않는다** — 이건

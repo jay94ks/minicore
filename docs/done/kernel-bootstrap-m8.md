@@ -140,9 +140,10 @@ arch 독립(ADR-002). `__builtin_strncmp`를 쓰려다 이 freestanding
 커널에 보내는 IPC Call 자체다(레이블 0xB007) — 커널 쪽 수신 스레드가
 그 사실 자체를 klog로 기록하는 것이 관찰 수단이다. 고정 핸들 번호
 (1 — `handle_table` 첫 슬롯은 항상 1)로 boot endpoint를 참조하는
-M8 한정 관례를 문서화했다. [kernel/include/uapi.hpp](../../kernel/include/uapi.hpp) —
-커널·유저가 공유하는 최소 syscall ABI(`ipc::message`와 바이트 단위로
-동일한 레이아웃).
+M8 한정 관례를 문서화했다. 당시 `kernel/include/uapi.hpp`(M50/
+ADR-200 이후 `libs/mc/include/mc/syscall.h`로 흡수+이 헤더 자체는
+폐지) — 커널·유저가 공유하는 최소 syscall ABI(`ipc::message`와
+바이트 단위로 동일한 레이아웃).
 
 ### 7. kernel_main.cpp — initrd 파싱 → ELF 로드 → 유저 스레드 생성 (boot.md §4)
 

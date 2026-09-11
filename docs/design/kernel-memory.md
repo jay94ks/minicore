@@ -772,7 +772,8 @@
 - **결정**: [OPEN-53](open-items.md)을 해소한다. 새 커널 파일
   [process_ops.hpp](../../kernel/arch/x86_64/process_ops.hpp)/
   [.cpp](../../kernel/arch/x86_64/process_ops.cpp)에 syscall 번호
-  1~4를 배정한다([uapi.hpp](../../kernel/include/uapi.hpp)).
+  1~4를 배정한다(당시 `kernel/include/uapi.hpp` — M50/ADR-200이
+  이 헤더를 폐지하고 `libs/mc/include/mc/syscall.h`로 흡수했다).
   1. **`sys_process_spawn`**(1, ADR-131이 이름만 정해 둠) —
      `process_spawn_request{elf_data, elf_size, argv_blob, argv_size,
      grant_trusted}`(a1 = 이 구조체의 유저 가상주소, 호출자 자신의
@@ -1169,7 +1170,8 @@
 
 - **상태**: 확정 (2026-09-10)
 - **결정**: 새 syscall `sys_brk`(번호 13,
-  [uapi.hpp::brk_request](../../kernel/include/uapi.hpp)) — `a1`=이
+  당시 `uapi.hpp::brk_request` — M50/ADR-200 이후
+  `libs/mc/include/mc/syscall.h`) — `a1`=이
   구조체의 유저 가상주소, `increment`(byte, 0=조회, 음수=미지원)를
   받아 `object::address_space`에 새로 추가한 `heap_top`/
   `heap_mapped_top` 두 필드([kernel_objects.hpp](../../kernel/core/object/kernel_objects.hpp))
@@ -1178,7 +1180,7 @@
   5 * 0x100000`, 슬롯 4는 이미 ADR-159의 IPC `pages[]` 매핑이 차지)
   에 두고, 슬롯 하나(1MiB)를 그대로 힙 전체의 예산으로 쓴다(다른
   슬롯처럼 "시작 지점 근처 몇 페이지"가 아니라 "가변 크기로 계속
-  자라는" 유일한 슬롯이라는 차이만 있다). [libmc/include/mc/heap.h](../../libmc/include/mc/heap.h)
+  자라는" 유일한 슬롯이라는 차이만 있다). [mc/heap.h](../../libs/mc/include/mc/heap.h)
   가 이 syscall 위에 `mc_malloc`/`mc_free`(순수 범프 할당자, 4페이지
   단위로 미리 확보해 syscall 왕복을 줄인다 — `free()`는 회수하지
   않는 no-op)를 얹는다.

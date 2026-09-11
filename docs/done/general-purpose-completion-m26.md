@@ -42,8 +42,10 @@ ADR-022가 예상해 둔 형태 그대로). 무수정 원본이다 — 이번 �
 생성 규칙만 새 [tools/gen-musl-alltypes.py](../../tools/gen-musl-alltypes.py)
 로 재현했다(sed 출력과 개행 차이만 있고 내용은 동일함을 diff로
 확인). `strdup`이 요구하는 `malloc`/`free`/`calloc`/`realloc`은
-[libc/sysdeps/minicore/mem_shim.c](../../libc/sysdeps/minicore/mem_shim.c)
-가 M24(ADR-180)의 `mc_malloc`/`mc_free`로 연결한다 —
+`libc/sysdeps/minicore/mem_shim.c`(이 파일 자체는 M30/ADR-204가
+musl 자신의 malloc으로 대체하며 없어졌다 — 현재는
+`libc/sysdeps/minicore/malloc_shim.c` 참고)가 M24(ADR-180)의
+`mc_malloc`/`mc_free`로 연결한다 —
 repo-layout.md가 이미 예약해 둔 "libc 내부 훅을 libmc의 mc_* 호출로
 연결하는 얇은 어댑터" 자리를 이번에 처음 채웠다.
 

@@ -40,8 +40,8 @@
   `ipc/endpoint.cpp::resolve_endpoint()`와 정확히 같은 `debug_entry()`
   기반 핸들 검사 패턴으로 핸들을 검증하고 `sched::request_kill()`을
   부른다.
-- 새 syscall `sys_process_kill`(번호 12,
-  [uapi.hpp](../../kernel/include/uapi.hpp)) —
+- 새 syscall `sys_process_kill`(번호 12, 당시 `uapi.hpp` — M50/
+  ADR-200 이후 `libs/mc/include/mc/syscall.h`) —
   [syscall.cpp](../../kernel/arch/x86_64/syscall.cpp)에 라우팅을
   추가했다.
 
