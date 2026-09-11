@@ -1771,10 +1771,11 @@ ADR-011/023)만으로 표현한다.
 
 ## ADR-227. M55 job control 최소: "프로세스 그룹"의 실제 주체는 procsrv가 아니라 msh 자신이다 — `setpgid`/`getpgid` 일반화는 하지 않는다
 
-- **상태**: 확정 (2026-09-11, 계획 단계 — [musl-userland-porting.md](../plan/musl-userland-porting.md)
-  §M55 착수 전에 설계만 먼저 결정한다. [ADR-226](kernel-scheduler.md)과
-  짝이다 — 사용자가 M55를 곧바로 구현하지 말고 "OPEN 항목을 검토해
-  설계 계획부터 작성"하라고 지시해 나왔다)
+- **상태**: 확정, M55 실행 완료 (2026-09-11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M55. [ADR-226](kernel-scheduler.md)과 짝이다 — 사용자가 M55를
+  곧바로 구현하지 말고 "OPEN 항목을 검토해 설계 계획부터 작성"하라고
+  지시해 이 ADR이 먼저 계획 단계로 나왔고, 이어서 같은 세션에서
+  실제로 구현·QEMU로 검증했다)
 - **배경 — 계획 원문("`setpgid()`/`getpgid()`(`SYS_setpgid`/
   `SYS_getpgid`)")이 이 프로젝트의 기존 아키텍처와 실제로 안 맞는
   지점을 발견했다.** `servers/procsrv/main.cpp`의 `process_entry.
@@ -1863,7 +1864,23 @@ ADR-011/023)만으로 표현한다.
   범위 밖으로 명시했다.
 - **영향**: [open-items.md](open-items.md)에 **OPEN-76**(위)을
   등록한다. `mc/procsrv_protocol.h`에 label=18 추가,
-  `mc/procsrv_client.h`/`.c`에 `mc_report_signaled()` 추가.
+  `mc/procsrv_client.h`/`.c`에 `mc_report_signaled()` 추가. msh
+  전용 얇은 래퍼 `mc_shell_report_signaled()`(syscall_shim.c —
+  msh가 procsrv의 핸들 번호를 몰라도 되게, `mc_shell_bind_pipe_fd`
+  등과 같은 원칙)도 함께 추가했다.
+- **실행 중 발견**: [ADR-226](kernel-scheduler.md)의 "실행 중
+  발견" 항목 참고 — `execve()`도 syscall 리턴 시점 시그널 확인을
+  거치므로, `fork()` 직후 곧바로 `SIGINT`를 보내면 자식이 자기
+  `main()`을 시작하기도 전에 죽어 "실행 중인 자식을 끊는다"는 이
+  ADR의 목표를 제대로 증명하지 못했다 — msh가 신호를 보내기 전에
+  `sched_yield()`를 50회 돌려 자식이 실제로 스케줄될 시간을 준
+  것으로 고쳤다(§결정4의 "자기테스트 설계" 부분이 최종 반영된
+  형태). 부수적으로, 부팅 시점에 VFS에 새 파일(`/bin/loop-test`)을
+  하나 더 심게 되면서 `tools/smoke-test-x86_64.sh`의 M54 리다이렉션
+  어서션이 고정해 둔 `open_file_id`가 36→37로 밀리는 것도 실제로
+  겪었다(그 값이 "부팅 시점에 몇 번째로 열린 VFS 파일인가"에 의존하는
+  하드코딩이라, VFS에 파일을 더 심는 어떤 변경도 이후의 이런
+  하드코딩을 깨뜨릴 수 있다 — 근본 수정은 범위 밖).
 
 ## 아직 정하지 않은 것
 

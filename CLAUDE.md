@@ -678,4 +678,36 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   "이동" 모델이다. `tools/smoke-test-x86_64.sh`에 M54 어서션 4개
   추가, 스모크+SMP+NUMA+AVX+net 5개 회귀 스위트 전부 PASS(결과는
   [docs/done/musl-userland-porting-m54.md](docs/done/musl-userland-porting-m54.md)
-  참고). M55(job control 최소, 스트레치)만 남았다.
+  참고).
+  **M55(완료, 스트레치)**([ADR-226](docs/design/kernel-scheduler.md)/
+  [ADR-227](docs/design/security-model.md) 참고): job control 최소
+  — 착수 전 설계 검토(사용자가 "OPEN 항목을 검토해 설계 계획부터
+  작성"하라고 지시)에서 계획 원문("procsrv가 `setpgid()`/`getpgid()`
+  로 프로세스 그룹을 관리하고 포그라운드 그룹에 시그널을 라우팅")이
+  이 프로젝트 아키텍처와 안 맞음을 발견했다 — `servers/procsrv/
+  main.cpp`의 `process_entry.thread_handle`은 procsrv가 **직접**
+  스폰한 프로세스(msh 자신)에만 유효하고, `mc_fork()`로 등록된
+  자식(msh의 파이프라인 단계 전부)은 항상 `thread_handle=0`("모름")
+  이라 procsrv는 msh의 자식에게 시그널을 보낼 방법이 원천적으로
+  없다. 그래서 procsrv에 pgid 개념을 전혀 추가하지 않고 "그룹"의
+  실제 주체를 msh 자신으로 옮겼다 — msh가 자기 자식의 진짜
+  시그널 가능 handle(`mc_last_fork_child_thread_handle()`, M36부터
+  있던 것)로 `mc_signal_send(SIGINT)`를 직접 부르고, 새 procsrv
+  오퍼레이션 `MC_PROC_OP_REPORT_SIGNALED`로 그 사실만 알린다.
+  커널 쪽은 `SIGINT` 하나만 핸들러 없으면 진짜로 종료하도록
+  바꿨다(나머지 31개 시그널은 그대로 무시 — OPEN-75). 새 최소
+  프로그램 `userland/loop-test`(`sched_yield()`를 500만 회 반복)를
+  msh가 fork+exec한 뒤 인터럽트해 "자식만 종료되고 셸은 살아남는다"
+  는 목표를 확인했다. 실행 중 발견: `execve()`도 syscall 리턴
+  시점 시그널 확인을 거쳐, `fork()` 직후 곧바로 `SIGINT`를 보내면
+  자식이 `main()`을 시작하기도 전에 죽어(`"[loop-test] starting"`
+  이 로그에 전혀 없었다) "실행 중인 자식을 끊는다"는 진짜 목표를
+  증명하지 못했다 — 신호를 보내기 전에 `sched_yield()`를 50회
+  돌려 자식에게 실제로 스케줄될 시간을 준 것으로 고쳤다. 부수적으로
+  부팅 시점에 새 VFS 파일이 하나 늘어 M54의 리다이렉션 어서션이
+  고정해 둔 `open_file_id`가 36→37로 밀린 것도 겪었다.
+  `tools/smoke-test-x86_64.sh`에 M55 어서션 추가, 스모크(147)+
+  SMP(11)+NUMA(24)+AVX(12)+net(6) 5개 회귀 스위트 전부 PASS(결과는
+  [docs/done/musl-userland-porting-m55.md](docs/done/musl-userland-porting-m55.md)
+  참고). **musl-userland-porting.md는 이제 M51~M55 전부 완료됐다**
+  — 이 계획에는 더 이상 다음 마일스톤이 없다.

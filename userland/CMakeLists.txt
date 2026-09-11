@@ -36,3 +36,9 @@ add_subdirectory(echo)
 add_subdirectory(ls)
 add_subdirectory(cat)
 add_subdirectory(msh)
+
+# docs/plan/musl-userland-porting.md §M55(ADR-227) — msh의 job
+# control 자기테스트 대상(sched_yield() 루프, SIGINT로 종료돼야
+# 정상). msh/echo/ls/cat과 같은 방식으로 procsrv가 자신의 컴파일
+# 시점 데이터로 직접 스폰한다.
+add_subdirectory(loop-test)

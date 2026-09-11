@@ -15,11 +15,15 @@
 // 없으면(자동화 환경, servers/login의 관례와 같다) 고정된
 // 자기테스트 명령줄 목록을 하나씩 실행한다.
 #include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <mc/procsrv_client.h>
 #include <mc/shell_fd_binding.h>
+#include <mc/syscall.h>
 
 #define MC_MAX_TOKENS 8
 #define MC_MAX_STAGES 4
@@ -267,6 +271,51 @@ static int run_pipeline(char* line) {
     return last_status;
 }
 
+// M55(musl-userland-porting.md §M55, ADR-226/227) — job control 최소
+// 자기테스트. "프로세스 그룹"의 실제 주체는 procsrv가 아니라 msh
+// 자신이다(ADR-227 배경 — procsrv는 fork_register된 자식의 진짜
+// 커널 handle을 원천적으로 모른다). `spawn_stage()`를 그대로
+// 재사용해 파이프/리다이렉션 없이 `loop-test` 하나만 fork+exec한 뒤,
+// 그 직후(spawn_stage()가 그 사이 다른 fork()를 하지 않으므로 여전히
+// 유효한) `mc_last_fork_child_thread_handle()`로 자식의 진짜 시그널
+// 가능 handle을 얻어 `mc_signal_send(SIGINT)`를 직접 부른다 — 실제
+// 종료는 ADR-226의 커널 쪽 기본 동작이 한다. `mc_shell_report_signaled()`
+// 로 procsrv에게도 알려야 `waitpid()`가 200,000회 폴링 예산을 다
+// 태우지 않고 곧바로 돌아온다(그 op이 exit_code=-SIGINT로 낙관적
+// 마킹한다, SYS_wait4의 wstatus 인코딩이 그 값을 하위 8비트로
+// 그대로 옮긴다 — WEXITSTATUS가 (unsigned char)(-SIGINT)와 일치하면
+// "시그널로 종료됨"으로 본다). 실제 PS/2 키보드 Ctrl-C 감지는 범위
+// 밖이라(OPEN-76) 여기서 그 이벤트를 직접 시뮬레이션한다.
+static int run_job_control_test(void) {
+    char* argv_target[] = {"loop-test", 0};
+    long pid = spawn_stage(argv_target, 0, 0, 0, 0, 0);
+
+    // execve()도 여느 syscall과 같은 자리(syscall 리턴 직전, ADR-211
+    // §결정3)에서 시그널을 확인한다 — SIGINT를 fork() 직후 곧바로
+    // 보내면 자식이 "/bin/loop-test"의 execve() 자체를 마치고
+    // 돌아오는 그 순간 바로 소비돼, loop-test의 main()이 단 한
+    // 줄도 실행되기 전에 죽어버린다(실제로 QEMU에서 겪었다 — "[msh]
+    // job control: child interrupted ok=1"은 나왔지만 "[loop-test]
+    // starting"이 로그에 전혀 없었다). 이 자기테스트의 목표는 "실행
+    // 중인" 자식을 끊는 것을 보이는 것이라, 자식이 실제로 몇 번
+    // 스케줄돼 자기 루프에 진입할 시간을 준 뒤에 신호를 보낸다.
+    for (int i = 0; i < 50; ++i) {
+        sched_yield();
+    }
+
+    unsigned int child_handle = (unsigned int)mc_last_fork_child_thread_handle();
+    mc_signal_send(child_handle, SIGINT);
+    mc_shell_report_signaled((unsigned int)pid, (unsigned int)SIGINT);
+
+    int wstatus = 0;
+    long waited = waitpid(pid, &wstatus, 0);
+    int interrupted = (waited == pid) && WIFEXITED(wstatus) &&
+                       (WEXITSTATUS(wstatus) == (unsigned char)(-SIGINT));
+    wr(interrupted ? "[msh] job control: child interrupted ok=1\n"
+                   : "[msh] job control: child interrupted ok=0\n");
+    return interrupted ? 0 : 1;
+}
+
 int main(void) {
     wr("[msh] no keyboard input, running self-test commands\n");
 
@@ -285,6 +334,14 @@ int main(void) {
             all_ok = 0;
         }
     }
+
+    // M55 — 이 단계 뒤에도 self-test 마커가 계속 정상적으로 찍힌다는
+    // 사실 자체가 "셸 자신은 살아남는다"는 목표의 증명이다(별도
+    // 확인 코드 불필요).
+    if (run_job_control_test() != 0) {
+        all_ok = 0;
+    }
+
     wr(all_ok ? "[msh] self-test done ok=1\n" : "[msh] self-test done ok=0\n");
     return all_ok ? 0 : 1;
 }

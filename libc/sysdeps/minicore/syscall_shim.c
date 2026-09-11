@@ -217,6 +217,10 @@ void mc_shell_bind_file_fd(int fd, unsigned int fs_handle, unsigned long long op
     g_std_redirect[fd].open_file_id = open_file_id;
 }
 
+unsigned int mc_shell_report_signaled(unsigned int target_pid, unsigned int signal_number) {
+    return mc_report_signaled(MC_PROCSRV_HANDLE, target_pid, mc_getpid_cached(), signal_number);
+}
+
 int mc_shell_query_file_fd(int fd, unsigned int* out_fs_handle,
                             unsigned long long* out_open_file_id) {
     if (fd < 3 || fd - 3 >= MC_MAX_OPEN_FILES || !g_open_files[fd - 3].in_use) {

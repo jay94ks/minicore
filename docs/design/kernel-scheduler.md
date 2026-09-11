@@ -1404,10 +1404,11 @@
 
 ## ADR-226. `SIG_DFL`의 실제 기본 동작(Term류는 프로세스 종료) — M55 job control의 선행 조건
 
-- **상태**: 확정 (2026-09-11, 계획 단계 — [musl-userland-porting.md](../plan/musl-userland-porting.md)
-  §M55 착수 전에 설계만 먼저 결정한다. 사용자가 M55를 바로 구현에
-  들어가지 말고 "OPEN 항목을 검토해 설계 계획부터 작성"하라고
-  지시해 이 ADR과 [ADR-227](security-model.md)이 나왔다)
+- **상태**: 확정, M55 실행 완료 (2026-09-11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M55. 사용자가 M55를 바로 구현에 들어가지 말고 "OPEN 항목을
+  검토해 설계 계획부터 작성"하라고 지시해 이 ADR과
+  [ADR-227](security-model.md)이 먼저 계획 단계로 나왔고, 이어서
+  같은 세션에서 실제로 구현·QEMU로 검증했다)
 - **배경**: ADR-211(M36)이 `SIG_DFL`(0)과 `SIG_IGN`(1)을 둘 다
   "무시"로 단순화해 뒀다 — `check_signal_delivery()`
   (`kernel/arch/x86_64/signal.cpp`)의 해당 분기 주석이 "진짜 기본
@@ -1438,13 +1439,15 @@
      "대기열에 갇힌 대상은 다시 깨우지 않으면 안 폐기된다"는
      OPEN-65의 기존 한계도 그대로 물려받는다, 새로 풀지 않는다).
      `SIGINT` 외 나머지 번호는 ADR-211 그대로 무시한다.
-  3. **exit code 관례**: `request_kill()`로 종료된 프로세스가
-     procsrv에 보고하는 exit code는 기존 `sys_process_kill` 경로가
-     이미 쓰는 값(현재 0, ADR-178)을 그대로 따른다 — 셸이
-     "Ctrl-C로 죽었다"를 구분해야 하는 요구사항(예: `$?` 128+시그널
-     같은 셸 관례)은 이 라운드 범위 밖(계획 문서가 검증 목표를
-     "자식만 종료됨을 확인"으로 좁혀 뒀다 — 종료 사유 코드화는
-     다루지 않는다).
+  3. **exit code 관례**: `request_kill()`로 실제 종료된 프로세스가
+     procsrv에 그 사실을 알리는 것은 이 커널 함수 자신이 아니라
+     [ADR-227](security-model.md)의 새 오퍼레이션
+     `MC_PROC_OP_REPORT_SIGNALED`(msh가 직접 호출)다 — 이 커널
+     경로는 procsrv와 전혀 통신하지 않는다(스레드가 조용히
+     `kill_requested`로 표시돼 다음에 스케줄될 차례에 폐기될
+     뿐이다, `sys_process_kill`과 정확히 같다). exit code
+     인코딩(음수=시그널 번호, `MC_PROC_OP_KILL`이 이미 쓰는 관례)은
+     ADR-227에 있다.
 - **범위 밖**: `sigprocmask`로 `SIGINT`를 막아 둔 프로세스(이
   라운드 자기테스트는 아무도 `SIGINT`를 막지 않는다), `SIGTERM`/
   `SIGQUIT`/`SIGHUP` 등 다른 Term류 시그널의 기본 동작(계획이
@@ -1452,6 +1455,23 @@
   필요해지면 이 ADR과 같은 방식으로 번호별로 추가), `SIGSTOP`/
   `SIGCONT`를 통한 정지·재개(완전한 job control, 계획이 이미 범위
   밖으로 명시).
+- **실행 중 발견**: `execve()`도 여느 syscall과 마찬가지로 그
+  리턴 직전에 시그널을 확인한다(ADR-211 §결정3, 이 결정이 새로
+  바꾼 건 없다 — 원래부터 그랬다). 그래서 msh가 자식을 `fork()`한
+  직후 곧바로 `SIGINT`를 보내면, 그 자식이 "/bin/loop-test"의
+  `execve()` 자체를 마치고 돌아오는 순간 바로 이 결정의 새 분기가
+  소비해 버려, `loop-test`의 `main()`이 단 한 줄도 실행되기 전에
+  죽는 경우가 실제로 나왔다(QEMU 로그에 `"[loop-test] starting"`이
+  전혀 없었다 — 자기테스트 자체는 "자식이 죽었다"는 것만 확인해서
+  겉보기엔 통과했지만, "실행 중인 자식을 끊는다"는 진짜 목표를
+  증명하지 못했다). 이건 이 ADR의 버그가 아니라 msh 쪽 타이밍
+  문제였다 — msh가 신호를 보내기 전에 `sched_yield()`를 여러 번
+  돌려 자식이 실제로 몇 차례 스케줄돼 자기 루프에 들어갈 시간을
+  준 뒤로 고쳤다(ADR-227 §결정4 참고). 커널이 스레드를 실제로
+  폐기했다는 것도 `[sched] thread killed (discarded before
+  scheduling)` 로그(M22/ADR-178부터 있던 기존 로그, `pick_next_alive()`)
+  로 직접 확인했다 — procsrv의 낙관적 북키핑(ADR-227 §결정3)과
+  독립적인 진짜 증거다.
 - **영향**: [open-items.md](open-items.md) **OPEN-75**로 "표준
   시그널 나머지 31개의 기본 동작은 여전히 미구현"이라는 남는 gap을
   등록한다(`SIGINT` 하나만 이 ADR로 해소).

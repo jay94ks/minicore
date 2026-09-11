@@ -45,6 +45,7 @@
 #include "ls_blob.h"
 #include "cat_blob.h"
 #include "msh_blob.h"
+#include "loop_test_blob.h"
 
 namespace kernsrv::procsrv {
 
@@ -279,6 +280,28 @@ void handle_proc_kill(const mc_message& in, mc_message& out) {
     do_syscall(MC_SYSCALL_PROCESS_KILL, target->thread_handle, 0, 0);
     target->state = process_state::zombie;
     target->exit_code = -9;  // SIGKILL 관례(신호 계층 자체는 M36).
+    out.regs[0] = MC_PROC_STATUS_OK;
+}
+
+// M55(musl-userland-porting.md §M55, ADR-227) — 호출자(msh)가 자기
+// 자식에게 이미 mc_signal_send()로 직접 시그널을 보낸 뒤 그 사실만
+// 알려준다. handle_proc_kill과 달리 MC_SYSCALL_PROCESS_KILL을 다시
+// 시도하지 않는다 — msh의 파이프라인 자식은 항상 thread_handle=0
+// 으로 등록돼 있어(procsrv가 fork_register된 자식을 가리키는 진짜
+// 커널 핸들을 원천적으로 못 갖는다, ADR-227 배경 참고) 그 syscall이
+// 어차피 무효 핸들로 조용히 no-op된다. caller_pid는 다른 오퍼레이션
+// (OP_WAIT 등)과 같은 자기주장 모델이다(ADR-201 §결정2).
+void handle_proc_report_signaled(const mc_message& in, mc_message& out) {
+    uint32_t target_pid = static_cast<uint32_t>(in.regs[0]);
+    uint32_t caller_pid = static_cast<uint32_t>(in.regs[1]);
+    uint32_t signal_number = static_cast<uint32_t>(in.regs[2]);
+    process_entry* target = find_process(target_pid);
+    if (target == nullptr || target->parent_pid != caller_pid) {
+        out.regs[0] = MC_PROC_STATUS_NOT_FOUND;
+        return;
+    }
+    target->state = process_state::zombie;
+    target->exit_code = -static_cast<int32_t>(signal_number);
     out.regs[0] = MC_PROC_STATUS_OK;
 }
 
@@ -1323,6 +1346,15 @@ void run_coreutils_seed() {
     debug_log(msg, cstr_len(msg));
 }
 
+// M55(musl-userland-porting.md §M55, ADR-227) — 위 coreutils와 같은
+// 이유(msh가 execve("/bin/loop-test", ...)로 열 수 있으려면 부팅
+// 시점에 이미 VFS에 있어야 한다).
+void run_loop_test_seed() {
+    bool ok = write_elf_to_vfs("/bin/loop-test", g_loop_test_elf, g_loop_test_elf_len);
+    const char* msg = ok ? "[procsrv] loop-test seed ok=1\n" : "[procsrv] loop-test seed ok=0\n";
+    debug_log(msg, cstr_len(msg));
+}
+
 // M16(fs-protocol.md v2, ADR-057/129) — vfs의 마운트 테이블을 거쳐
 // fat32/ext4 서버가 실제로 마운트한 이미지에서 파일을 열어 읽는다.
 // tools/make-fs-test-images.sh가 각 이미지의 루트에 hello.txt를
@@ -1819,6 +1851,7 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     run_vfs_roundtrip_test();
     run_exec_target_seed();
     run_coreutils_seed();
+    run_loop_test_seed();
 
     // M16 — tools/make-fs-test-images.sh가 심어 둔 내용과 정확히
     // 일치해야 한다(그 스크립트의 FAT32_CONTENT/EXT4_CONTENT).
@@ -1894,6 +1927,8 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
                 handle_proc_spawn_delegated_unit(in, out, caller_badge);
             } else if (in.label == MC_PROC_OP_ADOPT_ORPHANS) {
                 handle_proc_adopt_orphans(in, out);
+            } else if (in.label == MC_PROC_OP_REPORT_SIGNALED) {
+                handle_proc_report_signaled(in, out);
             }
         }
         do_syscall(MC_SYSCALL_IPC_REPLY, reinterpret_cast<uint64_t>(&out), 0, 0);

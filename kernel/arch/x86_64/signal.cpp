@@ -86,6 +86,17 @@ void signal_action(kern::object::thread& self, uint32_t signal_number,
 
 }  // namespace kern::arch::x86_64
 
+namespace {
+// M55(musl-userland-porting.md §M55, ADR-226) — SIGINT 하나만
+// "기본 동작(SIG_DFL)=진짜 종료"로 하드코딩한다. 나머지 31개
+// 시그널은 여전히 ADR-211의 "SIG_DFL=무시" 단순화 그대로다
+// (OPEN-75) — 이 라운드가 실제로 보낼 시그널이 SIGINT 하나뿐이라
+// 함께 확장할 이유가 없다. check_signal_delivery()가 kern::arch::
+// x86_64 네임스페이스 밖(extern "C")이라 위 익명 네임스페이스의
+// k_sigkill과 같은 자리에 둘 수 없어 여기 따로 둔다.
+constexpr uint32_t k_sigint = 2;
+}  // namespace
+
 extern "C" mc_signal_dispatch_result check_signal_delivery(uint64_t* saved_regs,
                                                             uint64_t dispatch_ret) {
     kern::object::thread* self = kern::sched::current();
@@ -102,11 +113,21 @@ extern "C" mc_signal_dispatch_result check_signal_delivery(uint64_t* saved_regs,
         self->pending_signals &= ~bit;  // 이 시그널은 소비한다(전달하든 버리든).
 
         uint64_t handler = self->sigactions[sig].handler;
+        if (handler == 0 && sig == k_sigint) {
+            // M55(ADR-226) — 핸들러를 등록하지 않은 SIGINT는 진짜로
+            // 이 스레드를 종료시킨다. sys_process_kill(ADR-178)이
+            // 이미 쓰는 것과 정확히 같은 비동기 종료 요청이다 —
+            // "대기열에 갇힌 대상은 다시 깨우지 않으면 안 폐기된다"
+            // 는 기존 한계(OPEN-65)도 그대로 물려받는다, 새로 풀지
+            // 않는다.
+            kern::sched::request_kill(*self);
+            continue;
+        }
         if (handler == 0 || handler == 1) {
-            // SIG_DFL(0)/SIG_IGN(1) — 이 라운드는 둘 다 "무시"로
-            // 단순화한다(진짜 기본 동작 — 대부분 프로세스 종료 —
-            // 는 ADR-186이 이미 범위 밖으로 남겼다). 다음 대기 중인
-            // 시그널이 있는지 계속 살펴본다.
+            // SIG_DFL(0, SIGINT 제외)/SIG_IGN(1) — 이 라운드는 둘 다
+            // "무시"로 단순화한다(진짜 기본 동작 — 대부분 프로세스
+            // 종료 — 는 ADR-186이 이미 범위 밖으로 남겼다). 다음
+            // 대기 중인 시그널이 있는지 계속 살펴본다.
             continue;
         }
 

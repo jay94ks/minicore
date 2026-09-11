@@ -187,3 +187,17 @@ uint32_t mc_spawn_delegated_unit(uint32_t procsrv_handle, uint64_t username_pack
     }
     return MC_PROC_STATUS_OK;
 }
+
+uint32_t mc_report_signaled(uint32_t procsrv_handle, uint32_t target_pid, uint32_t caller_pid,
+                             uint32_t signal_number) {
+    mc_message req;
+    mc_zero_bytes(&req, sizeof(req));
+    req.label = MC_PROC_OP_REPORT_SIGNALED;
+    req.regs[0] = target_pid;
+    req.regs[1] = caller_pid;
+    req.regs[2] = signal_number;
+    mc_message reply;
+    mc_zero_bytes(&reply, sizeof(reply));
+    mc_ipc_call(procsrv_handle, &req, &reply);
+    return (uint32_t)reply.regs[0];
+}

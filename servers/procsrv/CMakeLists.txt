@@ -81,6 +81,13 @@ minicore_embed_userland_elf(echo minicore_echo_elf)
 minicore_embed_userland_elf(ls minicore_ls_elf)
 minicore_embed_userland_elf(cat minicore_cat_elf)
 minicore_embed_userland_elf(msh minicore_msh_elf)
+# M55(musl-userland-porting.md §M55, ADR-227) — msh가 job control
+# 자기테스트로 execve("/bin/loop-test", ...)할 대상. echo/ls/cat과
+# 같은 이유로 VFS에 미리 심어 둔다. 함수의 name 인자는 그대로 C
+# 배열 심벌 이름(g_${name}_elf)이 되므로 하이픈 대신 밑줄을 쓴다
+# (디렉터리/VFS 경로 이름의 "loop-test"와는 별개 — bin2c.py가
+# 이름을 그대로 심벌로 옮겨서 하이픈은 유효한 C 식별자가 아니다).
+minicore_embed_userland_elf(loop_test minicore_loop_test_elf)
 
 add_executable(minicore_procsrv_elf
     main.cpp
@@ -89,7 +96,7 @@ add_executable(minicore_procsrv_elf
 add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob
                   minicore_procsrv_user_service_unit_blob
                   minicore_procsrv_echo_blob minicore_procsrv_ls_blob minicore_procsrv_cat_blob
-                  minicore_procsrv_msh_blob)
+                  minicore_procsrv_msh_blob minicore_procsrv_loop_test_blob)
 
 target_include_directories(minicore_procsrv_elf PRIVATE
     ${CMAKE_SOURCE_DIR}/libs/mc/include

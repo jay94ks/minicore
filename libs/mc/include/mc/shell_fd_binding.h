@@ -59,6 +59,14 @@ int mc_shell_query_file_fd(int fd, unsigned int* out_fs_handle,
 // mc_shell_query_file_fd와 같다.
 int mc_shell_query_pipe_fd(int fd, unsigned long long* out_pipe_id);
 
+// M55(musl-userland-porting.md §M55, ADR-227) — msh가 자기 자식에게
+// mc_signal_send()로 이미 시그널을 보낸 뒤 그 사실을 procsrv에게도
+// 알린다. syscall_shim.c 안에서 정의한다(그 파일의 MC_PROCSRV_HANDLE
+// 관례+mc_getpid_cached()에 직접 접근해야 해서 — msh는 procsrv의
+// 핸들 번호를 몰라도 된다, syscall_shim.c의 다른 모든 mc_* 래퍼와
+// 같은 원칙). 반환값은 mc/procsrv_protocol.h의 MC_PROC_STATUS_*.
+unsigned int mc_shell_report_signaled(unsigned int target_pid, unsigned int signal_number);
+
 // 오버플로 없이 부호 없는 정수를 10진수 문자열로 찍는다(musl의
 // snprintf/strtoull을 새로 링크하지 않으려고 직접 짠 최소 구현 —
 // msh가 넘기는 값은 전부 fd/handle/id처럼 작은 양수뿐이다).

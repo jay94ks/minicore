@@ -497,6 +497,31 @@
 #     읽는다는 것(안 넘기면 UB), extract_redirect가 `>` 토큰을 자른
 #     뒤 NUL 종료를 빠뜨려 파일명까지 스푸리어스 인자로 넘어가던
 #     것도 실행 중 발견해 고쳤다.
+#   M55 (musl-userland-porting.md §M55, ADR-226/227): job control
+#     최소 — msh가 자기 파이프라인 자식(loop-test, sched_yield()를
+#     아주 큰 횟수 반복하는 최소 프로그램)에게 mc_signal_send(SIGINT)
+#     를 직접 부른다("[msh] running: loop-test" 다음 "[loop-test]
+#     starting"까지는 정상 실행됐다는 뜻, 그 다음 "finished without
+#     interruption"이 **나오지 않아야** 한다 — 나왔다면 SIGINT가
+#     안 먹혔다는 뜻이라 이 어서션 목록에는 넣지 않는다, 부재는
+#     grep -qF로 못 잡는다). "[msh] job control: child interrupted
+#     ok=1"이 성공 확인, 그 다음 "[msh] self-test done ok=1"이 여전히
+#     찍힌다는 사실 자체가 "셸 자신은 살아남는다"는 목표의 증명이다.
+#     설계 검토(착수 전) 중 계획 원문("procsrv가 setpgid/getpgid로
+#     프로세스 그룹을 관리")이 이 프로젝트 아키텍처와 안 맞음을
+#     발견했다 — procsrv는 fork_register된 자식(msh의 모든 파이프라인
+#     단계)의 진짜 커널 handle을 원천적으로 모른다(항상 thread_handle
+#     =0으로 등록된다) — 그래서 "그룹"의 실제 주체를 msh 자신으로
+#     옮겼다(ADR-227). 실행 중 발견: SIGINT를 fork() 직후 곧바로
+#     보내면 자식이 execve() 자체를 마치자마자(그 syscall 리턴
+#     지점에서도 시그널을 확인한다, ADR-211 §결정3) 곧바로 죽어
+#     loop-test의 main()이 단 한 줄도 못 실행했다("[loop-test]
+#     starting"이 로그에 전혀 없었다) — msh가 신호를 보내기 전에
+#     `sched_yield()`를 50회 돌려 자식이 실제로 스케줄돼 자기 루프에
+#     들어갈 시간을 준 뒤에야 신호를 보내도록 고쳤다. 이 변경으로
+#     부팅 시점에 VFS(memfs)에 심는 파일이 하나(/bin/loop-test) 늘어
+#     msh의 출력 리다이렉션 자기테스트(M54)가 여는 파일의
+#     open_file_id가 36→37로 밀렸다(아래 어서션도 갱신).
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -748,10 +773,14 @@ declare -a EXPECTED=(
   "[msh] running: cat /bin/echo"
   "[msh] running: ls @pipefd 1 2"
   "[msh] running: cat @pipefd 0 1"
-  "[msh] running: echo @filefd 1 10 36 msh-redirect-test"
+  "[msh] running: echo @filefd 1 10 37 msh-redirect-test"
   "[msh] running: cat /tmp/msh-redirect.txt"
+  "[msh] running: loop-test"
+  "[loop-test] starting"
+  "[msh] job control: child interrupted ok=1"
   "[msh] self-test done ok=1"
   "[procsrv] coreutils seed ok=1"
+  "[procsrv] loop-test seed ok=1"
   "[procsrv] loader roundtrip ok=1"
   "[svcmgr] self_register ok=1"
   "[svcmgr] adopt_orphans ok=1"

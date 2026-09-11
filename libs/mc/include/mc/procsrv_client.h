@@ -114,6 +114,17 @@ uint8_t mc_poll_login_event(uint32_t procsrv_handle, uint32_t* out_uid,
 uint32_t mc_spawn_delegated_unit(uint32_t procsrv_handle, uint64_t username_packed,
                                   uint32_t* out_thread_handle);
 
+// M55(musl-userland-porting.md §M55, ADR-227) — 호출자(msh)가 자기
+// 자식(mc_fork()로 만든, mc_last_fork_child_thread_handle()이 준
+// 핸들)에게 이미 mc_signal_send()로 직접 시그널을 보낸 뒤 그 사실을
+// procsrv에게 알린다 — procsrv는 fork_register된 자식의 진짜 커널
+// handle을 원천적으로 모르므로(항상 thread_handle=0) 이 호출이
+// 없으면 mc_wait()가 그 자식이 죽었다는 걸 전혀 못 배워 재시도
+// 예산을 다 태운다. caller_pid는 mc_getpid()로 얻은 호출자 자신의
+// pid(다른 오퍼레이션과 같은 자기주장 모델, ADR-201 §결정2).
+uint32_t mc_report_signaled(uint32_t procsrv_handle, uint32_t target_pid, uint32_t caller_pid,
+                             uint32_t signal_number);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

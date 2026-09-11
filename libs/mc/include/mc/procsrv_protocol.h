@@ -87,4 +87,17 @@
 // @wire-op label=17 name=spawn_delegated_unit request="uint64 username_packed" reply="uint32 status; uint32 out_thread_handle"
 #define MC_PROC_OP_SPAWN_DELEGATED_UNIT 17u
 
+// M55(musl-userland-porting.md §M55, ADR-227) — 호출자(msh)가 자기
+// 자식에게 이미 mc_signal_send()로 시그널을 직접 보낸 뒤, 그 사실을
+// procsrv에게 알린다. procsrv는 fork_register된 자식의 thread_handle
+// 을 원천적으로 모른다(항상 0으로 등록된다, insert_process_entry
+// 호출부 참고) — 그래서 이 오퍼레이션은 MC_PROC_OP_KILL처럼 실제
+// 커널 종료를 다시 시도하지 않고, target->parent_pid==caller_pid
+// 소유권 검사만 거친 뒤 곧바로 zombie로 낙관적 마킹한다(MC_PROC_OP_KILL
+// 이 이미 exit_code=-9로 SIGKILL을 인코딩하는 것과 같은 "음수=시그널
+// 번호" 관례) — 이게 없으면 mc_wait()가 이 자식이 죽었다는 것을
+// 전혀 못 배워 200,000회 폴링 예산을 다 태운다.
+// @wire-op label=18 name=report_signaled request="uint32 target_pid; uint32 caller_pid; uint32 signal_number" reply="uint32 status"
+#define MC_PROC_OP_REPORT_SIGNALED 18u
+
 #endif  // MC_PROCSRV_PROTOCOL_H
