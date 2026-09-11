@@ -747,3 +747,31 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   [docs/done/musl-userland-porting-m56.md](docs/done/musl-userland-porting-m56.md)
   참고). **musl-userland-porting.md는 이제 M51~M56 전부 완료됐다**
   — 이 계획에는 더 이상 다음 마일스톤이 없다.
+- musl-userland-porting.md 완료 후, 사용자가 "부팅된 결과물을
+  보여줘" → "QEMU 창을 직접 보여줘" → "VGA 카드를 실제로 표준
+  텍스트 모드로 세팅하는 걸 개발해야지"로 요청을 구체화한, 어떤
+  계획에도 속하지 않는 별도 확인/구현 작업을 완료했다([ADR-230](docs/design/boot-and-drivers.md)
+  참고). 이 커널은 BIOS/GRUB 없이 `qboot.rom`으로 곧바로 부팅해
+  VGA 카드를 실제로 텍스트 모드로 세팅해 주는 존재가 원래부터
+  없었다 — M1부터 모든 검증이 디버그 시리얼 콘솔로만 이뤄져 이
+  사실이 한 번도 드러난 적이 없었다. `servers/drivers/console`에
+  실제 VGA BIOS의 INT 10h AH=00h AL=03h와 같은 레지스터 시퀀스
+  (Sequencer/CRTC/Graphics Controller/Attribute Controller)+DAC
+  팔레트 로드+VRAM 플레인 2 글꼴 비트맵 로드(`servers/login`이
+  실제로 쓰는 ~20글자만, OPEN-77 신규)를 직접 구현했다. 실행 중
+  발견한 진짜 버그 2건: (1) Sequencer의 Memory Mode 레지스터 변경은
+  Synchronous Reset(SEQ0)으로 감싸야 문자 생성기의 실제 읽기
+  경로에 반영된다는 것, (2) **가장 심각한 것**: `sys_map_phys`
+  (M14, ADR-007/038/039)가 프로세스당 고정 가상주소 슬롯 하나만
+  재사용한다는 것을 놓쳐, 폰트 로드용 두 번째 `sys_map_phys` 호출이
+  먼저 만든 VGA 텍스트 버퍼 매핑을 조용히 다른 물리주소로 덮어써
+  — 모드 세팅·DAC 팔레트·폰트 쓰기 각각은 전부 정상이었는데도 화면
+  전체가 계속 검은 채로 남는 원인 파악에 오래 걸렸다 — 폰트 로드를
+  먼저 끝내고 텍스트 버퍼 매핑을 마지막에 하도록 순서를 바꿔
+  해결했다. QEMU `screendump`(모니터 TCP 소켓, PPM→PNG는 stdlib만
+  쓴 자체 스크립트로 변환)로 "minicore login: Login successful"
+  글자가 실제 육안으로 읽히는 것을 확인했고, 스모크(147)+SMP(11)+
+  NUMA(24)+AVX(12)+net(6) 5개 회귀 스위트 전부 PASS(결과는
+  [docs/done/console-vga-text-mode.md](docs/done/console-vga-text-mode.md)
+  참고). 이 작업은 그 자체로 완결됐다 — 다음 방향(aarch64 이식 등)
+  은 사용자가 정하는 대로 새 계획을 남긴다.

@@ -2103,3 +2103,95 @@
     기존 self-test 계정)가 각각 로그인해 같은 이름의 per_account
     유닛이 계정마다 독립된 프로세스로(공유 없이) 뜨는 것을 QEMU로
     확인한다(계획 원문의 검증 목표 그대로).
+
+## ADR-230. 콘솔 드라이버: 실제 VGA 텍스트 모드 3 하드웨어 초기화 (마일스톤 외, 사용자 지시)
+
+- **상태**: 확정 (2026-09-11), 어떤 `docs/plan/*.md`에도 속하지 않는
+  별도 확인/구현 작업 — musl-userland-porting.md(M51~M56)가 전부
+  완료된 뒤, 사용자가 "부팅된 결과물을 보여줘" → "QEMU 창을 직접
+  보여줘" → "VGA 카드를 실제로 표준 텍스트 모드로 세팅하는 걸
+  개발해야지"로 요청을 구체화했다.
+- **배경**: 이 커널은 실제 BIOS(INT 10h)나 GRUB을 거치지 않고
+  `tools/run-qemu.sh`가 `-bios qboot.rom -kernel ...`(최소 PVH 스텁)
+  으로 곧바로 부팅한다(개발 반복용 지름길, ADR-114가 이미 "이 경로는
+  Multiboot2/UEFI 실경로를 대체하지 않는다"고 명시해 뒀다). M1부터
+  지금까지 모든 검증이 디버그 시리얼 콘솔로만 이뤄져, "VGA 카드
+  자신을 실제로 80x25 텍스트 모드로 세팅하는 존재가 원래부터 없다"
+  는 사실이 한 번도 드러난 적이 없었다 — `servers/drivers/console`
+  (M17, ADR-164)는 그냥 물리주소 0xB8000에 문자+속성 바이트를 쓰기만
+  하면 화면에 보인다고 가정했다. 실제로는 QEMU가
+  "Guest has not initialized the display (yet)."만 띄웠다.
+- **결정**:
+  1. `set_text_mode_3()`(`servers/drivers/console/main.cpp`)을 신설해
+     실제 VGA BIOS의 INT 10h AH=00h AL=03h("모드 3", 80x25 16색
+     텍스트)와 같은 레지스터 프로그래밍을(Miscellaneous Output→
+     Sequencer→CRTC→Graphics Controller→Attribute Controller 순서,
+     FreeVGA 문서 표준값) `sys_io_activate`(ps2 드라이버가 이미 쓰는
+     것과 같은 패턴, 포트 범위 0x3B0~0x3DF)로 재현한다.
+  2. Attribute Controller는 속성 니블을 DAC 팔레트 인덱스로만
+     매핑할 뿐 실제 RGB 값은 정의하지 않으므로, DAC(0x3C8/0x3C9)에
+     EGA/VGA 표준 16색 팔레트를 직접 로드한다 — 진짜 BIOS가 모드
+     세팅 때 항상 같이 해 주는 일을 대신한다.
+  3. 문자 셀의 실제 모양(글리프 비트맵)은 VRAM "플레인 2"(문자
+     생성기 플레인)에서 읽히는데, 이 커널에는 그 데이터를 넣어 줄
+     BIOS가 없어 전부 0(빈 칸)이었다 — `load_font()`를 신설해, 표준
+     "plane-2 직접 접근" 트릭(Sequencer를 Synchronous Reset(SEQ0=
+     0x01)으로 잠깐 멈춘 뒤 Map Mask(SEQ2)=0x04+Memory Mode(SEQ4)=
+     0x07로 바꾸고, Graphics Controller의 Read Map Select(GR4)=0x02/
+     Graphics Mode(GR5)=0x00/Miscellaneous(GR6)=0x00으로 0xA0000을
+     플레인 2에 선형 매핑, 쓴 뒤 SEQ0 리셋으로 감싸 원래 값으로
+     복원)으로 물리주소 0xA0000(`sys_map_phys`로 새로 매핑, 2페이지/
+     8KiB)에 폰트 데이터를 쓴다.
+  4. 이 화면에 실제로 나타나는 문자는 `servers/login`(콘솔에 직접
+     쓰는 유일한 소비자)이 쓰는 것뿐이라(`grep`으로 확인) 전체
+     256자 폰트 ROM을 재현하지 않고, 실제로 쓰이는 ~20글자(공백,
+     `:`, `a,c,d,e,f,g,i,l,m,n,o,r,s,t,u,w,P,L`)만 손으로 그린 8x8
+     비트맵으로 담는다(`k_glyphs[]`) — 표에 없는 문자는 화면에 빈
+     칸으로만 보인다. CRTC Maximum Scan Line(=16줄/문자, 기존
+     `set_text_mode_3()`의 k_crtc[9]=0x4F)에 맞춰 8행을 스캔라인
+     두 줄씩 복제해 16줄을 채운다.
+- **실행 중 발견**: `kernel/arch/x86_64/process_ops.cpp::map_phys`
+  (M14, ADR-007/038/039)는 **프로세스당 고정 가상주소 슬롯 하나**
+  (`k_mmio_user_vaddr`)만 재사용한다 — 새 `sys_map_phys` 호출마다
+  이전 매핑을 조용히 다른 물리주소로 덮어쓴다(같은 가상주소, 다른
+  물리 페이지). 처음엔 0xB8000(텍스트 버퍼)을 먼저 매핑해 `g_vga`에
+  저장해 두고 그 다음 0xA0000(폰트 로드 창)을 매핑했는데, 이 두
+  번째 호출이 `g_vga`가 가리키던 가상주소를 조용히 0xA0000 물리
+  페이지로 바꿔 버려 — 그 뒤 화면 지우기/로그인 텍스트 출력 등
+  `g_vga`를 통한 모든 쓰기가 실제 VGA 텍스트 버퍼(0xB8000)에는
+  전혀 도달하지 못했다. 모드 세팅(720x400 해상도로 확인)·DAC
+  팔레트(빨간 배경 테스트 바로 확인)·폰트 쓰기(같은 창에서의
+  자기 읽기-쓰기로 확인) 각각은 전부 정상이었는데도 최종 화면은
+  완전히 검은 채로 남아 원인 파악이 오래 걸렸다 — `sys_map_phys`
+  응답값(`out_virt_addr`)이 매번 같은 상수였다는 것을 커널 소스에서
+  직접 확인하고서야 알아냈다. 해결: 폰트 로드는 부팅 시 한 번만
+  쓰고 버리는 임시 매핑이므로, 반드시 먼저 끝내고 **그 다음**
+  0xB8000을 매핑하도록 순서를 바꿔, 마지막(=계속 살아있는 `g_vga`)
+  매핑이 항상 올바른 물리주소를 가리키게 했다. 이 슬롯 재사용
+  자체는 ADR-007/038/039가 이미 의도한 설계라 커널을 바꾸지 않았다
+  — 소비자가 "동시에 두 MMIO 매핑이 필요하면 순서를 지켜야 한다"는
+  제약을 지키는 쪽으로 해결했다.
+  또한 처음엔 SEQ0 Synchronous Reset 없이 SEQ4=0x06으로 시도했는데,
+  이 상태에서 "쓴 값을 같은 상태에서 즉시 읽어보면" 정확히
+  일치했음에도(자기 자신과의 자기 일치일 뿐 실제 렌더링과는
+  무관했다) 화면에는 전혀 반영되지 않았다 — FreeVGA류 표준 절차가
+  요구하는 SEQ0=0x01(리셋)→레지스터 변경→SEQ0=0x03(재시작) 감싸기
+  없이는 Memory Mode 변경이 문자 생성기의 실제 읽기 경로에 반영되지
+  않는다는 것을 뒤늦게 확인해 SEQ4=0x07+리셋 감싸기로 정정했다.
+- **범위 밖**: 폰트는 로그인 프롬프트가 실제로 쓰는 ~20글자만
+  담는다 — 콘솔에 쓰는 다른 소비자가 생기면(현재는 없다) 그 문자가
+  표에 없으면 빈 칸으로 보인다(OPEN-77로 추적). 그래픽 프레임버퍼
+  백엔드, 커서 깜빡임(하드웨어 텍스트 커서 자체는 그대로 켜져
+  있다), 다중 폰트 뱅크(밑줄/블링크 속성)는 ADR-164가 이미 범위
+  밖으로 남긴 그대로다.
+- **근거**: 사용자가 실제 QEMU 창으로 로그인 프롬프트를 직접 보길
+  원했고, "Guest has not initialized the display" placeholder의
+  근본 원인(BIOS 없음)을 우회가 아니라 정면으로(레지스터 직접
+  프로그래밍) 해결하라고 명시했다.
+- **영향**: `servers/drivers/console/main.cpp`(`set_text_mode_3`/
+  `load_font`/폰트 테이블 신설, `_start()`의 매핑 순서 정정). 검증은
+  QEMU `screendump`(모니터 TCP 소켓)로 캡처한 PPM을 PNG로 변환해
+  실제로 "minicore login: Login successful" 글자가 육안으로 읽히는
+  것을 확인했다([docs/done/console-vga-text-mode.md](../done/console-vga-text-mode.md)
+  참고) — 이후 스모크(147)+SMP(11)+NUMA(24)+AVX(12)+net(6) 5개
+  회귀 스위트 전부 PASS.

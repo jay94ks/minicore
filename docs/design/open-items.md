@@ -25,6 +25,7 @@
 | OPEN-73 | ADR-218(M43)의 `op_spawn_delegated_unit`은 ADR-193의 준비완료 핸드셰이크(`create_endpoint`)를 연결하지 않는다 — 그 프록시 핸들이 procsrv 자신의 handle_table에 생겨, svcmgr에게 넘기려면 `sys_reply`의 `handles[]` 위임(ADR-151)까지 얹어야 해서 이번 라운드 범위를 넘었다(exec_path처럼 명시적으로 미뤄 둔 것 중 하나). 계정별 인스턴스가 실제로 "준비됐다"는 신호가 필요해지는 시점에 재검토 | ADR-151, ADR-193, ADR-218 | [security-model.md](security-model.md) |
 | OPEN-75 | ADR-226(M55 설계)은 표준 시그널 32개 중 `SIGINT` 하나만 "기본 동작(SIG_DFL)=진짜 종료"로 하드코딩한다 — 나머지 31개(`SIGTERM`/`SIGQUIT`/`SIGHUP` 등)는 여전히 ADR-211(M36)의 "SIG_DFL=무시" 단순화 그대로다. 다른 Term류 시그널이 실제로 필요해지는 시점에 번호별로 같은 방식으로 확장 | ADR-211, ADR-226 | [kernel-scheduler.md](kernel-scheduler.md) |
 | OPEN-76 | ADR-227(M55 설계)의 "포그라운드 프로세스 그룹에 Ctrl-C를 SIGINT로 전달"은 msh 자신이 시뮬레이션하는 자기테스트 전용 경로다 — 실제 PS/2 키보드에서 Ctrl-C 스캔코드를 감지해 이 경로를 트리거하는 콘솔/ps2 드라이버 쪽 연결은 없다(콘솔 드라이버는 여전히 출력 전용, 키 입력을 읽는 유일한 소비자는 login뿐이고 procsrv/ps2 직접 IPC로 읽는다 — musl 프로그램의 read(0, ...)을 통하지 않는다, OPEN-64와 같은 "fd 진실 공급원 미완성" 뿌리). 진짜 대화형 세션(로그인 후 실제 키보드로 msh를 쓰는 것 자체)이 필요해지는 시점에 재검토 | ADR-227 | [security-model.md](security-model.md) |
+| OPEN-77 | ADR-230(콘솔 VGA 텍스트 모드 실제 초기화)이 VRAM 플레인 2에 로드하는 글꼴 비트맵(`k_glyphs[]`)은 `servers/login`이 실제로 쓰는 ~20글자(공백, `:`, `a,c,d,e,f,g,i,l,m,n,o,r,s,t,u,w,P,L`)만 담는다 — 표에 없는 문자(대문자 대부분, 숫자, 특수문자 등)는 화면에 빈 칸으로 보인다. 콘솔에 직접 쓰는 새 소비자가 생겨 더 넓은 문자 집합이 필요해지는 시점에 전체 ASCII(또는 그 이상) 비트맵 폰트로 확장 | ADR-230 | [boot-and-drivers.md](boot-and-drivers.md) |
 ## 해결된 항목 (이력)
 
 | ID | 내용 | 해결 ADR |
