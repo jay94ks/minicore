@@ -118,21 +118,58 @@ M29의 원래 목표가 실현된다"고 **동적 링킹을 전제**하고 있�
   거쳐 정확히 동작함을 self-test 명령 목록(로그인 자동화 경로,
   ADR-165 §결정4와 같은 관례)으로 QEMU에서 확인한다.
 
-## M55. Job control 최소 — 프로세스 그룹 + 포그라운드 시그널 라우팅 (스트레치)
+## M55. Job control 최소 — msh 자신이 자기 자식에게 SIGINT를 전달 (스트레치)
 
-- **구현**: `setpgid()`/`getpgid()`(`SYS_setpgid`/`SYS_getpgid`)와,
-  터미널의 Ctrl-C(`SIGINT`)가 셸 자신이 아니라 **현재 포그라운드
-  프로세스 그룹**에게 전달되는 최소한의 라우팅만 다룬다.
-- **주의(사전 진단)**: `tcsetpgrp`/`tcgetpgrp`(제어 터미널 개념
-  자체, OPEN-39가 이미 미결로 남겨 둔 "로그인 프롬프트/콘솔
-  드라이버 상세 설계"와 맞물림)와 `SIGTSTP`/`SIGCONT`(bg/fg
-  전환, Ctrl-Z)는 이 마일스톤 범위 밖이다 — **이 마일스톤이
-  착수되지 않거나 실패해도 M51~M54의 성과는 독립적으로 유효하다**
-  (BusyBox 자신은 job control 없이도 스크립트/파이프라인 용도로
-  충분히 쓸 수 있다) — 그래서 스트레치로 맨 뒤에 뒀다.
-- **목표**: 셸이 자식(예: 무한 루프 프로그램)을 포그라운드로 실행
-  중일 때 콘솔에서 Ctrl-C를 누르면 셸 자신은 살아남고 그 자식만
-  종료됨을 확인한다.
+- **설계가 원안을 좁혔다** — 착수 전 설계 검토([ADR-226](../design/kernel-scheduler.md)/
+  [ADR-227](../design/security-model.md), 2026-09-11, 사용자 지시로
+  OPEN 항목 검토 후 확정)에서 원안("`setpgid()`/`getpgid()`
+  (`SYS_setpgid`/`SYS_getpgid`)"으로 **procsrv**가 프로세스 그룹을
+  관리하고 포그라운드 그룹에 시그널을 라우팅한다)이 이 프로젝트의
+  기존 아키텍처와 안 맞는다는 것을 발견했다 — `servers/procsrv/
+  main.cpp`의 `process_entry.thread_handle`은 procsrv가 **직접**
+  스폰한 프로세스(msh 자신)에만 유효하고, `mc_fork()`로 등록된
+  자식(msh의 파이프라인 단계들)은 항상 `thread_handle=0`("모름")
+  이다 — procsrv는 애초에 msh의 자식에게 시그널을 보낼 방법이
+  없다. 그래서 이 계획은 **procsrv에 pgid/setpgid/getpgid를 전혀
+  추가하지 않는다** — "그룹"의 실제 주체는 msh 자신이다(자세한
+  근거는 ADR-227).
+- **구현**:
+  1. [ADR-226](../design/kernel-scheduler.md): 커널이 `SIGINT`
+     하나만 "핸들러 없으면 진짜로 종료"로 바꾼다(나머지 시그널은
+     ADR-211의 "SIG_DFL=무시" 그대로 — OPEN-75).
+  2. [ADR-227](../design/security-model.md): `userland/msh`가 매
+     파이프라인 단계를 `fork()`한 직후 그 자식의 thread handle
+     (`mc_last_fork_child_thread_handle()`, M36부터 이미 있다)을
+     배열로 들고 있는다 — 이게 "현재 포그라운드 그룹"이다. Ctrl-C가
+     눌렸다고 판단되면(이 라운드는 자기테스트 시뮬레이션, 아래
+     참고) 그 배열의 각 handle에 `mc_signal_send(handle, SIGINT)`
+     를 직접 부르고, 새 procsrv 오퍼레이션
+     `MC_PROC_OP_REPORT_SIGNALED`(label=18)로 그 사실을 procsrv에
+     알려(`target->state=zombie`, `exit_code=-2`) `mc_wait()`가
+     200,000회 폴링을 다 태우지 않고 바로 돌아오게 한다.
+  3. 새 최소 유저 프로그램 `userland/loop-test` — 시작 즉시
+     `"[loop-test] starting\n"`을 찍고 `sched_yield()`를 아주 큰
+     횟수 반복한다. 전부 마치면(=SIGINT가 실제로 안 먹혔다는 뜻)
+     `"[loop-test] finished without interruption\n"`을 찍는다 —
+     이 줄이 QEMU 로그에 나타나면 이 마일스톤은 실패다.
+  4. msh의 self-test에 전용 단계 하나를 추가한다 — `loop-test`를
+     fork+exec한 뒤 곧바로 위 2번 절차(신호 전송+report_signaled)
+     를 거쳐 wait하고, 그 다음 self-test 명령들이 계속 정상 실행됨
+     (=셸 자신은 살아남았다)을 확인한다.
+- **주의(사전 진단, ADR-227이 실행 중 확정)**: 진짜 PS/2 키보드에서
+  Ctrl-C 스캔코드를 감지해 이 경로를 트리거하는 것은 범위 밖이다
+  (콘솔 드라이버는 여전히 출력 전용, 키 입력을 읽는 유일한 소비자는
+  `login`뿐이고 그것도 musl 프로그램의 `read(0, ...)`을 거치지 않는다
+  — OPEN-64와 같은 뿌리, 신규 **OPEN-76**). 이 라운드는 msh 자신이
+  "Ctrl-C가 눌렸다"를 시뮬레이션한다(`login`의 "키보드 입력 없음"
+  self-test 관례와 같은 정신). `tcsetpgrp`/`tcgetpgrp`(제어 터미널
+  개념 자체, ADR-098이 이미 의도적으로 안 만들기로 한 것)와
+  `SIGTSTP`/`SIGCONT`(bg/fg 전환, Ctrl-Z)는 이 마일스톤 범위 밖이다
+  — **이 마일스톤이 착수되지 않거나 실패해도 M51~M54의 성과는
+  독립적으로 유효하다** — 그래서 스트레치로 맨 뒤에 뒀다.
+- **목표**: 셸이 자식(무한 루프 프로그램 `loop-test`)을 포그라운드로
+  실행 중일 때(자기테스트가 시뮬레이션하는) Ctrl-C가 오면 셸 자신은
+  살아남고 그 자식만 종료됨을 확인한다.
 
 ## 포함하지 않는 것 (이 계획 이후로 명시적으로 미룸)
 
@@ -145,8 +182,11 @@ M29의 원래 목표가 실현된다"고 **동적 링킹을 전제**하고 있�
   같다.
 - **완전한 job control**(`SIGTSTP`/`SIGCONT`를 통한 bg/fg 전환,
   제어 터미널 소유권 이양) — M55가 다루는 "포그라운드 시그널
-  라우팅"보다 훨씬 넓다. OPEN-39(로그인 프롬프트/콘솔 드라이버
-  상세 설계 미결)가 먼저 해소돼야 제대로 다룰 수 있다.
+  라우팅"보다 훨씬 넓다. OPEN-39는 이미 ADR-097/098로 해소돼
+  있었지만(로그인 프롬프트↔콘솔 연결 자체는 풀렸다), ADR-098이
+  "제어 터미널" 개념을 의도적으로 만들지 않기로 해 그 위에서만
+  성립하는 완전한 job control은 여전히 미해결이다 — 착수 전
+  설계 검토(ADR-227)가 이 진짜 gap을 **OPEN-76**으로 새로 등록했다.
 - **named pipe(FIFO)**, **소켓** — M51은 익명 파이프만.
 - **`dup_for_new_client` 완전한 fd 진실 공급원 프로토콜**(OPEN-64)
   — 여전히 su/sudo 경유 실행이 실제로 필요해지는 시점까지 미룬다.

@@ -1769,6 +1769,102 @@ ADR-011/023)만으로 표현한다.
     에서 실행되던 M52 때와 로그가 나오는 시점만 달라졌을 뿐 내용은
     동일하다.
 
+## ADR-227. M55 job control 최소: "프로세스 그룹"의 실제 주체는 procsrv가 아니라 msh 자신이다 — `setpgid`/`getpgid` 일반화는 하지 않는다
+
+- **상태**: 확정 (2026-09-11, 계획 단계 — [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M55 착수 전에 설계만 먼저 결정한다. [ADR-226](kernel-scheduler.md)과
+  짝이다 — 사용자가 M55를 곧바로 구현하지 말고 "OPEN 항목을 검토해
+  설계 계획부터 작성"하라고 지시해 나왔다)
+- **배경 — 계획 원문("`setpgid()`/`getpgid()`(`SYS_setpgid`/
+  `SYS_getpgid`)")이 이 프로젝트의 기존 아키텍처와 실제로 안 맞는
+  지점을 발견했다.** `servers/procsrv/main.cpp`의 `process_entry.
+  thread_handle`(M22/ADR-178)은 **procsrv 자신의 handle_table
+  인덱스**다 — `sys_process_spawn`으로 procsrv가 **직접** 스폰한
+  프로세스(예: msh 자신)만 이 값이 유효하고, `mc_fork()`(M23/M32,
+  `MC_PROC_OP_FORK_REGISTER`)로 등록된 자식(msh가 파이프라인
+  단계마다 만드는 `ls`/`cat`/`echo` 전부)은 **항상 `thread_handle=0`
+  ("모름")으로 등록된다**(`insert_process_entry` 호출부 주석,
+  `servers/procsrv/main.cpp:315/323` 참고) — fork()의 자식을 가리키는
+  진짜 커널 핸들은 오직 **fork를 호출한 부모(msh) 자신의
+  handle_table**에만 생긴다(ADR-211 §결정5, `mc_last_fork_child_
+  thread_handle()`). 즉 procsrv는 msh의 파이프라인 자식들에게
+  **시그널을 보낼 방법이 원천적으로 없다** — `MC_PROC_OP_KILL`이
+  이미 겪고 있는 것과 같은 뿌리(`target->thread_handle==0`이면
+  `MC_SYSCALL_PROCESS_KILL`이 무효 핸들로 조용히 no-op된다)다.
+  그래서 "procsrv가 `pgid`를 관리하고 포그라운드 그룹에 시그널을
+  뿌린다"는 원래 계획 문구를 그대로 구현해도 **실제로 아무 자식도
+  건드리지 못한다** — 이 ADR은 그 불일치를 미리 발견해 설계를
+  고친 것이다.
+- **결정 1 — "프로세스 그룹"은 procsrv의 전역 상태가 아니라 msh
+  자신의 로컬 상태다.** procsrv에 `pgid`/`setpgid`/`getpgid`/
+  "포그라운드 그룹" 개념을 전혀 추가하지 않는다(따라서 `SYS_setpgid`/
+  `SYS_getpgid`는 이 라운드에 구현하지 않는다 — 위 배경이 보여주듯
+  procsrv가 그 정보를 갖고 있어도 실제로 쓸 수가 없어 죽은
+  코드(YAGNI 위반)가 된다). 대신 **msh가 매 파이프라인마다 자신이
+  `fork()`한 각 단계의 thread handle(`mc_last_fork_child_thread_
+  handle()`, `spawn_stage()`가 매 `fork()` 직후 즉시 캡처)을 배열로
+  들고 있는 것 자체가 "현재 포그라운드 그룹"**이다 — 실제 유닉스에서
+  커널이 pgid로 하는 일(시그널을 그룹 전체에 뿌린다)을, 이 프로젝트
+  에선 애초에 그 그룹을 만든 프로세스(셸) 자신이 자기 손에 쥔
+  핸들로 직접 한다. `ADR-098`이 "제어 터미널 개념을 새로 만들지
+  않는다"고 결정한 것과 같은 정신 — 여기서도 procsrv/커널에 새
+  전역 개념을 얹지 않고, 이미 있는 "부모가 자식의 handle을 들고
+  있다"는 사실만으로 충분하다.
+- **결정 2 — SIGINT 전달 경로**: msh가 `mc_signal_send(child_handle,
+  SIGINT)`(M36, `k_right_can_signal`은 `fork_current()`가 이미
+  자동으로 부여해 둔다 — 새 권한 부여 로직 불필요)를 자신이 들고
+  있는 각 자식 handle에 직접 부른다. 실제 종료는
+  [ADR-226](kernel-scheduler.md)의 커널 쪽 기본 동작(핸들러 없는
+  `SIGINT`는 진짜로 종료)이 수행한다.
+- **결정 3 — `wait()`가 procsrv의 낙관적 북키핑에 의존한다(기존
+  `MC_PROC_OP_KILL`과 같은 관례)**: 시그널로 종료된 스레드는
+  스케줄러가 "다음에 뽑힐 차례가 됐을 때" 조용히 폐기할 뿐(ADR-178
+  §`request_kill`의 기존 동작, OPEN-65가 이미 지적해 둔 비동기성)
+  procsrv에게 스스로 알리지 않는다 — `mc_wait()`가 그 사실을 전혀
+  못 배워 200,000회 폴링 예산을 전부 소진할 위험이 있다(M54가 겪은
+  것과 같은 종류의 대가). 새 procsrv 오퍼레이션
+  `MC_PROC_OP_REPORT_SIGNALED`(label=18, `mc/procsrv_protocol.h`)를
+  추가한다 — `handle_proc_wait`와 같은 소유권 검사(`target->parent_pid
+  == caller_pid`)를 거친 뒤 `target->state = zombie`,
+  `target->exit_code = -(int32_t)signal_number`를 즉시 반영한다
+  (`MC_PROC_OP_KILL`이 이미 `exit_code=-9`로 SIGKILL을 인코딩하는
+  것과 같은 "음수 = 시그널 번호" 관례, `SIGINT`=2 → `exit_code=-2`).
+  msh는 `mc_signal_send()`를 부른 직후 이 오퍼레이션도 함께 호출한
+  뒤에 `waitpid()`한다. **이 낙관적 업데이트는 실제로 스레드가
+  죽었다는 커널 확인 없이 이뤄진다** — `MC_PROC_OP_KILL`이 이미
+  받아들인 것과 정확히 같은 수준의 정확도다(새로 낮추는 기준이
+  아니다).
+- **결정 4 — 자기테스트 설계**: 새 최소 유저 프로그램
+  `userland/loop-test`를 추가한다 — 시작 즉시 `"[loop-test]
+  starting\n"`을 찍고, `sched_yield()`(M36 `sys_yield`가 이미
+  노출)를 아주 큰 횟수(수백만 회) 반복하다가 전부 마치면
+  `"[loop-test] finished without interruption\n"`을 찍고 종료한다
+  (이 두 번째 줄이 로그에 나타나면 이 라운드의 목표가 실패했다는
+  뜻 — SIGINT가 실제로 안 먹혔다). `msh`는 별도 자기테스트 단계로
+  `loop-test`를 `fork()`+`exec()`한 뒤(일반 `run_pipeline()` 경로가
+  아니라 전용 함수 — 다른 파이프라인 단계는 "즉시 인터럽트"할
+  이유가 없다), 곧바로 결정 2/3의 절차(신호 전송+`report_signaled`)
+  를 거쳐 `waitpid()`하고, 그 다음 self-test 명령(`self_test[]`의
+  나머지)이 계속 정상적으로 실행됨을 확인한다 — "셸 자신은
+  살아남는다"는 목표는 이 뒤의 self-test들이 그대로 성공하는 것
+  자체로 증명된다. **`sched_yield()` 루프를 쓰는 이유**: signal
+  전달은 syscall 리턴 시점에만 확인된다(ADR-211 §결정3) — 아무
+  syscall도 안 하는 순수 계산 루프라면 `SIGINT`가 영원히 전달될
+  기회를 못 잡는다.
+- **범위 밖**: 실제 PS/2 키보드에서 Ctrl-C 스캔코드를 감지해 이
+  경로를 트리거하는 것(콘솔 드라이버는 여전히 출력 전용, 키 입력을
+  읽는 유일한 소비자는 `login`뿐이고 그것도 procsrv/ps2 직접 IPC로,
+  musl 프로그램의 `read(0, ...)`을 통하지 않는다 — OPEN-64가 이미
+  지적한 "fd 진실 공급원 미완성"과 같은 뿌리) — 이번 라운드는 msh
+  자신이 "Ctrl-C가 눌렸다"를 시뮬레이션한다(자기테스트 전용, `login`
+  의 "키보드 입력 없음" self-test 관례와 같은 정신). **신규
+  OPEN-76**으로 이 gap을 등록한다. `SIGTSTP`/`SIGCONT`(bg/fg
+  전환)·`tcsetpgrp`/`tcgetpgrp`(제어 터미널)는 계획 문서가 이미
+  범위 밖으로 명시했다.
+- **영향**: [open-items.md](open-items.md)에 **OPEN-76**(위)을
+  등록한다. `mc/procsrv_protocol.h`에 label=18 추가,
+  `mc/procsrv_client.h`/`.c`에 `mc_report_signaled()` 추가.
+
 ## 아직 정하지 않은 것
 
 - **OPEN-42**(범위 좁혀짐, ADR-194로 명령 단위는 해결): 위임의
