@@ -968,3 +968,85 @@
   없음, `>>`(append)나 `<`(입력 리다이렉션)는 다루지 않는다 — 계획
   문서가 이미 이렇게 좁혀 둔 범위다. job control(M55, 스트레치)은
   별도.
+
+## ADR-228. M56: coreutils(echo/ls/cat)+`[`을 별도 ELF 대신 msh 자신의 빌트인으로 흡수 — 파이프라인은 real musl pthread로 동시 실행
+
+- **상태**: 확정 (2026-09-11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M56, 사용자 지시 — M51~M55 완료 뒤 "독립된 ls/cat/`[` 같은 동작이
+  자체 바이너리를 갖지 않고 msh 하나의 ELF가 모두 처리하도록
+  바꾸자"는 명시적 재설계 요청)
+- **배경**: M52(ADR-221)가 이미 한 번 "BusyBox처럼 미리 만들어진
+  것을 가져오지 않고 직접 짠다"는 방향 전환을 겪었지만, 그때도
+  echo/ls/cat은 msh가 진짜 `fork()`+`execve()`로 띄우는 **별도
+  ELF**였다(ADR-221 §결정3이 "명령을 별도 실행파일로 fork+exec해야
+  검증 목표가 성립한다"고 명시적으로 요구했다). 이 ADR은 그 결정을
+  뒤집는다 — 사용자가 명시적으로 "ls/cat/`[`를 msh 하나의 ELF로
+  합치고, 전부 빌트인으로 만들자"고 지시했다. 대신 msh가 여전히
+  알지 못하는 명령(이 라운드엔 M55의 `loop-test` 하나뿐)은 계속
+  `fork()`+`execve()`로 외부 실행파일을 띄운다 — "명령을 실제
+  실행파일로 fork+exec할 수 있는 셸"이라는 일반성 자체는 잃지
+  않는다, 그 대상이 "항상 별도 ELF"에서 "모르는 명령에 대한
+  폴백"으로 좁아졌을 뿐이다.
+- **결정 1 — 대상과 범위**: `echo`/`ls`/`cat`(기존 3개 coreutils)에
+  새 빌트인 `[`(POSIX `test`의 아주 좁은 부분집합 — 문자열 비교
+  `=`/`!=`, 정수 비교 `-eq`/`-ne`/`-lt`/`-le`/`-gt`/`-ge`, 문자열
+  비어있음 `-z`/`-n`, 단항 문자열 진위)를 더해 총 4개를 msh
+  빌트인으로 흡수한다. `userland/echo`, `userland/ls`,
+  `userland/cat` 디렉터리는 저장소에서 완전히 삭제하고, `servers/
+  procsrv`의 VFS 시딩(`run_coreutils_seed()`, `/bin/echo`/`/bin/ls`/
+  `/bin/cat`을 부팅 시 미리 심던 것)도 함께 없앤다. `-f`/`-d`(파일
+  존재 검사)는 일부러 뺐다 — `mc_vfs_open()`이 없는 파일을 그
+  자리에서 새로 만들어 버리는 memfs의 open-always-creates 관례
+  (`open_common()`과 같은 근거) 때문에, 이 프로토콜로는 "존재하는지"
+  를 부작용 없이 물을 방법이 없다.
+- **결정 2 — 빌트인 파이프라인은 real musl pthread로 "병렬 실행을
+  흉내낸다"**(사용자의 표현 그대로). "ls | cat" 같은 파이프라인은
+  두 빌트인이 동시에 진행돼야(생산자가 쓰는 동안 소비자가 읽어야)
+  막히지 않는다 — 별도 프로세스 없이 이걸 해내려면 msh 자신이
+  진짜 동시 실행 단위를 여러 개 가져야 한다. M37이 이미 만든 실제
+  musl `pthread_create()`/`pthread_join()`을 그대로 쓴다(가짜
+  코루틴/수동 인터리빙을 새로 고안하지 않는다) — pthread는
+  `owner_space`/`handle_table`을 msh와 그대로 공유하므로(ADR-212)
+  빌트인 스레드가 msh 자신의 handle 2(vfs)/4(pipesrv)를 별도 설정
+  없이 바로 쓸 수 있다. 알려지지 않은 명령(외부 폴백)은 여전히
+  `fork()`+`execve()`(기존 `spawn_stage()`, 변경 없음)로 돈다 —
+  빌트인 스레드와 외부 프로세스를 파이프라인 안에서 자유롭게
+  섞을 수 있다(파이프 자체는 raw pipe_id일 뿐이라 어느 쪽이 만들고
+  어느 쪽이 쓰는지 무관하다).
+- **결정 3 — 빌트인은 M54의 fd 번호 계층(`g_pipe_fds[]`/
+  `g_std_redirect[]`, `mc/shell_fd_binding.h`)을 완전히 우회한다.**
+  여러 pthread가 **같은** `handle_table`/BSS를 공유하는 상황에서
+  "지금 이 스레드의 fd 1"이라는 전역 슬롯 하나로 서로 다른 파이프라인
+  단계를 표현하려 하면(각 스레드가 동시에 "나의 fd 1은 이거다"라고
+  주장) 충돌한다 — 그래서 빌트인은 raw `pipe_id`/`{fs_handle,
+  open_file_id}`를 함수 인자로 직접 받고, `mc_pipe_create/read/write/
+  close`(이미 공개된 `mc/pipesrv_client.h`)와 `mc_vfs_open`/
+  `mc_fs_read`/`mc_fs_write`(이미 공개된 `mc/vfs_client.h`/
+  `mc/fs_client.h`)를 직접 부른다 — fd 번호 배정이 아예 없으니
+  M54가 겪은 "fork()의 자동 dup" 문제도 이 경로엔 없다(빌트인은
+  fork()를 전혀 안 한다). `run_pipeline()`도 이제 `pipe()`(실제
+  fd 생성) 대신 `mc_pipe_create()`를 직접 불러 raw id를 얻는다 —
+  msh 자신의 fd 테이블에 파이프 항목을 전혀 등록하지 않으므로
+  `mc_shell_forget_pipe_fd()`/`mc_shell_query_pipe_fd()`(M54가
+  추가했던 것)는 이제 아무도 안 쓴다(외부 폴백 경로는 여전히
+  `mc_shell_bind_pipe_fd()`/`mc_shell_bind_file_fd()`/
+  `mc_shell_strip_bindings()`를 쓴다 — 자식이 exec 이후 자기 자신을
+  argv 토큰으로 바인딩하는 쪽은 안 바뀌었다).
+- **실행 중 발견 — 이 프로젝트 역사상 첫 진짜 커널 동시성 버그**:
+  빌트인을 pthread로 동시 실행하자마자 `cat`이 파일을 여는 건
+  항상 성공했는데 그 직후 읽기가 항상 0바이트를 돌려주는 버그를
+  만났다 — 원인은 msh 코드가 아니라 커널 자체였다(`kern::object::
+  handle_table`에 락이 전혀 없었던 것, IPC `pages[]` 매핑 슬롯이
+  프로세스당 고정된 자리 하나뿐이었던 것 — 둘 다 OPEN-68이 이미
+  경고해 둔 "다음에 실제로 여러 스레드가 IPC를 동시에 건드리면
+  재검토" 시나리오였다). 자세한 진단·수정은
+  [ADR-229](kernel-ipc-objects.md)에 적었다 — coreutils를 msh
+  빌트인으로 옮기는 것 자체는 이 ADR이 다루는 유저랜드 설계
+  변경이고, 그 과정에서 드러난 커널 버그의 근본 수정은 ADR-229의
+  몫으로 분리했다.
+- **영향**: `tools/smoke-test-x86_64.sh`의 msh 관련 어서션을 갱신
+  (echo/ls/cat/`[` 빌트인 로그 형식 변경 — 더 이상 "@pipefd"/
+  "@filefd" 토큰이 안 보인다, `cat test.txt`가 이제 `cat /bin/echo`
+  대신이다). QEMU 5개 회귀 스위트 전부 통과(결과는
+  [docs/done/musl-userland-porting-m56.md](../done/musl-userland-porting-m56.md)
+  참고).

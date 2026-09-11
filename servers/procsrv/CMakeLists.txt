@@ -52,14 +52,16 @@ add_custom_command(
 )
 add_custom_target(minicore_procsrv_user_service_unit_blob DEPENDS ${USER_SERVICE_UNIT_BLOB_H})
 
-# docs/plan/musl-userland-porting.md §M52(ADR-221) — 자체 작성 최소
-# coreutils(echo/ls/cat)를 위 musl-exec-target과 같은 이유로 procsrv
-# 자신의 컴파일 시점 데이터로 심는다 — userland/msh가 execve()로
-# "/bin/echo" 등을 열 수 있으려면 그 바이트가 부팅 시 VFS(memfs)에
-# 먼저 쓰여 있어야 한다. M53(ADR-224)부터는 msh 자신도 같은 방식으로
-# 심는다 — 다만 msh는 VFS에 쓰지 않는다(procsrv가 로그인 성공 시
+# docs/plan/musl-userland-porting.md §M52(ADR-221) — procsrv 자신의
+# 컴파일 시점 데이터로 다른 유저 ELF를 심는다(musl-exec-target과
+# 같은 이유). M53(ADR-224)부터 msh 자신도 이 방식으로 심는다 — 다만
+# msh는 VFS에 쓰지 않는다(procsrv가 로그인 성공 시
 # sys_process_spawn의 elf_data로 이 바이트를 직접 넘겨 스폰하므로,
-# 경로로 다시 열어 볼 필요가 없다).
+# 경로로 다시 열어 볼 필요가 없다). M56(ADR-228)부터 coreutils
+# (echo/ls/cat)는 더 이상 별도 ELF가 아니라 msh 자신의 빌트인이라
+# 이 함수로 심을 대상에서 빠졌다 — 남은 대상은 msh 자신과
+# loop-test(M55, job control 자기테스트가 진짜 별도 프로세스를
+# 죽여야 해서 여전히 빌트인이 아니다)뿐이다.
 function(minicore_embed_userland_elf name target)
     set(blob_h ${CMAKE_CURRENT_BINARY_DIR}/generated/${name}_blob.h)
     add_custom_command(
@@ -77,16 +79,13 @@ function(minicore_embed_userland_elf name target)
     add_custom_target(minicore_procsrv_${name}_blob DEPENDS ${blob_h})
 endfunction()
 
-minicore_embed_userland_elf(echo minicore_echo_elf)
-minicore_embed_userland_elf(ls minicore_ls_elf)
-minicore_embed_userland_elf(cat minicore_cat_elf)
 minicore_embed_userland_elf(msh minicore_msh_elf)
 # M55(musl-userland-porting.md §M55, ADR-227) — msh가 job control
-# 자기테스트로 execve("/bin/loop-test", ...)할 대상. echo/ls/cat과
-# 같은 이유로 VFS에 미리 심어 둔다. 함수의 name 인자는 그대로 C
-# 배열 심벌 이름(g_${name}_elf)이 되므로 하이픈 대신 밑줄을 쓴다
-# (디렉터리/VFS 경로 이름의 "loop-test"와는 별개 — bin2c.py가
-# 이름을 그대로 심벌로 옮겨서 하이픈은 유효한 C 식별자가 아니다).
+# 자기테스트로 execve("/bin/loop-test", ...)할 대상. 함수의 name
+# 인자는 그대로 C 배열 심벌 이름(g_${name}_elf)이 되므로 하이픈
+# 대신 밑줄을 쓴다(디렉터리/VFS 경로 이름의 "loop-test"와는 별개 —
+# bin2c.py가 이름을 그대로 심벌로 옮겨서 하이픈은 유효한 C 식별자가
+# 아니다).
 minicore_embed_userland_elf(loop_test minicore_loop_test_elf)
 
 add_executable(minicore_procsrv_elf
@@ -95,7 +94,6 @@ add_executable(minicore_procsrv_elf
 
 add_dependencies(minicore_procsrv_elf minicore_procsrv_musl_exec_target_blob
                   minicore_procsrv_user_service_unit_blob
-                  minicore_procsrv_echo_blob minicore_procsrv_ls_blob minicore_procsrv_cat_blob
                   minicore_procsrv_msh_blob minicore_procsrv_loop_test_blob)
 
 target_include_directories(minicore_procsrv_elf PRIVATE

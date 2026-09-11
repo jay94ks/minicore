@@ -384,6 +384,16 @@ kern::object::thread* create_user_thread(uint64_t entry_rip, uint64_t user_rsp, 
         return nullptr;
     }
     t->owner_space = space;
+    if (space != nullptr) {
+        // M56(musl-userland-porting.md §M56, ADR-229) — 이 함수는
+        // process_spawn(새 address_space, 첫 스레드)과
+        // sys_thread_create(기존 address_space를 공유하는 추가
+        // pthread) 양쪽에서 다 쓰인다 — 어느 경로든 "이 address_space
+        // 안에서 몇 번째 스레드인가"를 이 자리에서 한 번에 배정하면
+        // 두 호출부를 따로 손대지 않아도 된다(kernel/core/ipc/
+        // message.hpp 상단 주석 참고).
+        t->ipc_pages_slot_index = space->next_ipc_pages_slot.fetch_add_relaxed(1);
+    }
     t->handles = handles;
     t->user_entry_rip = entry_rip;
     t->user_rsp = user_rsp;
@@ -447,6 +457,13 @@ kern::object::thread* create_forked_thread(uint64_t saved_user_rip, uint64_t sav
         return nullptr;
     }
     t->owner_space = space;
+    if (space != nullptr) {
+        // M56(musl-userland-porting.md §M56, ADR-229) — create_user_thread
+        // 와 같은 이유. fork()의 자식은 항상 자기만의 새 address_space
+        // (COW로 복제된 것, 부모와 다른 객체)를 받으므로 이 스레드는
+        // 그 space의 유일한 스레드다 — fetch_add가 항상 0을 준다.
+        t->ipc_pages_slot_index = space->next_ipc_pages_slot.fetch_add_relaxed(1);
+    }
     t->handles = handles;
 
     // M12(ADR-141) — 이 스레드도 자기 전용 syscall 커널 스택이

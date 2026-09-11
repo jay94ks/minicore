@@ -27,18 +27,17 @@ add_subdirectory(user-service-delegate-test)
 add_subdirectory(pipe-test)
 
 # docs/plan/musl-userland-porting.md §M52(ADR-221) — BusyBox 도입을
-# 철회하고 이 저장소 안에서 직접 작성한 최소 셸(msh)+coreutils
-# (echo/ls/cat). msh가 이 셋을 별도 실행파일로 진짜 fork()+execve()
-# 한다(빌트인 아님). M53(ADR-224)부터 msh는 더 이상 부팅 시점
-# 서비스가 아니다 — servers/procsrv가 로그인 성공 시 자신의 컴파일
-# 시점 데이터(bin2c로 심은 바이트)로 직접 스폰한다.
-add_subdirectory(echo)
-add_subdirectory(ls)
-add_subdirectory(cat)
+# 철회하고 이 저장소 안에서 직접 작성한 최소 셸(msh). M53(ADR-224)
+# 부터 msh는 더 이상 부팅 시점 서비스가 아니다 — servers/procsrv가
+# 로그인 성공 시 자신의 컴파일 시점 데이터(bin2c로 심은 바이트)로
+# 직접 스폰한다. M56(ADR-228)부터 coreutils(echo/ls/cat)+`[`는 더
+# 이상 별도 실행파일이 아니라 msh 자신의 빌트인이다 — userland/echo,
+# userland/ls, userland/cat은 이제 이 저장소에 없다.
 add_subdirectory(msh)
 
 # docs/plan/musl-userland-porting.md §M55(ADR-227) — msh의 job
 # control 자기테스트 대상(sched_yield() 루프, SIGINT로 종료돼야
-# 정상). msh/echo/ls/cat과 같은 방식으로 procsrv가 자신의 컴파일
-# 시점 데이터로 직접 스폰한다.
+# 정상). msh와 같은 방식으로 procsrv가 자신의 컴파일 시점 데이터로
+# 직접 스폰한다(빌트인이 아니다 — 진짜 별도 프로세스여야 SIGINT로
+# 죽는 것을 증명할 수 있다).
 add_subdirectory(loop-test)

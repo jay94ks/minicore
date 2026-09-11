@@ -608,6 +608,12 @@ process_spawn_error exec_current(const uint8_t* elf_data, uint64_t elf_size,
     // 이미지 교체가 실제로 동작한다"만 보이면 충분하고, 회수는 이후
     // 마일스톤이다.
     self->owner_space = built.space;
+    // M56(musl-userland-porting.md §M56, ADR-229) — 이 스레드는 이제
+    // 완전히 새로운 address_space에 속한다(옛 슬롯 번호는 옛
+    // address_space 기준이라 무의미해졌다) — 새 space의 카운터에서
+    // 다시 하나 받는다(항상 0 — execve()가 이 스레드를 그 space의
+    // 유일한 스레드로 만든다).
+    self->ipc_pages_slot_index = built.space->next_ipc_pages_slot.fetch_add_relaxed(1);
 
     // 지금 이 스레드로 CR3를 직접 전환한다 — 다음 kern::sched::yield/block
     // 없이 곧바로 새 이미지로 뛰어들 것이므로, 스케줄러의 일반

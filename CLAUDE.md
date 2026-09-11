@@ -709,5 +709,41 @@ minicore — **AI 네이티브 마이크로커널**. 이 저장소에서 작업�
   `tools/smoke-test-x86_64.sh`에 M55 어서션 추가, 스모크(147)+
   SMP(11)+NUMA(24)+AVX(12)+net(6) 5개 회귀 스위트 전부 PASS(결과는
   [docs/done/musl-userland-porting-m55.md](docs/done/musl-userland-porting-m55.md)
-  참고). **musl-userland-porting.md는 이제 M51~M55 전부 완료됐다**
+  참고).
+  **M56(완료)**([ADR-228](docs/design/foundations.md)/
+  [ADR-229](docs/design/kernel-ipc-objects.md) 참고, M51~M55 완료 후
+  사용자 지시로 추가): "독립된 ls/cat/`[` 같은 동작이 자체 바이너리를
+  갖지 않고 msh 하나의 ELF가 모두 처리하도록 바꾸자"는 지시로
+  ADR-221(M52)의 "명령은 항상 별도 ELF로 fork+exec" 원칙을
+  뒤집었다 — `userland/echo`/`userland/ls`/`userland/cat`을 완전히
+  삭제하고 그 로직을 msh 자신의 빌트인 함수로 옮겼다. 새 빌트인
+  `[`(POSIX test의 아주 좁은 부분집합)도 추가했다(사용자가 "지금
+  같이 추가"를 선택). 파이프라인의 여러 빌트인이 동시에 진행돼야
+  하므로("ls | cat") msh가 real musl pthread(M37,
+  `pthread_create`/`pthread_join`)로 "내부적인 병렬 실행"을
+  구현했다 — pthread는 handle_table/owner_space를 공유하므로
+  (ADR-212) 빌트인은 msh 자신의 vfs/pipesrv handle을 그대로 쓴다.
+  여러 pthread가 같은 handle_table/BSS를 공유하는 상황에서 M54의
+  fd 번호 계층("지금 이 스레드의 fd 1")을 그대로 쓰면 동시에 도는
+  두 빌트인이 충돌하므로, 빌트인은 그 계층을 완전히 우회해 raw
+  pipe_id/{fs_handle, open_file_id}를 함수 인자로 직접 받는다.
+  알려지지 않은 명령(`loop-test`뿐)은 여전히 기존 fork+exec
+  경로로 떨어진다 — 셸의 일반성은 유지된다. **실행 중 이 프로젝트
+  역사상 첫 진짜 커널 동시성 버그를 발견했다** — `cat` 빌트인이
+  파일을 여는 건 항상 성공했는데 그 직후 읽기가 항상 0바이트를
+  돌려줬다. 원인은 (1) `kern::object::handle_table`에 락이 전혀
+  없어(OPEN-68이 M11부터 지적해 둔 것) `pthread_create()`가 만드는
+  "새 스레드 소유 핸들"과 그 새 스레드 자신의 IPC 응답 처리가 다른
+  코어에서 동시에 같은 handle_table 슬롯을 두고 경합한 것, (2) IPC
+  `pages[]` 매핑 슬롯(kernel-memory.md ADR-160 슬롯 4)이 프로세스당
+  고정된 자리 하나뿐이라 두 pthread가 동시에 받는 서로 다른 응답이
+  같은 물리 슬롯에 겹친 것 — 둘 다였다. `handle_table`의 모든
+  변경/조회 진입점을 전역 스핀락으로 감싸고, IPC 매핑 슬롯을
+  스레드별 부분 슬롯(16KiB×최대 64스레드=슬롯 4의 1MiB 예산과
+  정확히 일치)으로 나눠 해결했다 — OPEN-68을 해소한다.
+  `tools/smoke-test-x86_64.sh`의 msh 관련 어서션을 갱신, 스모크
+  (147)+SMP(11)+NUMA(24)+AVX(12)+net(6) 5개 회귀 스위트 전부
+  PASS(결과는
+  [docs/done/musl-userland-porting-m56.md](docs/done/musl-userland-porting-m56.md)
+  참고). **musl-userland-porting.md는 이제 M51~M56 전부 완료됐다**
   — 이 계획에는 더 이상 다음 마일스톤이 없다.

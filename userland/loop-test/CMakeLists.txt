@@ -1,6 +1,7 @@
 # docs/plan/musl-userland-porting.md §M55 (ADR-227) — msh의 job
-# control 자기테스트 대상. userland/echo/CMakeLists.txt와 완전히
-# 같은 설정(진짜 musl 프로그램).
+# control 자기테스트 대상. userland/msh/CMakeLists.txt와 같은 설정
+# (진짜 musl 프로그램) — coreutils(M56/ADR-228부터 msh 빌트인이라
+# 더 이상 이 저장소에 없다)가 전에 쓰던 것과 같은 패턴이었다.
 if(NOT MINICORE_ARCH STREQUAL "x86_64")
   add_library(minicore_loop_test INTERFACE)
   return()

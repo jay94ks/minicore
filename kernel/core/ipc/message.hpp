@@ -23,7 +23,27 @@ inline constexpr size_t k_max_handle_transfers = 2;
 // 슬롯. k_max_page_descriptors(4)페이지 예산 — 슬롯당 정확히 1페이지
 // (endpoint.cpp의 deliver_message가 강제)라 인덱스 i의 페이지는 항상
 // 여기서 i*4096만큼 떨어진 자리에 매핑된다.
+//
+// M56(musl-userland-porting.md §M56, ADR-229) 실행 중 발견 — 위 설명은
+// "이 프로세스에 스레드가 하나뿐"이라는 M7~M55의 전제를 깔고 있었다.
+// M37의 pthread는 owner_space(따라서 이 고정 가상주소도)를 그대로
+// 공유하는데(ADR-212), 두 pthread가 동시에 각자 다른 IPC 응답으로
+// pages[]를 받으면 **둘 다 정확히 같은 물리주소**(이 상수 자체가
+// 스레드 구분이 없다)로 매핑을 시도해 서로의 응답 페이지를 덮어썼다
+// — msh의 빌트인 cat이 open()엔 성공했는데 그 직후 read()가 항상
+// 0바이트를 돌려주는 것으로 처음 드러났다(다른 pthread의 응답
+// 매핑이 먼저 도착해 있다가 cat 자신의 응답이 오기 전에 이미
+// 지워졌거나, 반대로 cat의 매핑이 다른 스레드 것으로 덮어써졌다).
+// 그래서 이 슬롯을 **스레드별로** 나눈다 — 슬롯 4 전체 예산이
+// 1MiB(kernel-memory.md ADR-160)인데 스레드 하나가 실제로 쓰는
+// 건 k_max_page_descriptors(4)페이지(16KiB)뿐이라, 그 안에 최대
+// k_max_ipc_mapped_pages_threads(64)개의 독립된 스레드별 부분 슬롯을
+// 그대로 채워 넣을 수 있다(64 * 16KiB = 1MiB, 슬롯 4 예산과 정확히
+// 맞아떨어진다 — 새 최상위 슬롯 번호가 필요 없다).
 inline constexpr uint64_t k_ipc_mapped_pages_user_vaddr = 0x0000700000400000ull;
+inline constexpr uint32_t k_max_ipc_mapped_pages_threads = 64;
+inline constexpr uint64_t k_ipc_mapped_pages_thread_slot_bytes =
+    static_cast<uint64_t>(k_max_page_descriptors) * 4096ull;
 
 enum class transfer_mode : uint8_t {
     copy = 0,  // 기본값(ADR-015) — M7이 구현하는 유일한 모드.

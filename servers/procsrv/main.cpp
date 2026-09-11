@@ -41,9 +41,6 @@
 
 #include "musl_exec_target_blob.h"
 #include "user_service_unit_blob.h"
-#include "echo_blob.h"
-#include "ls_blob.h"
-#include "cat_blob.h"
 #include "msh_blob.h"
 #include "loop_test_blob.h"
 
@@ -1333,22 +1330,11 @@ void run_exec_target_seed() {
     debug_log(msg, cstr_len(msg));
 }
 
-// docs/plan/musl-userland-porting.md §M52(ADR-221) — 자체 작성 최소
-// coreutils(echo/ls/cat)를 위와 같은 이유로 VFS에 미리 써 둔다 —
-// userland/msh가 execve("/bin/echo", ...)류로 열 수 있으려면 그
-// 경로가 부팅 시 이미 준비돼 있어야 한다.
-void run_coreutils_seed() {
-    bool echo_ok = write_elf_to_vfs("/bin/echo", g_echo_elf, g_echo_elf_len);
-    bool ls_ok = write_elf_to_vfs("/bin/ls", g_ls_elf, g_ls_elf_len);
-    bool cat_ok = write_elf_to_vfs("/bin/cat", g_cat_elf, g_cat_elf_len);
-    const char* msg = (echo_ok && ls_ok && cat_ok) ? "[procsrv] coreutils seed ok=1\n"
-                                                     : "[procsrv] coreutils seed ok=0\n";
-    debug_log(msg, cstr_len(msg));
-}
-
-// M55(musl-userland-porting.md §M55, ADR-227) — 위 coreutils와 같은
-// 이유(msh가 execve("/bin/loop-test", ...)로 열 수 있으려면 부팅
-// 시점에 이미 VFS에 있어야 한다).
+// M55(musl-userland-porting.md §M55, ADR-227) — 위 musl-exec-target과
+// 같은 이유로 VFS에 미리 써 둔다 — msh가 job control 자기테스트로
+// execve("/bin/loop-test", ...)할 수 있으려면 부팅 시점에 이미
+// VFS에 있어야 한다(M56/ADR-228부터 coreutils는 빌트인이 돼 이
+// 자리에 남는 유일한 대상이다).
 void run_loop_test_seed() {
     bool ok = write_elf_to_vfs("/bin/loop-test", g_loop_test_elf, g_loop_test_elf_len);
     const char* msg = ok ? "[procsrv] loop-test seed ok=1\n" : "[procsrv] loop-test seed ok=0\n";
@@ -1850,7 +1836,6 @@ extern "C" [[noreturn]] void _start(const void* argv_or_null) {
     // 확인한다.
     run_vfs_roundtrip_test();
     run_exec_target_seed();
-    run_coreutils_seed();
     run_loop_test_seed();
 
     // M16 — tools/make-fs-test-images.sh가 심어 둔 내용과 정확히

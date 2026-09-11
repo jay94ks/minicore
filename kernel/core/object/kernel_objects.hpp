@@ -170,6 +170,17 @@ struct thread {
     uint32_t ipc_mapped_page_count = 0;
     uint64_t ipc_mapped_frames[4] = {};
 
+    // M56(musl-userland-porting.md §M56, ADR-229) — 위 고정 슬롯이
+    // "이 프로세스의 유일한 스레드"를 전제해 pthread(같은 owner_space
+    // 를 공유, ADR-212) 두 개가 동시에 IPC 응답을 받으면 서로의 매핑을
+    // 덮어썼다(kernel/core/ipc/message.hpp 상단 주석 참고). 이 스레드가
+    // owner_space 안에서 몇 번째로 만들어졌는지(process_spawn/
+    // fork_current/thread_create가 owner_space::next_ipc_pages_slot에서
+    // 하나씩 뽑아 채운다) — deliver_message가 이 값으로 자기만의
+    // 부분 슬롯을 계산해, 같은 owner_space를 공유하는 다른 스레드와
+    // 절대 겹치지 않는다.
+    uint32_t ipc_pages_slot_index = 0;
+
     // M28(real-libc-syscall-layer.md §M28, ADR-183) — sys_arch_prctl_set_fs가
     // 채우는 이 스레드의 IA32_FS_BASE 값(기본 0 = 미설정). musl의
     // __init_tp가 TLS/errno 접근 전제조건으로 무조건 요구한다(tss.hpp::
@@ -317,6 +328,15 @@ struct address_space {
     // 있어 이번에 새로 만들지 않는다).
     spinlock futex_lock;
     intrusive_list<thread, &thread::futex_wait_hook> futex_waiters;
+
+    // M56(musl-userland-porting.md §M56, ADR-229) — 이 address_space를
+    // 공유하는 스레드마다 IPC pages[] 매핑용 부분 슬롯을 하나씩 내주는
+    // 카운터(thread::ipc_pages_slot_index, kernel/core/ipc/message.hpp
+    // 상단 주석 참고). fetch_add 하나로 충분하다 — 슬롯은 handle_table
+    // 슬롯(objects.md §5)과 같은 이유로 절대 반납/재사용하지 않는다,
+    // 그래서 락 없는 원자적 증가만으로 스레드 간 경합 없이 유일한
+    // 값을 나눠줄 수 있다.
+    atomic<uint32_t> next_ipc_pages_slot{0};
 };
 
 struct endpoint {

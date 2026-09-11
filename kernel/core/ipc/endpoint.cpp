@@ -129,8 +129,14 @@ void release_previous_ipc_mapping(kern::object::thread* t) {
     if (t->ipc_mapped_page_count == 0) {
         return;
     }
+    // M56(ADR-229) — t 자신의 스레드별 부분 슬롯(message.hpp 상단
+    // 주석 참고)에서 언매핑한다. 이 값은 이 스레드가 매핑할 때 썼던
+    // 것과 항상 같다(thread::ipc_pages_slot_index는 생성 이후 절대
+    // 바뀌지 않는다).
+    uint64_t thread_base =
+        k_ipc_mapped_pages_user_vaddr + t->ipc_pages_slot_index * k_ipc_mapped_pages_thread_slot_bytes;
     for (uint32_t i = 0; i < t->ipc_mapped_page_count; ++i) {
-        uint64_t vaddr = k_ipc_mapped_pages_user_vaddr + i * kern::mm::k_page_size;
+        uint64_t vaddr = thread_base + i * kern::mm::k_page_size;
         (void)arch_unmap_ipc_page(t->owner_space->page_table_root, vaddr);
         kern::mm::frame_release(t->ipc_mapped_frames[i]);
     }
@@ -220,7 +226,13 @@ result<void, ipc_error> deliver_message(uint64_t src_vaddr, kern::object::addres
             return result<void, ipc_error>::err(ipc_error::page_not_mapped);
         }
         kern::mm::frame_add_ref(phys);
-        uint64_t slot_vaddr = k_ipc_mapped_pages_user_vaddr + i * kern::mm::k_page_size;
+        // M56(ADR-229) — dst_thread 자신의 부분 슬롯에 매핑한다(고정
+        // 슬롯 하나를 이 owner_space의 모든 스레드가 공유하던 옛
+        // 계산은, pthread 두 개가 동시에 서로 다른 IPC 응답을 받으면
+        // 서로의 매핑을 지워버렸다 — message.hpp 상단 주석 참고).
+        uint64_t slot_vaddr = k_ipc_mapped_pages_user_vaddr +
+                               dst_thread->ipc_pages_slot_index * k_ipc_mapped_pages_thread_slot_bytes +
+                               i * kern::mm::k_page_size;
         if (!arch_map_ipc_page_readonly(dst_space->page_table_root, slot_vaddr, phys)) {
             kern::mm::frame_release(phys);
             return result<void, ipc_error>::err(ipc_error::page_not_mapped);

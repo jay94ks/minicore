@@ -604,3 +604,97 @@
   전체와 기존 M32 musl fork/exec 자기테스트가 동시에 실행돼도 둘 다
   올바른 내용을 읽음을 확인(`[msh] self-test done ok=1`,
   `[procsrv] loader roundtrip ok=1`), QEMU 5개 회귀 스위트 전부 통과.
+
+## ADR-229. M56 실행 중 발견: `handle_table`이 진짜 락 없이 여러 코어에서 동시 변경됐고, IPC `pages[]` 매핑 슬롯이 프로세스당 하나뿐이라 pthread 두 개가 서로의 응답을 덮어썼다 — OPEN-68 해소
+
+- **상태**: 확정 (2026-09-11, [musl-userland-porting.md](../plan/musl-userland-porting.md)
+  §M56 실행 중 발견. [ADR-228](foundations.md)이 만든 "빌트인
+  coreutils를 pthread로 동시 실행"이 이 저장소 역사상 **처음으로**
+  "한 프로세스의 여러 스레드가 동시에 서로 다른 IPC 왕복(파일 열기/
+  읽기)을 실제로 겪는" 시나리오를 만들면서 드러났다 — OPEN-68이
+  M11부터, 그리고 M34/M37이 각각 다시 "이번 자기테스트는 이 경로를
+  안 건드려 여전히 미검증"이라고 명시적으로 남겨 뒀던 gap이다.
+- **증상**: msh의 빌트인 `cat`이 파일을 여는 것(`mc_vfs_open`)까지는
+  항상 성공했는데, 그 직후의 읽기(`mc_fs_read`)가 항상 0바이트
+  (EOF처럼 보이는 값)를 돌려줬다 — 파이프라인의 두 번째 빌트인
+  호출부터 매번 재현됐고, 단일 명령(파이프 없음)에도 나타났다
+  (msh의 메인 스레드가 `pthread_create()` 안에서 하는 handle_table
+  작업과, 막 만들어진 pthread 자신의 IPC handle_table 작업이 서로
+  다른 코어에서 겹칠 수 있어서다 — 반드시 두 빌트인이 파이프라인
+  으로 이어져 있어야 하는 게 아니었다).
+- **원인 1 — `kern::object::handle_table`에 락이 전혀 없다**(OPEN-68이
+  이미 정확히 지적해 둔 것). `allocate_slot()`의 "빈 슬롯을 찾아서
+  쓴다"는 읽고-나서-쓰는 비원자적 연산이라, 두 코어가 동시에
+  `create_owner`/`create_proxy`를 호출하면(예: 메인 스레드가
+  `pthread_create()`로 "새 스레드를 가리키는 소유 핸들"을 만드는
+  동안, 그 새 스레드가 다른 코어에서 이미 스케줄돼 자기 몫의
+  `mc_vfs_open()` 응답으로 받은 `handles[]` 위임을 처리하는 경우 —
+  ADR-212가 만든 "pthread는 handle_table을 클론하지 않고 공유한다"
+  가 바로 이 공유 지점을 만든다) 같은 "빈" 슬롯을 골라 하나가
+  다른 하나를 조용히 덮어쓸 수 있다.
+- **원인 2 — IPC `pages[]` 매핑 슬롯(ADR-159/161)이 프로세스 하나당
+  고정된 자리 하나뿐이다.** `kern::ipc::k_ipc_mapped_pages_user_vaddr`
+  는 이 owner_space에 스레드가 몇 개든 항상 같은 가상주소를 가리켰다
+  — 두 pthread가 동시에 서로 다른 응답(하나는 `mc_vfs_open`의
+  handles[] 위임, 다른 하나는 `mc_fs_read`의 pages[] 페이로드)을
+  받으면 **똑같은 물리 슬롯**에 두 번 매핑을 시도해, 나중에 도착한
+  쪽이 먼저 도착한 쪽의 매핑을 지운다 — 원인 1과 증상이 겹쳐 둘 다
+  고쳐야 실제로 사라졌다(원인 1만 고친 뒤에도 open()은 정상화됐지만
+  read()는 여전히 실패했다 — memfs 자신이 올바른 파일/크기/커서로
+  응답을 계산하는 것까지 서버 쪽 진단으로 직접 확인한 뒤에야 원인
+  2를 좁혀냈다).
+- **결정 1(원인 1 수정)**: `handle_table`의 모든 변경 진입점
+  (`create_owner`/`create_proxy`/`close`, 조회 진입점
+  `handle_info`/`debug_entry`도 함께)을 **단일 전역 스핀락**으로
+  감싼다 — 테이블별 락을 따로 두면 `create_proxy`가 서로 다른 두
+  `handle_table`(호출자 테이블+`dest_table`)을 동시에 다루고
+  `close`의 `cascade_revoke`가 트리를 따라 다른 프로세스의 테이블까지
+  건널 수 있어(`handle_entry::owner_table`), "어느 순서로 두 테이블을
+  잠글까"를 매번 따져야 하는 교착 위험이 생긴다 — 이 프로젝트의
+  handle_table 연산은 전부 배열 읽기/쓰기 수준으로 짧아 전역 락 하나로
+  묶는 비용이 그 복잡도보다 작다고 판단했다(YAGNI, 실측으로 경합이
+  문제가 되면 그때 테이블별 락+순서 규칙으로 다시 좁힌다).
+  `allocate_slot()`/`cascade_revoke()`는 "호출자가 이미 이 락을 들고
+  있다"고 가정하는 내부 헬퍼로 남겨 재진입(같은 스레드가 스핀락을
+  두 번 잠가 자기 자신과 교착)을 피한다.
+- **결정 2(원인 2 수정)**: IPC pages[] 매핑 슬롯을 **스레드별 부분
+  슬롯**으로 나눈다. 슬롯 4(`kernel-memory.md` ADR-160) 전체 예산이
+  1MiB인데 스레드 하나가 실제로 쓰는 건 `k_max_page_descriptors`
+  (4)페이지(16KiB)뿐이라, 그 안에 최대 `k_max_ipc_mapped_pages_threads`
+  (64, `handle_table`의 `k_max_handles`와 같은 값)개의 독립된
+  스레드별 부분 슬롯을 그대로 채워 넣는다(64 × 16KiB = 1MiB, 슬롯 4
+  예산과 정확히 맞아떨어져 새 최상위 슬롯 번호가 필요 없다). 새 필드
+  `thread::ipc_pages_slot_index`를 이 스레드가 속한 `owner_space`의
+  새 원자적 카운터(`address_space::next_ipc_pages_slot`, `fetch_add`
+  하나로 충분하다 — handle_table 슬롯처럼 절대 반납/재사용하지
+  않는다)에서 스레드 생성 시점에 배정한다 — `create_user_thread`
+  (process_spawn 첫 스레드+`sys_thread_create`의 pthread 둘 다가
+  거치는 공용 함수)와 `create_forked_thread`(fork의 자식, 항상 새
+  address_space라 늘 슬롯 0), 그리고 `sys_exec`가 스레드에 새
+  address_space를 붙이는 지점(마찬가지로 늘 슬롯 0) 세 곳에서
+  배정한다. `deliver_message`/`release_previous_ipc_mapping`은 이제
+  `k_ipc_mapped_pages_user_vaddr + ipc_pages_slot_index *
+  k_ipc_mapped_pages_thread_slot_bytes + i*4096`을 쓴다.
+- **범위 밖**: 스레드가 64개를 넘으면 슬롯이 다음 최상위 슬롯(5,
+  예약됨)을 침범할 수 있다는 것을 이 라운드는 명시적으로 검사하지
+  않는다 — `handle_table`도 같은 상한(64)에서 이미 조용히
+  `table_full`로 막히므로 실질적으로 같은 한계를 공유하지만, 두
+  한계가 "같은 상수라서" 우연히 맞아떨어지는 것이지 하나가 다른
+  하나를 구조적으로 강제하지는 않는다 — 스레드 수가 실제로 이
+  근처까지 자라는 시나리오가 생기면 재검토.
+- **근거**: OPEN-68이 이미 "다음에 실제로 건드리는 시나리오가 생기면
+  재검토"라고 못박아 둔 대로, M56이 그 시나리오(pthread+IPC 동시
+  접근)를 실제로 만든 첫 소비자였다 — ADR-216(M42)/ADR-223(M52)이
+  이미 두 번 보여준 "이 프로젝트가 첫 실제 동시 소비자가 나타나기
+  전까지는 멀쩡하다" 패턴의 세 번째 사례다.
+- **영향**: [open-items.md](open-items.md) **OPEN-68 해소**(해결
+  ADR-229로 이동). `kernel/core/object/handle_table.cpp`(전역 락),
+  `kernel/core/ipc/message.hpp`/`endpoint.cpp`(스레드별 부분 슬롯),
+  `kernel/core/object/kernel_objects.hpp`(`thread::ipc_pages_slot_index`/
+  `address_space::next_ipc_pages_slot` 신설), `kernel/core/sched/
+  scheduler.cpp`(`create_user_thread`/`create_forked_thread`),
+  `kernel/arch/x86_64/process_ops.cpp`(`sys_exec`) 변경. 실측(QEMU):
+  msh의 `cat`(단일 파일+파이프라인 양쪽)이 매번 정확한 바이트 수를
+  읽음을 서버 쪽 진단(`file_index`/`file_size`/`read_cursor`)과
+  클라이언트 쪽 결과 양쪽에서 직접 확인, QEMU 5개 회귀 스위트 전부
+  통과.

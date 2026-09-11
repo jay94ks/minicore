@@ -171,6 +171,34 @@ M29의 원래 목표가 실현된다"고 **동적 링킹을 전제**하고 있�
   실행 중일 때(자기테스트가 시뮬레이션하는) Ctrl-C가 오면 셸 자신은
   살아남고 그 자식만 종료됨을 확인한다.
 
+## M56. coreutils(echo/ls/cat)+`[`을 msh 빌트인으로 흡수 (M51~M55 완료 뒤 사용자 지시로 추가)
+
+- **배경**: 이 계획은 원래 M55로 끝났었다(M51~M55 전부 완료). 사용자가
+  이어서 "독립된 ls/cat/`[` 같은 동작이 자체 바이너리를 갖지 않고
+  msh 하나의 ELF가 모두 처리하도록 바꾸자"고 명시적으로 지시해 이
+  마일스톤을 추가한다 — ADR-221(M52)이 세운 "명령은 항상 별도
+  ELF로 fork+exec"라는 원칙을 되돌리는 것이라, 사전 확인 질문
+  (빌트인의 실행 방식/범위/`[` 추가 여부)에 대한 사용자 답변을
+  그대로 반영한다: (1) 진짜 빌트인(fork 없이 함수 호출, 파이프라인은
+  msh가 내부적으로 병렬 실행을 흉내낸다), (2) echo 포함 coreutils
+  전부, (3) `[`도 지금 같이 새로 설계해 추가.
+- **구현**: `userland/echo`/`userland/ls`/`userland/cat`을 저장소에서
+  완전히 삭제하고 그 로직을 msh 자신의 함수(`builtin_echo`/
+  `builtin_ls`/`builtin_cat`)로 옮긴다. 새 `builtin_test`(`[`)를
+  추가한다. 파이프라인의 여러 빌트인은 real musl pthread
+  (`pthread_create`/`pthread_join`, M37)로 동시 실행한다. 알려지지
+  않은 명령(이 라운드엔 `loop-test`뿐)은 여전히 기존
+  `fork()`+`execve()`(`spawn_stage()`, 변경 없음)로 돈다.
+- **범위 밖**: `-f`/`-d`(파일 존재 검사, memfs의 open-always-creates
+  관례 때문에 이 프로토콜로는 부작용 없이 구현할 수 없다), "test"
+  라는 별명(사용자가 `[`만 요청했다).
+- **결과**: 완료. 자세한 설계 결정과 실행 중 발견(이 프로젝트
+  역사상 첫 진짜 커널 동시성 버그 — handle_table 무동기화+IPC
+  pages[] 매핑 슬롯 공유)은 [ADR-228](../design/foundations.md)/
+  [ADR-229](../design/kernel-ipc-objects.md), 결과 보고는
+  [musl-userland-porting-m56.md](../done/musl-userland-porting-m56.md)
+  참고.
+
 ## 포함하지 않는 것 (이 계획 이후로 명시적으로 미룸)
 
 - **동적 링킹(여러 바이너리가 musl의 공유 `libc.so` 하나를

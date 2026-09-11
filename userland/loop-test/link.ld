@@ -1,6 +1,6 @@
 /*
  * userland/loop-test 링커 스크립트 (docs/plan/musl-userland-porting.md
- * §M55, ADR-227). userland/echo/link.ld와 완전히 같은 이유로 같은
+ * §M55, ADR-227). userland/msh/link.ld와 완전히 같은 이유로 같은
  * 값을 쓴다(별도 프로세스라 다른 프로그램과 주소가 겹쳐도 무해하다).
  */
 

@@ -522,6 +522,31 @@
 #     부팅 시점에 VFS(memfs)에 심는 파일이 하나(/bin/loop-test) 늘어
 #     msh의 출력 리다이렉션 자기테스트(M54)가 여는 파일의
 #     open_file_id가 36→37로 밀렸다(아래 어서션도 갱신).
+#   M56 (musl-userland-porting.md §M56, foundations.md ADR-228,
+#     사용자 지시): coreutils(echo/ls/cat)+새 `[`(test)를 더 이상
+#     별도 ELF가 아니라 msh 자신의 빌트인으로 흡수했다 —
+#     userland/echo, userland/ls, userland/cat은 이 저장소에서
+#     완전히 사라졌고, procsrv의 VFS 시딩("[procsrv] coreutils seed
+#     ok=1")도 함께 없어졌다. 빌트인 로그는 M54/M55가 붙였던
+#     "@pipefd"/"@filefd" argv 토큰이 없다(빌트인은 그 관례를 아예
+#     안 쓴다 — 아래 참고) — 그래서 "[msh] running: ls @pipefd 1 2"
+#     같은 옛 어서션은 그냥 "[msh] running: ls"로 바뀌었다. cmd3도
+#     "cat /bin/echo"(echo가 삭제돼 더는 존재하지 않는 경로)에서
+#     "cat test.txt"로 바꿨다. 새 `[` 자기테스트 둘("[ 1 -eq 1 ]"은
+#     참, "[ hello = world ]"는 거짓이 정답 — msh의 self_test_entry가
+#     명령마다 정답 상태를 명시한다)도 추가했다. 파이프라인에서
+#     여러 빌트인이 동시에 진행돼야 해서(예: "ls | cat") msh가 진짜
+#     musl pthread(M37)로 각 단계를 돈다 — 빌트인은 별도 프로세스가
+#     아니라 msh 자신의 스레드라 handle_table/BSS를 전부 공유하므로
+#     (ADR-212), M54의 "@pipefd"/"@filefd" fd 번호 관례(g_pipe_fds[]/
+#     g_std_redirect[])를 그대로 쓰면 동시에 도는 두 빌트인이 "지금
+#     이 스레드의 fd 1"이라는 같은 전역 슬롯을 서로 다른 의미로 두고
+#     충돌한다 — 그래서 빌트인은 그 계층을 완전히 우회해 raw
+#     pipe_id/{fs_handle,open_file_id}를 함수 인자로 직접 받는다
+#     (ADR-228 참고). 이 경로엔 M54가 겪은 "fork()의 자동 dup" 문제도
+#     없다(빌트인은 fork()를 전혀 안 한다). 알려지지 않은 명령(현재는
+#     loop-test뿐)은 여전히 기존 fork+exec+argv-바인딩 경로로
+#     떨어진다 — 셸의 일반성은 유지된다.
 #   M35 (real-libc-syscall-layer.md §M35, foundations.md ADR-188):
 #     musl locale — "C"/"POSIX" 고정만 검증한다. setlocale(LC_ALL, "")
 #     는 POSIX 관례상 항상 성공해야 한다("musl setlocale empty
@@ -770,16 +795,16 @@ declare -a EXPECTED=(
   "[msh] no keyboard input, running self-test commands"
   "[msh] running: echo hello msh"
   "[msh] running: ls"
-  "[msh] running: cat /bin/echo"
-  "[msh] running: ls @pipefd 1 2"
-  "[msh] running: cat @pipefd 0 1"
-  "[msh] running: echo @filefd 1 10 37 msh-redirect-test"
+  "[msh] running: cat test.txt"
+  "[msh] running: ls"
+  "[msh] running: cat"
+  "[msh] running: echo msh-redirect-test"
   "[msh] running: cat /tmp/msh-redirect.txt"
+  "[msh] running: ["
   "[msh] running: loop-test"
   "[loop-test] starting"
   "[msh] job control: child interrupted ok=1"
   "[msh] self-test done ok=1"
-  "[procsrv] coreutils seed ok=1"
   "[procsrv] loop-test seed ok=1"
   "[procsrv] loader roundtrip ok=1"
   "[svcmgr] self_register ok=1"
