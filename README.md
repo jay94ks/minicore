@@ -6,6 +6,9 @@ minicore는 처음부터 새로 설계하는 범용 지향 마이크로커널 OS
 커널·디바이스 드라이버·시스템 서비스는 전부 직접 구현하고, 셸·
 coreutils 같은 사용자 소프트웨어는 기존 생태계를 포팅해 완성합니다.
 
+- 왜 이렇게 설계했는가 → [CONCEPTS.md](CONCEPTS.md) (설계 원칙)
+- 지금 실제로 어떤 구조인가 → [ARCHITECTURE.md](ARCHITECTURE.md) (아키텍처)
+
 ## 아키텍처 하이라이트
 
 - **커널**: freestanding C++, 예외·RTTI 없음. x86_64 1순위, aarch64 후속.
