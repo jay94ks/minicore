@@ -32,13 +32,16 @@ MCP 도구(`cnw`)로만 읽고 쓴다. 파일을 직접 만들거나 수정해�
    등록해 설계자의 답을 기다린다. 작업 시작 전 `docs pending
    cmtzsjm5c000fo401iozcc60t`로 답변 대기 중인 질의가 있는지 항상
    먼저 확인한다.
-5. **git 발행은 반드시 CNW 파이프라인으로만**: 로컬에서 직접
-   `git commit`/`git push`로 GitHub main에 커밋을 얹지 않는다 —
+5. **git 발행은 반드시 CNW 파이프라인으로만, 그리고 자동으로**: 로컬에서
+   직접 `git commit`/`git push`로 GitHub main에 커밋을 얹지 않는다 —
    Gitea 작업 저장소가 모르는 커밋이 생기면 다음 `docs git publish`가
    조용히 force-push해 그 커밋을 잃어버린다(2026-09-13 실제 사고,
    RM-23F4B687 §7 참고). 항상 `docs git add`→`docs git commit`→
    `docs git publish` 순서로 하고, 로컬은 그 다음 `git fetch`+
-   fast-forward로만 따라간다.
+   fast-forward로만 따라간다. 이 파이프라인을 지키는 한 커밋/발행
+   전에 매번 승인을 구하지 않는다(설계자 지시, 2026-09-13) — 단
+   force-push/히스토리 재작성처럼 되돌리기 어려운 조작은 예외로,
+   여전히 먼저 확인한다.
 6. **`docs/` 캐시는 요청 시에만 갱신**: `scripts/export-cnw-docs.mjs`는
    설계자가 명시적으로 요청했을 때만 실행한다 — CNW 문서를 바꿀 때마다
    자동으로 재실행하지 않는다.
