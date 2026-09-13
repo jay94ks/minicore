@@ -9,6 +9,7 @@ add_library(minicore_kernel OBJECT
     lapic.cpp
     ioapic.cpp
     hpet.cpp
+    pci.cpp
     timer.cpp
 )
 

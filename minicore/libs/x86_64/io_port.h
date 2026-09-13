@@ -26,6 +26,31 @@ inline unsigned char kInB(unsigned short port) {
     return value;
 }
 
+inline void kOutW(unsigned short port, unsigned short value) {
+    asm volatile("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+inline unsigned short kInW(unsigned short port) {
+    unsigned short value;
+    asm volatile("inw %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+// PCI 설정 공간(포트 0xCF8/0xCFC)의 CONFIG_ADDRESS 자체는 항상 32비트
+// 단위로 쓴다 - CONFIG_DATA(0xCFC)는 오프셋의 하위 2비트를 더한
+// 포트로 8/16/32비트 폭에 맞춰 접근하면 칩셋이 알아서 해당 바이트
+// 레인만 골라준다(레지스터 하나를 통째로 읽어 마스킹하는 것보다
+// 이 방식이 더 정확함 - pci.cpp가 이렇게 쓴다).
+inline void kOutL(unsigned short port, unsigned int value) {
+    asm volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+inline unsigned int kInL(unsigned short port) {
+    unsigned int value;
+    asm volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 }  // namespace arch
 }  // namespace kernel
 

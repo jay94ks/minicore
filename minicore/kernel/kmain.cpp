@@ -5,10 +5,29 @@
 #include "lapic.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "pci.h"
 #include "serial.h"
 #include "timer.h"
 
 namespace {
+
+void kLogPciDevice(const kernel::Pci::Device& dev) {
+    kernel::Serial::write("  pci ");
+    kernel::Serial::writeHex(dev.bus);
+    kernel::Serial::write(":");
+    kernel::Serial::writeHex(dev.device);
+    kernel::Serial::write(".");
+    kernel::Serial::writeHex(dev.function);
+    kernel::Serial::write(" vendor=");
+    kernel::Serial::writeHex(dev.vendorId);
+    kernel::Serial::write(" device=");
+    kernel::Serial::writeHex(dev.deviceId);
+    kernel::Serial::write(" class=");
+    kernel::Serial::writeHex(dev.classCode);
+    kernel::Serial::write(" subclass=");
+    kernel::Serial::writeHex(dev.subclass);
+    kernel::Serial::write("\n");
+}
 
 // linker.ld가 정의하는 커널 자신의 물리 범위 - usable 메모리에서
 // 제외하는 데 쓴다(page_frame_allocator.cpp).
@@ -113,6 +132,9 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     kernel::Serial::write("minicore: timer ready (100Hz), source=");
     kernel::Serial::write(kernel::Timer::usesHpet() ? "hpet" : "lapic+pit");
     kernel::Serial::write(", enabling interrupts\n");
+
+    kernel::Serial::write("minicore: PCI enumeration:\n");
+    kernel::Pci::enumerate(kLogPciDevice);
 
     asm volatile("sti");
 
