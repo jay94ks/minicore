@@ -16,6 +16,7 @@ set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/arch/x86_64/linker.ld)
 # 추가한다. 전부 OBJECT 라이브러리라 실제 아카이빙/심볼가지치기 없이
 # 오브젝트가 그대로 최종 실행 파일에 들어간다.
 add_subdirectory(minicore/libs/libkenv)
+add_subdirectory(minicore/libs/libcpio)
 add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
@@ -25,6 +26,7 @@ target_link_libraries(minicore.elf PRIVATE
     minicore_arch_x86_64
     minicore_kernel
     libkenv
+    libcpio
     minicore_libs_x86_64
 )
 

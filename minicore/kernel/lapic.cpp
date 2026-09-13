@@ -10,12 +10,8 @@ constexpr unsigned long kApicBaseEnableBit = 1UL << 11;
 constexpr unsigned long kApicBaseExtdBit = 1UL << 10;  // x2APIC 모드 전환 비트
 constexpr unsigned long kApicBaseAddrMask = 0x000FFFFFFFFFF000UL;
 
-constexpr unsigned int kRegisterEoi = 0x0B0;
-constexpr unsigned int kRegisterSpuriousVector = 0x0F0;
 constexpr unsigned int kSpuriousSoftwareEnableBit = 1U << 8;
 
-constexpr unsigned int kRegisterIcrLow = 0x300;
-constexpr unsigned int kRegisterIcrHigh = 0x310;
 constexpr unsigned int kX2ApicIcrMsr = 0x830;  // x2APIC은 ICR이 64비트 MSR 하나로 통합됨(xAPIC의 0x300+0x310과 다름)
 
 constexpr unsigned int kIcrDeliveryModeInit = 5U << 8;
@@ -45,6 +41,9 @@ bool gLapicReady = false;
 // 중 xAPIC<->x2APIC을 오가는 경로는 지원하지 않음, DC 없음: PL-D65F49CC
 // 설계 범위 내 결정).
 bool gUseX2Apic = false;
+// --disable-x2apic 커널 커맨드라인 옵션(QU-6ABACEAD) - true면 CPUID가
+// x2APIC을 지원해도 init()이 강제로 xAPIC을 쓴다.
+bool gX2ApicDisabledByOption = false;
 
 // CPUID.01H:ECX 비트21 - x2APIC 지원 여부. ebx는 그냥 버리지만 cpuid는
 // eax/ebx/ecx/edx를 전부 건드리므로 전부 출력 제약에 넣어야 한다.
@@ -100,7 +99,7 @@ namespace kernel {
 void Lapic::init() {
     kDisableLegacyPic();
 
-    gUseX2Apic = kCpuidHasX2Apic();
+    gUseX2Apic = !gX2ApicDisabledByOption && kCpuidHasX2Apic();
     unsigned long apicBaseMsr = kReadMsr(kIa32ApicBaseMsr);
 
     if (gUseX2Apic) {
@@ -124,7 +123,23 @@ void Lapic::init() {
 
     // 소프트웨어 활성화 + spurious 인터럽트 벡터(0xFF, 관례상 흔히
     // 쓰는 값 - 하위 4비트가 전부 1이라 우선순위 그룹 규칙과도 맞음).
-    writeRegister(kRegisterSpuriousVector, kSpuriousSoftwareEnableBit | 0xFF);
+    writeRegister(kLapicRegSpuriousVector, kSpuriousSoftwareEnableBit | 0xFF);
+
+    // "호환성 옵션"(QU-B569F367) - 아직 안 쓰는 LVT 엔트리(Thermal/
+    // PerfCounter/LINT0/LINT1/Error)를 명시적으로 마스크해 둔다. 이
+    // 레지스터들은 리셋 직후 값이 정의돼 있지 않은 하드웨어도 있어서
+    // (실기에서는 흔히 마스크 상태로 리셋되지만 보장은 아님), 안
+    // 마스크해 두면 아직 등록도 안 한 벡터로 예상 못한 인터럽트가
+    // 들어올 수 있다 - Linux 등 실제 OS도 LAPIC 초기화 시 이렇게
+    // 방어적으로 마스크한다. TPR도 0(모든 우선순위 수신)으로
+    // 명시적으로 맞춘다 - 리셋값이 이미 0이지만, x2APIC 강제
+    // 비활성화 같은 재초기화 경로를 감안해 항상 확정해 둔다.
+    writeRegister(kLapicRegLvtThermal, kLapicLvtMaskedBit);
+    writeRegister(kLapicRegLvtPerfCounter, kLapicLvtMaskedBit);
+    writeRegister(kLapicRegLvtLint0, kLapicLvtMaskedBit);
+    writeRegister(kLapicRegLvtLint1, kLapicLvtMaskedBit);
+    writeRegister(kLapicRegLvtError, kLapicLvtMaskedBit);
+    setTaskPriority(0);
 }
 
 unsigned int Lapic::id() {
@@ -134,7 +149,7 @@ unsigned int Lapic::id() {
         // 제한도 없어져 32비트 전체를 ID로 쓸 수 있다).
         return static_cast<unsigned int>(kReadMsr(kX2ApicIdMsr));
     }
-    return readRegister(0x020) >> 24;
+    return readRegister(kLapicRegId) >> 24;
 }
 
 bool Lapic::isReady() {
@@ -145,8 +160,38 @@ bool Lapic::usesX2Apic() {
     return gUseX2Apic;
 }
 
+void Lapic::setX2ApicDisabled(bool disabled) {
+    gX2ApicDisabledByOption = disabled;
+}
+
 void Lapic::sendEoi() {
-    writeRegister(kRegisterEoi, 0);
+    writeRegister(kLapicRegEoi, 0);
+}
+
+void Lapic::setTaskPriority(unsigned int priority) {
+    writeRegister(kLapicRegTaskPriority, priority & 0xFF);
+}
+
+unsigned int Lapic::taskPriority() {
+    return readRegister(kLapicRegTaskPriority) & 0xFF;
+}
+
+unsigned int Lapic::processorPriority() {
+    return readRegister(kLapicRegProcessorPriority) & 0xFF;
+}
+
+void Lapic::setLogicalDestination(unsigned int logicalId) {
+    if (gUseX2Apic) {
+        return;  // x2APIC엔 LDR이 없음(항상 물리 목적지) - 무해하게 무시
+    }
+    writeRegister(kLapicRegLogicalDestination, logicalId << 24);
+}
+
+void Lapic::setDestinationFormat(unsigned int format) {
+    if (gUseX2Apic) {
+        return;  // x2APIC엔 DFR이 없음 - 무해하게 무시
+    }
+    writeRegister(kLapicRegDestinationFormat, format);
 }
 
 void Lapic::writeRegister(unsigned int offset, unsigned int value) {
@@ -176,9 +221,9 @@ void kSendIcr(unsigned int destApicId, unsigned int commandLow) {
     }
     // xAPIC: 목적지를 먼저 ICR_HIGH에 쓰고(8비트, 물리모드), ICR_LOW를
     // 쓰는 순간 실제로 IPI가 나간다 - 그래서 순서가 중요하다.
-    Lapic::writeRegister(kRegisterIcrHigh, destApicId << kXApicIcrHighDestShift);
-    Lapic::writeRegister(kRegisterIcrLow, commandLow);
-    while (Lapic::readRegister(kRegisterIcrLow) & kIcrDeliveryStatusBit) {
+    Lapic::writeRegister(kLapicRegIcrHigh, destApicId << kXApicIcrHighDestShift);
+    Lapic::writeRegister(kLapicRegIcrLow, commandLow);
+    while (Lapic::readRegister(kLapicRegIcrLow) & kIcrDeliveryStatusBit) {
         asm volatile("pause");
     }
 }

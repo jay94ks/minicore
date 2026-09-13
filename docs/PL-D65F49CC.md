@@ -5,12 +5,12 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: PL-D65F49CC
   status: approved
-  updatedAt: 2026-09-13T16:23:32.587Z
+  updatedAt: 2026-09-13T18:33:31.466Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 실행 계획: x2APIC 지원
 
-**[완료, 2026-09-14]** QA-26450C3E 체크됨. 아래는 완료 기록으로 남긴다.
+**[완료, 2026-09-14, 2026-09-14 재작업 반영]** QA-26450C3E 체크됨. 아래는 완료 기록으로 남긴다.
 
 지금 Lapic은 xAPIC(MMIO) 모드만 구현돼 있다(DS-D4E5C451 - 설계자
 지시로 고려 대상에 등록). x2APIC은 접근 방식 자체가 다르므로 Lapic을
@@ -70,17 +70,45 @@
    - 세 로그 모두 확인 후 임시로 넣었던 CPUID 원시값(ecx) 디버그
      출력은 제거했다(진단용으로 유지한 건 `mode=` 로그 한 줄뿐).
 
+## 재작업 - ICR(SMP에서 완료)/x2APIC 강제 비활성화/전 레지스터 (2026-09-14, 설계자 지시)
+
+애초에 "이번엔 안 한 것"으로 남겨 뒀던 두 항목에 대한 상태:
+
+- **ICR(Interrupt Command Register)**: SMP AP 기동(PL-65C20380)
+  작업에서 이미 구현 완료됐다 - `Lapic::sendInitIpi`/`sendStartupIpi`
+  가 xAPIC(ICR_LOW/HIGH)과 x2APIC(MSR 0x830 통합)을 내부에서 분기.
+  자세한 내용/실측은 PL-65C20380 문서 참고(이 문서에서 중복 기록
+  안 함).
+- **QU-6ABACEAD 답변 반영("커널 옵션으로 --disable-x2apic를 받으면
+  비활성화되도록 구현하라")**: `Lapic::setX2ApicDisabled(bool)`
+  추가 - `Lapic::init()` 호출 전에 켜 두면 CPUID가 x2APIC을 지원해도
+  강제로 xAPIC 경로를 쓴다. `kmain.cpp`가 부팅 커맨드라인(멀티부트2
+  타입1 태그 또는 PVH `hvm_start_info::cmdlinePaddr`, PL-FC38956C
+  재작업으로 이번에 같이 파싱하게 됨)에서 `--disable-x2apic` 문자열을
+  찾아 자동으로 켠다.
+- **QU-B569F367 답변 반영("LAPIC에 존재하는 모든 레지스터를
+  구현해놓고 호환성 옵션들을 추가해야 한다")**: `lapic.h`에 SDM
+  Vol.3 11.4.1의 표준 LAPIC 레지스터 오프셋을 전부 이름 붙여
+  선언(ID/VERSION/TPR/APR/PPR/EOI/RRD/LDR/DFR/SVR/ISR/TMR/IRR/ESR/
+  ICR_LOW/HIGH/LVT Timer·Thermal·PerfCounter·LINT0·LINT1·Error/
+  Initial·Current Count/Divide Config). `Lapic::init()`이 아직 안
+  쓰는 LVT 엔트리(Thermal/PerfCounter/LINT0/LINT1/Error)를 명시적으로
+  마스크하고 TPR을 0으로 맞추는 "호환성 기본값"을 추가했다(리셋값이
+  이미 이렇더라도, 실기 호환성을 위해 명시적으로 확정 - Linux 등
+  실제 OS도 이렇게 방어적으로 초기화한다). `setTaskPriority`/
+  `taskPriority`/`processorPriority`/`setLogicalDestination`/
+  `setDestinationFormat`도 공개 API로 추가(논리 목적지 모드는 아직
+  안 쓰지만 "호환성 옵션"으로 노출).
+- **실측(2026-09-14, QEMU 8.2.2)**: `-append '--disable-x2apic'` +
+  `-accel kvm -cpu host`(x2APIC 지원 하드웨어) 조합에서 실제로
+  `mode=xapic`으로 강제됨을 확인(같은 하드웨어에서 플래그 없이는
+  `mode=x2apic` - 대조군도 확인). 플래그 도입 후에도 일반 부팅/
+  SMP(`-smp 4`) 회귀 없음 확인.
+
 ## 이번엔 안 한 것 (후속 과제로 남김)
 
-- **ICR(Interrupt Command Register) 지원**: xAPIC은 MMIO 0x300+0x310
-  두 32비트 레지스터, x2APIC은 MSR 0x830 하나(64비트)로 통합돼 있어
-  구성 자체가 다르다 - 지금 `Lapic`은 EOI/spurious/타이머 레지스터만
-  다루고 ICR은 아직 없다. SMP AP 기동 계획(PL-65C20380 4단계)에서
-  INIT-SIPI-SIPI를 구현할 때 이 차이를 반드시 반영해야 한다(관계도에
-  기록 예정).
-- **x2APIC 강제 비활성화 옵션**: 디버깅/호환성 목적으로 CPU가
-  x2APIC을 지원해도 강제로 xAPIC을 쓰게 하는 경로 - 필요성이 아직
-  안 보여 보류.
+- 없음 - 원래 이 절에 있던 두 항목(ICR, x2APIC 강제 비활성화)은
+  각각 PL-65C20380과 위 재작업으로 전부 반영됐다.
 
 ## 미결 사항
 

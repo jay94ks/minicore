@@ -3,6 +3,41 @@
 
 namespace kernel {
 
+// LAPIC(xAPIC MMIO 오프셋 기준 - x2APIC은 Lapic::readRegister/
+// writeRegister가 내부에서 MSR 0x800+(offset>>4)로 자동 변환) 표준
+// 레지스터 오프셋 전부(Intel SDM Vol.3 11.4.1) - QU-B569F367, 설계자
+// 지시, 2026-09-14: "LAPIC에 존재하는 모든 레지스터를 구현해놓고
+// 호환성 옵션들을 추가해야 한다." readRegister/writeRegister는
+// 이전부터 임의 오프셋을 받을 수 있었지만, 이 이름들을 통해 어떤
+// 레지스터가 있는지 명시적으로 드러낸다.
+constexpr unsigned int kLapicRegId = 0x020;
+constexpr unsigned int kLapicRegVersion = 0x030;
+constexpr unsigned int kLapicRegTaskPriority = 0x080;         // TPR
+constexpr unsigned int kLapicRegArbitrationPriority = 0x090;  // APR, 읽기전용
+constexpr unsigned int kLapicRegProcessorPriority = 0x0A0;    // PPR, 읽기전용
+constexpr unsigned int kLapicRegEoi = 0x0B0;
+constexpr unsigned int kLapicRegRemoteRead = 0x0C0;  // RRD, deprecated - 구형 하드웨어 호환용
+constexpr unsigned int kLapicRegLogicalDestination = 0x0D0;    // LDR - xAPIC 전용
+constexpr unsigned int kLapicRegDestinationFormat = 0x0E0;     // DFR - xAPIC 전용
+constexpr unsigned int kLapicRegSpuriousVector = 0x0F0;        // SVR
+constexpr unsigned int kLapicRegInService0 = 0x100;    // ISR0-7 (0x100,0x110,...,0x170), 읽기전용
+constexpr unsigned int kLapicRegTriggerMode0 = 0x180;  // TMR0-7, 읽기전용
+constexpr unsigned int kLapicRegInterruptRequest0 = 0x200;  // IRR0-7, 읽기전용
+constexpr unsigned int kLapicRegErrorStatus = 0x280;   // ESR - 읽기 전 0을 한 번 써야 최신값 반영(스펙 quirk)
+constexpr unsigned int kLapicRegIcrLow = 0x300;
+constexpr unsigned int kLapicRegIcrHigh = 0x310;
+constexpr unsigned int kLapicRegLvtTimer = 0x320;
+constexpr unsigned int kLapicRegLvtThermal = 0x330;
+constexpr unsigned int kLapicRegLvtPerfCounter = 0x340;
+constexpr unsigned int kLapicRegLvtLint0 = 0x350;
+constexpr unsigned int kLapicRegLvtLint1 = 0x360;
+constexpr unsigned int kLapicRegLvtError = 0x370;
+constexpr unsigned int kLapicRegInitialCount = 0x380;
+constexpr unsigned int kLapicRegCurrentCount = 0x390;
+constexpr unsigned int kLapicRegDivideConfig = 0x3E0;
+
+constexpr unsigned int kLapicLvtMaskedBit = 1U << 16;
+
 // 이 프로젝트는 처음부터 레거시 PIC(8259)가 아니라 Local APIC를
 // 쓴다 - SMP에서는 코어마다 자기 LAPIC이 있어야 타이머/IPI(코어간
 // 인터럽트)가 되고, PIC은 애초에 코어를 지정해서 인터럽트를 줄 수
@@ -41,6 +76,32 @@ public:
 
     // 진단/로그용 - init()이 x2APIC과 xAPIC 중 어느 쪽으로 붙었는지.
     static bool usesX2Apic();
+
+    // 커널 커맨드라인 `--disable-x2apic`(QU-6ABACEAD, 설계자 지시,
+    // 2026-09-14 - "커널 옵션으로 --disable-x2apic를 받으면
+    // 비활성화되도록 구현하라. 이 기능이 있어야 호환되지 않는
+    // 하드웨어에서도 사용자의 수동 설정 등을 통하여 정상 동작을
+    // 보장할 수 있다")로 켠다 - true면 CPUID가 x2APIC을 지원해도
+    // init()이 강제로 xAPIC 경로를 쓴다. init() 호출 **전에** 설정해야
+    // 의미가 있다.
+    static void setX2ApicDisabled(bool disabled);
+
+    // TPR(Task Priority Register) - priority보다 낮은 우선순위
+    // 클래스의 인터럽트는 이 코어에 전달되지 않는다. 0=전부 수신
+    // (기본값, init()이 설정).
+    static void setTaskPriority(unsigned int priority);
+    static unsigned int taskPriority();
+    // PPR(Processor Priority Register) - 읽기전용, 실제 유효
+    // 우선순위(TPR과 최고 ISR 비트 중 큰 값).
+    static unsigned int processorPriority();
+
+    // LDR/DFR - xAPIC 전용(x2APIC은 목적지가 항상 물리 ID라 이
+    // 레지스터들이 없음 - 호출해도 무해하게 무시됨). 지금은 이
+    // 프로젝트가 물리 목적지 모드만 쓰므로(IOAPIC REDTBL/ICR 전부
+    // physical mode) 실제로 켤 일은 없지만, 논리 목적지 모드가
+    // 필요해질 미래를 대비해 노출해 둔다("호환성 옵션" - QU-B569F367).
+    static void setLogicalDestination(unsigned int logicalId);
+    static void setDestinationFormat(unsigned int format);
 
     // 인터럽트 핸들러가 처리를 마치면 반드시 호출해야 한다 - 안 하면
     // 그 이하 우선순위 인터럽트가 더는 안 들어온다.

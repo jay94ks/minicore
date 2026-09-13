@@ -8,6 +8,9 @@ struct TagHeader {
 } __attribute__((packed));
 
 constexpr unsigned int kTagTypeEnd = 0;
+constexpr unsigned int kTagTypeCmdline = 1;
+constexpr unsigned int kTagTypeBootloaderName = 2;
+constexpr unsigned int kTagTypeModule = 3;
 constexpr unsigned int kTagTypeMemoryMap = 6;
 constexpr unsigned int kTagTypeAcpiOldRsdp = 14;
 constexpr unsigned int kTagTypeAcpiNewRsdp = 15;
@@ -23,6 +26,16 @@ struct MemoryMapEntryRaw {
     unsigned long length;
     unsigned int type;
     unsigned int reserved;
+} __attribute__((packed));
+
+// 타입1(커맨드라인)/타입2(부트로더 이름)은 헤더 바로 뒤에 그냥
+// null-terminated 문자열이 온다 - 별도 구조체 불필요.
+
+struct ModuleTag {
+    TagHeader header;
+    unsigned int modStart;
+    unsigned int modEnd;
+    // 바로 뒤에 null-terminated 문자열(모듈 커맨드라인)이 이어진다.
 } __attribute__((packed));
 
 // 멀티부트2 메모리맵 태그의 타입 값은 E820과 거의 같다(1=usable,
@@ -48,12 +61,16 @@ unsigned int kMapMemType(unsigned int mb2Type) {
 namespace kernel {
 
 void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap, unsigned int maxEntries,
-                            unsigned int* outMemmapCount, unsigned long* outRsdpPaddr, unsigned int* outTotalSize) {
+                            unsigned int* outMemmapCount, unsigned long* outRsdpPaddr, unsigned int* outTotalSize,
+                            BootInfo* outBootInfo) {
     const auto* base = reinterpret_cast<const unsigned char*>(infoPhysAddr);
     const unsigned int totalSize = *reinterpret_cast<const unsigned int*>(base);
     *outTotalSize = totalSize;
     *outMemmapCount = 0;
     *outRsdpPaddr = 0;
+    outBootInfo->cmdline = nullptr;
+    outBootInfo->bootloaderName = nullptr;
+    outBootInfo->moduleCount = 0;
 
     unsigned long oldRsdpPhys = 0;
     const unsigned char* tagPtr = base + 8;  // total_size(4)+reserved(4) 헤더 다음부터 태그 시작
@@ -82,6 +99,19 @@ void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap
             *outRsdpPaddr = reinterpret_cast<unsigned long>(tagPtr + sizeof(TagHeader));
         } else if (tag->type == kTagTypeAcpiOldRsdp && oldRsdpPhys == 0) {
             oldRsdpPhys = reinterpret_cast<unsigned long>(tagPtr + sizeof(TagHeader));
+        } else if (tag->type == kTagTypeCmdline) {
+            outBootInfo->cmdline = reinterpret_cast<const char*>(tagPtr + sizeof(TagHeader));
+        } else if (tag->type == kTagTypeBootloaderName) {
+            outBootInfo->bootloaderName = reinterpret_cast<const char*>(tagPtr + sizeof(TagHeader));
+        } else if (tag->type == kTagTypeModule) {
+            if (outBootInfo->moduleCount < kBootInfoMaxModules) {
+                const auto* modTag = reinterpret_cast<const ModuleTag*>(tagPtr);
+                BootModule& mod = outBootInfo->modules[outBootInfo->moduleCount];
+                mod.physStart = modTag->modStart;
+                mod.physEnd = modTag->modEnd;
+                mod.cmdline = reinterpret_cast<const char*>(tagPtr + sizeof(ModuleTag));
+                ++outBootInfo->moduleCount;
+            }
         }
 
         const unsigned int advance = (tag->size + 7) & ~7U;  // 태그는 8바이트 경계로 패딩된다(스펙)

@@ -35,6 +35,16 @@ struct HvmMemmapEntry {
     unsigned int reserved;
 } __attribute__((packed));
 
+// HvmStartInfo::modlistPaddr가 가리키는 배열의 원소 하나(Xen PVH
+// 스펙) - nrModules개 있다. cmdlinePaddr는 이 모듈 전용 커맨드라인
+// (null-terminated) - 없으면 0.
+struct HvmModlistEntry {
+    unsigned long paddr;
+    unsigned long size;
+    unsigned long cmdlinePaddr;
+    unsigned long reserved;
+} __attribute__((packed));
+
 constexpr unsigned int kHvmStartInfoMagic = 0x336ec578;
 
 }  // namespace kernel

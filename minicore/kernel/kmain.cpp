@@ -1,6 +1,8 @@
 #include "acpi.h"
+#include "boot_info.h"
 #include "hvm_start_info.h"
 #include "idt.h"
+#include "libcpio/cpio.h"
 #include "ioapic.h"
 #include "lapic.h"
 #include "multiboot2.h"
@@ -43,6 +45,79 @@ void kLogPciDevice(const kernel::Pci::Device& dev) {
 extern "C" char kernel_phys_start[];
 extern "C" char kernel_phys_end[];
 
+// 커널 커맨드라인에서 flag(예: "--disable-x2apic")를 찾는다 - 표준
+// strstr이 freestanding에 없어 직접 구현(libkenv에 문자열 유틸리티가
+// 아직 없음 - QU-19B76E06 open, 답변 오면 그쪽으로 옮길 수 있음).
+bool kCmdlineHasFlag(const char* cmdline, const char* flag) {
+    if (!cmdline) {
+        return false;
+    }
+    for (const char* p = cmdline; *p; ++p) {
+        const char* a = p;
+        const char* b = flag;
+        while (*a && *b && *a == *b) {
+            ++a;
+            ++b;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 부팅 모듈(initrd)이 있으면 libcpio로 훑어 로그를 남긴다(QU-9DCDCE3E
+// - "initrd 역시도 마찬가지다"). 아직 이 CPIO 내용을 실제로 마운트할
+// 파일시스템/디바이스 관리자가 없어 지금은 진단 로그까지만 한다 -
+// 실제 사용(파일 열람 등)은 그 서브시스템이 생길 때 이 파서를 그대로
+// 재사용하면 된다.
+void kLogCpioEntry(const cpio::Entry& entry, void*) {
+    // entry.name은 아카이브 안의 파일명 바이트를 그대로 가리킨다 -
+    // nameSize(원본 필드)가 null 포함이라 name[nameLength]가 이미
+    // '\0'이므로 별도 복사 없이 그대로 null-terminated 문자열이다.
+    kernel::Serial::write("    cpio: ");
+    kernel::Serial::write(entry.name);
+    kernel::Serial::write(" size=");
+    kernel::Serial::writeHex(entry.dataSize);
+    kernel::Serial::write(" mode=");
+    kernel::Serial::writeHex(entry.mode);
+    kernel::Serial::write("\n");
+}
+
+void kLogBootInfo(const kernel::BootInfo& bootInfo) {
+    kernel::Serial::write("minicore: cmdline=");
+    kernel::Serial::write(bootInfo.cmdline ? bootInfo.cmdline : "(none)");
+    kernel::Serial::write("\n");
+    if (bootInfo.bootloaderName) {
+        kernel::Serial::write("minicore: bootloader=");
+        kernel::Serial::write(bootInfo.bootloaderName);
+        kernel::Serial::write("\n");
+    }
+    kernel::Serial::write("minicore: modules=");
+    kernel::Serial::writeHex(bootInfo.moduleCount);
+    kernel::Serial::write("\n");
+    for (unsigned int i = 0; i < bootInfo.moduleCount; ++i) {
+        const kernel::BootModule& mod = bootInfo.modules[i];
+        kernel::Serial::write("  module[");
+        kernel::Serial::writeHex(i);
+        kernel::Serial::write("] phys=");
+        kernel::Serial::writeHex(mod.physStart);
+        kernel::Serial::write("-");
+        kernel::Serial::writeHex(mod.physEnd);
+        kernel::Serial::write(" cmdline=");
+        kernel::Serial::write(mod.cmdline ? mod.cmdline : "(none)");
+        kernel::Serial::write("\n");
+
+        // 모듈을 CPIO(newc) 아카이브로 시도해 본다 - 매직이 안 맞으면
+        // forEachEntry가 즉시 0을 반환하므로 CPIO가 아닌 모듈(예: 커널
+        // 자체 설정 파일)이어도 안전하다. 물리주소를 그대로 포인터로
+        // 캐스팅한다(Paging::init() 이전, 저지대 identity map 범위).
+        const auto* archive = reinterpret_cast<const void*>(mod.physStart);
+        const unsigned long archiveSize = mod.physEnd - mod.physStart;
+        cpio::forEachEntry(archive, archiveSize, kLogCpioEntry, nullptr);
+    }
+}
+
 void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, unsigned int count) {
     kernel::Serial::write("minicore: memory map (");
     kernel::Serial::writeHex(count);
@@ -76,12 +151,14 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
     unsigned int memmapEntries = 0;
     unsigned long rsdpPaddr = 0;
     unsigned long startInfoSize = 0;
+    kernel::BootInfo bootInfo{};
 
     if (bootProtocol == kBootProtocolMultiboot2) {
         kernel::Serial::write("minicore: booted via multiboot2 (GRUB, higher-half, long mode)\n");
         unsigned int mb2TotalSize = 0;
         kernel::Multiboot2Info::parse(static_cast<unsigned long>(startInfoAddr), gMb2MemmapBuffer,
-                                       kernel::kMultiboot2MaxMemmapEntries, &memmapEntries, &rsdpPaddr, &mb2TotalSize);
+                                       kernel::kMultiboot2MaxMemmapEntries, &memmapEntries, &rsdpPaddr, &mb2TotalSize,
+                                       &bootInfo);
         memmap = gMb2MemmapBuffer;
         startInfoSize = mb2TotalSize;
     } else {
@@ -96,10 +173,38 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
         memmapEntries = startInfo->memmapEntries;
         rsdpPaddr = startInfo->rsdpPaddr;
         startInfoSize = sizeof(kernel::HvmStartInfo);
+
+        // PVH도 QU-9DCDCE3E 지시대로 커맨드라인/모듈을 채운다 -
+        // hvm_start_info가 이미 두 필드를 갖고 있었다(cmdlinePaddr/
+        // modlistPaddr+nrModules) - 부트로더 이름 개념은 PVH ABI에
+        // 없어 항상 nullptr로 남는다.
+        bootInfo.cmdline = startInfo->cmdlinePaddr
+                               ? reinterpret_cast<const char*>(startInfo->cmdlinePaddr)
+                               : nullptr;
+        bootInfo.bootloaderName = nullptr;
+        bootInfo.moduleCount = 0;
+        const unsigned int moduleCount =
+            startInfo->nrModules < kernel::kBootInfoMaxModules ? startInfo->nrModules : kernel::kBootInfoMaxModules;
+        if (startInfo->modlistPaddr) {
+            const auto* modlist = reinterpret_cast<const kernel::HvmModlistEntry*>(startInfo->modlistPaddr);
+            for (unsigned int i = 0; i < moduleCount; ++i) {
+                kernel::BootModule& mod = bootInfo.modules[bootInfo.moduleCount];
+                mod.physStart = modlist[i].paddr;
+                mod.physEnd = modlist[i].paddr + modlist[i].size;
+                mod.cmdline = modlist[i].cmdlinePaddr ? reinterpret_cast<const char*>(modlist[i].cmdlinePaddr) : nullptr;
+                ++bootInfo.moduleCount;
+            }
+        }
     }
 
     kernel::Idt::init();
     kernel::Serial::write("minicore: IDT ready\n");
+
+    kLogBootInfo(bootInfo);
+    if (kCmdlineHasFlag(bootInfo.cmdline, "--disable-x2apic")) {
+        kernel::Lapic::setX2ApicDisabled(true);
+        kernel::Serial::write("minicore: --disable-x2apic requested, x2APIC will be forced off\n");
+    }
 
     kLogMemoryMap(memmap, memmapEntries);
 
