@@ -11,6 +11,7 @@ public:
     static void kInit();
     static void kPutChar(char c);
     static void kWrite(const char* str);
+    static void kWriteHex(unsigned long value);
 };
 
 }  // namespace kernel

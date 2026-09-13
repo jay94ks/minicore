@@ -31,6 +31,7 @@ PHDRS
 SECTIONS
 {
     . = KERNEL_LMA;
+    kernel_phys_start = .;
 
     .note.pvh : AT(ADDR(.note.pvh)) { KEEP(*(.note.pvh)) } :note
 
@@ -67,6 +68,10 @@ SECTIONS
     } :kdata
 
     kernel_end = .;
+    /* page_frame_allocator.cpp가 커널 자신의 물리 범위를 예약(usable
+     * 메모리에서 제외)하는 데 쓴다 - kernel_end는 higher-half VMA라서
+     * 그대로는 물리 주소가 아니다. */
+    kernel_phys_end = kernel_end - KERNEL_VMA;
 
     /DISCARD/ :
     {

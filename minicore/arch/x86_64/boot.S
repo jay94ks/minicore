@@ -150,9 +150,11 @@ zero_page:
     ret
 
 /* PML4/PDPT/PD를 구성한다:
- *   - 물리/가상 0x0        ~ 0x1FFFFF (2MiB) : identity map (부트 코드용)
- *   - 가상 0xFFFFFFFF80000000 ~ +2MiB        : 위와 같은 물리 2MiB (커널용)
- * 두 매핑 모두 2MiB 페이지(PS 비트) 하나로 끝낸다 - PT 레벨 불필요.
+ *   - 물리/가상 0x0        ~ 0x3FFFFFFF (1GiB) : identity map
+ *   - 가상 0xFFFFFFFF80000000 ~ +1GiB          : 위와 같은 물리 1GiB
+ * 두 매핑 모두 PD 하나(512개 2MiB 페이지, PS 비트)로 끝낸다 - PT
+ * 레벨 불필요. 이 1GiB 한도는 kernel/page_frame_allocator.cpp의
+ * kMappedLimit과 반드시 맞춰야 한다(관계도 기록됨).
  */
 setup_page_tables:
     mov edi, offset pml4
@@ -176,8 +178,15 @@ setup_page_tables:
     or eax, 0x3
     mov [pdpt_low], eax
 
-    /* pd_low[0] = 2MiB identity page @0x0 */
-    mov dword ptr [pd_low], 0x83
+    /* pd_low[0..511] = 2MiB identity 페이지 512개(0 ~ 1GiB) */
+    mov edi, offset pd_low
+    mov ecx, 512
+    mov eax, 0x83
+.Lfill_pd_low:
+    mov [edi], eax
+    add eax, 0x200000
+    add edi, 8
+    loop .Lfill_pd_low
 
     /* pml4[511] -> pdpt_high (0xFFFFFFFF80000000의 PML4 인덱스) */
     mov eax, offset pdpt_high
@@ -189,8 +198,15 @@ setup_page_tables:
     or eax, 0x3
     mov [pdpt_high + 510*8], eax
 
-    /* pd_high[0] = 같은 2MiB 물리 프레임 @0x0 */
-    mov dword ptr [pd_high], 0x83
+    /* pd_high[0..511] = 같은 물리 1GiB(0 ~ 1GiB)를 higher-half로 매핑 */
+    mov edi, offset pd_high
+    mov ecx, 512
+    mov eax, 0x83
+.Lfill_pd_high:
+    mov [edi], eax
+    add eax, 0x200000
+    add edi, 8
+    loop .Lfill_pd_high
 
     ret
 

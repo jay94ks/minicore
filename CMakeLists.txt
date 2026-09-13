@@ -13,6 +13,7 @@ add_executable(minicore.elf
     minicore/kernel/kmain.cpp
     minicore/kernel/serial.cpp
     minicore/kernel/idt.cpp
+    minicore/kernel/page_frame_allocator.cpp
 )
 
 target_compile_options(minicore.elf PRIVATE -Wall -Wextra)

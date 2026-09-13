@@ -110,15 +110,6 @@ const char* const kExceptionNames[32] = {
     "Hypervisor Injection Exception", "VMM Communication Exception", "Security Exception", "Reserved",
 };
 
-void kWriteHex64(unsigned long value) {
-    char buf[19] = "0x0000000000000000";
-    constexpr char kHexDigits[] = "0123456789abcdef";
-    for (int i = 0; i < 16; ++i) {
-        buf[18 - i] = kHexDigits[(value >> (i * 4)) & 0xF];
-    }
-    kernel::Serial::kWrite(buf);
-}
-
 }  // namespace
 
 // isr_common_stub(isr.S)이 호출한다 - 아직 복구 경로가 없으니 진단
@@ -128,22 +119,22 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     kernel::Serial::kWrite("\nminicore: PANIC - unhandled exception: ");
     kernel::Serial::kWrite(kExceptionNames[frame->vector & 0x1F]);
     kernel::Serial::kWrite("\n  vector=");
-    kWriteHex64(frame->vector);
+    kernel::Serial::kWriteHex(frame->vector);
     kernel::Serial::kWrite(" error_code=");
-    kWriteHex64(frame->errorCode);
+    kernel::Serial::kWriteHex(frame->errorCode);
     kernel::Serial::kWrite("\n  rip=");
-    kWriteHex64(frame->rip);
+    kernel::Serial::kWriteHex(frame->rip);
     kernel::Serial::kWrite(" cs=");
-    kWriteHex64(frame->cs);
+    kernel::Serial::kWriteHex(frame->cs);
     kernel::Serial::kWrite(" rflags=");
-    kWriteHex64(frame->rflags);
+    kernel::Serial::kWriteHex(frame->rflags);
     kernel::Serial::kWrite("\n");
 
     if (frame->vector == 14) {  // Page Fault
         unsigned long cr2;
         asm volatile("mov %%cr2, %0" : "=r"(cr2));
         kernel::Serial::kWrite("  cr2(fault addr)=");
-        kWriteHex64(cr2);
+        kernel::Serial::kWriteHex(cr2);
         kernel::Serial::kWrite("\n");
     }
 
