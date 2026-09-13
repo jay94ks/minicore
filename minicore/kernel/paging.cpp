@@ -20,15 +20,23 @@ unsigned long kCurrentPml4Phys() {
     return cr3 & kAddrMask;
 }
 
-unsigned long* kAsTable(unsigned long physAddr) {
-    // PageFrameAllocator가 주는 프레임은 항상 저지대 1GiB 안(identity
-    // map)이라 물리 주소를 그대로 포인터로 쓸 수 있다. direct map이
-    // 준비된 뒤에는 kPhysToVirt를 거치는 편이 더 일반적이지만, 부트
-    // 스트랩 단계(Paging::init 자신)에서는 아직 direct map이 없으므로
-    // 여기서는 항상 identity 가정으로 접근한다 - 이 가정이 깨지는
-    // 유일한 경우는 PageFrameAllocator 관리 범위가 1GiB를 넘어설 때뿐
-    // 이다(그때는 이 함수도 같이 고쳐야 한다).
+// Paging::init() 자신이 direct map을 만들기 전에 딱 한 번(자기 자신의
+// PML4를 읽으려고) 쓴다 - 그 시점엔 kPhysToVirt를 아직 못 쓴다(direct
+// map이 없으니까). boot.S가 PML4를 항상 저지대 identity map 구간에
+// 두기 때문에 안전하다. **이 함수는 Paging::init() 밖에서 쓰면 안
+// 된다** - PageFrameAllocator가 그 뒤로는 1GiB 밖 프레임도 내주므로
+// (PL-99562483) identity 가정이 깨진다.
+unsigned long* kLowIdentityTable(unsigned long physAddr) {
     return reinterpret_cast<unsigned long*>(physAddr);
+}
+
+// direct map(0~4GiB, Paging::init() 이후 항상 존재)을 거쳐 임의 물리
+// 프레임을 가리키는 포인터를 얻는다 - PageFrameAllocator가 내주는
+// 프레임이 이제 1GiB를 넘어설 수 있어(PL-99562483, 2026-09-14) 더는
+// identity 캐스팅을 쓰면 안 된다(실측으로 페이지폴트 걸림 - -m 2048
+// 환경에서 재현).
+unsigned long* kAsTable(unsigned long physAddr) {
+    return reinterpret_cast<unsigned long*>(kernel::kPhysToVirt(physAddr));
 }
 
 void kZeroTable(unsigned long* table) {
@@ -65,7 +73,7 @@ void kInvalidatePage(unsigned long virtualAddr) {
 namespace kernel {
 
 void Paging::init() {
-    unsigned long* pml4 = kAsTable(kCurrentPml4Phys());
+    unsigned long* pml4 = kLowIdentityTable(kCurrentPml4Phys());
     auto* pdpt = reinterpret_cast<unsigned long*>(&gDirectMapPdptStorage[0]);
     kZeroTable(pdpt);
 

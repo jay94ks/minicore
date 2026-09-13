@@ -3,22 +3,31 @@
 #include "acpi.h"
 #include "lapic.h"
 #include "libkenv/spinlock.h"
+#include "paging.h"
 
 namespace {
 
 constexpr unsigned long kPageSize = 4096;
 constexpr unsigned int kMaxOrder = 10;  // 4KiB << 10 = 4MiB 최대 블록
-// boot.S가 identity/higher-half로 정적 매핑해 둔 범위와 반드시 맞춰야
-// 한다(관계도 기록됨) - 그 밖의 물리 메모리는 아직 이 v1에서 안 다룬다.
-constexpr unsigned long kMappedLimit = 1UL << 30;        // 1GiB
+// Paging의 direct physical map이 커버하는 범위와 맞춘다(PL-99562483,
+// 2026-09-14 - 예전엔 boot.S가 정적으로 identity map한 1GiB로
+// 제한했었다). 그 이상(4GiB 초과) RAM을 쓰려면 Paging의 direct map
+// PDPT 엔트리를 먼저 늘려야 한다.
+constexpr unsigned long kMappedLimit = 4UL << 30;        // 4GiB
 constexpr unsigned long kLowReservedEnd = 0x200000;      // 2MiB: BIOS 영역 + 커널 자신
 
+// next는 다음 블록의 "물리주소"다(가상 포인터 아님) - 0이면 끝.
+// 널 페이지(물리주소 0)는 kLowReservedEnd 블랭킷 예약에 항상 포함돼
+// 실제 블록으로 절대 안 쓰이므로 sentinel로 안전하다. 물리주소를
+// 그대로 저장/비교해야 kMappedLimit이 1GiB(identity map 가정)를
+// 넘어서도(PL-99562483) 값 자체는 그대로 유효하다 - 실제로 읽고
+// 쓸 때만 kPhysToVirt를 거친다.
 struct FreeBlock {
-    FreeBlock* next;
+    unsigned long next;
 };
 
 struct Node {
-    FreeBlock* freeLists[kMaxOrder + 1];
+    unsigned long freeListHeads[kMaxOrder + 1];  // 물리주소, 0 = 비어있음
     unsigned long freePageCount;
     // 이 노드의 free list를 건드리는 공개 API(allocOrderOnNode/
     // freeOrder) 진입점 하나당 한 번만 잠근다 - kObtainBlock의 내부
@@ -38,31 +47,34 @@ unsigned long kAlignDown(unsigned long value, unsigned long align) {
     return value & ~(align - 1);
 }
 
+FreeBlock* kAsBlock(unsigned long physAddr) {
+    return reinterpret_cast<FreeBlock*>(kernel::kPhysToVirt(physAddr));
+}
+
 void kInsertBlock(Node& node, unsigned long addr, unsigned int order) {
-    auto* block = reinterpret_cast<FreeBlock*>(addr);
-    block->next = node.freeLists[order];
-    node.freeLists[order] = block;
+    kAsBlock(addr)->next = node.freeListHeads[order];
+    node.freeListHeads[order] = addr;
 }
 
 bool kTryRemoveBlock(Node& node, unsigned long addr, unsigned int order) {
-    FreeBlock** cur = &node.freeLists[order];
+    unsigned long* cur = &node.freeListHeads[order];
     while (*cur) {
-        if (reinterpret_cast<unsigned long>(*cur) == addr) {
-            *cur = (*cur)->next;
+        if (*cur == addr) {
+            *cur = kAsBlock(*cur)->next;
             return true;
         }
-        cur = &(*cur)->next;
+        cur = &kAsBlock(*cur)->next;
     }
     return false;
 }
 
 unsigned long kPopBlock(Node& node, unsigned int order) {
-    FreeBlock* block = node.freeLists[order];
-    if (!block) {
+    const unsigned long addr = node.freeListHeads[order];
+    if (!addr) {
         return 0;
     }
-    node.freeLists[order] = block->next;
-    return reinterpret_cast<unsigned long>(block);
+    node.freeListHeads[order] = kAsBlock(addr)->next;
+    return addr;
 }
 
 unsigned long kBuddyAddr(unsigned long addr, unsigned int order) {
