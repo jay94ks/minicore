@@ -130,7 +130,7 @@ void kSubtractReservedFromList(Range* ranges, int& count, unsigned long resStart
 
 namespace kernel {
 
-void PageFrameAllocator::kInit(const HvmMemmapEntry* memmap, unsigned int entryCount,
+void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCount,
                                 unsigned long kernelPhysStart, unsigned long kernelPhysEnd,
                                 unsigned long startInfoAddr, unsigned long startInfoSize) {
     Range ranges[kMaxRanges];
@@ -168,7 +168,7 @@ void PageFrameAllocator::kInit(const HvmMemmapEntry* memmap, unsigned int entryC
     }
 }
 
-unsigned long PageFrameAllocator::kAllocOrder(unsigned int order) {
+unsigned long PageFrameAllocator::allocOrder(unsigned int order) {
     const unsigned long addr = kObtainBlock(order);
     if (addr) {
         gFreePageCount -= (1UL << order);
@@ -176,7 +176,7 @@ unsigned long PageFrameAllocator::kAllocOrder(unsigned int order) {
     return addr;
 }
 
-void PageFrameAllocator::kFreeOrder(unsigned long physAddr, unsigned int order) {
+void PageFrameAllocator::freeOrder(unsigned long physAddr, unsigned int order) {
     gFreePageCount += (1UL << order);
     while (order < kMaxOrder) {
         const unsigned long buddy = kBuddyAddr(physAddr, order);
@@ -189,15 +189,15 @@ void PageFrameAllocator::kFreeOrder(unsigned long physAddr, unsigned int order) 
     kInsertBlock(physAddr, order);
 }
 
-unsigned long PageFrameAllocator::kAllocPage() {
-    return kAllocOrder(0);
+unsigned long PageFrameAllocator::allocPage() {
+    return allocOrder(0);
 }
 
-void PageFrameAllocator::kFreePage(unsigned long physAddr) {
-    kFreeOrder(physAddr, 0);
+void PageFrameAllocator::freePage(unsigned long physAddr) {
+    freeOrder(physAddr, 0);
 }
 
-unsigned long PageFrameAllocator::kFreePageCount() {
+unsigned long PageFrameAllocator::freePageCount() {
     return gFreePageCount;
 }
 

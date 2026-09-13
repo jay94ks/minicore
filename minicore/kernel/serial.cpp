@@ -1,28 +1,20 @@
 #include "serial.h"
 
+#include "x86_64/io_port.h"
+
 namespace {
 
 constexpr unsigned short kCom1 = 0x3F8;
 
-inline void kOutB(unsigned short port, unsigned char value) {
-    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-inline unsigned char kInB(unsigned short port) {
-    unsigned char value;
-    asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
 bool kIsTransmitEmpty() {
-    return (kInB(kCom1 + 5) & 0x20) != 0;
+    return (kernel::kInB(kCom1 + 5) & 0x20) != 0;
 }
 
 }  // namespace
 
 namespace kernel {
 
-void Serial::kInit() {
+void Serial::init() {
     kOutB(kCom1 + 1, 0x00);  // 인터럽트 비활성화
     kOutB(kCom1 + 3, 0x80);  // DLAB 켜기
     kOutB(kCom1 + 0, 0x03);  // 분주값 하위바이트 (38400 baud)
@@ -32,22 +24,22 @@ void Serial::kInit() {
     kOutB(kCom1 + 4, 0x0B);  // IRQ 활성화, RTS/DSR set
 }
 
-void Serial::kPutChar(char c) {
+void Serial::putChar(char c) {
     while (!kIsTransmitEmpty()) {
     }
     kOutB(kCom1, static_cast<unsigned char>(c));
 }
 
-void Serial::kWrite(const char* str) {
+void Serial::write(const char* str) {
     while (*str) {
         if (*str == '\n') {
-            kPutChar('\r');
+            putChar('\r');
         }
-        kPutChar(*str++);
+        putChar(*str++);
     }
 }
 
-void Serial::kWriteHex(unsigned long value) {
+void Serial::writeHex(unsigned long value) {
     // buf[0..1]="0x", buf[2..17]=16개 16진 자리, buf[18]='\0'(건드리지
     // 않음) - 여기 인덱스를 잘못 밀면 널 종단이 지워져 스택 밖까지
     // 읽어버린다(실측으로 걸림, 2026-09-14).
@@ -56,7 +48,7 @@ void Serial::kWriteHex(unsigned long value) {
     for (int i = 0; i < 16; ++i) {
         buf[17 - i] = kHexDigits[(value >> (i * 4)) & 0xF];
     }
-    kWrite(buf);
+    write(buf);
 }
 
 }  // namespace kernel

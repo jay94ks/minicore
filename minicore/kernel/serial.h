@@ -8,10 +8,10 @@ namespace kernel {
 // 폴링만 한다 - 이 단계에서는 그걸로 충분하다.
 class Serial {
 public:
-    static void kInit();
-    static void kPutChar(char c);
-    static void kWrite(const char* str);
-    static void kWriteHex(unsigned long value);
+    static void init();
+    static void putChar(char c);
+    static void write(const char* str);
+    static void writeHex(unsigned long value);
 };
 
 }  // namespace kernel

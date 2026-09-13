@@ -1,8 +1,11 @@
+#include "acpi.h"
 #include "hvm_start_info.h"
 #include "idt.h"
+#include "lapic.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "serial.h"
+#include "timer.h"
 
 namespace {
 
@@ -12,17 +15,17 @@ extern "C" char kernel_phys_start[];
 extern "C" char kernel_phys_end[];
 
 void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, unsigned int count) {
-    kernel::Serial::kWrite("minicore: memory map (");
-    kernel::Serial::kWriteHex(count);
-    kernel::Serial::kWrite(" entries)\n");
+    kernel::Serial::write("minicore: memory map (");
+    kernel::Serial::writeHex(count);
+    kernel::Serial::write(" entries)\n");
     for (unsigned int i = 0; i < count; ++i) {
-        kernel::Serial::kWrite("  base=");
-        kernel::Serial::kWriteHex(memmap[i].addr);
-        kernel::Serial::kWrite(" size=");
-        kernel::Serial::kWriteHex(memmap[i].size);
-        kernel::Serial::kWrite(" type=");
-        kernel::Serial::kWriteHex(memmap[i].type);
-        kernel::Serial::kWrite("\n");
+        kernel::Serial::write("  base=");
+        kernel::Serial::writeHex(memmap[i].addr);
+        kernel::Serial::write(" size=");
+        kernel::Serial::writeHex(memmap[i].size);
+        kernel::Serial::write(" type=");
+        kernel::Serial::writeHex(memmap[i].type);
+        kernel::Serial::write("\n");
     }
 }
 
@@ -33,34 +36,63 @@ void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, unsigned int count) {
 // boot.S가 그대로 넘김). 이 시점에는 커널(ring 0)만 실행 중이다 -
 // devmgr 등 "커널 서비스"는 아직 존재하지 않는다(SP-8B6B8D25 §2-A).
 extern "C" void kMain(unsigned int startInfoAddr) {
-    kernel::Serial::kInit();
-    kernel::Serial::kWrite("minicore: booted via Xen PVH (higher-half, long mode)\n");
+    kernel::Serial::init();
+    kernel::Serial::write("minicore: booted via Xen PVH (higher-half, long mode)\n");
 
     const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<unsigned long>(startInfoAddr));
     if (startInfo->magic == kernel::kHvmStartInfoMagic) {
-        kernel::Serial::kWrite("minicore: hvm_start_info magic OK\n");
+        kernel::Serial::write("minicore: hvm_start_info magic OK\n");
     } else {
-        kernel::Serial::kWrite("minicore: hvm_start_info magic MISMATCH\n");
+        kernel::Serial::write("minicore: hvm_start_info magic MISMATCH\n");
     }
 
-    kernel::Idt::kInit();
-    kernel::Serial::kWrite("minicore: IDT ready\n");
+    kernel::Idt::init();
+    kernel::Serial::write("minicore: IDT ready\n");
 
     const auto* memmap = reinterpret_cast<const kernel::HvmMemmapEntry*>(startInfo->memmapPaddr);
     kLogMemoryMap(memmap, startInfo->memmapEntries);
 
-    kernel::PageFrameAllocator::kInit(
+    kernel::PageFrameAllocator::init(
         memmap, startInfo->memmapEntries,
         reinterpret_cast<unsigned long>(kernel_phys_start),
         reinterpret_cast<unsigned long>(kernel_phys_end),
         static_cast<unsigned long>(startInfoAddr), sizeof(kernel::HvmStartInfo));
 
-    kernel::Serial::kWrite("minicore: page frame allocator ready, free pages=");
-    kernel::Serial::kWriteHex(kernel::PageFrameAllocator::kFreePageCount());
-    kernel::Serial::kWrite("\n");
+    kernel::Serial::write("minicore: page frame allocator ready, free pages=");
+    kernel::Serial::writeHex(kernel::PageFrameAllocator::freePageCount());
+    kernel::Serial::write("\n");
 
-    kernel::Paging::kInit();
-    kernel::Serial::kWrite("minicore: direct physical map ready\n");
+    kernel::Paging::init();
+    kernel::Serial::write("minicore: direct physical map ready\n");
+
+    if (kernel::Acpi::init(startInfo->rsdpPaddr)) {
+        kernel::Serial::write("minicore: ACPI MADT parsed, cpu_count=");
+        kernel::Serial::writeHex(kernel::Acpi::cpuCount());
+        kernel::Serial::write(" local_apic_addr=");
+        kernel::Serial::writeHex(kernel::Acpi::localApicAddress());
+        kernel::Serial::write(" ioapic_addr=");
+        kernel::Serial::writeHex(kernel::Acpi::ioApicAddress());
+        kernel::Serial::write("\n");
+        for (unsigned int i = 0; i < kernel::Acpi::cpuCount(); ++i) {
+            kernel::Serial::write("  cpu[");
+            kernel::Serial::writeHex(i);
+            kernel::Serial::write("] apic_id=");
+            kernel::Serial::writeHex(kernel::Acpi::cpuApicId(i));
+            kernel::Serial::write("\n");
+        }
+    } else {
+        kernel::Serial::write("minicore: ACPI MADT parse FAILED\n");
+    }
+
+    kernel::Lapic::init();
+    kernel::Serial::write("minicore: LAPIC ready, id=");
+    kernel::Serial::writeHex(kernel::Lapic::id());
+    kernel::Serial::write("\n");
+
+    kernel::Timer::init();
+    kernel::Serial::write("minicore: timer calibrated (100Hz), enabling interrupts\n");
+
+    asm volatile("sti");
 
     for (;;) {
         asm volatile("hlt");

@@ -1,8 +1,10 @@
 #include "idt.h"
 
 #include "interrupt_frame.h"
+#include "lapic.h"
 #include "paging.h"
 #include "serial.h"
+#include "timer.h"
 
 namespace {
 
@@ -62,6 +64,10 @@ extern "C" void isr29();
 extern "C" void isr30();
 extern "C" void isr31();
 
+// 하드웨어 인터럽트(CPU 예외 0-31 밖) - 지금은 타이머와 spurious만.
+extern "C" void isr32();
+extern "C" void isr255();
+
 using IsrStub = void (*)();
 
 const IsrStub kIsrStubs[kVectorCount] = {
@@ -86,10 +92,12 @@ void kSetGate(int vector, IsrStub handler) {
 
 namespace kernel {
 
-void Idt::kInit() {
+void Idt::init() {
     for (int vector = 0; vector < kVectorCount; ++vector) {
         kSetGate(vector, kIsrStubs[vector]);
     }
+    kSetGate(kTimerVector, isr32);
+    kSetGate(0xFF, isr255);
 
     gIdtPointer.limit = static_cast<unsigned short>(sizeof(gIdt) - 1);
     gIdtPointer.base = reinterpret_cast<unsigned long>(&gIdt[0]);
@@ -122,24 +130,24 @@ unsigned long kReadCr2() {
 }
 
 void kPanic(kernel::InterruptFrame* frame) {
-    kernel::Serial::kWrite("\nminicore: PANIC - unhandled exception: ");
-    kernel::Serial::kWrite(kExceptionNames[frame->vector & 0x1F]);
-    kernel::Serial::kWrite("\n  vector=");
-    kernel::Serial::kWriteHex(frame->vector);
-    kernel::Serial::kWrite(" error_code=");
-    kernel::Serial::kWriteHex(frame->errorCode);
-    kernel::Serial::kWrite("\n  rip=");
-    kernel::Serial::kWriteHex(frame->rip);
-    kernel::Serial::kWrite(" cs=");
-    kernel::Serial::kWriteHex(frame->cs);
-    kernel::Serial::kWrite(" rflags=");
-    kernel::Serial::kWriteHex(frame->rflags);
-    kernel::Serial::kWrite("\n");
+    kernel::Serial::write("\nminicore: PANIC - unhandled exception: ");
+    kernel::Serial::write(kExceptionNames[frame->vector & 0x1F]);
+    kernel::Serial::write("\n  vector=");
+    kernel::Serial::writeHex(frame->vector);
+    kernel::Serial::write(" error_code=");
+    kernel::Serial::writeHex(frame->errorCode);
+    kernel::Serial::write("\n  rip=");
+    kernel::Serial::writeHex(frame->rip);
+    kernel::Serial::write(" cs=");
+    kernel::Serial::writeHex(frame->cs);
+    kernel::Serial::write(" rflags=");
+    kernel::Serial::writeHex(frame->rflags);
+    kernel::Serial::write("\n");
 
     if (frame->vector == 14) {  // Page Fault
-        kernel::Serial::kWrite("  cr2(fault addr)=");
-        kernel::Serial::kWriteHex(kReadCr2());
-        kernel::Serial::kWrite("\n");
+        kernel::Serial::write("  cr2(fault addr)=");
+        kernel::Serial::writeHex(kReadCr2());
+        kernel::Serial::write("\n");
     }
 
     for (;;) {
@@ -149,15 +157,27 @@ void kPanic(kernel::InterruptFrame* frame) {
 
 }  // namespace
 
-// isr_common_stub(isr.S)이 호출한다. 페이지 폴트(벡터 14)는 먼저
-// Paging::kHandlePageFault로 "온디맨드 매핑으로 해결 가능한 폴트인지"
-// 확인한다 - 처리됐으면 그냥 반환해 iretq가 폴트난 명령어를 재실행
-// 하게 둔다. 그 외(진짜 잘못된 접근, 다른 예외 전부)는 진단 로그를
-// 남기고 멈춘다.
+// isr_common_stub(isr.S)이 호출한다.
+// - 타이머(kTimerVector)/spurious(0xFF): 하드웨어 인터럽트라 반드시
+//   EOI를 보내야 다음 인터럽트가 들어온다. 스케줄러가 생기기 전까지
+//   타이머는 그냥 틱만 센다.
+// - 페이지 폴트(벡터 14): 먼저 Paging::kHandlePageFault로 "온디맨드
+//   매핑으로 해결 가능한 폴트인지" 확인한다 - 처리됐으면 그냥 반환해
+//   iretq가 폴트난 명령어를 재실행하게 둔다.
+// - 그 외(진짜 잘못된 접근, 다른 예외 전부)는 진단 로그를 남기고
+//   멈춘다.
 extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
+    if (frame->vector == kernel::kTimerVector) {
+        kernel::Timer::onTick();
+        kernel::Lapic::sendEoi();
+        return;
+    }
+    if (frame->vector == 0xFF) {
+        return;  // spurious - EOI 불필요(스펙상 안 보내도 됨)
+    }
     if (frame->vector == 14) {
         const unsigned long faultAddr = kReadCr2();
-        if (kernel::Paging::kHandlePageFault(faultAddr, frame->errorCode)) {
+        if (kernel::Paging::handlePageFault(faultAddr, frame->errorCode)) {
             return;
         }
     }

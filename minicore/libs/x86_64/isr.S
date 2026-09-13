@@ -59,6 +59,10 @@ isr_err    29
 isr_err    30
 isr_no_err 31
 
+/* 하드웨어 인터럽트(LAPIC) - CPU 예외와 달리 에러 코드가 없다. */
+isr_no_err 32   /* 타이머(kTimerVector, timer.h) */
+isr_no_err 255  /* spurious (lapic.cpp의 SVR 설정과 일치해야 함) */
+
 .extern kIsrHandler
 isr_common_stub:
     push r15

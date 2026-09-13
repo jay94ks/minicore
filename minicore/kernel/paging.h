@@ -6,10 +6,11 @@ namespace kernel {
 constexpr unsigned long PAGE_PRESENT = 1UL << 0;
 constexpr unsigned long PAGE_WRITABLE = 1UL << 1;
 constexpr unsigned long PAGE_USER = 1UL << 2;
+constexpr unsigned long PAGE_CACHE_DISABLE = 1UL << 4;  // MMIO(LAPIC 등)는 반드시 이걸 켜야 한다
 
 // 커널이 임의 물리 프레임을 한 번에 볼 수 있게 만드는 direct physical
 // map(가상 kDirectMapBase + 물리주소 = 그 물리 프레임)의 시작 주소.
-// 첫 4GiB를 1GiB 페이지 4개로 매핑해 둔다(Paging::kInit) - 그 이상은
+// 첫 4GiB를 1GiB 페이지 4개로 매핑해 둔다(Paging::init) - 그 이상은
 // 아직 v1 범위 밖(관련 결정: DS-D4E5C451, 후속 DC 예정).
 constexpr unsigned long kDirectMapBase = 0xFFFF800000000000UL;
 
@@ -33,18 +34,18 @@ constexpr unsigned long kLazyZoneSize = 0x40000000UL;  // 1GiB
 // 수 있다.
 class Paging {
 public:
-    // direct physical map을 구성한다 - kMapPage/kUnmapPage보다 먼저
+    // direct physical map을 구성한다 - mapPage/kUnmapPage보다 먼저
     // 호출해야 한다(둘 다 CR3을 그대로 쓰긴 하지만, direct map 없이도
     // 동작은 함 - 다만 커널이 임의 물리 주소를 볼 방법이 없어진다).
-    static void kInit();
+    static void init();
 
     // virtualAddr을 physicalAddr(4KiB 정렬)에 매핑한다. 필요한 중간
     // 테이블은 그때그때 만든다. 이미 매핑돼 있으면 덮어쓴다.
-    static void kMapPage(unsigned long virtualAddr, unsigned long physicalAddr, unsigned long flags);
+    static void mapPage(unsigned long virtualAddr, unsigned long physicalAddr, unsigned long flags);
 
     // 매핑을 해제한다(TLB도 무효화) - 매핑돼 있지 않으면 아무 일도
     // 안 한다.
-    static void kUnmapPage(unsigned long virtualAddr);
+    static void unmapPage(unsigned long virtualAddr);
 
     // #PF(vector 14) 핸들러가 호출한다(idt.cpp). faultAddr는 CR2,
     // errorCode는 하드웨어가 스택에 남긴 값 그대로. 이 폴트를 정말
@@ -52,7 +53,7 @@ public:
     // 반환한다 - false면 호출부가 평소대로 패닉한다. kLazyZoneBase
     // 범위 안의 not-present 폴트만 처리한다(권한 위반은 그대로
     // 패닉시킨다 - 조용히 덮어쓰지 않는다).
-    static bool kHandlePageFault(unsigned long faultAddr, unsigned long errorCode);
+    static bool handlePageFault(unsigned long faultAddr, unsigned long errorCode);
 };
 
 }  // namespace kernel

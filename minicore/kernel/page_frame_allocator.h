@@ -15,19 +15,19 @@ public:
     // memmap: HvmStartInfo::memmapPaddr가 가리키는 배열(entryCount개).
     // kernelPhysStart/End: 커널 이미지 자신의 물리 범위(겹치는 usable
     // 영역에서 제외) - 링커 심볼로 구한다.
-    static void kInit(const HvmMemmapEntry* memmap, unsigned int entryCount,
+    static void init(const HvmMemmapEntry* memmap, unsigned int entryCount,
                        unsigned long kernelPhysStart, unsigned long kernelPhysEnd,
                        unsigned long startInfoAddr, unsigned long startInfoSize);
 
     // 4KiB 페이지 하나 - 실패하면 0을 반환한다(널 페이지는 항상 예약됨).
-    static unsigned long kAllocPage();
-    static void kFreePage(unsigned long physAddr);
+    static unsigned long allocPage();
+    static void freePage(unsigned long physAddr);
 
     // order: 2^order 페이지(4KiB << order) 블록.
-    static unsigned long kAllocOrder(unsigned int order);
-    static void kFreeOrder(unsigned long physAddr, unsigned int order);
+    static unsigned long allocOrder(unsigned int order);
+    static void freeOrder(unsigned long physAddr, unsigned int order);
 
-    static unsigned long kFreePageCount();
+    static unsigned long freePageCount();
 };
 
 }  // namespace kernel

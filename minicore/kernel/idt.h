@@ -10,7 +10,7 @@ namespace kernel {
 // 라우팅하지 않고 커널 자신이 처리한다).
 class Idt {
 public:
-    static void kInit();
+    static void init();
 };
 
 }  // namespace kernel

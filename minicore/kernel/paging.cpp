@@ -24,7 +24,7 @@ unsigned long* kAsTable(unsigned long physAddr) {
     // PageFrameAllocator가 주는 프레임은 항상 저지대 1GiB 안(identity
     // map)이라 물리 주소를 그대로 포인터로 쓸 수 있다. direct map이
     // 준비된 뒤에는 kPhysToVirt를 거치는 편이 더 일반적이지만, 부트
-    // 스트랩 단계(Paging::kInit 자신)에서는 아직 direct map이 없으므로
+    // 스트랩 단계(Paging::init 자신)에서는 아직 direct map이 없으므로
     // 여기서는 항상 identity 가정으로 접근한다 - 이 가정이 깨지는
     // 유일한 경우는 PageFrameAllocator 관리 범위가 1GiB를 넘어설 때뿐
     // 이다(그때는 이 함수도 같이 고쳐야 한다).
@@ -44,7 +44,7 @@ unsigned long* kGetOrCreateNextLevel(unsigned long* parentTable, unsigned int in
         parentTable[index] |= flags;  // 기존 권한에 이번 요청 권한을 더해준다(예: USER 승격)
         return kAsTable(parentTable[index] & kAddrMask);
     }
-    const unsigned long newTablePhys = kernel::PageFrameAllocator::kAllocPage();
+    const unsigned long newTablePhys = kernel::PageFrameAllocator::allocPage();
     unsigned long* newTable = kAsTable(newTablePhys);
     kZeroTable(newTable);
     parentTable[index] = newTablePhys | kernel::PAGE_PRESENT | kernel::PAGE_WRITABLE | flags;
@@ -64,7 +64,7 @@ void kInvalidatePage(unsigned long virtualAddr) {
 
 namespace kernel {
 
-void Paging::kInit() {
+void Paging::init() {
     unsigned long* pml4 = kAsTable(kCurrentPml4Phys());
     auto* pdpt = reinterpret_cast<unsigned long*>(&gDirectMapPdptStorage[0]);
     kZeroTable(pdpt);
@@ -85,7 +85,7 @@ void Paging::kInit() {
     pml4[pml4Index] = pdptPhys | PAGE_PRESENT | PAGE_WRITABLE;
 }
 
-void Paging::kMapPage(unsigned long virtualAddr, unsigned long physicalAddr, unsigned long flags) {
+void Paging::mapPage(unsigned long virtualAddr, unsigned long physicalAddr, unsigned long flags) {
     virtualAddr &= ~(kPageSize4K - 1);
     physicalAddr &= ~(kPageSize4K - 1);
 
@@ -98,7 +98,7 @@ void Paging::kMapPage(unsigned long virtualAddr, unsigned long physicalAddr, uns
     kInvalidatePage(virtualAddr);
 }
 
-bool Paging::kHandlePageFault(unsigned long faultAddr, unsigned long errorCode) {
+bool Paging::handlePageFault(unsigned long faultAddr, unsigned long errorCode) {
     constexpr unsigned long kErrorCodePresentBit = 1UL << 0;
     if (errorCode & kErrorCodePresentBit) {
         return false;  // 이미 매핑된 페이지에 대한 권한 위반 - 조용히 넘기지 않는다
@@ -107,16 +107,16 @@ bool Paging::kHandlePageFault(unsigned long faultAddr, unsigned long errorCode) 
         return false;  // 지연 매핑 구역 밖 - 진짜 잘못된 접근
     }
 
-    const unsigned long phys = PageFrameAllocator::kAllocPage();
+    const unsigned long phys = PageFrameAllocator::allocPage();
     if (!phys) {
         return false;  // OOM - 매핑해줄 방법이 없으니 그대로 패닉시킨다
     }
 
-    kMapPage(faultAddr & ~(kPageSize4K - 1), phys, PAGE_WRITABLE);
+    mapPage(faultAddr & ~(kPageSize4K - 1), phys, PAGE_WRITABLE);
     return true;
 }
 
-void Paging::kUnmapPage(unsigned long virtualAddr) {
+void Paging::unmapPage(unsigned long virtualAddr) {
     virtualAddr &= ~(kPageSize4K - 1);
 
     unsigned long* pml4 = kAsTable(kCurrentPml4Phys());
