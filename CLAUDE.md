@@ -21,16 +21,27 @@ MCP 도구(`cnw`)로만 읽고 쓴다. 파일을 직접 만들거나 수정해�
    사본(캐시)이라 예외적으로 커밋한다. `docs/` 파일은 손으로 고치지
    말고 `node scripts/export-cnw-docs.mjs`로 다시 생성한다(자세한 내용은
    RM-23F4B687 §6).
-3. **코드 관계도는 실제로 기록한다**: 여러 파일을 가로지르는 탐색이라
-   다시 파악하려면 비용이 드는 발견을 했으면 `docs relation add`로
-   기록하고, 새 탐색 전엔 `docs relation list`로 이미 있는지 먼저
-   확인한다. 현재는 `main`에 소스 코드가 없어 비어 있으나, 코드가
-   쌓이면 이 규칙이 바로 적용된다.
+3. **코드 관계도는 실제로 기록한다**: 구현 중 나중에 다시 파악하려면
+   비용이 드는 설계 사실(예: "이 코드가 어떤 SP/DS 결정을 구현/전제
+   하는지")을 `docs relation add --file <path> --line <n> --purpose
+   <설명> --refs <trackingCode>`로 기록하고, 새 탐색 전엔 `docs
+   relation list`로 이미 있는지 먼저 확인한다(자세한 기준은
+   RM-23F4B687 §8).
 4. **명시되지 않은 설계는 임의로 결정하지 않는다**: 이 문서나 SP 문서에
    없는 세부는 추측으로 채우지 말고 DC(결정 요구사항 및 요청) 문서로
    등록해 설계자의 답을 기다린다. 작업 시작 전 `docs pending
    cmtzsjm5c000fo401iozcc60t`로 답변 대기 중인 질의가 있는지 항상
    먼저 확인한다.
+5. **git 발행은 반드시 CNW 파이프라인으로만**: 로컬에서 직접
+   `git commit`/`git push`로 GitHub main에 커밋을 얹지 않는다 —
+   Gitea 작업 저장소가 모르는 커밋이 생기면 다음 `docs git publish`가
+   조용히 force-push해 그 커밋을 잃어버린다(2026-09-13 실제 사고,
+   RM-23F4B687 §7 참고). 항상 `docs git add`→`docs git commit`→
+   `docs git publish` 순서로 하고, 로컬은 그 다음 `git fetch`+
+   fast-forward로만 따라간다.
+6. **`docs/` 캐시는 요청 시에만 갱신**: `scripts/export-cnw-docs.mjs`는
+   설계자가 명시적으로 요청했을 때만 실행한다 — CNW 문서를 바꿀 때마다
+   자동으로 재실행하지 않는다.
 
 ## 프로젝트 핵심 문서
 
