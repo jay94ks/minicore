@@ -68,15 +68,18 @@ MCP 도구(`cnw`)로만 읽고 쓴다. 파일을 직접 만들거나 수정해�
 ## 코딩 컨벤션 요약 (전체는 RM-23F4B687 참고)
 
 - 언어: C++(주) + 어셈블러(하드웨어 제어/로우레벨).
-- 네이밍: 프리픽스 + 파스칼 케이스, 예: `kMain`.
+- 네이밍: **자유 함수만** 프리픽스 `k`+파스칼케이스(예: `kMain`) —
+  **클래스 멤버 메서드는 `k` 없이 camelCase**(예: `Serial::init()`).
+  헷갈리기 쉬우니 헷갈리면 RM-23F4B687 §1을 먼저 본다.
 - 네임스페이스 규칙은 **커널 앱에만** 적용 — 유저랜드 앱은 앱별 별도
   프로젝트로 간주한다.
 - 헤더 가드는 전통적 `#ifndef`/`#define`(`#pragma once` 아님). 커널
   코드에서 C++ 예외 금지, `errno_t` 체계 사용. RTTI/STL은 부팅 초기엔
   freestanding 최소 범위만, 이후 단계적으로 확장.
-- 디렉터리: 아키텍처 공통 `minicore/arch`, 아키텍처별 라이브러리
-  `minicore/libs/<arch_name>`, 커널 `minicore/kernel`, 서비스는
-  `minicore/devmgr`/`fs`/`net`/`tty`.
+- 디렉터리: `minicore/arch/<arch>`는 순수 부팅 stub만, 부팅 이후에도
+  쓰는 아키텍처 종속 코드는 `minicore/libs/<arch_name>`, 아키텍처
+  무관 early 런타임(memcpy 등)은 `minicore/libs/libkenv`, 커널은
+  `minicore/kernel`, 서비스는 `minicore/devmgr`/`fs`/`net`/`tty`.
 - 빌드: CMake + WSL의 clang. 첫 구현 부팅 경로는 multiboot2, 부트로더는
   기존 것을 체인로더로 활용. 라이선스: MIT.
 
