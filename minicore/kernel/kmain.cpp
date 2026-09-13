@@ -71,6 +71,8 @@ extern "C" void kMain(unsigned int startInfoAddr) {
         kernel::Serial::writeHex(kernel::Acpi::localApicAddress());
         kernel::Serial::write(" ioapic_addr=");
         kernel::Serial::writeHex(kernel::Acpi::ioApicAddress());
+        kernel::Serial::write(" hpet=");
+        kernel::Serial::write(kernel::Acpi::hasHpet() ? "yes" : "no");
         kernel::Serial::write("\n");
         for (unsigned int i = 0; i < kernel::Acpi::cpuCount(); ++i) {
             kernel::Serial::write("  cpu[");
@@ -108,7 +110,9 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     kernel::Serial::write("minicore: IOAPIC mapped\n");
 
     kernel::Timer::init();
-    kernel::Serial::write("minicore: timer calibrated (100Hz), enabling interrupts\n");
+    kernel::Serial::write("minicore: timer ready (100Hz), source=");
+    kernel::Serial::write(kernel::Timer::usesHpet() ? "hpet" : "lapic+pit");
+    kernel::Serial::write(", enabling interrupts\n");
 
     asm volatile("sti");
 

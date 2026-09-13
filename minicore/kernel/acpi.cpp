@@ -87,8 +87,28 @@ constexpr unsigned char kSratTypeMemoryAffinity = 1;
 constexpr unsigned int kSratAffinityEnabledFlag = 1U << 0;
 constexpr unsigned int kSratHeaderPad = 12;  // tableRevision(4) + reserved(8)
 
+// ACPI HPET 테이블(IA-PC HPET 규격 3.2.4) - SdtHeader(36바이트) 바로
+// 뒤에 이어진다. Generic Address Structure(주소공간ID+너비+비트오프셋
+// +예약+실제주소, 12바이트)에서 실제 주소만 쓴다(항상 시스템 메모리
+// 공간이라 addressSpaceId 검사는 생략 - 다른 값이 실무에서 쓰이는
+// 사례가 없음).
+struct HpetTable {
+    SdtHeader header;
+    unsigned int eventTimerBlockId;
+    unsigned char addressSpaceId;
+    unsigned char registerBitWidth;
+    unsigned char registerBitOffset;
+    unsigned char reserved0;
+    unsigned long address;
+    unsigned char hpetNumber;
+    unsigned short minimumTick;
+    unsigned char pageProtection;
+} __attribute__((packed));
+
 unsigned long gLocalApicAddress = 0;
 unsigned int gIoApicAddress = 0;
+bool gHasHpet = false;
+unsigned long gHpetAddress = 0;
 unsigned int gCpuApicIds[kernel::kAcpiMaxCpus];
 unsigned int gCpuNumaNode[kernel::kAcpiMaxCpus];
 unsigned int gCpuCount = 0;
@@ -241,15 +261,23 @@ bool Acpi::init(unsigned long rsdpPhys) {
 
     const SdtHeader* madt = nullptr;
     const SdtHeader* srat = nullptr;
+    const SdtHeader* hpet = nullptr;
 
     if (rsdp->revision >= 2 && kChecksumOk(rsdp, sizeof(Rsdp)) && rsdp->xsdtAddress) {
         madt = kFindTable<unsigned long>(rsdp->xsdtAddress, "APIC");
         srat = kFindTable<unsigned long>(rsdp->xsdtAddress, "SRAT");
+        hpet = kFindTable<unsigned long>(rsdp->xsdtAddress, "HPET");
     } else if (kChecksumOk(rsdp, 20)) {  // ACPI 1.0 RSDP는 처음 20바이트만 체크섬 대상
         madt = kFindTable<unsigned int>(rsdp->rsdtAddress, "APIC");
         srat = kFindTable<unsigned int>(rsdp->rsdtAddress, "SRAT");
+        hpet = kFindTable<unsigned int>(rsdp->rsdtAddress, "HPET");
     } else {
         return false;
+    }
+
+    if (hpet) {
+        gHasHpet = true;
+        gHpetAddress = reinterpret_cast<const HpetTable*>(hpet)->address;
     }
 
     if (!madt) {
@@ -277,6 +305,9 @@ unsigned long Acpi::localApicAddress() { return gLocalApicAddress; }
 unsigned int Acpi::cpuCount() { return gCpuCount; }
 unsigned int Acpi::cpuApicId(unsigned int index) { return gCpuApicIds[index]; }
 unsigned int Acpi::ioApicAddress() { return gIoApicAddress; }
+
+bool Acpi::hasHpet() { return gHasHpet; }
+unsigned long Acpi::hpetAddress() { return gHpetAddress; }
 
 unsigned int Acpi::numaNodeCount() { return gDomainCount; }
 unsigned int Acpi::cpuNumaNode(unsigned int index) { return gCpuNumaNode[index]; }

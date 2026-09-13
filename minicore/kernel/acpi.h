@@ -29,6 +29,13 @@ public:
     static unsigned int cpuApicId(unsigned int index);
     static unsigned int ioApicAddress();
 
+    // HPET("HPET" 시그니처)는 선택 테이블이다 - 없는 펌웨어도 흔하다.
+    // hasHpet()이 false면 hpetAddress()는 의미 없다(호출부가 반드시
+    // hasHpet()로 먼저 확인해야 함, DS-D4E5C451 - "HPET을 스케줄러
+    // 기본 시간원으로, LAPIC 타이머는 fallback으로").
+    static bool hasHpet();
+    static unsigned long hpetAddress();
+
     // NUMA 토폴로지 (SRAT 없으면 항상 numaNodeCount()==1로 fallback).
     static unsigned int numaNodeCount();
     // cpuApicId(index)와 같은 index로 대응되는 코어가 속한 노드.

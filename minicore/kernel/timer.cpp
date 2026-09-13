@@ -1,6 +1,8 @@
 #include "timer.h"
 
 #include "x86_64/io_port.h"
+#include "acpi.h"
+#include "hpet.h"
 #include "lapic.h"
 
 namespace {
@@ -21,6 +23,7 @@ constexpr unsigned int kPitFrequencyHz = 1193182;
 constexpr unsigned int kCalibrationMs = 10;
 
 unsigned long gTickCount = 0;
+bool gUsesHpet = false;
 
 // PIT 채널2를 kCalibrationMs만큼 원샷으로 돌리는 동안, 이미 최댓값
 // (0xFFFFFFFF)에서 카운트다운 중인 LAPIC 타이머가 얼마나 줄었는지
@@ -55,6 +58,11 @@ unsigned int kCalibrateLapicTicksPerWindow() {
 namespace kernel {
 
 void Timer::init() {
+    if (Acpi::hasHpet() && Hpet::init()) {
+        gUsesHpet = true;
+        return;  // HPET가 스케줄러 틱을 담당 - 아래 PIT 보정/LAPIC 주기 설정은 불필요
+    }
+
     const unsigned int ticksPerWindow = kCalibrateLapicTicksPerWindow();
 
     Lapic::writeRegister(kLapicDivideConfig, kDivideBy16);
@@ -64,6 +72,10 @@ void Timer::init() {
 
 unsigned long Timer::tickCount() {
     return gTickCount;
+}
+
+bool Timer::usesHpet() {
+    return gUsesHpet;
 }
 
 void Timer::onTick() {
