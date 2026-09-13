@@ -6,6 +6,14 @@ namespace kernel {
 constexpr unsigned int kAcpiMaxCpus = 32;             // v1 임시 상한
 constexpr unsigned int kAcpiMaxNumaNodes = 8;         // v1 임시 상한
 constexpr unsigned int kAcpiMaxMemoryAffinityEntries = 32;
+constexpr unsigned int kAcpiMaxIsoEntries = 16;       // ISA IRQ가 0-15뿐이라 이 이상 필요 없음
+
+// Acpi::IsaIrqRouting::polarity/triggerMode 값 - ACPI MPS INTI Flags를
+// "conforms(버스 기본값)"까지 전부 해석해 둔 최종 값이다.
+constexpr unsigned int kAcpiPolarityActiveHigh = 1;
+constexpr unsigned int kAcpiPolarityActiveLow = 3;
+constexpr unsigned int kAcpiTriggerEdge = 1;
+constexpr unsigned int kAcpiTriggerLevel = 3;
 
 // RSDP -> RSDT/XSDT -> MADT("APIC")/SRAT까지 파싱해서 로컬 APIC 주소,
 // 코어(Local APIC) 목록, 그리고 **NUMA 노드 토폴로지**(설계자 지시,
@@ -28,6 +36,25 @@ public:
     static unsigned int cpuCount();
     static unsigned int cpuApicId(unsigned int index);
     static unsigned int ioApicAddress();
+
+    // ISA IRQ(레거시 핀 번호, 0-15) 하나를 실제 라우팅할 GSI(Global
+    // System Interrupt)/극성/트리거 모드로 바꾼다 - MADT Interrupt
+    // Source Override(타입2)를 파싱한 결과다(QU-2EF510B4, 설계자 지시,
+    // 2026-09-14 - "IRQ==GSI로 가정하지 말고 실제로 파싱해서 맵핑하라").
+    // override가 없는 IRQ는 ISA 기본값(GSI=IRQ 그대로, active-high,
+    // edge-triggered)으로 반환한다 - ACPI 스펙상 override 테이블에
+    // 없는 ISA IRQ는 이 기본값을 따른다고 명시돼 있다.
+    struct IsaIrqRouting {
+        unsigned int gsi;
+        // kPolarityActiveHigh/ActiveLow(아래 상수) - ACPI MPS INTI
+        // Flags의 극성 필드를 ISA 기본값(active-high)까지 반영해
+        // 이미 해석해 둔 값이다("conforms" 값은 여기 없음).
+        unsigned int polarity;
+        // kTriggerEdge/Level(아래 상수) - 위와 같은 이유로 이미 해석됨
+        // (ISA 기본값 edge까지 반영).
+        unsigned int triggerMode;
+    };
+    static IsaIrqRouting resolveIsaIrq(unsigned int isaIrq);
 
     // HPET("HPET" 시그니처)는 선택 테이블이다 - 없는 펌웨어도 흔하다.
     // hasHpet()이 false면 hpetAddress()는 의미 없다(호출부가 반드시

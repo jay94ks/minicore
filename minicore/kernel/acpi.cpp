@@ -50,9 +50,24 @@ struct MadtIoApicEntry {
     unsigned int globalSystemInterruptBase;
 } __attribute__((packed));
 
+struct MadtInterruptSourceOverrideEntry {
+    MadtEntryHeader header;
+    unsigned char bus;   // 항상 0(ISA)
+    unsigned char source;  // ISA IRQ 번호
+    unsigned int globalSystemInterrupt;
+    unsigned short flags;  // MPS INTI Flags: bit0-1 극성, bit2-3 트리거 모드
+} __attribute__((packed));
+
 constexpr unsigned char kMadtTypeLocalApic = 0;
 constexpr unsigned char kMadtTypeIoApic = 1;
+constexpr unsigned char kMadtTypeInterruptSourceOverride = 2;
 constexpr unsigned int kMadtLocalApicEnabledFlag = 1U << 0;
+
+// MPS INTI Flags(ACPI 스펙 5.2.12.5) - 극성 2비트/트리거 2비트, 각각
+// 0=버스 기본값(conforms), 1=고정값, 2=예약, 3=반대 고정값.
+constexpr unsigned short kMpsFlagsPolarityMask = 0x3;
+constexpr unsigned short kMpsFlagsTriggerShift = 2;
+constexpr unsigned short kMpsFlagsTriggerMask = 0x3 << kMpsFlagsTriggerShift;
 
 struct SratEntryHeader {
     unsigned char type;
@@ -112,6 +127,14 @@ unsigned long gHpetAddress = 0;
 unsigned int gCpuApicIds[kernel::kAcpiMaxCpus];
 unsigned int gCpuNumaNode[kernel::kAcpiMaxCpus];
 unsigned int gCpuCount = 0;
+
+// ISA IRQ(인덱스) -> override 존재 여부/GSI/극성/트리거. override가
+// 없는 IRQ는 gIsoPresent[irq]==false로 남고, Acpi::resolveIsaIrq가
+// ISA 기본값(GSI=IRQ, active-high, edge)으로 채워 돌려준다.
+bool gIsoPresent[kernel::kAcpiMaxIsoEntries];
+unsigned int gIsoGsi[kernel::kAcpiMaxIsoEntries];
+unsigned int gIsoPolarity[kernel::kAcpiMaxIsoEntries];
+unsigned int gIsoTriggerMode[kernel::kAcpiMaxIsoEntries];
 
 unsigned int gDomainValues[kernel::kAcpiMaxNumaNodes];
 unsigned int gDomainCount = 0;
@@ -185,6 +208,24 @@ void kParseMadt(const SdtHeader* madtHeader) {
         } else if (entryHeader->type == kMadtTypeIoApic) {
             const auto* ioapic = reinterpret_cast<const MadtIoApicEntry*>(entry);
             gIoApicAddress = ioapic->ioApicAddress;
+        } else if (entryHeader->type == kMadtTypeInterruptSourceOverride) {
+            const auto* iso = reinterpret_cast<const MadtInterruptSourceOverrideEntry*>(entry);
+            if (iso->source < kernel::kAcpiMaxIsoEntries) {
+                gIsoPresent[iso->source] = true;
+                gIsoGsi[iso->source] = iso->globalSystemInterrupt;
+
+                const unsigned int rawPolarity = iso->flags & kMpsFlagsPolarityMask;
+                gIsoPolarity[iso->source] =
+                    (rawPolarity == 0 || rawPolarity == kernel::kAcpiPolarityActiveHigh)
+                        ? kernel::kAcpiPolarityActiveHigh
+                        : kernel::kAcpiPolarityActiveLow;
+
+                const unsigned int rawTrigger = (iso->flags & kMpsFlagsTriggerMask) >> kMpsFlagsTriggerShift;
+                gIsoTriggerMode[iso->source] =
+                    (rawTrigger == 0 || rawTrigger == kernel::kAcpiTriggerEdge)
+                        ? kernel::kAcpiTriggerEdge
+                        : kernel::kAcpiTriggerLevel;
+            }
         }
         entry += entryHeader->length;
     }
@@ -305,6 +346,14 @@ unsigned long Acpi::localApicAddress() { return gLocalApicAddress; }
 unsigned int Acpi::cpuCount() { return gCpuCount; }
 unsigned int Acpi::cpuApicId(unsigned int index) { return gCpuApicIds[index]; }
 unsigned int Acpi::ioApicAddress() { return gIoApicAddress; }
+
+Acpi::IsaIrqRouting Acpi::resolveIsaIrq(unsigned int isaIrq) {
+    if (isaIrq < kAcpiMaxIsoEntries && gIsoPresent[isaIrq]) {
+        return {gIsoGsi[isaIrq], gIsoPolarity[isaIrq], gIsoTriggerMode[isaIrq]};
+    }
+    // override 없음 - ACPI 스펙의 ISA 기본값(GSI=IRQ, active-high, edge).
+    return {isaIrq, kAcpiPolarityActiveHigh, kAcpiTriggerEdge};
+}
 
 bool Acpi::hasHpet() { return gHasHpet; }
 unsigned long Acpi::hpetAddress() { return gHpetAddress; }

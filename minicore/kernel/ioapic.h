@@ -8,27 +8,37 @@ namespace kernel {
 // (PL-2D149D8F). LAPIC과 달리 IOREGSEL(오프셋 0x00에 레지스터 번호를
 // 써서 선택)+IOWIN(오프셋 0x10으로 실제 값 접근)의 2단계 간접 방식이다.
 //
-// **주의(범위 밖)**: ACPI MADT의 Interrupt Source Override(타입2)
-// 엔트리를 아직 파싱하지 않는다(Acpi 클래스가 Local APIC/IO APIC
-// 엔트리만 다룸) - 그래서 여기서는 "IRQ 번호 == GSI(Global System
-// Interrupt) 번호"로 가정한다. 실제 하드웨어/일부 BIOS는 특히 IRQ0을
-// 다른 GSI로 재배선해 두는 경우가 있다 - 지금은 GSI 재배선이 거의
-// 없는 IRQ1(키보드)만 다뤄서 문제가 없지만, PIT(IRQ0) 등을 IOAPIC으로
-// 라우팅해야 할 일이 생기면 Interrupt Source Override 파싱을 먼저
-// 추가해야 한다.
+// ACPI MADT Interrupt Source Override(타입2)를 Acpi::resolveIsaIrq로
+// 실제로 반영한다(QU-2EF510B4, 설계자 지시, 2026-09-14 - "IRQ==GSI로
+// 가정하지 말고 실제로 파싱해서 맵핑하라") - setRedirectionForIsaIrq가
+// 이 변환을 대신해 준다.
 class IoApic {
 public:
     static void init();
 
-    // irq: ISA IRQ 번호(위 주의사항 참고 - 지금은 GSI와 동일하다고
-    // 가정). vector: IDT에 등록된 목적지 벡터(33-254, Idt::kDynamicVectorBase
-    // 대역과 registerHandler로 실제 콜백을 먼저 걸어 둬야 함).
-    // destApicId: 인터럽트를 받을 코어의(x)APIC ID - IOAPIC 리다이렉션
-    // 테이블의 물리 목적지 필드는 8비트라 x2APIC의 32비트 ID 전체는
-    // 못 담는다(지금은 BSP 하나뿐이라 문제 없음 - SMP 확장 시 재검토).
-    static void setRedirection(unsigned int irq, unsigned int vector, unsigned int destApicId);
-    static void mask(unsigned int irq);
-    static void unmask(unsigned int irq);
+    // gsi: Global System Interrupt(IOAPIC 리다이렉션 테이블 인덱스 그
+    // 자체) - HPET처럼 이미 GSI 단위로 라우팅을 정하는 경우 직접
+    // 쓴다. polarity/triggerMode는 kAcpiPolarityActiveHigh/ActiveLow,
+    // kAcpiTriggerEdge/Level(acpi.h) 값.
+    // destApicId: 인터럽트를 받을 코어의 (x)APIC ID - 32비트 타입으로
+    // 관리하되(QU-F89355A8, 설계자 지시 - "32bit 타입으로 관리하고,
+    // 8비트만 사용가능한 시스템에서 32비트 중 8비트를 활용"), IOAPIC
+    // REDTBL의 물리 목적지 필드 자체는 하드웨어 스펙상 8비트라
+    // 0xFF를 넘는 목적지는 애초에 라우팅이 불가능하다 - 그 경우 false를
+    // 반환한다(조용히 잘못된 대상으로 보내지 않기 위함, 그런 코어는
+    // MSI/x2APIC 논리주소 등 다른 전달 경로를 써야 한다).
+    // gsi가 이 IOAPIC의 최대 리다이렉션 엔트리 수(IOAPICVER에서 읽음)를
+    // 넘어도 false.
+    static bool setRedirection(unsigned int gsi, unsigned int vector, unsigned int destApicId,
+                                unsigned int polarity, unsigned int triggerMode);
+
+    // ISA IRQ(레거시 핀 번호, 0-15) 하나를 라우팅하는 편의 함수 -
+    // Acpi::resolveIsaIrq로 실제 GSI/극성/트리거를 구해 위
+    // setRedirection을 호출한다.
+    static bool setRedirectionForIsaIrq(unsigned int isaIrq, unsigned int vector, unsigned int destApicId);
+
+    static void mask(unsigned int gsi);
+    static void unmask(unsigned int gsi);
 };
 
 }  // namespace kernel
