@@ -7,6 +7,7 @@ constexpr unsigned int kAcpiMaxCpus = 32;             // v1 임시 상한
 constexpr unsigned int kAcpiMaxNumaNodes = 8;         // v1 임시 상한
 constexpr unsigned int kAcpiMaxMemoryAffinityEntries = 32;
 constexpr unsigned int kAcpiMaxIsoEntries = 16;       // ISA IRQ가 0-15뿐이라 이 이상 필요 없음
+constexpr unsigned int kAcpiMaxIoApics = 8;           // v1 임시 상한 - 서버급 멀티소켓도 보통 이 안쪽
 
 // Acpi::IsaIrqRouting::polarity/triggerMode 값 - ACPI MPS INTI Flags를
 // "conforms(버스 기본값)"까지 전부 해석해 둔 최종 값이다.
@@ -35,7 +36,19 @@ public:
     static unsigned long localApicAddress();
     static unsigned int cpuCount();
     static unsigned int cpuApicId(unsigned int index);
-    static unsigned int ioApicAddress();
+
+    // 시스템에 IOAPIC이 여러 개 있을 수 있다(설계자 지시, 2026-09-14 -
+    // "IOAPIC는 한개가 아니라 여러개가 존재할 수도 있는데, 이 부분에
+    // 대해서도 고려해야해") - 서버급 멀티소켓/멀티칩셋 구성에서 흔하다.
+    // MADT의 IO APIC 엔트리(타입1)마다 각자 다른 MMIO 베이스 주소와
+    // globalSystemInterruptBase(이 IOAPIC이 담당하는 GSI 범위의 시작)를
+    // 갖는다 - GSI 하나를 실제로 라우팅하려면 어느 IOAPIC이 그 GSI를
+    // 담당하는지부터 찾아야 한다(IoApic::setRedirection이 이 배열을
+    // 순회해서 처리, ioapic.cpp 참고).
+    static unsigned int ioApicCount();
+    static unsigned int ioApicId(unsigned int index);
+    static unsigned int ioApicAddress(unsigned int index);
+    static unsigned int ioApicGsiBase(unsigned int index);
 
     // ISA IRQ(레거시 핀 번호, 0-15) 하나를 실제 라우팅할 GSI(Global
     // System Interrupt)/극성/트리거 모드로 바꾼다 - MADT Interrupt

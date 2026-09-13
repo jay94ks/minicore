@@ -3,10 +3,19 @@
 
 namespace kernel {
 
-// ACPI MADT가 알려주는 IOAPIC(Acpi::ioApicAddress())을 매핑해 핀 기반
-// 외부 인터럽트(키보드 등 레거시 IRQ)를 원하는 벡터로 라우팅한다
-// (PL-2D149D8F). LAPIC과 달리 IOREGSEL(오프셋 0x00에 레지스터 번호를
-// 써서 선택)+IOWIN(오프셋 0x10으로 실제 값 접근)의 2단계 간접 방식이다.
+// ACPI MADT가 알려주는 IOAPIC들(Acpi::ioApicCount()/ioApicAddress())을
+// 전부 매핑해 핀 기반 외부 인터럽트(키보드 등 레거시 IRQ)를 원하는
+// 벡터로 라우팅한다(PL-2D149D8F). LAPIC과 달리 IOREGSEL(오프셋 0x00에
+// 레지스터 번호를 써서 선택)+IOWIN(오프셋 0x10으로 실제 값 접근)의
+// 2단계 간접 방식이다.
+//
+// 시스템에 IOAPIC이 여러 개 있을 수 있다(설계자 지시, 2026-09-14 -
+// "IOAPIC는 한개가 아니라 여러개가 존재할 수도 있는데, 이 부분에
+// 대해서도 고려해야해") - 각 IOAPIC은 ACPI가 알려주는
+// globalSystemInterruptBase부터 시작하는 서로 겹치지 않는 GSI 구간을
+// 담당한다. 이 클래스의 gsi 기반 API(setRedirection/mask/unmask)는
+// 호출부가 어느 IOAPIC이 그 GSI를 담당하는지 몰라도 되게, 내부에서
+// GSI 값으로 올바른 IOAPIC 인스턴스를 찾아 라우팅한다.
 //
 // ACPI MADT Interrupt Source Override(타입2)를 Acpi::resolveIsaIrq로
 // 실제로 반영한다(QU-2EF510B4, 설계자 지시, 2026-09-14 - "IRQ==GSI로
@@ -27,8 +36,10 @@ public:
     // 0xFF를 넘는 목적지는 애초에 라우팅이 불가능하다 - 그 경우 false를
     // 반환한다(조용히 잘못된 대상으로 보내지 않기 위함, 그런 코어는
     // MSI/x2APIC 논리주소 등 다른 전달 경로를 써야 한다).
-    // gsi가 이 IOAPIC의 최대 리다이렉션 엔트리 수(IOAPICVER에서 읽음)를
-    // 넘어도 false.
+    // gsi를 담당하는 IOAPIC이 없거나(어느 인스턴스의 [gsiBase,
+    // gsiBase+최대 리다이렉션 엔트리 수) 구간에도 안 들어감), 담당
+    // IOAPIC은 찾았지만 그 안에서 지역 인덱스가 IOAPICVER가 알려주는
+    // 최대 엔트리 수를 넘어도 false.
     static bool setRedirection(unsigned int gsi, unsigned int vector, unsigned int destApicId,
                                 unsigned int polarity, unsigned int triggerMode);
 

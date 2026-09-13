@@ -8,7 +8,7 @@ namespace {
 constexpr unsigned int kRegIoRegSel = 0x00;
 constexpr unsigned int kRegIoWin = 0x10;
 constexpr unsigned int kRegIoApicVer = 0x01;
-constexpr unsigned int kRegRedTblBase = 0x10;  // 엔트리당 2개(저/고 32비트): 0x10+2*gsi, 0x10+2*gsi+1
+constexpr unsigned int kRegRedTblBase = 0x10;  // 엔트리당 2개(저/고 32비트): 0x10+2*localIndex, 0x10+2*localIndex+1
 
 constexpr unsigned int kRedTblMaskedBit = 1U << 16;
 constexpr unsigned int kRedTblPolarityBit = 1U << 13;
@@ -20,22 +20,41 @@ constexpr unsigned int kIoApicVerMaxRedirEntryShift = 16;
 constexpr unsigned int kIoApicVerMaxRedirEntryMask = 0xFF;
 
 // LAPIC MMIO(lapic.cpp의 kLapicVirtBase, 0xFFFF901000000000UL) 바로
-// 다음 4KiB 페이지 - LAPIC과 서로 다른 물리 프레임을 가리키므로 독립된
-// 가상주소가 필요하다. 두 매핑 다 PAGE_CACHE_DISABLE 4KiB MMIO
-// 페이지라 이렇게 나란히 둬도 안전하다(page table 상 서로 다른 PTE).
+// 다음 4KiB 페이지부터 IOAPIC 인스턴스마다 한 페이지씩 순서대로 쓴다 -
+// MMCONFIG(0xFFFF901000010000UL)가 시작되기 전까지 kAcpiMaxIoApics
+// (8)개를 위한 여유가 충분하다(0x1000~0x8000, MMCONFIG는 0x10000부터).
 constexpr unsigned long kIoApicVirtBase = 0xFFFF901000001000UL;
 
-unsigned long gIoApicVirtAddr = 0;
-unsigned int gMaxRedirectionEntry = 0;  // IOAPICVER에서 읽은 "최대 인덱스"(엔트리 수 - 1)
+struct IoApicInstance {
+    unsigned long virtAddr;
+    unsigned int gsiBase;
+    unsigned int maxRedirectionEntry;  // IOAPICVER에서 읽은 "최대 인덱스"(엔트리 수 - 1)
+};
 
-unsigned int kReadReg(unsigned int reg) {
-    *reinterpret_cast<volatile unsigned int*>(gIoApicVirtAddr + kRegIoRegSel) = reg;
-    return *reinterpret_cast<volatile unsigned int*>(gIoApicVirtAddr + kRegIoWin);
+IoApicInstance gInstances[kernel::kAcpiMaxIoApics];
+unsigned int gInstanceCount = 0;
+
+unsigned int kReadReg(const IoApicInstance& instance, unsigned int reg) {
+    *reinterpret_cast<volatile unsigned int*>(instance.virtAddr + kRegIoRegSel) = reg;
+    return *reinterpret_cast<volatile unsigned int*>(instance.virtAddr + kRegIoWin);
 }
 
-void kWriteReg(unsigned int reg, unsigned int value) {
-    *reinterpret_cast<volatile unsigned int*>(gIoApicVirtAddr + kRegIoRegSel) = reg;
-    *reinterpret_cast<volatile unsigned int*>(gIoApicVirtAddr + kRegIoWin) = value;
+void kWriteReg(const IoApicInstance& instance, unsigned int reg, unsigned int value) {
+    *reinterpret_cast<volatile unsigned int*>(instance.virtAddr + kRegIoRegSel) = reg;
+    *reinterpret_cast<volatile unsigned int*>(instance.virtAddr + kRegIoWin) = value;
+}
+
+// gsi를 담당하는 인스턴스를 찾아 그 안에서의 지역 리다이렉션 인덱스를
+// outLocalIndex로 돌려준다 - 어느 인스턴스에도 안 속하면 nullptr.
+const IoApicInstance* kFindInstanceForGsi(unsigned int gsi, unsigned int* outLocalIndex) {
+    for (unsigned int i = 0; i < gInstanceCount; ++i) {
+        const IoApicInstance& instance = gInstances[i];
+        if (gsi >= instance.gsiBase && gsi - instance.gsiBase <= instance.maxRedirectionEntry) {
+            *outLocalIndex = gsi - instance.gsiBase;
+            return &instance;
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -43,16 +62,26 @@ void kWriteReg(unsigned int reg, unsigned int value) {
 namespace kernel {
 
 void IoApic::init() {
-    const unsigned long phys = Acpi::ioApicAddress();
-    Paging::mapPage(kIoApicVirtBase, phys, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
-    gIoApicVirtAddr = kIoApicVirtBase;
-    gMaxRedirectionEntry = (kReadReg(kRegIoApicVer) >> kIoApicVerMaxRedirEntryShift) & kIoApicVerMaxRedirEntryMask;
+    const unsigned int count = Acpi::ioApicCount();
+    gInstanceCount = count < kAcpiMaxIoApics ? count : kAcpiMaxIoApics;
+
+    for (unsigned int i = 0; i < gInstanceCount; ++i) {
+        const unsigned long virtAddr = kIoApicVirtBase + static_cast<unsigned long>(i) * 4096UL;
+        Paging::mapPage(virtAddr, Acpi::ioApicAddress(i), PAGE_WRITABLE | PAGE_CACHE_DISABLE);
+
+        gInstances[i].virtAddr = virtAddr;
+        gInstances[i].gsiBase = Acpi::ioApicGsiBase(i);
+        gInstances[i].maxRedirectionEntry =
+            (kReadReg(gInstances[i], kRegIoApicVer) >> kIoApicVerMaxRedirEntryShift) & kIoApicVerMaxRedirEntryMask;
+    }
 }
 
 bool IoApic::setRedirection(unsigned int gsi, unsigned int vector, unsigned int destApicId, unsigned int polarity,
                              unsigned int triggerMode) {
-    if (gsi > gMaxRedirectionEntry) {
-        return false;  // 이 IOAPIC이 아예 갖고 있지 않은 엔트리
+    unsigned int localIndex = 0;
+    const IoApicInstance* instance = kFindInstanceForGsi(gsi, &localIndex);
+    if (!instance) {
+        return false;  // 이 GSI를 담당하는 IOAPIC이 없음
     }
     if (destApicId > kRedTblDestMask) {
         // IOAPIC REDTBL의 물리 목적지 필드는 8비트 고정(하드웨어
@@ -69,11 +98,11 @@ bool IoApic::setRedirection(unsigned int gsi, unsigned int vector, unsigned int 
         low |= kRedTblTriggerBit;
     }
     const unsigned int high = destApicId << kRedTblDestShift;
-    const unsigned int regLow = kRegRedTblBase + gsi * 2;
+    const unsigned int regLow = kRegRedTblBase + localIndex * 2;
     const unsigned int regHigh = regLow + 1;
 
-    kWriteReg(regHigh, high);
-    kWriteReg(regLow, low);
+    kWriteReg(*instance, regHigh, high);
+    kWriteReg(*instance, regLow, low);
     return true;
 }
 
@@ -83,13 +112,23 @@ bool IoApic::setRedirectionForIsaIrq(unsigned int isaIrq, unsigned int vector, u
 }
 
 void IoApic::mask(unsigned int gsi) {
-    const unsigned int regLow = kRegRedTblBase + gsi * 2;
-    kWriteReg(regLow, kReadReg(regLow) | kRedTblMaskedBit);
+    unsigned int localIndex = 0;
+    const IoApicInstance* instance = kFindInstanceForGsi(gsi, &localIndex);
+    if (!instance) {
+        return;
+    }
+    const unsigned int regLow = kRegRedTblBase + localIndex * 2;
+    kWriteReg(*instance, regLow, kReadReg(*instance, regLow) | kRedTblMaskedBit);
 }
 
 void IoApic::unmask(unsigned int gsi) {
-    const unsigned int regLow = kRegRedTblBase + gsi * 2;
-    kWriteReg(regLow, kReadReg(regLow) & ~kRedTblMaskedBit);
+    unsigned int localIndex = 0;
+    const IoApicInstance* instance = kFindInstanceForGsi(gsi, &localIndex);
+    if (!instance) {
+        return;
+    }
+    const unsigned int regLow = kRegRedTblBase + localIndex * 2;
+    kWriteReg(*instance, regLow, kReadReg(*instance, regLow) & ~kRedTblMaskedBit);
 }
 
 }  // namespace kernel

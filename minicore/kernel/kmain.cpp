@@ -224,8 +224,8 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
         kernel::Serial::writeHex(kernel::Acpi::numaNodeCount());
         kernel::Serial::write(" local_apic_addr=");
         kernel::Serial::writeHex(kernel::Acpi::localApicAddress());
-        kernel::Serial::write(" ioapic_addr=");
-        kernel::Serial::writeHex(kernel::Acpi::ioApicAddress());
+        kernel::Serial::write(" ioapic_count=");
+        kernel::Serial::writeHex(kernel::Acpi::ioApicCount());
         kernel::Serial::write(" hpet=");
         kernel::Serial::write(kernel::Acpi::hasHpet() ? "yes" : "no");
         kernel::Serial::write("\n");
@@ -236,6 +236,17 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
             kernel::Serial::writeHex(kernel::Acpi::cpuApicId(i));
             kernel::Serial::write(" numa_node=");
             kernel::Serial::writeHex(kernel::Acpi::cpuNumaNode(i));
+            kernel::Serial::write("\n");
+        }
+        for (unsigned int i = 0; i < kernel::Acpi::ioApicCount(); ++i) {
+            kernel::Serial::write("  ioapic[");
+            kernel::Serial::writeHex(i);
+            kernel::Serial::write("] id=");
+            kernel::Serial::writeHex(kernel::Acpi::ioApicId(i));
+            kernel::Serial::write(" addr=");
+            kernel::Serial::writeHex(kernel::Acpi::ioApicAddress(i));
+            kernel::Serial::write(" gsi_base=");
+            kernel::Serial::writeHex(kernel::Acpi::ioApicGsiBase(i));
             kernel::Serial::write("\n");
         }
     } else {

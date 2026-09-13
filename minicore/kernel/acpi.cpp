@@ -133,7 +133,10 @@ struct McfgEntry {
 constexpr unsigned int kMcfgHeaderPad = 8;  // 예약 필드
 
 unsigned long gLocalApicAddress = 0;
-unsigned int gIoApicAddress = 0;
+unsigned int gIoApicIds[kernel::kAcpiMaxIoApics];
+unsigned int gIoApicAddresses[kernel::kAcpiMaxIoApics];
+unsigned int gIoApicGsiBases[kernel::kAcpiMaxIoApics];
+unsigned int gIoApicCount = 0;
 bool gHasHpet = false;
 unsigned long gHpetAddress = 0;
 bool gHasMcfg = false;
@@ -223,7 +226,12 @@ void kParseMadt(const SdtHeader* madtHeader) {
             }
         } else if (entryHeader->type == kMadtTypeIoApic) {
             const auto* ioapic = reinterpret_cast<const MadtIoApicEntry*>(entry);
-            gIoApicAddress = ioapic->ioApicAddress;
+            if (gIoApicCount < kernel::kAcpiMaxIoApics) {
+                gIoApicIds[gIoApicCount] = ioapic->ioApicId;
+                gIoApicAddresses[gIoApicCount] = ioapic->ioApicAddress;
+                gIoApicGsiBases[gIoApicCount] = ioapic->globalSystemInterruptBase;
+                ++gIoApicCount;
+            }
         } else if (entryHeader->type == kMadtTypeInterruptSourceOverride) {
             const auto* iso = reinterpret_cast<const MadtInterruptSourceOverrideEntry*>(entry);
             if (iso->source < kernel::kAcpiMaxIsoEntries) {
@@ -373,7 +381,10 @@ bool Acpi::init(unsigned long rsdpPhys) {
 unsigned long Acpi::localApicAddress() { return gLocalApicAddress; }
 unsigned int Acpi::cpuCount() { return gCpuCount; }
 unsigned int Acpi::cpuApicId(unsigned int index) { return gCpuApicIds[index]; }
-unsigned int Acpi::ioApicAddress() { return gIoApicAddress; }
+unsigned int Acpi::ioApicCount() { return gIoApicCount; }
+unsigned int Acpi::ioApicId(unsigned int index) { return gIoApicIds[index]; }
+unsigned int Acpi::ioApicAddress(unsigned int index) { return gIoApicAddresses[index]; }
+unsigned int Acpi::ioApicGsiBase(unsigned int index) { return gIoApicGsiBases[index]; }
 
 Acpi::IsaIrqRouting Acpi::resolveIsaIrq(unsigned int isaIrq) {
     if (isaIrq < kAcpiMaxIsoEntries && gIsoPresent[isaIrq]) {
