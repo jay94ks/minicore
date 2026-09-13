@@ -14,6 +14,17 @@ constexpr unsigned int kRegisterEoi = 0x0B0;
 constexpr unsigned int kRegisterSpuriousVector = 0x0F0;
 constexpr unsigned int kSpuriousSoftwareEnableBit = 1U << 8;
 
+constexpr unsigned int kRegisterIcrLow = 0x300;
+constexpr unsigned int kRegisterIcrHigh = 0x310;
+constexpr unsigned int kX2ApicIcrMsr = 0x830;  // x2APIC은 ICR이 64비트 MSR 하나로 통합됨(xAPIC의 0x300+0x310과 다름)
+
+constexpr unsigned int kIcrDeliveryModeInit = 5U << 8;
+constexpr unsigned int kIcrDeliveryModeStartup = 6U << 8;
+constexpr unsigned int kIcrLevelAssert = 1U << 14;
+constexpr unsigned int kIcrTriggerModeLevel = 1U << 15;
+constexpr unsigned int kIcrDeliveryStatusBit = 1U << 12;  // x2APIC엔 없음(전송이 항상 동기적으로 완료됨)
+constexpr unsigned int kXApicIcrHighDestShift = 24;
+
 // LAPIC MMIO는 direct map(WB 캐시)에 그대로 얹으면 안 된다 - 전용
 // 가상주소에 캐시 비활성으로 따로 매핑한다. (x2APIC 모드에서는 MMIO
 // 매핑 자체를 안 쓴다 - 전부 MSR 접근이라 필요 없음.)
@@ -151,6 +162,40 @@ unsigned int Lapic::readRegister(unsigned int offset) {
         return static_cast<unsigned int>(kReadMsr(kX2ApicMsrBase + (offset >> 4)));
     }
     return *reinterpret_cast<volatile unsigned int*>(gLapicVirtAddr + offset);
+}
+
+namespace {
+
+void kSendIcr(unsigned int destApicId, unsigned int commandLow) {
+    if (gUseX2Apic) {
+        // x2APIC: 목적지(전체 32비트) + 명령을 한 번의 64비트 MSR
+        // 쓰기로 보낸다 - 스펙상 항상 동기적으로 완료되어 xAPIC의
+        // delivery status 폴링이 필요 없다.
+        kWriteMsr(kX2ApicIcrMsr, (static_cast<unsigned long>(destApicId) << 32) | commandLow);
+        return;
+    }
+    // xAPIC: 목적지를 먼저 ICR_HIGH에 쓰고(8비트, 물리모드), ICR_LOW를
+    // 쓰는 순간 실제로 IPI가 나간다 - 그래서 순서가 중요하다.
+    Lapic::writeRegister(kRegisterIcrHigh, destApicId << kXApicIcrHighDestShift);
+    Lapic::writeRegister(kRegisterIcrLow, commandLow);
+    while (Lapic::readRegister(kRegisterIcrLow) & kIcrDeliveryStatusBit) {
+        asm volatile("pause");
+    }
+}
+
+}  // namespace
+
+void Lapic::sendInitIpi(unsigned int destApicId, bool assert) {
+    unsigned int command = kIcrDeliveryModeInit | kIcrTriggerModeLevel;
+    if (assert) {
+        command |= kIcrLevelAssert;
+    }
+    kSendIcr(destApicId, command);
+}
+
+void Lapic::sendStartupIpi(unsigned int destApicId, unsigned int startupVector) {
+    const unsigned int command = kIcrDeliveryModeStartup | (startupVector & 0xFF);
+    kSendIcr(destApicId, command);
 }
 
 }  // namespace kernel

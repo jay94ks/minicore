@@ -9,4 +9,5 @@
 # 통째로 빠질 수 있다.
 add_library(minicore_arch_x86_64 OBJECT
     boot.S
+    ap_trampoline.S
 )

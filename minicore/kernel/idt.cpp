@@ -118,6 +118,10 @@ void Idt::init() {
     asm volatile("lidt %0" : : "m"(gIdtPointer));
 }
 
+void Idt::reloadOnThisCore() {
+    asm volatile("lidt %0" : : "m"(gIdtPointer));
+}
+
 void Idt::registerHandler(unsigned int vector, InterruptHandler handler) {
     if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd) {
         return;

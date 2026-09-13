@@ -49,6 +49,19 @@ public:
     // Timer.cpp가 LVT Timer/Divide/Initial Count를 직접 쓸 때 쓴다.
     static void writeRegister(unsigned int offset, unsigned int value);
     static unsigned int readRegister(unsigned int offset);
+
+    // ICR(Interrupt Command Register) 전송 - SMP AP 기동(PL-65C20380)의
+    // INIT-SIPI-SIPI 시퀀스 전용. 다른 레지스터와 달리 xAPIC(ICR_LOW
+    // 0x300+ICR_HIGH 0x310, 두 개의 32비트 레지스터)과 x2APIC(MSR
+    // 0x830 하나, 64비트 통합)이 근본적으로 다른 유일한 레지스터라
+    // readRegister/writeRegister로 일반화할 수 없다 - 그래서 전용
+    // 메서드로 따로 뒀다(PL-D65F49CC 설계 당시부터 예견된 차이).
+    // assert=true면 INIT 어서트, false면 디어서트(레벨 비트만 다름).
+    static void sendInitIpi(unsigned int destApicId, bool assert);
+    // startupVector: SIPI가 가리키는 물리주소를 4096으로 나눈 값
+    // (예: 0x8000 -> 0x08) - AP가 그 페이지의 오프셋 0부터 16비트
+    // 실모드로 시작한다.
+    static void sendStartupIpi(unsigned int destApicId, unsigned int startupVector);
 };
 
 }  // namespace kernel

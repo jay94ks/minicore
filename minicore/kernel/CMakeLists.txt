@@ -11,6 +11,7 @@ add_library(minicore_kernel OBJECT
     ioapic.cpp
     hpet.cpp
     pci.cpp
+    smp.cpp
     timer.cpp
 )
 

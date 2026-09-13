@@ -8,6 +8,7 @@
 #include "paging.h"
 #include "pci.h"
 #include "serial.h"
+#include "smp.h"
 #include "timer.h"
 
 namespace {
@@ -166,7 +167,11 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
     kernel::Serial::write("minicore: PCI enumeration:\n");
     kernel::Pci::enumerate(kLogPciDevice);
 
+    // SMP AP 기동(PL-65C20380)은 Timer 틱 기반 타임아웃 대기를 쓰므로
+    // 반드시 sti 이후에 호출해야 한다.
     asm volatile("sti");
+
+    kernel::Smp::startApCores();
 
     for (;;) {
         asm volatile("hlt");

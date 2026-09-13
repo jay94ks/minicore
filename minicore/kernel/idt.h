@@ -16,6 +16,14 @@ class Idt {
 public:
     static void init();
 
+    // IDT 내용(gIdt)은 전역 하나뿐이라 다시 만들 필요가 없지만,
+    // IDTR은 코어마다 별도 레지스터라 각 코어가 자기 몫으로 lidt를
+    // 한 번씩 실행해야 한다(SMP AP 기동, PL-65C20380) - init()을
+    // 다시 부르면 이미 켜진 다른 코어가 쓰는 것과 동일한 내용을
+    // 다시 써도 안전하긴 하지만(결정적 내용이라 값 자체는 그대로),
+    // 이 메서드는 그 재작성 없이 lidt만 실행해 의도를 더 분명히 한다.
+    static void reloadOnThisCore();
+
     // vector: 33-254 범위(0-32, 0xFF는 커널이 이미 쓰고 있어 등록
     // 불가 - registerHandler가 그 범위를 받으면 그냥 무시한다).
     // handler는 EOI를 직접 보내지 않는다 - 반환 후 kIsrHandler가

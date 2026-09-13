@@ -12,20 +12,39 @@
  * PHDRS를 직접 쓰는 이유: .note.pvh(PVH ELF Note)가 실제로 PT_NOTE
  * 세그먼트로 나오려면 커스텀 SECTIONS를 쓰는 한 명시적으로 선언해야
  * 한다(기본 스크립트의 자동 추론에 맡기면 조용히 빠질 수 있음).
+ *
+ * .ap_trampoline16(SMP AP 기동, PL-65C20380)은 실행 주소(VMA)가
+ * 물리주소 0x8000이어야 한다 - INIT-SIPI-SIPI의 SIPI 벡터가 "물리
+ * 주소/4096"이고, 이 코드는 AP가 16비트 실모드로 막 깨어난 순간
+ * 실행할 코드라 링크 주소가 실행 주소와 정확히 같아야 `offset 심볼`
+ * 형태를 그대로 쓸 수 있다(boot.S와 동일한 이유). **다만 이 섹션을
+ * 물리주소 0x8000에 대응하는 별도 PT_LOAD 세그먼트로 만들면 QEMU의
+ * PVH 직접 부팅 로더가 그 세그먼트를 게스트 메모리에 아예 안
+ * 올린다(2026-09-14 실측으로 발견 - `xp` 모니터 명령으로 0x8000이
+ * 전부 0임을 확인, ELF 파일 자체엔 올바른 바이트가 있었음 - 로더가
+ * 저지대/추가 PT_LOAD를 걸러내는 것으로 보임).** 그래서 VMA=0x8000은
+ * 유지하되, LMA(파일에 실제로 저장되는 위치)는 이미 정상 로드됨이
+ * 검증된 :boot 세그먼트 바로 뒤에 붙인다 - 커널이 부팅 후 이 바이트를
+ * memcpy로 진짜 0x8000에 복사한다(Smp::startApCores, AP 기동 직전
+ * 1회). 0-2MiB는 kernel/page_frame_allocator.cpp의 kLowReservedEnd가
+ * kernel_phys_start/End와 무관하게 이미 통째로 예약해 두므로(BIOS
+ * 영역 + 커널 자신) 복사 대상 0x8000 자체는 별도 예약이 필요 없다.
  */
 
 ENTRY(pvh_start)
 
 KERNEL_LMA = 1M;
 KERNEL_VMA = 0xFFFFFFFF80000000;
+AP_TRAMPOLINE_VADDR = 0x8000;
 
 PHDRS
 {
-    note   PT_NOTE FLAGS(4);        /* R */
-    boot   PT_LOAD FLAGS(5);        /* R+X */
-    ktext  PT_LOAD FLAGS(5);        /* R+X */
+    note    PT_NOTE FLAGS(4);       /* R */
+    boot    PT_LOAD FLAGS(5);       /* R+X */
+    aptramp PT_LOAD FLAGS(5);       /* R+X - VMA(0x8000)와 LMA(:boot 뒤)가 크게 다름(.text 등과 같은 패턴, 방향만 반대) */
+    ktext   PT_LOAD FLAGS(5);       /* R+X */
     krodata PT_LOAD FLAGS(4);       /* R */
-    kdata  PT_LOAD FLAGS(6);        /* R+W */
+    kdata   PT_LOAD FLAGS(6);       /* R+W */
 }
 
 SECTIONS
@@ -41,6 +60,21 @@ SECTIONS
         *(.boot.data)
         *(.boot.bss)
     } :boot
+
+    /* VMA만 0x8000으로 강제(위 설명 참고) - LMA는 .boot 바로 뒤에
+     * 이어붙여 :boot 세그먼트의 일부로 실제로 로드되게 한다. 이 섹션
+     * 블록 "안"에서의 "."은 VMA(0x8000쪽) 기준이라 실제 로드 위치를
+     * 가리키는 심볼은 블록 밖에서 별도로 계산해야 한다 - 그래서
+     * ap_trampoline16_lma/_size를 블록 앞뒤에 둔다(smp.cpp가 이
+     * 값들로 진짜 0x8000에 memcpy한다). */
+    ap_trampoline16_lma = ADDR(.boot) + SIZEOF(.boot);
+    .ap_trampoline16 AP_TRAMPOLINE_VADDR : AT(ap_trampoline16_lma)
+    {
+        KEEP(*(.ap_trampoline16))
+    } :aptramp
+    ap_trampoline16_size = SIZEOF(.ap_trampoline16);
+
+    . = ap_trampoline16_lma + ap_trampoline16_size;
 
     . += KERNEL_VMA;
 

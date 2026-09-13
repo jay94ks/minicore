@@ -98,6 +98,10 @@ gdt32:
     .quad 0x00CF9A000000FFFF     /* 0x08: code, 32bit, flat */
     .quad 0x00CF92000000FFFF     /* 0x10: data, 32bit, flat */
 gdt32_end:
+/* ap_trampoline.S(SMP AP 기동, PL-65C20380)도 이 진짜 GDT로 갈아타야
+ * 해서 .global이 필요하다 - AP는 자기만의 임시 GDT로 32비트에 막
+ * 들어온 뒤 곧바로 이걸로 다시 로드한다. */
+.global gdt32_ptr
 gdt32_ptr:
     .word gdt32_end - gdt32 - 1
     .long gdt32
@@ -108,6 +112,7 @@ gdt64:
     .quad 0x00AF9A000000FFFF     /* 0x08: code, 64bit (L=1) */
     .quad 0x00CF92000000FFFF     /* 0x10: data */
 gdt64_end:
+.global gdt64_ptr
 gdt64_ptr:
     .word gdt64_end - gdt64 - 1
     .quad gdt64
@@ -277,6 +282,10 @@ setup_page_tables:
 
     ret
 
+/* ap_trampoline.S(SMP AP 기동)도 재사용한다 - 코어별 CR3/CR4/EFER/CR0
+ * 설정이라 AP마다 다시 실행해야 하지만, 페이지 테이블 자체(pml4)는
+ * BSP가 이미 만들어 둔 걸 그대로 가리키기만 한다(다시 만들지 않음). */
+.global enable_long_mode
 enable_long_mode:
     mov eax, offset pml4
     mov cr3, eax
