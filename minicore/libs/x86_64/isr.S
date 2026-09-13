@@ -63,6 +63,39 @@ isr_no_err 31
 isr_no_err 32   /* 타이머(kTimerVector, timer.h) */
 isr_no_err 255  /* spurious (lapic.cpp의 SVR 설정과 일치해야 함) */
 
+/* 33~254: IOAPIC/(추후) MSI가 임의로 라우팅할 수 있는 범용 하드웨어
+ * 인터럽트 벡터 - 장치마다 손으로 스텁을 추가하는 대신 전부 미리
+ * 찍어내고, idt.cpp의 벡터->콜백 테이블(Idt::registerHandler)로
+ * 디스패치한다(PL-2D149D8F 4~5단계). isr_table_entry가 만드는
+ * kIsrDynamicStubTable[i]는 벡터(33+i)의 스텁 주소를 담는다 - idt.cpp가
+ * IDT 게이트를 채울 때 이 표를 그대로 쓴다(222개를 하나하나 extern
+ * 선언하지 않기 위함).
+ */
+.macro isr_table_entry vec
+.quad isr\vec
+.endm
+
+.altmacro
+.set dyn_vec, 33
+.rept (254 - 33 + 1)
+isr_no_err %dyn_vec
+.set dyn_vec, dyn_vec+1
+.endr
+.noaltmacro
+
+.section .rodata
+.global kIsrDynamicStubTable
+kIsrDynamicStubTable:
+.altmacro
+.set dyn_vec, 33
+.rept (254 - 33 + 1)
+isr_table_entry %dyn_vec
+.set dyn_vec, dyn_vec+1
+.endr
+.noaltmacro
+
+.section .text
+
 .extern kIsrHandler
 isr_common_stub:
     push r15

@@ -7,6 +7,7 @@ add_library(minicore_kernel OBJECT
     paging.cpp
     acpi.cpp
     lapic.cpp
+    ioapic.cpp
     timer.cpp
 )
 

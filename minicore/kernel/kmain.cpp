@@ -1,6 +1,7 @@
 #include "acpi.h"
 #include "hvm_start_info.h"
 #include "idt.h"
+#include "ioapic.h"
 #include "lapic.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
@@ -102,6 +103,9 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     kernel::Serial::write(" id=");
     kernel::Serial::writeHex(kernel::Lapic::id());
     kernel::Serial::write("\n");
+
+    kernel::IoApic::init();
+    kernel::Serial::write("minicore: IOAPIC mapped\n");
 
     kernel::Timer::init();
     kernel::Serial::write("minicore: timer calibrated (100Hz), enabling interrupts\n");
