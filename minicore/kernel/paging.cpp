@@ -98,6 +98,24 @@ void Paging::kMapPage(unsigned long virtualAddr, unsigned long physicalAddr, uns
     kInvalidatePage(virtualAddr);
 }
 
+bool Paging::kHandlePageFault(unsigned long faultAddr, unsigned long errorCode) {
+    constexpr unsigned long kErrorCodePresentBit = 1UL << 0;
+    if (errorCode & kErrorCodePresentBit) {
+        return false;  // 이미 매핑된 페이지에 대한 권한 위반 - 조용히 넘기지 않는다
+    }
+    if (faultAddr < kLazyZoneBase || faultAddr >= kLazyZoneBase + kLazyZoneSize) {
+        return false;  // 지연 매핑 구역 밖 - 진짜 잘못된 접근
+    }
+
+    const unsigned long phys = PageFrameAllocator::kAllocPage();
+    if (!phys) {
+        return false;  // OOM - 매핑해줄 방법이 없으니 그대로 패닉시킨다
+    }
+
+    kMapPage(faultAddr & ~(kPageSize4K - 1), phys, PAGE_WRITABLE);
+    return true;
+}
+
 void Paging::kUnmapPage(unsigned long virtualAddr) {
     virtualAddr &= ~(kPageSize4K - 1);
 

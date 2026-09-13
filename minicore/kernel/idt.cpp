@@ -1,6 +1,7 @@
 #include "idt.h"
 
 #include "interrupt_frame.h"
+#include "paging.h"
 #include "serial.h"
 
 namespace {
@@ -112,10 +113,15 @@ const char* const kExceptionNames[32] = {
 
 }  // namespace
 
-// isr_common_stub(isr.S)이 호출한다 - 아직 복구 경로가 없으니 진단
-// 로그만 남기고 멈춘다. rip/vector/error code는 항상, 페이지 폴트는
-// CR2(폴트 주소)도 같이 찍는다.
-extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
+namespace {
+
+unsigned long kReadCr2() {
+    unsigned long cr2;
+    asm volatile("mov %%cr2, %0" : "=r"(cr2));
+    return cr2;
+}
+
+void kPanic(kernel::InterruptFrame* frame) {
     kernel::Serial::kWrite("\nminicore: PANIC - unhandled exception: ");
     kernel::Serial::kWrite(kExceptionNames[frame->vector & 0x1F]);
     kernel::Serial::kWrite("\n  vector=");
@@ -131,14 +137,29 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     kernel::Serial::kWrite("\n");
 
     if (frame->vector == 14) {  // Page Fault
-        unsigned long cr2;
-        asm volatile("mov %%cr2, %0" : "=r"(cr2));
         kernel::Serial::kWrite("  cr2(fault addr)=");
-        kernel::Serial::kWriteHex(cr2);
+        kernel::Serial::kWriteHex(kReadCr2());
         kernel::Serial::kWrite("\n");
     }
 
     for (;;) {
         asm volatile("cli; hlt");
     }
+}
+
+}  // namespace
+
+// isr_common_stub(isr.S)이 호출한다. 페이지 폴트(벡터 14)는 먼저
+// Paging::kHandlePageFault로 "온디맨드 매핑으로 해결 가능한 폴트인지"
+// 확인한다 - 처리됐으면 그냥 반환해 iretq가 폴트난 명령어를 재실행
+// 하게 둔다. 그 외(진짜 잘못된 접근, 다른 예외 전부)는 진단 로그를
+// 남기고 멈춘다.
+extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
+    if (frame->vector == 14) {
+        const unsigned long faultAddr = kReadCr2();
+        if (kernel::Paging::kHandlePageFault(faultAddr, frame->errorCode)) {
+            return;
+        }
+    }
+    kPanic(frame);
 }

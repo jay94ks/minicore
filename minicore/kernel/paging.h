@@ -17,6 +17,14 @@ inline unsigned long kPhysToVirt(unsigned long physAddr) {
     return kDirectMapBase + physAddr;
 }
 
+// 아직 실제 유저/커널 주소공간 서술자(VMA)가 없어서, 온디맨드 매핑을
+// 시험할 "지연 매핑 구역"을 하나 고정으로 둔다 - 이 범위 안에서
+// not-present 폴트가 나면 프레임을 새로 붙여준다. 나중에 진짜 힙/
+// 프로세스 주소공간이 생기면 이 구역이 그 정책의 첫 사용처가 될 수
+// 있다(지금은 자리표시자).
+constexpr unsigned long kLazyZoneBase = 0xFFFF900000000000UL;
+constexpr unsigned long kLazyZoneSize = 0x40000000UL;  // 1GiB
+
 // 온디맨드 가상 메모리 관리 (SP-8B6B8D25 §5) - PageFrameAllocator가
 // 관리하는 물리 프레임을 실제 페이지 테이블(PML4/PDPT/PD/PT)에
 // 매핑/해제한다. 새 중간 테이블이 필요하면 PageFrameAllocator에서
@@ -37,6 +45,14 @@ public:
     // 매핑을 해제한다(TLB도 무효화) - 매핑돼 있지 않으면 아무 일도
     // 안 한다.
     static void kUnmapPage(unsigned long virtualAddr);
+
+    // #PF(vector 14) 핸들러가 호출한다(idt.cpp). faultAddr는 CR2,
+    // errorCode는 하드웨어가 스택에 남긴 값 그대로. 이 폴트를 정말
+    // 처리했으면(=매핑을 새로 붙여서 재실행하면 될 상황) true를
+    // 반환한다 - false면 호출부가 평소대로 패닉한다. kLazyZoneBase
+    // 범위 안의 not-present 폴트만 처리한다(권한 위반은 그대로
+    // 패닉시킨다 - 조용히 덮어쓰지 않는다).
+    static bool kHandlePageFault(unsigned long faultAddr, unsigned long errorCode);
 };
 
 }  // namespace kernel
