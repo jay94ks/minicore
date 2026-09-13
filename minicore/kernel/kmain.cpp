@@ -1,3 +1,4 @@
+#include "idt.h"
 #include "serial.h"
 
 namespace {
@@ -24,6 +25,9 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     }
 
     // TODO(SP-8B6B8D25 후속): hvm_start_info 전체(rsdp_paddr 등) 파싱
+
+    kernel::Idt::kInit();
+    kernel::Serial::kWrite("minicore: IDT ready\n");
 
     for (;;) {
         asm volatile("hlt");

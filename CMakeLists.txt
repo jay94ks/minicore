@@ -9,8 +9,10 @@ set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/arch/x86_64/linker.ld)
 
 add_executable(minicore.elf
     minicore/arch/x86_64/boot.S
+    minicore/arch/x86_64/isr.S
     minicore/kernel/kmain.cpp
     minicore/kernel/serial.cpp
+    minicore/kernel/idt.cpp
 )
 
 target_compile_options(minicore.elf PRIVATE -Wall -Wextra)
