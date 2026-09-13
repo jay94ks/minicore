@@ -123,6 +123,18 @@ public:
     // (예: 0x8000 -> 0x08) - AP가 그 페이지의 오프셋 0부터 16비트
     // 실모드로 시작한다.
     static void sendStartupIpi(unsigned int destApicId, unsigned int startupVector);
+
+    // 이 코어의 LAPIC 자체 주기 타이머를 PIT 채널2로 보정해 hz 주기로
+    // 프로그래밍하고 vector로 인터럽트를 걸어 켠다 - LAPIC 타이머는
+    // 코어마다 독립된 하드웨어라 BSP/AP가 각자 호출해도 서로 간섭하지
+    // 않는다(QU-CFAA5B3D, 설계자 지시, 2026-09-14 - "AP 개별 LAPIC
+    // 타이머도 이번 테스트 범위에 포함시켜"). 원래 Timer::init()의
+    // LAPIC+PIT 폴백 경로에 있던 보정 로직을 여기로 옮겨 AP도 재사용할
+    // 수 있게 했다. **주의**: 보정에 쓰는 PIT 채널2는 전역 자원이라
+    // 여러 코어가 동시에 호출하면 안 된다 - 지금은 AP 기동이 순차적
+    // (한 코어씩 완전히 켠 뒤 다음 코어로)이라 안전하지만, 병렬 AP
+    // 기동을 도입하면 재검토 필요.
+    static void startPeriodicTimer(unsigned int vector, unsigned int hz);
 };
 
 }  // namespace kernel

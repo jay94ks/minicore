@@ -14,6 +14,15 @@ constexpr unsigned int kSpuriousSoftwareEnableBit = 1U << 8;
 
 constexpr unsigned int kX2ApicIcrMsr = 0x830;  // x2APIC은 ICR이 64비트 MSR 하나로 통합됨(xAPIC의 0x300+0x310과 다름)
 
+constexpr unsigned int kLapicDivideBy16 = 0x3;
+constexpr unsigned int kLapicLvtPeriodicBit = 1U << 17;
+
+constexpr unsigned short kPitChannel2Data = 0x42;
+constexpr unsigned short kPitCommand = 0x43;
+constexpr unsigned short kPitGateControl = 0x61;  // NMI/스피커 제어 포트
+constexpr unsigned int kPitFrequencyHz = 1193182;
+constexpr unsigned int kCalibrationMs = 10;
+
 constexpr unsigned int kIcrDeliveryModeInit = 5U << 8;
 constexpr unsigned int kIcrDeliveryModeStartup = 6U << 8;
 constexpr unsigned int kIcrLevelAssert = 1U << 14;
@@ -78,6 +87,34 @@ void kDisableLegacyPic() {
 
     kernel::arch::kOutB(0x21, 0xFF);  // 마스터 전 라인 마스크
     kernel::arch::kOutB(0xA1, 0xFF);  // 슬레이브 전 라인 마스크
+}
+
+// PIT 채널2를 kCalibrationMs만큼 원샷으로 돌리는 동안, 이미 최댓값
+// (0xFFFFFFFF)에서 카운트다운 중인 LAPIC 타이머가 얼마나 줄었는지
+// 재서 "그 시간 동안의 LAPIC 틱 수"를 구한다 - 그 값이 그대로 원하는
+// 주기(같은 kCalibrationMs)의 initial count가 된다.
+unsigned int kCalibrateLapicTicksPerWindow() {
+    const unsigned int pitCount = kPitFrequencyHz / (1000 / kCalibrationMs);
+
+    kernel::arch::kOutB(kPitGateControl, kernel::arch::kInB(kPitGateControl) & 0xFC);  // 게이트/스피커 끄기
+    kernel::arch::kOutB(kPitCommand, 0xB0);                                     // 채널2, lobyte/hibyte, 모드0
+    kernel::arch::kOutB(kPitChannel2Data, static_cast<unsigned char>(pitCount & 0xFF));
+    kernel::arch::kOutB(kPitChannel2Data, static_cast<unsigned char>((pitCount >> 8) & 0xFF));
+
+    kernel::Lapic::writeRegister(kernel::kLapicRegDivideConfig, kLapicDivideBy16);
+    kernel::Lapic::writeRegister(kernel::kLapicRegLvtTimer, kernel::kLapicLvtMaskedBit);
+    kernel::Lapic::writeRegister(kernel::kLapicRegInitialCount, 0xFFFFFFFF);
+
+    kernel::arch::kOutB(kPitGateControl, (kernel::arch::kInB(kPitGateControl) & 0xFC) | 0x01);  // 게이트 켜서 카운트다운 시작
+
+    while (!(kernel::arch::kInB(kPitGateControl) & 0x20)) {
+        // OUT2(비트5)가 설 때까지 대기 - PIT 원샷 카운트 만료 신호
+    }
+
+    kernel::arch::kOutB(kPitGateControl, kernel::arch::kInB(kPitGateControl) & 0xFC);  // 게이트 끄기
+
+    const unsigned int current = kernel::Lapic::readRegister(kernel::kLapicRegCurrentCount);
+    return 0xFFFFFFFFU - current;
 }
 
 unsigned long kReadMsr(unsigned long msr) {
@@ -241,6 +278,18 @@ void Lapic::sendInitIpi(unsigned int destApicId, bool assert) {
 void Lapic::sendStartupIpi(unsigned int destApicId, unsigned int startupVector) {
     const unsigned int command = kIcrDeliveryModeStartup | (startupVector & 0xFF);
     kSendIcr(destApicId, command);
+}
+
+void Lapic::startPeriodicTimer(unsigned int vector, unsigned int hz) {
+    // ticksPerWindow는 kCalibrationMs(고정 보정 창) 동안의 LAPIC 틱
+    // 수다 - 원하는 주기(1000/hz ms)에 맞는 initial count로 환산한다.
+    const unsigned int ticksPerWindow = kCalibrateLapicTicksPerWindow();
+    const unsigned int ticksPerPeriod =
+        static_cast<unsigned int>((static_cast<unsigned long>(ticksPerWindow) * 1000UL) / (kCalibrationMs * hz));
+
+    writeRegister(kLapicRegDivideConfig, kLapicDivideBy16);
+    writeRegister(kLapicRegLvtTimer, vector | kLapicLvtPeriodicBit);
+    writeRegister(kLapicRegInitialCount, ticksPerPeriod);
 }
 
 }  // namespace kernel

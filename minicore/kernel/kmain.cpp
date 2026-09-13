@@ -269,11 +269,13 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
     kernel::Serial::write(kernel::Timer::usesHpet() ? "hpet" : "lapic+pit");
     kernel::Serial::write(", enabling interrupts\n");
 
-    kernel::Serial::write("minicore: PCI enumeration:\n");
+    kernel::Pci::init();
+    kernel::Serial::write("minicore: PCI config access=");
+    kernel::Serial::write(kernel::Pci::usesMmconfig() ? "mmconfig+legacy" : "legacy");
+    kernel::Serial::write("\nminicore: PCI enumeration:\n");
     kernel::Pci::enumerate(kLogPciDevice);
 
-    // SMP AP 기동(PL-65C20380)은 Timer 틱 기반 타임아웃 대기를 쓰므로
-    // 반드시 sti 이후에 호출해야 한다.
+    // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
     asm volatile("sti");
 
     kernel::Smp::startApCores();

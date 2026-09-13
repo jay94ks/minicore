@@ -58,6 +58,13 @@ public:
         return __atomic_fetch_add(&_value, delta, __ATOMIC_ACQ_REL);
     }
 
+    // kernel::string(libkenv/string.h)의 참조 카운트 감소에 쓴다 -
+    // 반환값은 감소 전 값(호출부가 "이번에 0으로 떨어졌는지"를
+    // fetchSub(1)==1로 판정할 수 있게).
+    unsigned int fetchSub(unsigned int delta) {
+        return __atomic_fetch_sub(&_value, delta, __ATOMIC_ACQ_REL);
+    }
+
 private:
     unsigned int _value = 0;
 };

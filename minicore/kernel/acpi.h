@@ -63,6 +63,18 @@ public:
     static bool hasHpet();
     static unsigned long hpetAddress();
 
+    // ACPI MCFG("MCFG" 시그니처) - PCIe MMCONFIG(ECAM) 베이스 주소
+    // 테이블(QU-7B67E05A/QU-4C2DD71C, 설계자 지시, 2026-09-14 -
+    // "MMCONFIG 및 0xCF8 둘 모두 고려하고 준비해야 Legacy fallback을
+    // 구현할 수 있다"). 여러 PCI 세그먼트 그룹을 지원하는 시스템도
+    // 있지만(서버급), 이 프로젝트는 첫 번째 엔트리(세그먼트 그룹 0)만
+    // 다룬다 - 일반 데스크톱/서버 대부분이 세그먼트 그룹 0 하나뿐이라
+    // 실용적인 범위(관계도에 기록).
+    static bool hasMcfg();
+    static unsigned long mcfgBaseAddress();
+    static unsigned char mcfgStartBus();
+    static unsigned char mcfgEndBus();
+
     // NUMA 토폴로지 (SRAT 없으면 항상 numaNodeCount()==1로 fallback).
     static unsigned int numaNodeCount();
     // cpuApicId(index)와 같은 index로 대응되는 코어가 속한 노드.

@@ -120,10 +120,26 @@ struct HpetTable {
     unsigned char pageProtection;
 } __attribute__((packed));
 
+// ACPI MCFG(PCI Firmware Spec 3.0 §4.1.2) - SdtHeader(36바이트) +
+// 예약 8바이트 뒤에 가변 개수의 엔트리가 이어진다. 세그먼트 그룹 0
+// (첫 엔트리)만 다룬다.
+struct McfgEntry {
+    unsigned long baseAddress;
+    unsigned short pciSegmentGroup;
+    unsigned char startBusNumber;
+    unsigned char endBusNumber;
+    unsigned int reserved;
+} __attribute__((packed));
+constexpr unsigned int kMcfgHeaderPad = 8;  // 예약 필드
+
 unsigned long gLocalApicAddress = 0;
 unsigned int gIoApicAddress = 0;
 bool gHasHpet = false;
 unsigned long gHpetAddress = 0;
+bool gHasMcfg = false;
+unsigned long gMcfgBaseAddress = 0;
+unsigned char gMcfgStartBus = 0;
+unsigned char gMcfgEndBus = 0;
 unsigned int gCpuApicIds[kernel::kAcpiMaxCpus];
 unsigned int gCpuNumaNode[kernel::kAcpiMaxCpus];
 unsigned int gCpuCount = 0;
@@ -303,15 +319,18 @@ bool Acpi::init(unsigned long rsdpPhys) {
     const SdtHeader* madt = nullptr;
     const SdtHeader* srat = nullptr;
     const SdtHeader* hpet = nullptr;
+    const SdtHeader* mcfg = nullptr;
 
     if (rsdp->revision >= 2 && kChecksumOk(rsdp, sizeof(Rsdp)) && rsdp->xsdtAddress) {
         madt = kFindTable<unsigned long>(rsdp->xsdtAddress, "APIC");
         srat = kFindTable<unsigned long>(rsdp->xsdtAddress, "SRAT");
         hpet = kFindTable<unsigned long>(rsdp->xsdtAddress, "HPET");
+        mcfg = kFindTable<unsigned long>(rsdp->xsdtAddress, "MCFG");
     } else if (kChecksumOk(rsdp, 20)) {  // ACPI 1.0 RSDP는 처음 20바이트만 체크섬 대상
         madt = kFindTable<unsigned int>(rsdp->rsdtAddress, "APIC");
         srat = kFindTable<unsigned int>(rsdp->rsdtAddress, "SRAT");
         hpet = kFindTable<unsigned int>(rsdp->rsdtAddress, "HPET");
+        mcfg = kFindTable<unsigned int>(rsdp->rsdtAddress, "MCFG");
     } else {
         return false;
     }
@@ -319,6 +338,15 @@ bool Acpi::init(unsigned long rsdpPhys) {
     if (hpet) {
         gHasHpet = true;
         gHpetAddress = reinterpret_cast<const HpetTable*>(hpet)->address;
+    }
+
+    if (mcfg && mcfg->length >= sizeof(SdtHeader) + kMcfgHeaderPad + sizeof(McfgEntry)) {
+        const auto* mcfgBase = reinterpret_cast<const unsigned char*>(mcfg);
+        const auto* entry = reinterpret_cast<const McfgEntry*>(mcfgBase + sizeof(SdtHeader) + kMcfgHeaderPad);
+        gHasMcfg = true;
+        gMcfgBaseAddress = entry->baseAddress;
+        gMcfgStartBus = entry->startBusNumber;
+        gMcfgEndBus = entry->endBusNumber;
     }
 
     if (!madt) {
@@ -357,6 +385,11 @@ Acpi::IsaIrqRouting Acpi::resolveIsaIrq(unsigned int isaIrq) {
 
 bool Acpi::hasHpet() { return gHasHpet; }
 unsigned long Acpi::hpetAddress() { return gHpetAddress; }
+
+bool Acpi::hasMcfg() { return gHasMcfg; }
+unsigned long Acpi::mcfgBaseAddress() { return gMcfgBaseAddress; }
+unsigned char Acpi::mcfgStartBus() { return gMcfgStartBus; }
+unsigned char Acpi::mcfgEndBus() { return gMcfgEndBus; }
 
 unsigned int Acpi::numaNodeCount() { return gDomainCount; }
 unsigned int Acpi::cpuNumaNode(unsigned int index) { return gCpuNumaNode[index]; }
