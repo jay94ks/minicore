@@ -1,0 +1,6 @@
+# 이 리포는 WSL(Linux 툴체인)에서 빌드/부팅 테스트를 하므로, Windows
+# 체크아웃 환경(core.autocrlf=true)이 셸 스크립트/소스 파일에 CRLF를
+# 섞으면 실행이 깨진다(예: `#!/usr/bin/env bash`\r, `set -o pipefail`
+# 파싱 실패 - 2026-09-14 scripts/run-grub.sh에서 실측으로 발견). 텍스트
+# 파일은 항상 LF로 정규화한다.
+* text=auto eol=lf
