@@ -1,5 +1,6 @@
 #include "serial.h"
 
+#include "libkenv/spinlock.h"
 #include "x86_64/io_port.h"
 
 namespace {
@@ -9,6 +10,12 @@ constexpr unsigned short kCom1 = 0x3F8;
 bool kIsTransmitEmpty() {
     return (kernel::arch::kInB(kCom1 + 5) & 0x20) != 0;
 }
+
+// write() 전체를 감싸서, 한 코어가 쓰는 한 줄이 다른 코어의 출력과
+// 글자 단위로 뒤섞이지 않게 한다(SMP 0단계, QU-B97FDA44, 2026-09-14).
+// 지금은 코어가 하나뿐이라 동작에 차이는 없다 - AP가 실제로 뜨면
+// 의미가 생긴다.
+kernel::Spinlock gWriteLock;
 
 }  // namespace
 
@@ -31,6 +38,7 @@ void Serial::putChar(char c) {
 }
 
 void Serial::write(const char* str) {
+    SpinlockGuard guard(gWriteLock);
     while (*str) {
         if (*str == '\n') {
             putChar('\r');

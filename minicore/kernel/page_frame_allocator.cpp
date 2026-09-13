@@ -2,6 +2,7 @@
 
 #include "acpi.h"
 #include "lapic.h"
+#include "libkenv/spinlock.h"
 
 namespace {
 
@@ -19,6 +20,11 @@ struct FreeBlock {
 struct Node {
     FreeBlock* freeLists[kMaxOrder + 1];
     unsigned long freePageCount;
+    // 이 노드의 free list를 건드리는 공개 API(allocOrderOnNode/
+    // freeOrder) 진입점 하나당 한 번만 잠근다 - kObtainBlock의 내부
+    // 재귀는 이미 잠긴 상태로 도는 거라 다시 잠그지 않는다(SMP 0단계,
+    // QU-B97FDA44, 2026-09-14).
+    kernel::Spinlock lock;
 };
 
 Node gNodes[kernel::kPfaMaxNumaNodes];
@@ -292,9 +298,11 @@ unsigned long PageFrameAllocator::allocOrderOnNode(unsigned int node, unsigned i
     if (node >= gNodeCount) {
         return 0;
     }
-    const unsigned long addr = kObtainBlock(gNodes[node], order);
+    Node& n = gNodes[node];
+    SpinlockGuard guard(n.lock);
+    const unsigned long addr = kObtainBlock(n, order);
     if (addr) {
-        gNodes[node].freePageCount -= (1UL << order);
+        n.freePageCount -= (1UL << order);
     }
     return addr;
 }
@@ -322,6 +330,7 @@ unsigned long PageFrameAllocator::allocOrder(unsigned int order) {
 void PageFrameAllocator::freeOrder(unsigned long physAddr, unsigned int order) {
     const unsigned int node = kNodeForAddress(physAddr);
     Node& n = gNodes[node];
+    SpinlockGuard guard(n.lock);
     n.freePageCount += (1UL << order);
     while (order < kMaxOrder) {
         const unsigned long buddy = kBuddyAddr(physAddr, order);
