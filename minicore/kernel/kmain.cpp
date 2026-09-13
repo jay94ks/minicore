@@ -3,6 +3,7 @@
 #include "idt.h"
 #include "ioapic.h"
 #include "lapic.h"
+#include "multiboot2.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "pci.h"
@@ -10,6 +11,13 @@
 #include "timer.h"
 
 namespace {
+
+// boot.S가 esi로 넘기는 값(saved_boot_protocol, 0=PVH/1=multiboot2) -
+// 두 부팅 경로 모두 Idt::init() 이후로는 완전히 같은 코드를 탄다
+// (PL-FC38956C). PVH는 이 값의 기본값(0)이자 "else" 케이스로 처리
+// 한다 - 별도 상수를 안 둔 건 boot.S가 인식 못 하는 값을 보낼 방법이
+// 없어서(두 진입점만 존재) 대칭적인 분기가 오히려 불필요.
+constexpr unsigned int kBootProtocolMultiboot2 = 1;
 
 void kLogPciDevice(const kernel::Pci::Device& dev) {
     kernel::Serial::write("  pci ");
@@ -51,26 +59,48 @@ void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, unsigned int count) {
 
 }  // namespace
 
-// boot.S가 higher-half로 넘어온 뒤 호출한다. rdi = struct
-// hvm_start_info의 물리 주소(PVH direct boot ABI, EBX로 전달된 값을
-// boot.S가 그대로 넘김). 이 시점에는 커널(ring 0)만 실행 중이다 -
+// boot.S가 higher-half로 넘어온 뒤 호출한다. rdi = 부팅 정보 구조체
+// (PVH면 hvm_start_info, multiboot2면 그 정보 구조체)의 물리 주소,
+// rsi = 어느 프로토콜인지(kBootProtocolPvh/kBootProtocolMultiboot2,
+// EBX/EAX로 전달된 값을 boot.S가 저장해 뒀다가 넘김, PL-FC38956C).
+// 이 함수 맨 위에서 프로토콜별로 memmap/rsdpPaddr를 같은 형태
+// (HvmMemmapEntry 배열 + 물리주소)로 통일하고 나면, 그 뒤부터는 완전히
+// 프로토콜 무관 공통 경로다. 이 시점에는 커널(ring 0)만 실행 중이다 -
 // devmgr 등 "커널 서비스"는 아직 존재하지 않는다(SP-8B6B8D25 §2-A).
-extern "C" void kMain(unsigned int startInfoAddr) {
+extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
     kernel::Serial::init();
-    kernel::Serial::write("minicore: booted via Xen PVH (higher-half, long mode)\n");
 
-    const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<unsigned long>(startInfoAddr));
-    if (startInfo->magic == kernel::kHvmStartInfoMagic) {
-        kernel::Serial::write("minicore: hvm_start_info magic OK\n");
+    static kernel::HvmMemmapEntry gMb2MemmapBuffer[kernel::kMultiboot2MaxMemmapEntries];
+    const kernel::HvmMemmapEntry* memmap = nullptr;
+    unsigned int memmapEntries = 0;
+    unsigned long rsdpPaddr = 0;
+    unsigned long startInfoSize = 0;
+
+    if (bootProtocol == kBootProtocolMultiboot2) {
+        kernel::Serial::write("minicore: booted via multiboot2 (GRUB, higher-half, long mode)\n");
+        unsigned int mb2TotalSize = 0;
+        kernel::Multiboot2Info::parse(static_cast<unsigned long>(startInfoAddr), gMb2MemmapBuffer,
+                                       kernel::kMultiboot2MaxMemmapEntries, &memmapEntries, &rsdpPaddr, &mb2TotalSize);
+        memmap = gMb2MemmapBuffer;
+        startInfoSize = mb2TotalSize;
     } else {
-        kernel::Serial::write("minicore: hvm_start_info magic MISMATCH\n");
+        kernel::Serial::write("minicore: booted via Xen PVH (higher-half, long mode)\n");
+        const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<unsigned long>(startInfoAddr));
+        if (startInfo->magic == kernel::kHvmStartInfoMagic) {
+            kernel::Serial::write("minicore: hvm_start_info magic OK\n");
+        } else {
+            kernel::Serial::write("minicore: hvm_start_info magic MISMATCH\n");
+        }
+        memmap = reinterpret_cast<const kernel::HvmMemmapEntry*>(startInfo->memmapPaddr);
+        memmapEntries = startInfo->memmapEntries;
+        rsdpPaddr = startInfo->rsdpPaddr;
+        startInfoSize = sizeof(kernel::HvmStartInfo);
     }
 
     kernel::Idt::init();
     kernel::Serial::write("minicore: IDT ready\n");
 
-    const auto* memmap = reinterpret_cast<const kernel::HvmMemmapEntry*>(startInfo->memmapPaddr);
-    kLogMemoryMap(memmap, startInfo->memmapEntries);
+    kLogMemoryMap(memmap, memmapEntries);
 
     // 순서 중요: Paging(direct map) -> Acpi(SRAT로 NUMA 토폴로지 확보,
     // direct map으로 테이블을 읽음) -> PageFrameAllocator(Acpi의 NUMA
@@ -81,7 +111,7 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     kernel::Paging::init();
     kernel::Serial::write("minicore: direct physical map ready\n");
 
-    if (kernel::Acpi::init(startInfo->rsdpPaddr)) {
+    if (kernel::Acpi::init(rsdpPaddr)) {
         kernel::Serial::write("minicore: ACPI MADT/SRAT parsed, cpu_count=");
         kernel::Serial::writeHex(kernel::Acpi::cpuCount());
         kernel::Serial::write(" numa_nodes=");
@@ -107,10 +137,10 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     }
 
     kernel::PageFrameAllocator::init(
-        memmap, startInfo->memmapEntries,
+        memmap, memmapEntries,
         reinterpret_cast<unsigned long>(kernel_phys_start),
         reinterpret_cast<unsigned long>(kernel_phys_end),
-        static_cast<unsigned long>(startInfoAddr), sizeof(kernel::HvmStartInfo));
+        static_cast<unsigned long>(startInfoAddr), startInfoSize);
 
     kernel::Serial::write("minicore: page frame allocator ready, nodes=");
     kernel::Serial::writeHex(kernel::PageFrameAllocator::numaNodeCount());

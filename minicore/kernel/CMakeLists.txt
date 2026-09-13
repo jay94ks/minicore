@@ -1,6 +1,7 @@
 # 커널 본체 (SP-8B6B8D25 §3.1) - ring 0에서 구동되는 유일한 구성 요소.
 add_library(minicore_kernel OBJECT
     kmain.cpp
+    multiboot2.cpp
     serial.cpp
     idt.cpp
     page_frame_allocator.cpp

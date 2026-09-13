@@ -1,13 +1,14 @@
-/* x86-64 Xen PVH 진입점 (SP-8B6B8D25 §1, §2-A, §5 구현)
+/* x86-64 PVH/multiboot2 공용 진입점 (SP-8B6B8D25 §1, §2-A, §5 구현)
  *
- * 첫 구현 부팅 경로를 multiboot2에서 PVH로 바꿨다(2026-09-14, 설계자
- * 지시 - DC-427BB6B2/DS-D4E5C451 갱신 예정) - QEMU의 -kernel
- * 멀티부트 로더가 (a) Multiboot2를 모르고(MB1만 지원, GRUB만 MB2를
- * 이해) (b) 64비트 ELF 자체를 거부해서("give a 32bit one") 우리
- * higher-half 64비트 커널을 못 실었다. PVH는 ELF 클래스를 가리지
- * 않고 QEMU/Xen이 네이티브로 직접 로드하므로 이 문제를 피해간다.
- * multiboot2 지원은 나중에 별도로 추가한다(GRUB 체인로더 경유,
- * DC-427BB6B2 결정은 유지).
+ * 첫 구현 부팅 경로를 multiboot2에서 PVH로 바꿨었다(2026-09-14 - QEMU의
+ * -kernel 멀티부트 로더가 (a) Multiboot2를 모르고(MB1만 지원, GRUB만
+ * MB2를 이해) (b) 64비트 ELF 자체를 거부해서("give a 32bit one") 우리
+ * higher-half 64비트 커널을 못 실었기 때문). PVH는 ELF 클래스를
+ * 가리지 않고 QEMU/Xen이 네이티브로 직접 로드하므로 이 문제를 피해
+ * 간다. multiboot2(GRUB 전용, DC-427BB6B2 결정)는 이후 별도로 이
+ * 파일에 추가했다(PL-FC38956C) - PVH가 이미 검증해 둔 "GDT 적재 ->
+ * 페이지 테이블 구성 -> long mode 전환 -> higher-half 점프" 자산을
+ * `common_32bit_entry` 서브루틴으로 뽑아 두 진입점이 공유한다.
  *
  * PVH 진입 상태(Xen/QEMU 공통 "PVH direct boot ABI"): 32비트 보호
  * 모드, 페이징 꺼짐, 인터럽트 꺼짐, flat 세그먼트. EBX = struct
@@ -15,12 +16,25 @@
  * 정의되지 않음 - 멀티부트처럼 EAX 매직은 없다(struct 안의 magic
  * 필드로 대체 확인 가능, v1은 값만 넘기고 검증은 kMain에서 한다).
  *
- * 여기서 하는 일: 우리 GDT 적재 -> 페이지 테이블 구성(낮은 2MiB
- * identity + 상위 2GiB 지점 higher-half, 둘 다 같은 물리 2MiB를
- * 가리킴) -> PAE/롱모드/페이징 활성화 -> 64비트 코드 세그먼트로
- * far jump -> higher-half 링크 주소로 다시 점프 -> .bss 제로
- * 클리어 -> kMain 호출. kMain은 절대 반환하지 않지만, 반환하면
- * hlt 루프로 정지한다.
+ * multiboot2 진입 상태(GRUB): 32비트 보호모드, EAX=0x36d76289(매직),
+ * EBX=multiboot2 정보 구조체(태그 기반 가변 길이)의 물리주소. 매직이
+ * 안 맞으면(로더가 GRUB가 아니거나 손상됐다는 뜻) 시리얼도 없는 이
+ * 시점엔 로그를 남길 방법이 없어 그냥 멈춘다.
+ *
+ * 두 진입점 모두 EBX(부팅 정보 구조체 물리주소)를 saved_start_info에,
+ * 어느 프로토콜인지를 saved_boot_protocol에 저장한 뒤
+ * common_32bit_entry로 합류한다 - 거기서: GDT 적재 -> 페이지 테이블
+ * 구성(낮은 1GiB identity + 상위 1GiB 지점 higher-half, 둘 다 같은
+ * 물리 1GiB를 가리킴) -> PAE/롱모드/페이징 활성화 -> 64비트 코드
+ * 세그먼트로 far jump -> higher-half 링크 주소로 다시 점프 -> .bss
+ * 제로 클리어 -> kMain(startInfoAddr, bootProtocol) 호출. kMain은
+ * 절대 반환하지 않지만, 반환하면 hlt 루프로 정지한다.
+ *
+ * 링커 스크립트의 전역 ENTRY()/ELF e_entry는 여전히 pvh_start다(Xen/
+ * QEMU의 PVH 로더는 e_entry가 아니라 .note.pvh ELF Note로 직접
+ * 점프하므로 영향 없음) - GRUB은 e_entry를 그대로 쓰면 pvh_start로
+ * 잘못 들어오게 되므로, 아래 멀티부트2 헤더에 Entry Address 태그
+ * (type 3)를 넣어 GRUB 한정으로 mb2_start를 쓰게 한다.
  *
  * 커널 그 자체만 이 특권 모드(ring 0)에서 계속 구동된다 - devmgr/
  * fs/net/tty 같은 "커널 서비스"는 전부 유저랜드에서 구동된다
@@ -74,6 +88,9 @@ pd_high:
  * 둔다(스택은 higher_half_entry가 rsp를 다시 초기화하므로 못 믿는다). */
 saved_start_info:
     .long 0
+/* 0=PVH, 1=multiboot2 - kMain의 두 번째 인자로 그대로 넘어간다. */
+saved_boot_protocol:
+    .long 0
 
 .align 8
 gdt32:
@@ -99,6 +116,37 @@ gdt64_ptr:
 
 .section .boot.text, "ax"
 .code32
+
+/* ---------------------------------------------------------------- multiboot2 헤더
+ *
+ * GRUB이 파일 첫 32KiB 안에서 8바이트 정렬로 스캔해 찾는다 - .boot.text
+ * 맨 앞(이 섹션에서 코드보다 먼저 나오는 첫 데이터)에 둬서 ELF 헤더/
+ * 프로그램 헤더/.note.pvh 다음, 다른 어떤 코드보다도 앞서 파일 앞쪽에
+ * 오게 한다. ELF 프로그램 헤더가 이미 올바른 물리 적재 주소(AT())를
+ * 담고 있어 GRUB의 ELF 로더가 그대로 쓸 수 있다 - 그래서 별도 Address
+ * 태그(type 2)는 필요 없고, e_entry(=pvh_start, PVH 경로 전용) 대신
+ * mb2_start로 진입시키는 Entry Address 태그(type 3)만 추가하면 된다.
+ */
+.align 8
+.global multiboot2_header
+multiboot2_header:
+    .long 0xE85250D6                                    /* magic */
+    .long 0                                             /* architecture: i386(보호모드 32비트 진입) */
+    .long mb2_header_end - multiboot2_header            /* header_length */
+    .long -(0xE85250D6 + 0 + (mb2_header_end - multiboot2_header))  /* checksum */
+
+    .align 8
+    .word 3            /* type: entry address */
+    .word 0            /* flags */
+    .long 12           /* size */
+    .long mb2_start    /* entry_addr */
+
+    .align 8
+    .word 0            /* type: end */
+    .word 0            /* flags */
+    .long 8            /* size */
+mb2_header_end:
+
 .global pvh_start
 pvh_start:
     cli
@@ -108,7 +156,26 @@ pvh_start:
      * 위해 메모리에 저장해 둔다 - setup_page_tables가 edi를
      * 스크래치로 쓴다. */
     mov [saved_start_info], ebx
+    mov dword ptr [saved_boot_protocol], 0   /* 0 = PVH */
+    jmp common_32bit_entry
 
+.global mb2_start
+mb2_start:
+    cli
+    /* GRUB이 EAX에 넣어 주는 매직 - 안 맞으면(로더가 GRUB이 아니거나
+     * 손상) 이 시점엔 로그를 남길 방법이 없어 그냥 멈춘다. */
+    cmp eax, 0x36d76289
+    jne .Lmb2_bad_magic
+    mov esp, offset boot_stack_top
+    mov [saved_start_info], ebx
+    mov dword ptr [saved_boot_protocol], 1   /* 1 = multiboot2 */
+    jmp common_32bit_entry
+.Lmb2_bad_magic:
+    cli
+    hlt
+    jmp .Lmb2_bad_magic
+
+common_32bit_entry:
     lgdt [gdt32_ptr]
     mov ax, 0x10
     mov ds, ax
@@ -266,11 +333,15 @@ higher_half_entry:
      * 그대로 커널 스택으로 쓴다. */
     movabs rsp, offset boot_stack_top
 
-    /* System V AMD64 호출 규약의 첫 정수 인자(rdi)로 struct
-     * hvm_start_info의 물리 주소를 넘긴다 - 32비트 mov는 상위 32비트를
-     * 0으로 확장하므로 그대로 유효한 64비트 인자가 된다. */
+    /* System V AMD64 호출 규약의 첫 인자(rdi)로 부팅 정보 구조체(PVH면
+     * hvm_start_info, multiboot2면 그 정보 구조체)의 물리 주소를,
+     * 두 번째 인자(rsi)로 어느 프로토콜인지(0=PVH, 1=multiboot2)를
+     * 넘긴다 - 32비트 mov는 상위 32비트를 0으로 확장하므로 그대로
+     * 유효한 64비트 인자가 된다. */
     movabs rax, offset saved_start_info
     mov edi, [rax]
+    movabs rax, offset saved_boot_protocol
+    mov esi, [rax]
     call kMain
 
 .Lhang:
