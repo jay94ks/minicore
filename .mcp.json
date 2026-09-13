@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "cnw": {
+      "command": "docs-mcp"
+    }
+  }
+}
