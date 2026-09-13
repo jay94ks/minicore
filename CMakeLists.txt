@@ -14,6 +14,7 @@ add_executable(minicore.elf
     minicore/kernel/serial.cpp
     minicore/kernel/idt.cpp
     minicore/kernel/page_frame_allocator.cpp
+    minicore/kernel/paging.cpp
 )
 
 target_compile_options(minicore.elf PRIVATE -Wall -Wextra)

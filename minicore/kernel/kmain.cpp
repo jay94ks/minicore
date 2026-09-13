@@ -1,6 +1,7 @@
 #include "hvm_start_info.h"
 #include "idt.h"
 #include "page_frame_allocator.h"
+#include "paging.h"
 #include "serial.h"
 
 namespace {
@@ -57,6 +58,9 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     kernel::Serial::kWrite("minicore: page frame allocator ready, free pages=");
     kernel::Serial::kWriteHex(kernel::PageFrameAllocator::kFreePageCount());
     kernel::Serial::kWrite("\n");
+
+    kernel::Paging::kInit();
+    kernel::Serial::kWrite("minicore: direct physical map ready\n");
 
     for (;;) {
         asm volatile("hlt");
