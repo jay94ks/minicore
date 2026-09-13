@@ -54,10 +54,55 @@ constexpr unsigned char kMadtTypeLocalApic = 0;
 constexpr unsigned char kMadtTypeIoApic = 1;
 constexpr unsigned int kMadtLocalApicEnabledFlag = 1U << 0;
 
+struct SratEntryHeader {
+    unsigned char type;
+    unsigned char length;
+} __attribute__((packed));
+
+struct SratProcessorApicAffinity {
+    SratEntryHeader header;
+    unsigned char proximityDomainLow;
+    unsigned char apicId;
+    unsigned int flags;
+    unsigned char localSapicEid;
+    unsigned char proximityDomainHigh[3];
+    unsigned int clockDomain;
+} __attribute__((packed));
+
+struct SratMemoryAffinity {
+    SratEntryHeader header;
+    unsigned int proximityDomain;
+    unsigned short reserved1;
+    unsigned int baseAddressLow;
+    unsigned int baseAddressHigh;
+    unsigned int lengthLow;
+    unsigned int lengthHigh;
+    unsigned int reserved2;
+    unsigned int flags;
+    unsigned long reserved3;
+} __attribute__((packed));
+
+constexpr unsigned char kSratTypeProcessorApicAffinity = 0;
+constexpr unsigned char kSratTypeMemoryAffinity = 1;
+constexpr unsigned int kSratAffinityEnabledFlag = 1U << 0;
+constexpr unsigned int kSratHeaderPad = 12;  // tableRevision(4) + reserved(8)
+
 unsigned long gLocalApicAddress = 0;
 unsigned int gIoApicAddress = 0;
 unsigned int gCpuApicIds[kernel::kAcpiMaxCpus];
+unsigned int gCpuNumaNode[kernel::kAcpiMaxCpus];
 unsigned int gCpuCount = 0;
+
+unsigned int gDomainValues[kernel::kAcpiMaxNumaNodes];
+unsigned int gDomainCount = 0;
+
+struct MemAffinity {
+    unsigned long base;
+    unsigned long length;
+    unsigned int node;
+};
+MemAffinity gMemAffinities[kernel::kAcpiMaxMemoryAffinityEntries];
+unsigned int gMemAffinityCount = 0;
 
 template <typename T>
 const T* kAsTable(unsigned long physAddr) {
@@ -82,6 +127,21 @@ bool kSignatureIs(const char* sig, const char* expected, int len) {
     return true;
 }
 
+// proximity domain 값(펌웨어가 매긴 임의의 ID)을 0부터 시작하는
+// 내부 노드 인덱스로 바꾼다 - 처음 보는 값이면 새 노드를 만든다.
+unsigned int kNodeIndexForDomain(unsigned int domain) {
+    for (unsigned int i = 0; i < gDomainCount; ++i) {
+        if (gDomainValues[i] == domain) {
+            return i;
+        }
+    }
+    if (gDomainCount < kernel::kAcpiMaxNumaNodes) {
+        gDomainValues[gDomainCount] = domain;
+        return gDomainCount++;
+    }
+    return 0;  // 상한 초과 - 방어적으로 노드0에 몰아넣는다
+}
+
 void kParseMadt(const SdtHeader* madtHeader) {
     const auto* base = reinterpret_cast<const unsigned char*>(madtHeader);
     const auto* localApicAddrField = reinterpret_cast<const unsigned int*>(base + sizeof(SdtHeader));
@@ -98,7 +158,9 @@ void kParseMadt(const SdtHeader* madtHeader) {
         if (entryHeader->type == kMadtTypeLocalApic) {
             const auto* lapic = reinterpret_cast<const MadtLocalApicEntry*>(entry);
             if ((lapic->flags & kMadtLocalApicEnabledFlag) && gCpuCount < kernel::kAcpiMaxCpus) {
-                gCpuApicIds[gCpuCount++] = lapic->apicId;
+                gCpuApicIds[gCpuCount] = lapic->apicId;
+                gCpuNumaNode[gCpuCount] = 0;  // SRAT가 있으면 kParseSrat이 덮어씀
+                ++gCpuCount;
             }
         } else if (entryHeader->type == kMadtTypeIoApic) {
             const auto* ioapic = reinterpret_cast<const MadtIoApicEntry*>(entry);
@@ -108,14 +170,51 @@ void kParseMadt(const SdtHeader* madtHeader) {
     }
 }
 
+void kParseSrat(const SdtHeader* sratHeader) {
+    const auto* base = reinterpret_cast<const unsigned char*>(sratHeader);
+    const unsigned char* entry = base + sizeof(SdtHeader) + kSratHeaderPad;
+    const unsigned char* end = base + sratHeader->length;
+
+    while (entry < end) {
+        const auto* entryHeader = reinterpret_cast<const SratEntryHeader*>(entry);
+        if (entryHeader->length == 0) {
+            break;
+        }
+        if (entryHeader->type == kSratTypeProcessorApicAffinity) {
+            const auto* p = reinterpret_cast<const SratProcessorApicAffinity*>(entry);
+            if (p->flags & kSratAffinityEnabledFlag) {
+                const unsigned int domain = p->proximityDomainLow |
+                                             (static_cast<unsigned int>(p->proximityDomainHigh[0]) << 8) |
+                                             (static_cast<unsigned int>(p->proximityDomainHigh[1]) << 16) |
+                                             (static_cast<unsigned int>(p->proximityDomainHigh[2]) << 24);
+                const unsigned int node = kNodeIndexForDomain(domain);
+                for (unsigned int i = 0; i < gCpuCount; ++i) {
+                    if (gCpuApicIds[i] == p->apicId) {
+                        gCpuNumaNode[i] = node;
+                        break;
+                    }
+                }
+            }
+        } else if (entryHeader->type == kSratTypeMemoryAffinity) {
+            const auto* m = reinterpret_cast<const SratMemoryAffinity*>(entry);
+            if ((m->flags & kSratAffinityEnabledFlag) && gMemAffinityCount < kernel::kAcpiMaxMemoryAffinityEntries) {
+                const unsigned long memBase = (static_cast<unsigned long>(m->baseAddressHigh) << 32) | m->baseAddressLow;
+                const unsigned long memLength = (static_cast<unsigned long>(m->lengthHigh) << 32) | m->lengthLow;
+                gMemAffinities[gMemAffinityCount++] = {memBase, memLength, kNodeIndexForDomain(m->proximityDomain)};
+            }
+        }
+        entry += entryHeader->length;
+    }
+}
+
 // RSDT(32비트 포인터 배열) 또는 XSDT(64비트 포인터 배열)를 훑어서
-// "APIC"(MADT) 테이블을 찾는다 - 둘 다 헤더 형태가 같아서 템플릿
-// 하나로 처리한다.
+// signature와 일치하는 테이블을 찾는다 - 둘 다 헤더 형태가 같아서
+// 템플릿 하나로 처리한다.
 template <typename PointerType>
-bool kFindAndParseMadt(unsigned long sdtPhys) {
+const SdtHeader* kFindTable(unsigned long sdtPhys, const char* signature) {
     const auto* header = kAsTable<SdtHeader>(sdtPhys);
     if (!kChecksumOk(header, header->length)) {
-        return false;
+        return nullptr;
     }
     const auto* base = reinterpret_cast<const unsigned char*>(header);
     const auto* pointers = reinterpret_cast<const PointerType*>(base + sizeof(SdtHeader));
@@ -123,12 +222,11 @@ bool kFindAndParseMadt(unsigned long sdtPhys) {
 
     for (unsigned int i = 0; i < count; ++i) {
         const auto* candidate = kAsTable<SdtHeader>(static_cast<unsigned long>(pointers[i]));
-        if (kSignatureIs(candidate->signature, "APIC", 4) && kChecksumOk(candidate, candidate->length)) {
-            kParseMadt(candidate);
-            return true;
+        if (kSignatureIs(candidate->signature, signature, 4) && kChecksumOk(candidate, candidate->length)) {
+            return candidate;
         }
     }
-    return false;
+    return nullptr;
 }
 
 }  // namespace
@@ -141,18 +239,51 @@ bool Acpi::init(unsigned long rsdpPhys) {
         return false;
     }
 
+    const SdtHeader* madt = nullptr;
+    const SdtHeader* srat = nullptr;
+
     if (rsdp->revision >= 2 && kChecksumOk(rsdp, sizeof(Rsdp)) && rsdp->xsdtAddress) {
-        return kFindAndParseMadt<unsigned long>(rsdp->xsdtAddress);
+        madt = kFindTable<unsigned long>(rsdp->xsdtAddress, "APIC");
+        srat = kFindTable<unsigned long>(rsdp->xsdtAddress, "SRAT");
+    } else if (kChecksumOk(rsdp, 20)) {  // ACPI 1.0 RSDP는 처음 20바이트만 체크섬 대상
+        madt = kFindTable<unsigned int>(rsdp->rsdtAddress, "APIC");
+        srat = kFindTable<unsigned int>(rsdp->rsdtAddress, "SRAT");
+    } else {
+        return false;
     }
-    if (kChecksumOk(rsdp, 20)) {  // ACPI 1.0 RSDP는 처음 20바이트만 체크섬 대상
-        return kFindAndParseMadt<unsigned int>(rsdp->rsdtAddress);
+
+    if (!madt) {
+        return false;
     }
-    return false;
+    kParseMadt(madt);
+
+    if (srat) {
+        kParseSrat(srat);
+    } else {
+        // SRAT가 없는 머신(전형적으로 비-NUMA, 예: QEMU 기본 설정) -
+        // 노드 하나로 취급한다. memoryAffinityCount()==0으로 남으므로
+        // 호출부(PageFrameAllocator)가 "정보 없음 = 전부 노드 0"으로
+        // 처리해야 한다.
+        gDomainCount = 1;
+        gDomainValues[0] = 0;
+        for (unsigned int i = 0; i < gCpuCount; ++i) {
+            gCpuNumaNode[i] = 0;
+        }
+    }
+    return true;
 }
 
 unsigned long Acpi::localApicAddress() { return gLocalApicAddress; }
 unsigned int Acpi::cpuCount() { return gCpuCount; }
 unsigned int Acpi::cpuApicId(unsigned int index) { return gCpuApicIds[index]; }
 unsigned int Acpi::ioApicAddress() { return gIoApicAddress; }
+
+unsigned int Acpi::numaNodeCount() { return gDomainCount; }
+unsigned int Acpi::cpuNumaNode(unsigned int index) { return gCpuNumaNode[index]; }
+
+unsigned int Acpi::memoryAffinityCount() { return gMemAffinityCount; }
+unsigned long Acpi::memoryAffinityBase(unsigned int index) { return gMemAffinities[index].base; }
+unsigned long Acpi::memoryAffinityLength(unsigned int index) { return gMemAffinities[index].length; }
+unsigned int Acpi::memoryAffinityNode(unsigned int index) { return gMemAffinities[index].node; }
 
 }  // namespace kernel

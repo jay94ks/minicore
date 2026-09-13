@@ -7,11 +7,14 @@
 // ISA 명령어라 다른 아키텍처엔 이 형태로 존재하지 않는다 - 그래서
 // libkenv(아키텍처 무관 early 런타임)가 아니라 여기 있다.
 //
-// namespace를 kernel로 둔 건 지금 유일한 소비자가 커널뿐이라서다 -
-// 나중에 유저랜드 코드가 이 라이브러리를 직접 링크하게 되면 이
-// 네임스페이스 선택을 다시 봐야 한다(임시 결정, 관련 질의 등록됨).
+// kernel::arch 네임스페이스(2026-09-14, 설계자 확정 - QU-4606360C):
+// 유저랜드 프로세스가 커널과의 통신/권한 처리를 거쳐 IO 권한을 얻은
+// 뒤에는 이 라이브러리를 그대로 링크해 직접 포트 IO를 할 수 있게
+// 하려는 의도다 - 그래도 이름은 kernel::arch를 그대로 쓴다(누가
+// 링크하느냐와 무관하게 네임스페이스 경로는 고정).
 
 namespace kernel {
+namespace arch {
 
 inline void kOutB(unsigned short port, unsigned char value) {
     asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -23,6 +26,7 @@ inline unsigned char kInB(unsigned short port) {
     return value;
 }
 
+}  // namespace arch
 }  // namespace kernel
 
 #endif  // MINICORE_LIBS_X86_64_IO_PORT_H

@@ -52,22 +52,20 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     const auto* memmap = reinterpret_cast<const kernel::HvmMemmapEntry*>(startInfo->memmapPaddr);
     kLogMemoryMap(memmap, startInfo->memmapEntries);
 
-    kernel::PageFrameAllocator::init(
-        memmap, startInfo->memmapEntries,
-        reinterpret_cast<unsigned long>(kernel_phys_start),
-        reinterpret_cast<unsigned long>(kernel_phys_end),
-        static_cast<unsigned long>(startInfoAddr), sizeof(kernel::HvmStartInfo));
-
-    kernel::Serial::write("minicore: page frame allocator ready, free pages=");
-    kernel::Serial::writeHex(kernel::PageFrameAllocator::freePageCount());
-    kernel::Serial::write("\n");
-
+    // 순서 중요: Paging(direct map) -> Acpi(SRAT로 NUMA 토폴로지 확보,
+    // direct map으로 테이블을 읽음) -> PageFrameAllocator(Acpi의 NUMA
+    // 정보로 노드별 buddy 구성) -> Lapic(PageFrameAllocator에서 페이지
+    // 테이블용 프레임을 받아옴 - 그 안에서 자기 자신의 id()를 부르지
+    // 않도록 Lapic::isReady()로 방어돼 있음, 2026-09-14 실측으로
+    // 발견한 초기화 순서 문제).
     kernel::Paging::init();
     kernel::Serial::write("minicore: direct physical map ready\n");
 
     if (kernel::Acpi::init(startInfo->rsdpPaddr)) {
-        kernel::Serial::write("minicore: ACPI MADT parsed, cpu_count=");
+        kernel::Serial::write("minicore: ACPI MADT/SRAT parsed, cpu_count=");
         kernel::Serial::writeHex(kernel::Acpi::cpuCount());
+        kernel::Serial::write(" numa_nodes=");
+        kernel::Serial::writeHex(kernel::Acpi::numaNodeCount());
         kernel::Serial::write(" local_apic_addr=");
         kernel::Serial::writeHex(kernel::Acpi::localApicAddress());
         kernel::Serial::write(" ioapic_addr=");
@@ -78,11 +76,25 @@ extern "C" void kMain(unsigned int startInfoAddr) {
             kernel::Serial::writeHex(i);
             kernel::Serial::write("] apic_id=");
             kernel::Serial::writeHex(kernel::Acpi::cpuApicId(i));
+            kernel::Serial::write(" numa_node=");
+            kernel::Serial::writeHex(kernel::Acpi::cpuNumaNode(i));
             kernel::Serial::write("\n");
         }
     } else {
         kernel::Serial::write("minicore: ACPI MADT parse FAILED\n");
     }
+
+    kernel::PageFrameAllocator::init(
+        memmap, startInfo->memmapEntries,
+        reinterpret_cast<unsigned long>(kernel_phys_start),
+        reinterpret_cast<unsigned long>(kernel_phys_end),
+        static_cast<unsigned long>(startInfoAddr), sizeof(kernel::HvmStartInfo));
+
+    kernel::Serial::write("minicore: page frame allocator ready, nodes=");
+    kernel::Serial::writeHex(kernel::PageFrameAllocator::numaNodeCount());
+    kernel::Serial::write(" free_pages=");
+    kernel::Serial::writeHex(kernel::PageFrameAllocator::freePageCount());
+    kernel::Serial::write("\n");
 
     kernel::Lapic::init();
     kernel::Serial::write("minicore: LAPIC ready, id=");

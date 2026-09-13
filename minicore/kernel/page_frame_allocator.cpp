@@ -1,5 +1,8 @@
 #include "page_frame_allocator.h"
 
+#include "acpi.h"
+#include "lapic.h"
+
 namespace {
 
 constexpr unsigned long kPageSize = 4096;
@@ -13,8 +16,13 @@ struct FreeBlock {
     FreeBlock* next;
 };
 
-FreeBlock* gFreeLists[kMaxOrder + 1] = {};
-unsigned long gFreePageCount = 0;
+struct Node {
+    FreeBlock* freeLists[kMaxOrder + 1];
+    unsigned long freePageCount;
+};
+
+Node gNodes[kernel::kPfaMaxNumaNodes];
+unsigned int gNodeCount = 1;
 
 unsigned long kAlignUp(unsigned long value, unsigned long align) {
     return (value + align - 1) & ~(align - 1);
@@ -24,14 +32,14 @@ unsigned long kAlignDown(unsigned long value, unsigned long align) {
     return value & ~(align - 1);
 }
 
-void kInsertBlock(unsigned long addr, unsigned int order) {
+void kInsertBlock(Node& node, unsigned long addr, unsigned int order) {
     auto* block = reinterpret_cast<FreeBlock*>(addr);
-    block->next = gFreeLists[order];
-    gFreeLists[order] = block;
+    block->next = node.freeLists[order];
+    node.freeLists[order] = block;
 }
 
-bool kTryRemoveBlock(unsigned long addr, unsigned int order) {
-    FreeBlock** cur = &gFreeLists[order];
+bool kTryRemoveBlock(Node& node, unsigned long addr, unsigned int order) {
+    FreeBlock** cur = &node.freeLists[order];
     while (*cur) {
         if (reinterpret_cast<unsigned long>(*cur) == addr) {
             *cur = (*cur)->next;
@@ -42,12 +50,12 @@ bool kTryRemoveBlock(unsigned long addr, unsigned int order) {
     return false;
 }
 
-unsigned long kPopBlock(unsigned int order) {
-    FreeBlock* block = gFreeLists[order];
+unsigned long kPopBlock(Node& node, unsigned int order) {
+    FreeBlock* block = node.freeLists[order];
     if (!block) {
         return 0;
     }
-    gFreeLists[order] = block->next;
+    node.freeLists[order] = block->next;
     return reinterpret_cast<unsigned long>(block);
 }
 
@@ -59,24 +67,24 @@ unsigned long kBuddyAddr(unsigned long addr, unsigned int order) {
 // 재귀적으로 얻어 반으로 쪼개고(짝 하나는 그 order 리스트에 도로
 // 넣음), 전체 free 카운트는 여기서 건드리지 않는다(쪼개도 총량은
 // 그대로라서 - 카운트 조정은 공개 API에서 한 번만 한다).
-unsigned long kObtainBlock(unsigned int order) {
+unsigned long kObtainBlock(Node& node, unsigned int order) {
     if (order > kMaxOrder) {
         return 0;
     }
-    unsigned long addr = kPopBlock(order);
+    unsigned long addr = kPopBlock(node, order);
     if (addr) {
         return addr;
     }
-    unsigned long bigger = kObtainBlock(order + 1);
+    unsigned long bigger = kObtainBlock(node, order + 1);
     if (!bigger) {
         return 0;
     }
     unsigned long buddy = bigger + (kPageSize << order);
-    kInsertBlock(buddy, order);
+    kInsertBlock(node, buddy, order);
     return bigger;
 }
 
-void kAddRegionToBuddy(unsigned long start, unsigned long end) {
+void kAddRegionToBuddy(Node& node, unsigned long start, unsigned long end) {
     start = kAlignUp(start, kPageSize);
     end = kAlignDown(end, kPageSize);
     while (start < end) {
@@ -89,8 +97,8 @@ void kAddRegionToBuddy(unsigned long start, unsigned long end) {
             --order;
         }
         const unsigned long blockSize = kPageSize << order;
-        kInsertBlock(start, order);
-        gFreePageCount += (1UL << order);
+        kInsertBlock(node, start, order);
+        node.freePageCount += (1UL << order);
         start += blockSize;
     }
 }
@@ -126,13 +134,119 @@ void kSubtractReservedFromList(Range* ranges, int& count, unsigned long resStart
     }
 }
 
+// 어떤 물리주소가 어느 노드에 속하는지 나중에(freePage 시점에) 다시
+// 찾을 수 있도록 배정 결과를 기록해 둔다.
+struct RangeNode {
+    unsigned long start;
+    unsigned long end;
+    unsigned int node;
+};
+constexpr int kMaxRangeNodes = 128;
+RangeNode gRangeNodeMap[kMaxRangeNodes];
+int gRangeNodeMapCount = 0;
+
+void kAssignRangeToNode(unsigned long start, unsigned long end, unsigned int node) {
+    if (start >= end) {
+        return;
+    }
+    if (node >= gNodeCount) {
+        node = 0;  // 방어적 fallback
+    }
+    kAddRegionToBuddy(gNodes[node], start, end);
+    if (gRangeNodeMapCount < kMaxRangeNodes) {
+        gRangeNodeMap[gRangeNodeMapCount++] = {start, end, node};
+    }
+}
+
+// 지금 실행 중인 코어의 APIC ID로 Acpi가 SRAT에서 알아낸 소속 노드를
+// 찾는다 - 못 찾으면(코어가 MADT에 없거나 SRAT 정보가 아예 없거나)
+// 노드0으로 방어적으로 떨어진다. Lapic::init()이 아직 안 끝났으면
+// (자기 자신을 매핑하려고 이 할당자를 부르는 경우 포함 - 닭-달걀
+// 문제, 2026-09-14 실측으로 발견) id()를 부르지 않고 그냥 노드0을
+// 쓴다 - BSP는 관례상 거의 항상 노드0이라 안전한 기본값이다.
+unsigned int kCurrentNumaNode() {
+    if (!kernel::Lapic::isReady()) {
+        return 0;
+    }
+    const unsigned int myApicId = kernel::Lapic::id();
+    const unsigned int cpuCount = kernel::Acpi::cpuCount();
+    for (unsigned int i = 0; i < cpuCount; ++i) {
+        if (kernel::Acpi::cpuApicId(i) == myApicId) {
+            return kernel::Acpi::cpuNumaNode(i);
+        }
+    }
+    return 0;
+}
+
+unsigned int kNodeForAddress(unsigned long addr) {
+    for (int i = 0; i < gRangeNodeMapCount; ++i) {
+        if (addr >= gRangeNodeMap[i].start && addr < gRangeNodeMap[i].end) {
+            return gRangeNodeMap[i].node;
+        }
+    }
+    return 0;  // 못 찾으면 방어적으로 노드0(있을 수 없는 경우 - 우리가 준 주소만 free될 것이므로)
+}
+
+// SRAT 메모리 어피니티 테이블로 range를 노드별 조각으로 나눈다 -
+// 어떤 어피니티 엔트리에도 안 걸리는 부분은 노드0으로 떨어진다
+// (정보 없음 fallback, kSubtractReservedFromList와 같은 조각내기
+// 패턴을 "빼기"가 아니라 "겹치는 부분 추출"로 재사용한다).
+void kPartitionRangeByAffinity(unsigned long rangeStart, unsigned long rangeEnd) {
+    Range remaining[kMaxRanges];
+    int remainingCount = 1;
+    remaining[0] = {rangeStart, rangeEnd};
+
+    const unsigned int affinityCount = kernel::Acpi::memoryAffinityCount();
+    for (unsigned int a = 0; a < affinityCount && remainingCount > 0; ++a) {
+        const unsigned long affBase = kernel::Acpi::memoryAffinityBase(a);
+        const unsigned long affEnd = affBase + kernel::Acpi::memoryAffinityLength(a);
+        const unsigned int affNode = kernel::Acpi::memoryAffinityNode(a);
+
+        Range next[kMaxRanges];
+        int nextCount = 0;
+        for (int i = 0; i < remainingCount; ++i) {
+            const unsigned long pStart = remaining[i].start;
+            const unsigned long pEnd = remaining[i].end;
+            const unsigned long ovStart = pStart > affBase ? pStart : affBase;
+            const unsigned long ovEnd = pEnd < affEnd ? pEnd : affEnd;
+            if (ovStart < ovEnd) {
+                kAssignRangeToNode(ovStart, ovEnd, affNode);
+                if (pStart < ovStart && nextCount < kMaxRanges) {
+                    next[nextCount++] = {pStart, ovStart};
+                }
+                if (ovEnd < pEnd && nextCount < kMaxRanges) {
+                    next[nextCount++] = {ovEnd, pEnd};
+                }
+            } else if (nextCount < kMaxRanges) {
+                next[nextCount++] = remaining[i];
+            }
+        }
+        for (int i = 0; i < nextCount; ++i) {
+            remaining[i] = next[i];
+        }
+        remainingCount = nextCount;
+    }
+
+    for (int i = 0; i < remainingCount; ++i) {
+        kAssignRangeToNode(remaining[i].start, remaining[i].end, 0);
+    }
+}
+
 }  // namespace
 
 namespace kernel {
 
 void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCount,
-                                unsigned long kernelPhysStart, unsigned long kernelPhysEnd,
-                                unsigned long startInfoAddr, unsigned long startInfoSize) {
+                               unsigned long kernelPhysStart, unsigned long kernelPhysEnd,
+                               unsigned long startInfoAddr, unsigned long startInfoSize) {
+    gNodeCount = Acpi::numaNodeCount();
+    if (gNodeCount == 0) {
+        gNodeCount = 1;
+    }
+    if (gNodeCount > kPfaMaxNumaNodes) {
+        gNodeCount = kPfaMaxNumaNodes;
+    }
+
     Range ranges[kMaxRanges];
     int count = 0;
 
@@ -161,36 +275,71 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCo
     kSubtractReservedFromList(ranges, count, startInfoAddr, startInfoAddr + startInfoSize);
     kSubtractReservedFromList(ranges, count, memmapArrayAddr, memmapArrayEnd);
 
+    const bool haveAffinityInfo = Acpi::memoryAffinityCount() > 0;
     for (int i = 0; i < count; ++i) {
-        if (ranges[i].start < ranges[i].end) {
-            kAddRegionToBuddy(ranges[i].start, ranges[i].end);
+        if (ranges[i].start >= ranges[i].end) {
+            continue;
+        }
+        if (haveAffinityInfo) {
+            kPartitionRangeByAffinity(ranges[i].start, ranges[i].end);
+        } else {
+            kAssignRangeToNode(ranges[i].start, ranges[i].end, 0);
         }
     }
 }
 
-unsigned long PageFrameAllocator::allocOrder(unsigned int order) {
-    const unsigned long addr = kObtainBlock(order);
+unsigned long PageFrameAllocator::allocOrderOnNode(unsigned int node, unsigned int order) {
+    if (node >= gNodeCount) {
+        return 0;
+    }
+    const unsigned long addr = kObtainBlock(gNodes[node], order);
     if (addr) {
-        gFreePageCount -= (1UL << order);
+        gNodes[node].freePageCount -= (1UL << order);
     }
     return addr;
 }
 
+unsigned long PageFrameAllocator::allocOrder(unsigned int order) {
+    const unsigned int preferredNode = kCurrentNumaNode();
+    unsigned long addr = allocOrderOnNode(preferredNode, order);
+    if (addr) {
+        return addr;
+    }
+    // 선호 노드에 없으면 다른 노드를 순서대로 뒤진다(NUMA 지역성보다
+    // 할당 성공이 우선 - v1은 그 이상의 정책이 없다).
+    for (unsigned int node = 0; node < gNodeCount; ++node) {
+        if (node == preferredNode) {
+            continue;
+        }
+        addr = allocOrderOnNode(node, order);
+        if (addr) {
+            return addr;
+        }
+    }
+    return 0;
+}
+
 void PageFrameAllocator::freeOrder(unsigned long physAddr, unsigned int order) {
-    gFreePageCount += (1UL << order);
+    const unsigned int node = kNodeForAddress(physAddr);
+    Node& n = gNodes[node];
+    n.freePageCount += (1UL << order);
     while (order < kMaxOrder) {
         const unsigned long buddy = kBuddyAddr(physAddr, order);
-        if (!kTryRemoveBlock(buddy, order)) {
+        if (!kTryRemoveBlock(n, buddy, order)) {
             break;
         }
         physAddr = physAddr < buddy ? physAddr : buddy;
         ++order;
     }
-    kInsertBlock(physAddr, order);
+    kInsertBlock(n, physAddr, order);
 }
 
 unsigned long PageFrameAllocator::allocPage() {
     return allocOrder(0);
+}
+
+unsigned long PageFrameAllocator::allocPageOnNode(unsigned int node) {
+    return allocOrderOnNode(node, 0);
 }
 
 void PageFrameAllocator::freePage(unsigned long physAddr) {
@@ -198,7 +347,19 @@ void PageFrameAllocator::freePage(unsigned long physAddr) {
 }
 
 unsigned long PageFrameAllocator::freePageCount() {
-    return gFreePageCount;
+    unsigned long total = 0;
+    for (unsigned int i = 0; i < gNodeCount; ++i) {
+        total += gNodes[i].freePageCount;
+    }
+    return total;
+}
+
+unsigned int PageFrameAllocator::numaNodeCount() {
+    return gNodeCount;
+}
+
+unsigned long PageFrameAllocator::freePageCountOnNode(unsigned int node) {
+    return node < gNodeCount ? gNodes[node].freePageCount : 0;
 }
 
 }  // namespace kernel

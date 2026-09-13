@@ -29,22 +29,22 @@ unsigned long gTickCount = 0;
 unsigned int kCalibrateLapicTicksPerWindow() {
     const unsigned int pitCount = kPitFrequencyHz / (1000 / kCalibrationMs);
 
-    kernel::kOutB(kPitGateControl, kernel::kInB(kPitGateControl) & 0xFC);  // 게이트/스피커 끄기
-    kernel::kOutB(kPitCommand, 0xB0);                                     // 채널2, lobyte/hibyte, 모드0
-    kernel::kOutB(kPitChannel2Data, static_cast<unsigned char>(pitCount & 0xFF));
-    kernel::kOutB(kPitChannel2Data, static_cast<unsigned char>((pitCount >> 8) & 0xFF));
+    kernel::arch::kOutB(kPitGateControl, kernel::arch::kInB(kPitGateControl) & 0xFC);  // 게이트/스피커 끄기
+    kernel::arch::kOutB(kPitCommand, 0xB0);                                     // 채널2, lobyte/hibyte, 모드0
+    kernel::arch::kOutB(kPitChannel2Data, static_cast<unsigned char>(pitCount & 0xFF));
+    kernel::arch::kOutB(kPitChannel2Data, static_cast<unsigned char>((pitCount >> 8) & 0xFF));
 
     kernel::Lapic::writeRegister(kLapicDivideConfig, kDivideBy16);
     kernel::Lapic::writeRegister(kLapicLvtTimer, kLvtMaskedBit);
     kernel::Lapic::writeRegister(kLapicInitialCount, 0xFFFFFFFF);
 
-    kernel::kOutB(kPitGateControl, (kernel::kInB(kPitGateControl) & 0xFC) | 0x01);  // 게이트 켜서 카운트다운 시작
+    kernel::arch::kOutB(kPitGateControl, (kernel::arch::kInB(kPitGateControl) & 0xFC) | 0x01);  // 게이트 켜서 카운트다운 시작
 
-    while (!(kernel::kInB(kPitGateControl) & 0x20)) {
+    while (!(kernel::arch::kInB(kPitGateControl) & 0x20)) {
         // OUT2(비트5)가 설 때까지 대기 - PIT 원샷 카운트 만료 신호
     }
 
-    kernel::kOutB(kPitGateControl, kernel::kInB(kPitGateControl) & 0xFC);  // 게이트 끄기
+    kernel::arch::kOutB(kPitGateControl, kernel::arch::kInB(kPitGateControl) & 0xFC);  // 게이트 끄기
 
     const unsigned int current = kernel::Lapic::readRegister(kLapicCurrentCount);
     return 0xFFFFFFFFU - current;

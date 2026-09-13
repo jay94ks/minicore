@@ -18,6 +18,14 @@ public:
 
     static unsigned int id();
 
+    // init()이 LAPIC MMIO 매핑을 끝냈는지 - PageFrameAllocator가
+    // "지금 코어의 NUMA 노드"를 물어보려고 id()를 부르기 전에 반드시
+    // 이걸로 먼저 확인해야 한다. init() 자신도 (매핑용 페이지가
+    // 필요하면) PageFrameAllocator::allocPage()를 부르는데, 그 시점엔
+    // 아직 LAPIC이 안 잡혀 있으니 id()를 부르면 안 된다(닭-달걀 문제,
+    // 2026-09-14 실측으로 발견).
+    static bool isReady();
+
     // 인터럽트 핸들러가 처리를 마치면 반드시 호출해야 한다 - 안 하면
     // 그 이하 우선순위 인터럽트가 더는 안 들어온다.
     static void sendEoi();
