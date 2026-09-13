@@ -97,7 +97,9 @@ extern "C" void kMain(unsigned int startInfoAddr) {
     kernel::Serial::write("\n");
 
     kernel::Lapic::init();
-    kernel::Serial::write("minicore: LAPIC ready, id=");
+    kernel::Serial::write("minicore: LAPIC ready, mode=");
+    kernel::Serial::write(kernel::Lapic::usesX2Apic() ? "x2apic" : "xapic");
+    kernel::Serial::write(" id=");
     kernel::Serial::writeHex(kernel::Lapic::id());
     kernel::Serial::write("\n");
 
