@@ -45,6 +45,17 @@ MCP 도구(`cnw`)로만 읽고 쓴다. 파일을 직접 만들거나 수정해�
 6. **`docs/` 캐시는 매번 갱신**: CNW 문서(SP/DC/DS/QA/RM/PL 등)를 하나라도
    바꾸면 그때마다 `scripts/export-cnw-docs.mjs`를 실행해 커밋한다
    (2026-09-14부로 "요청 시에만"에서 이 규칙으로 대체됨).
+7. **체크리스트/할 일은 전부 CNW Plan(`PN-XXXXXXXX`)으로 관리한다**
+   (설계자 지시, 2026-09-14): 문서 안에 "남은 것"/"이번 범위에 포함하지
+   않은 것"/"아직 열려 있는 설계 영역"/"미결 사항" 같은 목록을 텍스트로만
+   남기지 않는다 — 항목 하나하나를 `docs plan new <projectId> <title>
+   --body <file> --refs <관련 문서 추적코드>`로 등록하고, 그 계획을 낳은
+   문서 쪽 본문에도 발급받은 `PN-XXXXXXXX`를 병기해 서로 찾아갈 수 있게
+   한다. **이미 끝난 작업도 사후 등록 대상이다** — 상태를 `docs plan
+   status <trackingCode> completed`로 맞춘다(전체 상태 코드는 `docs plan
+   statuses`). 설계자 답변을 기다리는 계획은 `in_review`로 둔다. 계획
+   간 선행 조건은 `docs plan depend`. 명령/상태 흐름 전체는 Skill의
+   "계획" 절 참고.
 
 ## 프로젝트 핵심 문서
 
