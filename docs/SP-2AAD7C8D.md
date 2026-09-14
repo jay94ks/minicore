@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: review
-  updatedAt: 2026-09-14T16:40:50.951Z
+  updatedAt: 2026-09-14T16:47:54.533Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
@@ -310,19 +310,11 @@ struct BrkArgs {
    (멀티스레드 프로세스 다수 + 페이지 폴트 빈도가 실측으로 문제가
    될 때) 별도 아키텍처 결정으로 재검토 - 설계자 판단 필요할 수
    있는 사안이라 숫자 튜닝이 아니라고 명시해 둔다.
-2. **커널 영역 TLB 샷다운 (신규 발견, 중요)**: `KernelAddressSpaceManager`
-   가 매핑을 해제/변경하면, 그 변경 전 주소를 캐시하고 있는 **다른
-   코어의 TLB**는 그 코어가 `invlpg`를 실행하기 전까진 갱신되지 않는다
-   - 지금 이 프로젝트의 `Paging::unmapPage`(`paging.cpp` 91번째 줄
-   근처 주석)는 "invlpg는 항상 지금 이 코어가 보고 있는 주소공간
-   기준으로만" 동작한다고 스스로 명시하고 있고, **다른 코어에 invlpg를
-   전파하는 IPI 기반 샷다운 메커니즘이 이 프로젝트에 아직 전혀 없다**
-   (`smp.h`/`lapic.h`에 INIT-SIPI 부팅 시퀀스만 있고 런타임 TLB
-   샷다운 IPI는 없음). **`KernelAddressSpaceManager`가 실제로 매핑을
-   해제/재배정하는 기능까지 쓰려면 이 IPI 샷다운이 선행돼야 한다** -
-   별도 계획으로 등록 필요(이 문서 범위 밖, §7에 선행 조건으로만 기록).
-   유저 영역(`ProcessAddressSpaceManager`)은 이 문제가 없다 - 다른
-   프로세스가 그 주소공간을 보고 있지 않으므로.
+2. ~~**커널 영역 TLB 샷다운**~~ - **해결됨(SP-DE19BB1C, 2026-09-14)**
+   - IPI 기반 우편함+ISR+ACK 메커니즘으로 구체화됐다(신규
+   `Lapic::sendFixedIpi` 포함). `KernelAddressSpaceManager`의 매핑
+   해제/변경 경로는 이제 이 문서를 그대로 재사용하면 된다 - 더 이상
+   이 문서의 미결 사항이 아니다.
 3. **`findGap`의 정확한 시작 지점(§5-A/§5의 이전 논의 상속)**: 코드/
    스택 경계를 피해 어디서부터 유저 영역 mmap을 시작할지 - SP-8B6B8D25
    §5-A가 아직 정하지 않은 힙/mmap 경계를 이 문서가 실질적으로 확정
