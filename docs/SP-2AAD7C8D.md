@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: review
-  updatedAt: 2026-09-14T16:16:28.204Z
+  updatedAt: 2026-09-14T16:27:49.877Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
@@ -19,6 +19,11 @@
 가상주소 공간 관리자 위임 사항")이 미뤄 뒀던 mmap 서브시스템 설계를
 실제로 수행한 것이다 - RM-9B8CA541은 이 문서로 대체/흡수되어 종료된다
 (그 문서의 "이 위임이 끝나는 조건" 항목이 정확히 이 상황이다).**
+
+**[확장, 2026-09-14, 설계자 후속 지시]** - "표준 파일 API들도 모두
+설계에 포함시켜." §9에서 open/close/read/write/lseek/stat/readdir/
+mkdir/unlink 전체를 다룬다 - VFS 라우팅(SP-7CC5693A §2.2의
+`ResolvePathArgs`)과 이 문서의 프로세스 자료구조를 엮는 지점이다.
 
 ## 1. 왜 두 파트로 나누는가
 
@@ -179,6 +184,7 @@ public:
 enum class VmaBacking : uint32_t {
     Anonymous,     // 요구 페이징(§2-B), 초기엔 매핑 없음 - 폴트 시 PageFrameAllocator로 채움
     FixedPhysical, // 물리주소가 이미 정해짐(MMIO/DMA 버퍼) - PnP §3.3/DMA 버퍼 관리자(SP-39F18E30)가 여기 해당
+    FileBacked,    // §9의 파일 API로 매핑 - 파일 오프셋 범위를 이 VMA에 연결(§9.5)
 };
 
 struct Vma {
@@ -186,6 +192,8 @@ struct Vma {
     uint32_t prot;            // Read/Write/Exec 비트
     VmaBacking backing;
     uint64_t fixedPhysAddr;   // backing==FixedPhysical일 때만 사용
+    int32_t backingFd;        // backing==FileBacked일 때만 사용(§9.2의 fd)
+    uint64_t fileOffset;      // backing==FileBacked일 때만 사용
     bool used = false;        // Slab 재사용 시 관례
 };
 ```
@@ -193,7 +201,7 @@ struct Vma {
 `Vma` 자체도 256B 버킷보다 훨씬 작으므로 32B/64B 버킷(SP-D7013B26의
 다른 버킷)에서 `GenericSlabAllocator`로 확보하는 것을 제안한다.
 
-## 5. Syscall API
+## 5. mmap/munmap/brk Syscall API
 
 ```cpp
 // 유저 프로세스 → 커널: ProcessAddressSpaceManager(호출자 프로세스 것)를 사용.
@@ -254,9 +262,10 @@ struct BrkArgs {
    §5-A가 아직 정하지 않은 힙/mmap 경계를 이 문서가 실질적으로 확정
    짓는다: **코드 공간 위쪽 ~ 스택 하단 사이 전부를 mmap 가능 영역으로
    본다**(v1 제안, 정확한 정렬/여유 공간 상수는 구현 시점 튜닝).
-4. **파일 백킹 mmap**: `fs` 서비스(SP-7CC5693A)가 아직 구현 전이라
-   `VmaBacking::FileBacked` 종류는 이번 범위 밖 - fs 서비스 실동작
-   이후 후속 과제.
+4. ~~**파일 백킹 mmap**~~ - **부분 해결(§9.5)** - `fs` 서비스
+   (SP-7CC5693A)가 실제로 구현되기 전까지는 실행 가능한 코드가 없지만,
+   `VmaBacking::FileBacked`의 자료구조/폴트 처리 흐름 자체는 §9.5에서
+   설계했다.
 
 ## 7. 선행 조건
 
@@ -270,6 +279,8 @@ struct BrkArgs {
   `Process` 구조체 자체.
 - `Paging::mapPage`/`unmapPage`(이미 구현 완료) - 실제 페이지 테이블
   조작.
+- VFS 커널 서브시스템(SP-7CC5693A) - §9의 파일 API가 경로 해석에
+  재사용하는 `ResolvePathArgs`.
 
 ## 8. RM-9B8CA541과의 관계
 
@@ -283,3 +294,173 @@ SP-39F18E30(DMA 버퍼 관리자) §3.2의 `ProcessVirtualAddressCursor`
 흡수된다 - `AllocDmaBuffer`는 이제 자체 커서 대신 `mmap`과 같은
 `ProcessAddressSpaceManager::findGap`+`store(VmaBacking::FixedPhysical)`
 경로를 재사용한다.
+
+## 9. 표준 파일 API (2026-09-14, 설계자 지시 - "표준 파일 API들도 모두 설계에 포함시켜")
+
+### 9.1 전체 흐름
+
+```
+유저 코드 (libmc가 감쌈)
+   |  open("/sys/etc/foo.conf", ...)
+   v
+[Open syscall]
+   |  1. ResolvePathArgs(SP-7CC5693A §2.2)로 경로 → (ownerChannelId, relPath)
+   |  2. 그 Channel로 "Open(relPath, flags)" IPC 메시지 전송(PL-C8648D4D)
+   |  3. fs 서비스가 FileSystemDriver::open() 호출 → 자기 내부 FileHandle 반환
+   |  4. 커널이 Process의 파일 디스크립터 테이블에 {ownerChannelId, fsHandle, offset=0} 등록
+   v
+프로세스별 정수 fd 반환 → 이후 read/write/lseek/close는 전부 이 fd로만 참조
+```
+
+이 흐름은 PnP(SP-9DD4F3EA §3.1 "장치 열거 → IO 권한 요청")와 정확히
+같은 2단계 패턴("커널이 라우팅 정보만 알려주고, 실제 작업은 그 대상과
+직접 IPC")을 재사용한다.
+
+### 9.2 프로세스 파일 디스크립터 테이블
+
+```cpp
+// minicore/kernel/process.h에 추가 제안 - DmaBuffer(SP-39F18E30 §4)와
+// 동일하게 ChunkedList 재사용.
+struct FileDescriptor {
+    uint64_t ownerChannelId;  // 이 fd를 처리하는 fs 서비스의 Channel(SP-7CC5693A §2.2)
+    uint64_t fsHandle;        // 그 fs 서비스 내부 FileSystemDriver::open()의 반환값
+    uint64_t offset;          // POSIX 관례 커서 - read/write가 명시적 offset을 안 줄 때 이 값을 쓰고 자동 전진
+    bool isDirectory;
+    bool used = false;
+};
+
+// Process에 추가
+ChunkedList<FileDescriptor, kFileDescriptorChunkCapacity> fileDescriptors;
+```
+
+**offset은 커널(fd 테이블)이 갖고, `FileSystemDriver::read/write`
+(SP-7CC5693A §3.2)는 매번 명시적 offset을 받는 무상태 오퍼레이션이다**
+- 이렇게 나누면 fs 서비스 드라이버 구현이 커서 상태를 신경 쓸 필요가
+없고(POSIX `pread`/`pwrite`와 동일한 결), `dup()`류로 fd를 복제해도
+어느 쪽이 offset을 소유하는지가 fd 테이블 하나로 명확하다.
+
+### 9.3 Syscall API
+
+```cpp
+enum class OpenFlags : uint32_t {
+    ReadOnly = 1 << 0,
+    WriteOnly = 1 << 1,
+    ReadWrite = ReadOnly | WriteOnly,
+    Create = 1 << 2,
+    Truncate = 1 << 3,
+    Append = 1 << 4,
+    Directory = 1 << 5,  // 디렉터리로 열기(readdir 전용)
+};
+
+struct OpenArgs {
+    const char* path;      // in: 절대 경로
+    uint32_t pathLen;
+    uint32_t flags;        // in: OpenFlags 조합
+    // out
+    int32_t fd;            // 실패 시 -1
+    ChannelError error;    // NotFound / PermissionDenied / AlreadyExists(Create+exclusive류 후속)
+};
+
+struct CloseArgs {
+    int32_t fd;
+    ChannelError error;    // InvalidHandle
+};
+
+struct ReadArgs {
+    int32_t fd;
+    void* buf;
+    uint32_t len;
+    // out
+    uint32_t bytesRead;    // 0이면 EOF
+    ChannelError error;
+};
+
+struct WriteArgs {
+    int32_t fd;
+    const void* buf;
+    uint32_t len;
+    // out
+    uint32_t bytesWritten;
+    ChannelError error;
+};
+
+enum class SeekWhence : uint32_t { Set, Current, End };
+
+struct LseekArgs {
+    int32_t fd;
+    int64_t offset;
+    SeekWhence whence;
+    // out
+    uint64_t newOffset;
+    ChannelError error;
+};
+
+struct StatArgs {
+    const char* path;      // in (fd 기반 fstat은 후속 변형으로 추가 가능)
+    uint32_t pathLen;
+    // out
+    StatBuf stat;          // SP-7CC5693A §3.2 참고
+    ChannelError error;
+};
+
+struct ReaddirArgs {
+    int32_t fd;             // Directory 플래그로 연 fd
+    // out
+    DirEntry entry;         // SP-7CC5693A §3.2 참고 - 호출마다 다음 엔트리 하나
+    bool hasMore;
+    ChannelError error;
+};
+
+struct MkdirArgs {
+    const char* path;
+    uint32_t pathLen;
+    ChannelError error;
+};
+
+struct UnlinkArgs {
+    const char* path;      // 파일이면 unlink, 빈 디렉터리면 rmdir 라우팅(§9.4)
+    uint32_t pathLen;
+    ChannelError error;
+};
+```
+
+`Read`/`Write`/`Lseek`/`Close`/`Readdir`는 전부 `fd`를 fd 테이블에서
+찾아 `ownerChannelId`로 IPC 메시지를 보내는 동일한 패턴이다 - 명시적
+offset이 필요한 `FileSystemDriver::read/write` 호출 시 fd 테이블의
+`offset` 필드를 넘기고, 성공하면 `bytesRead`/`bytesWritten`만큼 그
+필드를 전진시킨다(Append 플래그면 항상 파일 끝 기준으로 재계산 -
+세부는 구현 시점).
+
+### 9.4 `Mkdir`/`Unlink`가 `Stat`과 다른 점 - 디스크립터 없이 경로만으로 동작
+
+`mkdir`/`unlink`/`rmdir`/`stat`은 파일을 "열지" 않고 경로만으로
+수행되는 오퍼레이션이라, fd 테이블을 거치지 않고 `ResolvePathArgs`로
+얻은 채널에 직접 1회성 메시지를 보내는 것으로 충분하다(§9.1의 4단계
+흐름에서 3~4단계, "fd 등록"이 필요 없음) - `FileSystemDriver`(SP-7CC5693A
+§3.2)의 `stat`/`mkdir`/`rmdir`/`unlink`가 전부 `FileHandle`이 아니라
+`relPath`를 직접 받는 것도 이 때문이다.
+
+### 9.5 파일 백킹 mmap과의 연결 (§4-4, §6-4 참고)
+
+`mmap`(§5)에 `flags`로 "파일 백킹" 옵션이 추가되면(v1 이후, `fs`
+서비스가 실제로 동작하는 시점), `Vma::backing = FileBacked`로
+`backingFd`/`fileOffset`을 채워 등록한다 - 유저 모드 페이지 폴트
+(SP-8B6B8D25 §2-B)가 이 VMA를 만나면, 이미 있는 `FileDescriptor`의
+`ownerChannelId`로 그 오프셋 범위를 `Read`해 물리 페이지를 채우는
+흐름이 된다(Anonymous VMA의 "PageFrameAllocator로 그냥 0으로 채움"과
+갈라지는 지점 - 파일 백킹은 실제 데이터를 읽어와야 한다). 이 흐름의
+정확한 캐시/dirty 페이지 되쓰기(writeback) 정책은 `fs` 서비스가
+실제로 존재하기 전까지는 확정할 수 없어 후속 과제로 남긴다.
+
+### 9.6 아직 열려 있는 설계 영역 (§9 전용)
+
+1. **`dup`/`dup2`류 fd 복제**: 여러 fd가 같은 `FileDescriptor` 엔트리
+   (또는 offset을 공유하는 엔트리)를 가리키는 경우의 참조 카운트 -
+   `AtomicU32`(libkenv/spinlock.h, 이미 구현 완료) 재사용 제안, 세부는
+   실제 착수 시점.
+2. **경로 오프닝의 심볼릭 링크/`..`/`.` 정규화**: `ResolvePathArgs`
+   (SP-7CC5693A §2.2)가 지금은 단순 접두사 매칭만 가정 - 심볼릭 링크는
+   각 `fs` 드라이버가 있어야 의미가 생기므로 그때 같이 설계.
+3. **`Open`의 `Create` 플래그 경합(동시에 두 프로세스가 같은 파일을
+   O_CREAT|O_EXCL로 열 때)**: `fs` 서비스 쪽 드라이버의 원자성 보장
+   범위 - 각 드라이버(ext4 등) 착수 시점의 구현 세부.
