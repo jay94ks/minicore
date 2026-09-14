@@ -288,6 +288,38 @@ team-admin-add/team-admin-remove/team-admins <teamId> [<userId>]`.
 `kanban-card-get <trackingCode>`로 내용을 확인하고 실행 계획을 세워
 처리한 뒤 그 진행 상황에 맞게 `kanban-card-move`로 컬럼을 옮긴다.
 
+**AI 자신도 완료한 작업 단위를 능동적으로 기록할 수 있다** - 설계자가
+만든 카드를 처리하는 방향뿐 아니라, 이 프로젝트에 칸반 컬럼이 있고
+(`kanban-columns`로 확인) 작업이 하나의 뚜렷한 단위로 끝났다면(대개
+`DN` 라운드 하나에 대응) 그 문서를 `--refs`로 묶어 카드를 새로
+만들거나(`kanban-card-new`) 이미 있던 카드를 진행 상황에 맞게
+옮긴다(`kanban-card-move`) - 설계자가 보드만 보고도 "무엇이 끝났고
+무엇이 진행 중인지" 파악할 수 있게 하기 위함이다. 조사/조회 정도의
+가벼운 응답에는 만들지 않는다 - 실제로 코드나 문서가 바뀐 라운드
+단위로 판단한다.
+
+## 계획 (별도 계획 체크리스트)
+
+Document/DocType/DocStatus 체계와 완전히 별도로 관리되는 독립
+엔티티 - 작업 중 "이건 지금 당장이 아니라 나중에 따로 계획을 잡아야
+한다"고 판단한 항목을 즉시 트래킹 코드(`PN-XXXXXXXX`)로 남겨두는
+체크리스트다. 상태는 5개로 고정(`계획됨`/`승인대기`/`검토중`/
+`예정`/`거부`, `plan statuses`로 조회) - DocStatus처럼 프로젝트마다
+커스터마이즈되지 않고, 전이도 그래프로 제약되지 않아 언제든 5개 중
+아무 값으로나 바꿀 수 있다.
+
+**작업 중 스스로 판단해 기록한다** - 코드 관계도/칸반 카드와 같은
+원칙: 설계자가 시켜서가 아니라, 지금 처리할 일이 아니라고 판단되면
+(범위 밖 발견, 후속 확인 필요, 설계자 결정이 필요한 더 큰 작업 등)
+`plan new`로 제목/본문(Markdown)과 관련 문서(`--refs`)를 남겨둔다 -
+사소한 메모까지 전부 남기는 감사 로그가 아니라, 나중에 실제로 다시
+챙겨야 할 항목만 기록한다.
+
+웹 UI에는 "계획" 탭이 있어 설계자가 상태를 검토/승인 처리할 수 있다
+- 관련 문서는 항상 검색 기반 선택기로 고르고, `PN-XXXXXXXX` 코드는
+메시지/코멘트/문서 본문 어디서든 클릭하면 미리보기가 뜬다(질의/칸반
+카드 코드와 같은 방식).
+
 ## 목록 명령의 페이지네이션
 
 목록을 반환하는 명령은 대부분 `--page <n>`/`--count <n>`(MCP는
@@ -317,7 +349,14 @@ user activity`는 이미 있는 `--limit <n>`(단순 "최근 N건" 요약 뷰)�
   다시 파악하려면 비용이 드는 발견일 때만 기록한다 - 사소한 한 줄짜리
   조회까지 전부 남기는 감사 로그가 아니다. 예: "X 함수가 Y를 거쳐 Z를
   호출하는 이유를 추적해 알아냈다", "이 버그가 세 파일에 걸쳐 있다는
-  걸 확인했다", "이 추적코드가 구현된 소스 파일들을 찾았다".
+  걸 확인했다", "이 추적코드가 구현된 소스 파일들을 찾았다". **대상은
+  파일 하나짜리 요약에 그치지 않는다** - 함수 간 호출 관계(어떤 함수가
+  어떤 함수를 왜 반드시 그 순서로/그 방식으로 불러야 하는지), 클래스·
+  모듈 간 참조 관계(예: 전역 레지스트리에 특정 시점 전에 등록돼야
+  하는 의존관계), 그리고 특정 코드 한 곳에 매이지 않는 **일반화 가능한
+  설계 원칙**(예: "캐시 쓰기 실패가 그 캐시를 유발한 원래 동작의
+  실패로 이어지면 안 된다")도 전부 기록 대상이다 - 다만 발견 하나하나가
+  아니라 "선별적으로 중요한 것만" 남기는 기준은 그대로다.
 - **탐색 전 검색하는 습관**: 여러 파일을 추적하기 전에 `docs relation
   list --q <키워드>`나 특정 관계를 기점으로 `docs relation ancestors`/
   `docs relation descendants`로 이미 기록된 게 있는지 먼저 확인한다 -
@@ -398,6 +437,26 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 - 머지/수동 병합 완료는 owner 전용, 나머지(거부/닫기/재오픈/댓글
   작성)는 editor 이상.
 
+## 연관 소스코드 (Document ↔ Source File)
+
+문서가 실제로 어느 소스 코드 파일과 관련 있는지 식별해두는 순수 연관
+관계(`docs link-source <trackingCode> <path>` / `unlink-source
+<trackingCode> <linkId>` / `source-links <trackingCode>`, MCP는
+`document_link_source`/`document_unlink_source`/`document_source_links`) -
+`path`는 git 저장소 루트 기준 상대 경로. 연결해두면 웹 UI 문서 읽기
+화면에서 그 파일로 바로 이동하는 링크가 뜨고, 소스 코드 브라우저
+쪽에서도 그 파일에 연결된 문서를 거꾸로 찾을 수 있다(양방향 탐색).
+
+**언제 연결하는가**: 문서(특히 `DN` 라운드 문서)가 구체적으로 어떤
+파일을 바꿨다고 서술하면, 그 핵심 파일들을 실제로 연결해둔다 - 코드
+관계도와 같은 기준으로, 사소한 한 줄 변경까지 전부 남기는 감사 로그는
+아니지만 "이 문서가 실제로 어느 파일에서 나왔는지"를 나중에 다시
+찾는 비용을 줄이는 게 목적이다. 라운드를 끝내며 FT/DN 문서를 갱신할
+때 이 연결도 같이 남기는 걸 기본 루틴으로 삼는다(위 "칸반 보드"
+절의 카드 생성 여부 판단과 같은 타이밍). 파일이 나중에 삭제/이름
+변경돼 경로가 깨져도 연결 자체는 그대로 남는다(과거 시점 기록이라는
+게 아래 "연관 브랜치"와 같은 정책).
+
 ## 연관 브랜치 (Document ↔ Branch)
 
 문서가 어느 git 브랜치들에서 구현·논의됐는지 식별해두는 순수 연관
@@ -407,7 +466,11 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 `branch-links <trackingCode>`). **위 코드 관계도의 브랜치 자동 삭제와
 반대로, 그 브랜치가 나중에 삭제돼도 이 연결은 그대로 남는다** -
 "지금 브랜치가 있는지"가 아니라 "이 문서가 어떤 브랜치들을 거쳐
-구현됐는지"라는 역사적 기록이기 때문이다.
+구현됐는지"라는 역사적 기록이기 때문이다. **언제 연결하는가**: 이름
+붙은 기능 브랜치에서 작업했다면(`main`/`master`에 직접 커밋하는
+흐름이면 의미가 없으니 생략) 그 브랜치명을 관련 문서에 남겨, 나중에
+"이 문서가 어느 브랜치들을 거쳐 구현됐는지" 역사적으로 추적할 수
+있게 한다.
 
 ## 명령 요약 (CLI `docs` / MCP 도구 이름 병기)
 
@@ -470,6 +533,13 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 파일 부분 읽기(줄 범위) | `docs git read <projectId> <path> [--ref <r>] [--offset <n>] [--limit <n>]` | `git_read` |
 | 파일 정규식 검색 | `docs git grep <projectId> <path> <pattern> [--ref <r>] [--case-insensitive] [--context <n>]` | `git_grep` |
 | 파일 저장(커밋) | `docs git put <projectId> <path> <localFile> [--message <m>]` | `git_put` |
+| 파일 삭제(커밋) | `docs git delete <projectId> <path> [--message <m>]` | `git_delete` |
+| 여러 파일 한번에 조회 | `docs git cat-batch <projectId> <path1,path2,...>` | `git_cat_batch` |
+| 파일 변경 스테이징 | `docs git add <projectId> <path> <localFile>` | `git_add` |
+| 파일 삭제 스테이징 | `docs git rm <projectId> <path>` | `git_rm` |
+| 스테이징 상태 조회(diff+드리프트) | `docs git status <projectId>` | `git_status` |
+| 스테이징 취소 | `docs git restore <projectId> <path>` | `git_restore` |
+| 스테이징 반영(커밋) | `docs git commit <projectId> --message <m>` | `git_commit` |
 | 템플릿 조회(override 체인 적용) | `docs template get <filename> [--project <id>]` | `template_get` |
 | 템플릿 override 설정 | `docs template set <filename> <file> [--project\|--group\|--team <id>]` | `template_set` |
 | 템플릿 배포 | `docs template deploy <projectId>` | `template_deploy` |
@@ -493,6 +563,15 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 칸반 카드 목록 | `docs kanban-cards <projectId> [--column <columnId>]` | `kanban_cards` |
 | 칸반 카드 상세 | `docs kanban-card-get <trackingCode>` | `kanban_card_get` |
 | 칸반 카드 이동 | `docs kanban-card-move <trackingCode> <toColumnId> [--index <n>]` | `kanban_card_move` |
+| 계획 생성(+관련 문서) | `docs plan new <projectId> <title> --body <file> [--status <code>] [--refs <codes>]` | `plan_new` |
+| 계획 목록 | `docs plan list <projectId> [--status <code>] [--q <text>] [--page <n>] [--count <n>]` | `plan_list` |
+| 계획 상태 코드 목록(고정값) | `docs plan statuses` | `plan_statuses` |
+| 계획 상세 | `docs plan get <trackingCode>` | `plan_get` |
+| 계획 제목/본문 수정 | `docs plan set <trackingCode> [--title <t>] [--body <file>]` | `plan_set` |
+| 계획 상태 변경 | `docs plan status <trackingCode> <status>` | `plan_status` |
+| 계획 삭제 | `docs plan delete <trackingCode>` | `plan_delete` |
+| 계획에 관련 문서 추가 | `docs plan link <trackingCode> <docTrackingCode>` | `plan_link` |
+| 계획에서 관련 문서 제거 | `docs plan unlink <trackingCode> <docTrackingCode>` | `plan_unlink` |
 | 코드 관계 추가 | `docs relation add <projectId> --target <t> --referrer <r> --purpose <p> --file <path> [--line <n>] [--column <n>] [--data <json>] [--refs <codes>] [--tags <t1,t2>] [--parents <id1,id2>] [--children <id1,id2>] [--branch <name>]` | `relation_add` |
 | 코드 관계 수정 | `docs relation update <projectId> <id> [필드 옵션...] [--refs <codes>] [--add-parents/--remove-parents/--add-children/--remove-children <id1,id2>] [--branch <name>]` | `relation_update` |
 | 코드 관계 삭제 | `docs relation remove <projectId> <id>` | `relation_remove` |
@@ -586,6 +665,34 @@ git publish-queue-done <projectId> <id>`로 완료를 보고한다 - 이
 엔드포인트가 없어서(알려진 플랫폼 제한, 임의 추측이 아니라 실제 Gitea
 인스턴스에 대고 확인함) 호출하면 그 사실을 알리는 명확한 에러가 온다 -
 파일의 변경 이력은 `git log`/`git diff`/`git show`로 대신 확인한다.
+
+## 파일 스테이징(add/rm/status/restore/commit)
+
+`git put`/`git delete`는 파일 하나를 즉시 커밋하는 지름길이고, 여러
+파일을 한 커밋으로 묶으려면 실제 git처럼 스테이징한다: `git add
+<projectId> <path> <localFile>`(변경 스테이징)/`git rm <projectId>
+<path>`(삭제 스테이징) → `git status <projectId>`로 확인 → `git commit
+<projectId> --message <m>`으로 한 번에 반영. **`git status`는 각
+항목에 현재 HEAD 대비 diff(`docs diff`/`document_diff`와 같은 줄 단위
+형식)와 `driftDetected`(스테이징 이후 그 파일이 다른 경로로 먼저
+바뀌었는지)를 같이 보여준다** - 커밋을 시도하기 전에 충돌 가능성을
+미리 확인할 수 있다. `git restore <projectId> <path>`로 스테이징을
+취소한다(스테이징된 게 없으면 명확한 에러).
+
+**`git commit`은 항상 원자적이다** - 드리프트가 있어도 겹치지 않는
+변경이면 3-way 자동 병합해 한 커밋에 반영하지만, 같은 줄을 건드리는
+진짜 충돌이 하나라도 있으면 **커밋 전체를 하지 않는다**(부분 반영
+없음) - 응답에 충돌난 경로별로 `base`/`ours`/`theirs`와 충돌 마커
+(`<<<<<<< / ======= / >>>>>>>`)가 담긴 병합 시도 결과가 오니, 그걸 보고
+직접 병합한 내용을 다시 `git add`로 스테이징하거나 `git restore`로
+자기 쪽 변경을 버린 뒤 새 HEAD 기준으로 다시 편집한다. "삭제 대
+수정"(내가 지우려는 파일을 그 사이 누가 고침) 조합은 항상 충돌로
+취급한다(실제 git과 동일 - 자동 해소 대상이 아님).
+
+여러 파일을 한 번에 읽어야 할 때는 `git cat <path>`를 반복 호출하는
+대신 `docs git cat-batch <projectId> <path1,path2,...>`(MCP
+`git_cat_batch`)로 한 번에 조회한다 - 존재하지 않는 경로는 결과에
+`content: null`로 표시될 뿐 에러가 아니다.
 
 ## 인증
 
