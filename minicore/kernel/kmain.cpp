@@ -1,4 +1,5 @@
 #include "acpi.h"
+#include "async_task.h"
 #include "boot_info.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
@@ -303,6 +304,9 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Serial::write("Hz, vector=");
     kernel::Serial::writeHex(kernel::kSchedulerTickVector);
     kernel::Serial::write(")\n");
+
+    kernel::AsyncReactor::initForThisCore();
+    kernel::Serial::write("minicore: async reactor ready (core 0)\n");
 
     kernel::IoApic::init();
     kernel::Serial::write("minicore: IOAPIC mapped\n");

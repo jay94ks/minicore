@@ -1,6 +1,7 @@
 # libkenv - early 환경 C/C++ 런타임 라이브러리 (SP-8B6B8D25 §3.1b).
 add_library(libkenv OBJECT
     mem.cpp
+    cxxabi.cpp
 )
 
 # "libkenv/io_port.h"처럼 라이브러리 이름을 포함한 경로로 include하게

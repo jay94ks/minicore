@@ -1,6 +1,7 @@
 #include "smp.h"
 
 #include "acpi.h"
+#include "async_task.h"
 #include "gdt.h"
 #include "idt.h"
 #include "lapic.h"
@@ -93,6 +94,7 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     kernel::Serial::write("\n");
 
     kernel::Scheduler::startTickOnThisCore();
+    kernel::AsyncReactor::initForThisCore();
 
     gApStartedCount.fetchAdd(1);
 

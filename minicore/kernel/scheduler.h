@@ -99,6 +99,18 @@ public:
     // 아니어야 한다(일반 Task 실행 흐름에서만 호출).
     static void yieldCurrent();
 
+    // PL-2D3184BC 6단계 - "특정 이유로 블로킹 후 누군가 깨울 때까지
+    // 대기"의 범용 내부 프리미티브. yieldCurrent()와 달리 **어느
+    // 큐에도 다시 넣지 않는다** - scheduleImmediate()/enqueue()로
+    // 명시적으로 깨우기 전까지는 절대 다시 뽑히지 않는다. 원칙대로
+    // 이 함수 자체는 "범용 공개 API"가 아니라 기능별 API가 내부에서만
+    // 써야 한다(설계 문서 6절) - 첫 소비자는 AsyncReactor(async_task.h,
+    // 할 일이 없을 때 파킹) - 깨우는 쪽은 별도 API를 두지 않고 이미
+    // 있는 scheduleImmediate()를 그대로 쓴다(파킹된 Task는 어느 큐에도
+    // 없으므로 이중 스케줄링 걱정 없이 안전하게 즉시 큐에 넣을 수
+    // 있다).
+    static void parkCurrent();
+
     // 선점 비활성화 카운터(공개 API, PL-2D3184BC 8단계) - 인터럽트
     // 자체는 막지 않는다(onTick이 이 카운트를 보고 Task 전환만
     // 보류한다) - Slab 할당자(SP-D7013B26)의 PreemptionGuard가 코어별

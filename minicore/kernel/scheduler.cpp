@@ -240,6 +240,31 @@ void Scheduler::yieldCurrent() {
     // 선택되면 이 지점부터(인터럽트 다시 허용된 채로) 재개된다.
 }
 
+void Scheduler::parkCurrent() {
+    // yieldCurrent()와 똑같은 이유로 cli - gCurrentTask를 지우기 전에
+    // 상태만 Blocked로 바꾸면, 그 사이 낀 스케줄러 틱이 이 Task를
+    // "아직 실행 중"으로 보고 pickNext()가 (큐에 없으니 이 Task 본인은
+    // 아니지만) 다른 전환을 시도하다가 gCurrentTask가 가리키는 대상과
+    // 어긋난 상태로 kContextSwitch를 부를 위험을 없앤다.
+    asm volatile("cli");
+    const uint32_t coreIndex = currentCoreIndex();
+    Task* current = gCurrentTask[coreIndex];
+    if (!current) {
+        asm volatile("sti");
+        return;  // idle 컨텍스트에서 잘못 호출된 경우 - 할 일 없음
+    }
+    gCurrentTask[coreIndex] = nullptr;
+    current->state = TaskState::Blocked;
+    // yieldCurrent()와의 유일한 차이 - 어느 큐에도 넣지 않는다. 다시
+    // 실행되려면 누군가 scheduleImmediate()/enqueue()로 명시적으로
+    // 큐에 넣어야 한다(그 시점엔 이 Task가 어느 큐에도 없다는 게
+    // 보장되므로 이중 스케줄링 걱정이 없다).
+    kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    // 누군가 깨워 runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰
+    // 있다가, 다시 선택되면 이 지점부터(인터럽트 다시 허용된 채로)
+    // 재개된다.
+}
+
 void Scheduler::disablePreemption() {
     ++gPreemptDisableCount[currentCoreIndex()];
 }
