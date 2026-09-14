@@ -111,6 +111,19 @@ public:
     // 있다).
     static void parkCurrent();
 
+    // PL-2D3184BC "Task 종료 프로토콜"(설계자 지시, QU-26F9420E 답변
+    // 2번, 2026-09-14) - kTaskFallingToEnd(context_switch.S, 예전
+    // kTaskStartTrampoline_halt)가 "Kernel-Level Task가 계속 커널에
+    // 머물러 있는" 경우(Task::isUserLevel == false)에 호출한다. 이
+    // Task를 Zombie로 표시해 스케줄러에서 완전히 떼어내고(다시는
+    // pickNext에 뽑히지 않음) clean-up 큐에 등록한 뒤 다음 Task(또는
+    // idle)로 영구히 전환한다 - **절대 돌아오지 않는다**. 자기 자신의
+    // 커널 스택을 아직 쓰고 있는 도중(이 함수 자체가 그 스택 위에서
+    // 실행 중)이라 이 자리에서 스택을 직접 회수할 수 없다 - 실제
+    // 회수(PageFrameAllocator::freeOrder)는 runLoop()이 idle 컨텍스트
+    // (다른 스택) 위에서 이 큐를 드레인하며 나중에 처리한다.
+    [[noreturn]] static void retireCurrentTask();
+
     // 선점 비활성화 카운터(공개 API, PL-2D3184BC 8단계) - 인터럽트
     // 자체는 막지 않는다(onTick이 이 카운트를 보고 Task 전환만
     // 보류한다) - Slab 할당자(SP-D7013B26)의 PreemptionGuard가 코어별

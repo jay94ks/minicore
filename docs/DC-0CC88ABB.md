@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-0CC88ABB
-  status: review
-  updatedAt: 2026-09-14T07:35:55.989Z
+  status: approved
+  updatedAt: 2026-09-14T09:05:07.039Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 ## 배경
@@ -47,10 +47,38 @@ PL-2D3184BC 5단계(LAPIC 틱 기반 선점) 구현 중 발견 - 스케줄러 �
    증가시킬지"**를 명확히 해야 한다(각 코어가 독립적으로 자기 LAPIC
    틱을 갖는 이상, 특정 코어 하나만 대표로 증가시켜야 함).
 
-## 참고
+## 답변(설계자, 2026-09-14) 및 구현 완료
 
-- PL-2D3184BC - 이 결정이 반영될 스케줄러 실행 계획(5/7단계).
-- timer.cpp/lapic.h - 충돌하는 두 소비자(Timer::init()의 LAPIC 폴백,
-  Scheduler::startTickOnThisCore()).
-- 현재 코드는 이 문제를 아직 반영하지 않은 상태다(HPET가 있는 개발/
-  실측 환경에는 영향이 없어 당장 막힌 경로는 아님).
+> 1. HPET이 없는 환경에서 전역 tickCount는 (a)로 구현하되, legacy
+>    fallback만 확실히 설계하도록 하자.
+> 2. SMP 환경에서 "전역 카운터"는 "BSP"의 카운터를 직접 읽어라.
+
+**(a) 채택** - `Timer::init()`은 이제 HPET가 없어도 LAPIC을 전혀
+재프로그램하지 않는다(`timer.cpp`, 예전 `Lapic::startPeriodicTimer
+(kTimerVector, ...)` 호출 제거). 대신 `Scheduler::onTick()`
+(scheduler.cpp)이 EOI 직후 - 선점 금지/idle 여부를 확인하기 전에 -
+**"이 틱이 BSP 코어에서 왔고 `!Timer::usesHpet()`"인 경우에만**
+`Timer::onTick()`을 대신 호출해 전역 시각을 공급한다. BSP 코어
+인덱스는 `Scheduler::startTickOnThisCore()`의 첫 호출(항상 BSP
+자신 - AP는 이후 `Smp::startApCores()`가 순차 기동) 시점에 한 번만
+확정해 둔다(답변 2번 "SMP에서 전역 카운터는 BSP의 카운터를 직접
+읽어라"와 일치 - AP 코어는 이 조건에 걸리지 않아 절대 중복
+카운트하지 않는다). 레거시 PIT IRQ0 폴백(`Timer::enableLegacyPitIrq
+()`)은 이 경로와 완전히 독립된 하드웨어(PIT 채널0 + IOAPIC)라
+그대로 세 번째 안전망으로 유지된다(수동 토글, 기본 꺼짐).
+
+**QEMU 실측 검증(완료)** - GRUB + `qemu-system-x86_64 -machine
+q35,hpet=off -smp 4`로 HPET을 실제로 끈 4코어 SMP 환경에서:
+- ACPI 파싱이 `hpet=no`를 정확히 보고, `Timer::usesHpet()==false`.
+- 임시 드라이버 Task가 `Timer::tickCount()`를 바쁜 대기로 관찰 -
+  값이 실제로 전진함을 확인(`[TICK-DRIVER] ... advanced=yes`) -
+  이전 코드였다면 `Scheduler::startTickOnThisCore()`가 `Timer`의
+  LAPIC 프로그래밍을 덮어써(또는 그 반대 순서로) 스케줄러 틱 자체가
+  끊겼을 상황.
+- 3개 AP 전부 정상 기동, 크래시 없이 8초간 정상 동작(타임아웃 종료).
+- 동일 코드로 HPET가 있는 기존 PVH/GRUB 단일 코어 환경도 회귀 없음
+  (`usesHpet=yes`로 기존 경로 그대로 검증).
+
+임시 검증 코드는 확인 후 제거했다 - 영구 코드는 `timer.cpp`(LAPIC
+재프로그램 제거)와 `scheduler.cpp`(BSP 판별 + onTick의 조건부
+Timer::onTick() 호출)뿐이다. 자세한 구현 내역은 PL-2D3184BC 참고.

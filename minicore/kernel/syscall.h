@@ -13,6 +13,19 @@ namespace kernel {
 // SyscallRegistry 참고).
 using SyscallEndpointId = uint32_t;
 
+// User-Level로 격하된 Task가 자연 종료(kTaskFallingToEnd)될 때 자기
+// 자신을 종료 처리해 달라고 제출하는 예약 endpoint(PL-2D3184BC "Task
+// 종료 프로토콜", QU-26F9420E 설계자 답변 1번, 2026-09-14 - "자기
+// 자신을 종료처리하라는 System Call 명세를 별도로 만들고 그걸로
+// 제출"). **아직 이 endpoint에 등록된 핸들러가 없다**(프로세스
+// 모델/ring3 데모션 메커니즘 자체가 아직 없어 이 경로가 실제로
+// 트리거될 수 없음) - 그 인프라가 생길 때 실제 정리 로직(프로세스
+// 자원 회수, 부모에게 종료 통지 등)을 이 endpoint의 핸들러로 등록
+// 하면 된다. 그 전까지 submit()은 항상 미등록으로 실패하지만
+// (SyscallRegistry::resolveSubjectCode가 false), 호출부(scheduler.cpp
+// 의 kTaskOnFallingToEnd)는 그 결과를 wait하지 않으므로 무해하다.
+constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = 0;
+
 // 유저 프로세스에 속한 스레드의 커널 쪽 표현(SP-04EE2A18, 설계자 지시
 // 2026-09-14 - "커널 Task와 쓰레드는 다른 개념이다... 내부적으로 Task를
 // 상속받아 유저 쓰레드를 구현해도 상관없다"). 이 이름 자체는 제안일

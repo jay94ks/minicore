@@ -5,6 +5,9 @@
 #include "lapic.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "page_frame_allocator.h"
+#include "syscall.h"
+#include "timer.h"
 
 namespace kernel {
 
@@ -57,6 +60,32 @@ TaskQueue gImmediateQueues[kMaxCores];
 TaskQueue gRtQueues[kMaxCores];
 TaskQueue gNormalQueues[kMaxCores];
 uint32_t gCoreCount = 1;
+
+// retireCurrentTask()가 넣고 runLoop()이 드레인하는 "종료된 Task"
+// 큐(PL-2D3184BC "Task 종료 프로토콜", QU-26F9420E) - TaskQueue를
+// 그대로 재사용한다(우선순위 개념이 없는 단순 FIFO면 충분).
+TaskQueue gCleanupQueues[kMaxCores];
+
+// HPET가 없는 폴백 환경에서 전역 tickCount 공급원 역할을 대신하는
+// BSP 코어 인덱스(DC-0CC88ABB/QU-3218B790 설계자 답변 (a), 2026-09-14
+// - "BSP 한정으로 Scheduler::onTick이 Timer::onTick()도 대신 호출").
+// startTickOnThisCore()의 첫 호출(항상 BSP 자신 - AP는 그 이후
+// Smp::startApCores()가 순차 기동)에서 한 번만 확정한다.
+uint32_t gBspCoreIndex = 0;
+bool gBspCoreIndexKnown = false;
+
+// task.cpp의 kOrderForStackSize와 동일한 계산 - kernelStackSize(항상
+// 4KiB의 배수)를 되돌려 PageFrameAllocator::freeOrder에 넘길 order를
+// 구한다. Task::kernelStackSize는 Task::init()이 이미 4096<<order
+// 형태로만 채우므로 이 역산은 항상 정확히 떨어진다.
+uint32_t kOrderForCleanup(uint64_t stackSize) {
+    uint64_t pages = stackSize / 4096UL;
+    uint32_t order = 0;
+    while ((1UL << order) < pages) {
+        ++order;
+    }
+    return order;
+}
 
 // runLoop()이 이 코어에서 마지막으로 Task를 진입시키기 직전의 자기
 // 자신(idle 컨텍스트) RSP를 저장해 둔다 - yieldCurrent()가 돌아올
@@ -132,13 +161,20 @@ Task* Scheduler::pickNext(uint32_t coreIndex) {
 }
 
 void Scheduler::startTickOnThisCore() {
+    if (!gBspCoreIndexKnown) {
+        // 이 함수의 첫 호출은 항상 BSP 자신(kMain)에서 온다 - AP는
+        // 이후 Smp::startApCores()가 순차 기동하므로 그 시점엔 이미
+        // 이 분기를 지난 뒤다(smp.cpp가 이미 전제하는 것과 같은 부팅
+        // 순서 가정 - 병렬 AP 기동을 도입하면 재검토 필요).
+        gBspCoreIndex = currentCoreIndex();
+        gBspCoreIndexKnown = true;
+    }
     // 물리 LAPIC 타이머는 코어당 하나뿐이다 - HPET가 있으면
     // Timer::init()이 LAPIC을 아예 건드리지 않으므로(timer.cpp)
     // 여기서 그대로 독점할 수 있다. HPET가 없는 폴백 환경에서는
-    // Timer가 이미 kTimerVector로 이 하드웨어를 쓰고 있어 이 호출이
-    // 그걸 덮어써 버린다는 미해결 설계 공백이 있다 - DC-0CC88ABB로
-    // 등록해 설계자 확인 대기 중이다. 지금 QEMU 개발 환경은 항상
-    // HPET가 있어 실측 경로에는 영향이 없다.
+    // Timer::init()도 더 이상 이 하드웨어를 재프로그램하지 않는다
+    // (DC-0CC88ABB/QU-3218B790 설계자 답변 (a), 2026-09-14로 확정 -
+    // 대신 onTick()이 BSP에서 Timer::onTick()까지 대신 호출한다).
     Lapic::startPeriodicTimer(kSchedulerTickVector, kSchedulerTickHz);
 }
 
@@ -150,6 +186,20 @@ void Scheduler::onTick(InterruptFrame*) {
     Lapic::sendEoi();
 
     const uint32_t coreIndex = currentCoreIndex();
+
+    // HPET가 없는 폴백 환경(DC-0CC88ABB/QU-3218B790 설계자 답변 (a),
+    // 2026-09-14) - 물리 LAPIC 주기 타이머는 코어당 하나뿐이라 Timer가
+    // 별도로 자신의 주기 인터럽트를 프로그램하면 이 스케줄러 틱
+    // 자체를 덮어써 버린다(실측 전 리뷰로 확인). 그래서 HPET가 없을
+    // 땐 BSP 코어의 이 스케줄러 틱이 전역 시각도 대신 공급한다 -
+    // "SMP에서 전역 카운터는 BSP의 카운터를 직접 읽어라"(같은 답변
+    // 2번)와 일치하도록 다른 코어는 절대 호출하지 않는다. 선점 금지/
+    // idle 여부와 무관하게 항상 불러야 하므로 아래 어떤 조기 반환
+    // 보다도 먼저다.
+    if (coreIndex == gBspCoreIndex && !Timer::usesHpet()) {
+        Timer::onTick();
+    }
+
     if (gPreemptDisableCount[coreIndex] > 0) {
         return;  // 선점 금지 구간 - 인터럽트 자체는 처리됐으니 그냥 계속 실행
     }
@@ -178,6 +228,19 @@ void Scheduler::onTick(InterruptFrame*) {
 void Scheduler::runLoop() {
     const uint32_t coreIndex = currentCoreIndex();
     for (;;) {
+        // retireCurrentTask()가 넣어 둔, 이미 끝난 Task들의 커널
+        // 스택을 회수한다 - 지금 이 idle 컨텍스트는 그 Task들의
+        // 스택 위가 아니므로 안전하다(PL-2D3184BC "Task 종료
+        // 프로토콜", QU-26F9420E). pickNext보다 먼저 해도 순서 문제
+        // 없다 - 이 큐는 스케줄링 대상이 아니라 순수 회수 대기열이다.
+        for (;;) {
+            Task* zombie = gCleanupQueues[coreIndex].popFront();
+            if (!zombie) {
+                break;
+            }
+            PageFrameAllocator::freeOrder(zombie->kernelStackPhys, kOrderForCleanup(zombie->kernelStackSize));
+        }
+
         Task* next = pickNext(coreIndex);
         if (!next) {
             asm volatile("sti; hlt");
@@ -265,6 +328,41 @@ void Scheduler::parkCurrent() {
     // 재개된다.
 }
 
+void Scheduler::retireCurrentTask() {
+    // yieldCurrent()/parkCurrent()와 같은 이유로 cli - gCurrentTask를
+    // 지우기 전에 clean-up 큐에 먼저 넣으면, 그 사이 낀 스케줄러 틱이
+    // 이 Task를 "아직 실행 중"으로 오인해 존재하지 않는 전환을
+    // 시도할 위험이 있다.
+    asm volatile("cli");
+    const uint32_t coreIndex = currentCoreIndex();
+    Task* current = gCurrentTask[coreIndex];
+    if (!current) {
+        // idle 컨텍스트에서 잘못 호출된 경우 - 이론상 도달 불가(이
+        // 함수는 항상 kTaskFallingToEnd -> kTaskOnFallingToEnd를 거쳐
+        // "지금 실행 중이던 Task 자신"의 흐름에서만 불린다)지만,
+        // [[noreturn]] 계약을 지키기 위해 방어적으로 무한 대기한다.
+        asm volatile("sti");
+        for (;;) {
+            asm volatile("hlt");
+        }
+    }
+    gCurrentTask[coreIndex] = nullptr;
+    current->state = TaskState::Zombie;
+    // parkCurrent()와 달리 "누군가 깨워주길" 기다리는 게 아니라 다시는
+    // 선택되지 않는다 - 이 Task의 커널 스택은 지금 이 kContextSwitch
+    // 호출이 실제로 다른 스택으로 넘어가야(=더 이상 이 스택 위에서
+    // 실행되지 않게 되어야) 비로소 안전하게 회수할 수 있으므로, 회수
+    // 자체는 runLoop()이 idle 컨텍스트(다른 스택) 위에서 이 큐를
+    // 드레인하며 나중에 처리한다.
+    gCleanupQueues[coreIndex].pushBack(current);
+    kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    // 이 지점으로 다시는 돌아오지 않는다(current는 이미 Zombie로
+    // 어느 스케줄 큐에도 없어 다시 뽑힐 수 없다) - kAsyncTaskEntryWrapper
+    // 와 동일한 패턴의 방어적 무한 루프.
+    for (;;) {
+    }
+}
+
 void Scheduler::disablePreemption() {
     ++gPreemptDisableCount[currentCoreIndex()];
 }
@@ -277,3 +375,29 @@ void Scheduler::enablePreemption() {
 }
 
 }  // namespace kernel
+
+// context_switch.S의 kTaskFallingToEnd(entry가 반환해 Task 실행이
+// 자연 종료되는 지점)가 호출한다 - PL-2D3184BC "Task 종료 프로토콜"
+// (QU-26F9420E 설계자 답변, 2026-09-14)의 두 분기를 그대로 구현한다.
+// 이 함수 자체가 반환하면(User-Level 분기) 호출부가 이어서 hlt
+// 루프로 들어간다 - Kernel-Level 분기(retireCurrentTask())는 절대
+// 반환하지 않는다.
+extern "C" void kTaskOnFallingToEnd() {
+    kernel::Task* self = kernel::Scheduler::currentTask();
+    if (!self) {
+        return;  // 이론상 도달 불가 - 방어적으로 그냥 hlt 루프로
+    }
+    if (self->isUserLevel) {
+        // User-Level로 격하된 Task(설계자 지시 1번) - 자기종료
+        // syscall을 wait 없이 제출만 하고 반환한다. 아직 이 endpoint에
+        // 등록된 핸들러가 없어(프로세스 모델 미착수) submit이 항상
+        // 실패로 끝나지만, 그 실패 자체를 이 지점에서 신경 쓸 필요가
+        // 없다 - 어차피 바로 이어서 hlt 루프로 들어가 다시는 실행되지
+        // 않을 Task이기 때문이다.
+        kernel::Syscall::submit(kernel::kSyscallEndpointSelfTerminate, nullptr);
+        return;
+    }
+    // Kernel-Level Task가 계속 커널에 머물러 있는 경우(설계자 지시
+    // 2번, 지금 이 프로젝트의 모든 Task가 해당) - 절대 돌아오지 않는다.
+    kernel::Scheduler::retireCurrentTask();
+}

@@ -52,6 +52,16 @@ struct Task {
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
 
+    // 이 Task가 ring3 유저 코드로 격하(demote)된 적이 있으면 true -
+    // 아직 이 프로젝트엔 그 격하 메커니즘 자체가 없어(프로세스 모델
+    // 미착수) 항상 기본값 false로 남는다. kTaskFallingToEnd(entry가
+    // 반환해 이 Task의 실행이 자연 종료되는 지점, context_switch.S)가
+    // 이 플래그로 종료 처리를 분기한다(PL-2D3184BC "Task 종료
+    // 프로토콜", QU-26F9420E 설계자 답변, 2026-09-14) - true면
+    // 자기종료 syscall만 제출, false(지금 항상 이 경우)면
+    // Scheduler::retireCurrentTask()로 스케줄러에서 완전히 떼어낸다.
+    bool isUserLevel = false;
+
     // 코어별 큐(폴백/lock-free 공용, PL-2D3184BC 4단계)가 쓰는 침습적
     // (intrusive) 다음-포인터 - 이 Task가 큐에 들어있을 때만 유효.
     AtomicPtr<Task> next;
