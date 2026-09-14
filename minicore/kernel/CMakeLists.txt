@@ -20,6 +20,7 @@ add_library(minicore_kernel OBJECT
     syscall.cpp
     named_object.cpp
     channel.cpp
+    process.cpp
 )
 
 target_link_libraries(minicore_kernel PUBLIC libkenv minicore_libs_x86_64)

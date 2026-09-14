@@ -8,6 +8,8 @@
 
 namespace kernel {
 
+class Process;  // 포인터로만 참조(UserThread::process) - 전체 정의는 process.h
+
 // 공개 ABI로 노출되는 syscall 번호 - 커널이 부팅 시 고정 배정한다
 // (동적 재배정 없음, SP-04EE2A18). AsyncCallbackRegistry가 내부적으로
 // 동적 배정하는 subjectCode와는 별개의 이름 공간이다(아래
@@ -57,6 +59,14 @@ public:
     // 8B 낭비로 거의 꽉 채워 들어간다.
     static constexpr uint32_t kPendingSyscallChunkCapacity = 10;
     ChunkedList<PendingSyscall, kPendingSyscallChunkCapacity> pendingSyscalls;
+
+    // 이 유저 스레드가 속한 프로세스(SP-8B6B8D25 §2-B, 유저 모드 페이지
+    // 폴트를 그 프로세스의 PCB에 매다는 데 필요) - process.h가
+    // UserThread를 참조하는 반대 방향 관계라 순환 include를 피하려고
+    // 여기서는 전방 선언 포인터로만 갖는다(async_task.h의 `struct
+    // Task;`와 동일한 관례). 아직 프로세스 생성 경로 자체가 없어
+    // 항상 nullptr로 남는다.
+    Process* process = nullptr;
 };
 
 // endpointId(공개 ABI, 고정 슬롯) <-> AsyncTaskHandler 매핑 - 내부적으로

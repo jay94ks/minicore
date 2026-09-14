@@ -10,6 +10,15 @@ constexpr kernel::uint64_t kPageSize1G = 0x40000000UL;
 constexpr kernel::uint64_t kAddrMask = 0x000FFFFFFFFFF000UL;  // 엔트리에서 플래그 비트 뺀 물리주소
 constexpr kernel::uint64_t kPageSizeBit = 1UL << 7;           // PS(PDPT/PD 레벨 대형 페이지)
 
+// 커널 higher-half의 시작 PML4 인덱스(Paging::createAddressSpace) -
+// kDirectMapBase(0xFFFF800000000000)가 정확히 이 경계다(canonical
+// 주소의 부호 확장 경계, bit 47). 인덱스 256~511(총 256개)을 통째로
+// 복사하면 direct map/지연 매핑 구역/커널 이미지 자신(kKernelVma
+// 근방)까지 전부 한 번에 커버된다 - 이 셋의 정확한 하위 배치를
+// 개별적으로 알 필요가 없다.
+constexpr kernel::uint32_t kHigherHalfPml4Start = 256;
+constexpr kernel::uint32_t kPml4EntryCount = 512;
+
 // direct map용 PDPT 하나만 정적으로 예약한다(컴파일 타임 .bss, 커널
 // 자신의 higher-half 이미지 안이라 이미 매핑돼 있다 - PageFrameAllocator
 // 초기화 전에도 안전하게 쓸 수 있다). 첫 4GiB만 1GiB 페이지로 덮는다.
@@ -94,17 +103,27 @@ void Paging::init() {
     pml4[pml4Index] = pdptPhys | PAGE_PRESENT | PAGE_WRITABLE;
 }
 
-void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags) {
+void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags, uint64_t pml4Phys) {
     virtualAddr &= ~(kPageSize4K - 1);
     physicalAddr &= ~(kPageSize4K - 1);
+    if (pml4Phys == 0) {
+        pml4Phys = kCurrentPml4Phys();
+    }
 
-    uint64_t* pml4 = kAsTable(kCurrentPml4Phys());
+    uint64_t* pml4 = kAsTable(pml4Phys);
     uint64_t* pdpt = kGetOrCreateNextLevel(pml4, kPml4Index(virtualAddr), flags & PAGE_USER);
     uint64_t* pd = kGetOrCreateNextLevel(pdpt, kPdptIndex(virtualAddr), flags & PAGE_USER);
     uint64_t* pt = kGetOrCreateNextLevel(pd, kPdIndex(virtualAddr), flags & PAGE_USER);
 
     pt[kPtIndex(virtualAddr)] = physicalAddr | PAGE_PRESENT | flags;
-    kInvalidatePage(virtualAddr);
+    // 지금 실행 중인 주소공간(현재 CR3)에 대한 변경일 때만 TLB를
+    // 무효화한다 - pml4Phys가 아직 CR3에 설치되지 않은 다른 주소공간을
+    // 가리키면 이 코어의 TLB엔 애초에 그 매핑이 캐시돼 있을 수 없다
+    // (invlpg는 항상 "지금 이 코어가 보고 있는 주소공간" 기준으로만
+    // 의미가 있다).
+    if (pml4Phys == kCurrentPml4Phys()) {
+        kInvalidatePage(virtualAddr);
+    }
 }
 
 bool Paging::handlePageFault(uint64_t faultAddr, uint64_t errorCode) {
@@ -125,10 +144,13 @@ bool Paging::handlePageFault(uint64_t faultAddr, uint64_t errorCode) {
     return true;
 }
 
-void Paging::unmapPage(uint64_t virtualAddr) {
+void Paging::unmapPage(uint64_t virtualAddr, uint64_t pml4Phys) {
     virtualAddr &= ~(kPageSize4K - 1);
+    if (pml4Phys == 0) {
+        pml4Phys = kCurrentPml4Phys();
+    }
 
-    uint64_t* pml4 = kAsTable(kCurrentPml4Phys());
+    uint64_t* pml4 = kAsTable(pml4Phys);
     if (!(pml4[kPml4Index(virtualAddr)] & PAGE_PRESENT)) {
         return;
     }
@@ -142,7 +164,32 @@ void Paging::unmapPage(uint64_t virtualAddr) {
     }
     uint64_t* pt = kAsTable(pd[kPdIndex(virtualAddr)] & kAddrMask);
     pt[kPtIndex(virtualAddr)] = 0;
-    kInvalidatePage(virtualAddr);
+    if (pml4Phys == kCurrentPml4Phys()) {
+        kInvalidatePage(virtualAddr);
+    }
+}
+
+uint64_t Paging::currentPml4Phys() {
+    return kCurrentPml4Phys();
+}
+
+uint64_t Paging::createAddressSpace() {
+    const uint64_t newPml4Phys = PageFrameAllocator::allocPage();
+    if (!newPml4Phys) {
+        return 0;
+    }
+    uint64_t* newPml4 = kAsTable(newPml4Phys);
+    kZeroTable(newPml4);
+
+    const uint64_t* sourcePml4 = kAsTable(kCurrentPml4Phys());
+    for (uint32_t i = kHigherHalfPml4Start; i < kPml4EntryCount; ++i) {
+        newPml4[i] = sourcePml4[i];
+    }
+    return newPml4Phys;
+}
+
+void Paging::destroyAddressSpace(uint64_t pml4Phys) {
+    PageFrameAllocator::freePage(pml4Phys);
 }
 
 }  // namespace kernel
