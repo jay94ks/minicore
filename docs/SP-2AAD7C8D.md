@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: review
-  updatedAt: 2026-09-14T16:27:49.877Z
+  updatedAt: 2026-09-14T16:40:50.951Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
@@ -24,6 +24,12 @@
 설계에 포함시켜." §9에서 open/close/read/write/lseek/stat/readdir/
 mkdir/unlink 전체를 다룬다 - VFS 라우팅(SP-7CC5693A §2.2의
 `ResolvePathArgs`)과 이 문서의 프로세스 자료구조를 엮는 지점이다.
+
+**[갱신, 2026-09-14, 설계자 후속 지시]** - "메모리 절약이 실제로
+필요하지 않더라도 maple_dense/maple_leaf_64류 구분을 미리 추가해놔."
+§3.1이 처음 제안했던 "v1은 단일 노드 타입으로 통일" 단순화를 철회하고,
+Linux 원본과 동일하게 4가지 노드 타입 + 포인터 태깅을 처음부터
+설계에 포함시켰다.
 
 ## 1. 왜 두 파트로 나누는가
 
@@ -73,14 +79,13 @@ Linux 6.1의 Maple Tree(RB-Tree를 대체한 VMA 관리 구조, 참고:
 https://www.minzkn.com/linuxkernel/pages/maple-tree.html)를 이
 프로젝트의 freestanding 제약에 맞게 이식한다.
 
-### 3.1 노드 레이아웃 (256바이트 고정 - Slab 재사용)
+### 3.1 노드 레이아웃 - 4가지 타입 + 포인터 태깅 (2026-09-14 갱신)
 
-Linux 원본과 동일하게 **노드 하나 = 256바이트**로 고정한다 - 이 크기가
-SP-D7013B26(Slab 할당자, 이미 구현 완료)의 **7단계 버킷 중 하나(256B)와
-정확히 일치**하므로, 전용 페이지 풀을 새로 만들 필요 없이
-`GenericSlabAllocator::alloc(256)`/`free(ptr, 256)`을 그대로 재사용한다
-- 이 프로젝트가 아직 갖추지 못한 것(RCU, 캐시라인 정렬 커스텀 슬랩)
-없이도 Linux가 노린 "캐시라인 친화적 노드 크기" 이점을 그대로 얻는다.
+**[재확정, 설계자 지시]** 메모리 절약 필요 여부와 무관하게 Linux
+원본과 동일한 4가지 노드 타입을 처음부터 둔다 - 노드 전부 256바이트로
+고정해 SP-D7013B26(Slab 할당자, 이미 구현 완료)의 256B 버킷을
+`GenericSlabAllocator::alloc(256)`/`free(ptr, 256)`으로 그대로
+재사용한다.
 
 ```cpp
 // minicore/libs/libkenv, 가칭 maple_tree.h - freestanding 제약 준수
@@ -88,22 +93,44 @@ SP-D7013B26(Slab 할당자, 이미 구현 완료)의 **7단계 버킷 중 하나
 // 또는 libkenv/mem.h의 memcpy/memset만 사용).
 namespace kernel {
 
-constexpr uint32_t kMapleRangeSlotCount = 16;   // maple_range_64와 동일
+constexpr uint32_t kMapleRangeSlotCount = 16;   // maple_range_64/maple_leaf_64와 동일
 constexpr uint32_t kMapleArangeSlotCount = 10;  // maple_arange_64와 동일(gap 배열 자리 확보)
+constexpr uint32_t kMapleDenseSlotCount = 31;   // pivot 없이 8B 슬롯만 채운 최대 개수(256B/8B)
 
-// 일반 노드(내부/리프 공용) - 256B.
-struct MapleRangeNode {
+// (1) 밀집 노드 - 아주 작은/희소 구간 전용. pivot 배열이 아예 없다 -
+// slot[i]가 "이 노드가 담당하는 범위의 i번째 오프셋"을 직접 가리킨다
+// (범위 자체는 노드 밖 부모 pivot이 결정). 트리 전체가 작을 때(루트
+// 노드가 곧 리프인 경우 등) 가장 메모리 효율적이다.
+struct MapleDenseNode {
+    void* parent;
+    void* slot[kMapleDenseSlotCount];   // NULL=gap
+};
+static_assert(sizeof(MapleDenseNode) <= 256, "slab 256B 버킷 초과");
+
+// (2) 리프 전용 64비트 범위 노드 - gap 배열 없음(부모 arange 노드가
+// 이 서브트리 전체의 gap을 이미 요약해 알고 있다고 가정할 수 있을 때만
+// 안전 - §3.1-A 선택 정책 참고).
+struct MapleLeaf64Node {
     void* parent;
     uint64_t pivot[kMapleRangeSlotCount - 1];  // 15개 경계값
-    void* slot[kMapleRangeSlotCount];          // 자식 포인터(내부) 또는 값 포인터(리프), NULL=gap
+    void* slot[kMapleRangeSlotCount];          // 값 포인터(Vma* 등), NULL=gap
 };
-static_assert(sizeof(MapleRangeNode) <= 256, "slab 256B 버킷 초과");
+static_assert(sizeof(MapleLeaf64Node) <= 256, "slab 256B 버킷 초과");
 
-// gap 탐색용 확장 노드 - 256B(슬롯 수가 적은 대신 gap 배열을 갖는다).
+// (3) 내부 전용 64비트 범위 노드 - gap 배열 없음, 자식 포인터만 보관.
+struct MapleRange64Node {
+    void* parent;
+    uint64_t pivot[kMapleRangeSlotCount - 1];  // 15개 경계값
+    void* slot[kMapleRangeSlotCount];          // 자식 노드 포인터(태깅된 포인터, §3.1-B)
+};
+static_assert(sizeof(MapleRange64Node) <= 256, "slab 256B 버킷 초과");
+
+// (4) gap 탐색용 확장 노드 - 슬롯 수는 적지만(10개) gap 배열을 갖는다.
+// findGap(§3.3)이 서브트리 단위로 건너뛸 수 있게 해 주는 핵심 노드.
 struct MapleArangeNode {
     void* parent;
     uint64_t pivot[kMapleArangeSlotCount - 1];  // 9개 경계값
-    void* slot[kMapleArangeSlotCount];          // 10개
+    void* slot[kMapleArangeSlotCount];          // 10개 - 자식(내부) 또는 값(리프)
     uint64_t gap[kMapleArangeSlotCount];        // 각 슬롯 서브트리의 최대 연속 gap 크기
     uint16_t maxGapSlot;                        // 가장 큰 gap을 가진 슬롯 인덱스(meta 역할)
 };
@@ -112,15 +139,52 @@ static_assert(sizeof(MapleArangeNode) <= 256, "slab 256B 버킷 초과");
 }  // namespace kernel
 ```
 
-**v1 단순화(설계자 재확인 필요 없음, RM-23F4B687 §4 취지 - 숫자/구조
-튜닝)**: Linux는 포인터 하위 비트에 노드 타입을 인코딩(256B 정렬로
-8비트 여유)하지만, 이 프로젝트는 아직 그런 포인터 태깅 관례가 없다 -
-v1은 대신 **모든 노드가 `MapleArangeNode`로 통일**된 단일 타입을
-제안한다(항상 gap 배열을 갖되, 리프 노드에서는 그 필드를 안 씀 -
-메모리 낭비는 있지만(리프 노드도 256B 전부 소비) 타입 분기/포인터
-태깅 복잡도가 아예 없어져 v1 구현이 훨씬 단순해진다). 실측 후 메모리
-절약이 실제로 필요하면 `maple_dense`/`maple_leaf_64`류 구분을 추가하는
-것을 후속 과제로 남긴다.
+### 3.1-A. 어느 노드를 언제 쓰는가 (선택 정책, v1 제안)
+
+- **루트를 포함한 모든 내부 노드는 `MapleArangeNode`로 시작한다** -
+  이 트리의 존재 이유 자체가 `findGap`(mmap의 빈 주소 탐색)이므로,
+  gap 정보가 트리 어느 깊이에서든 끊기면 안 된다 - 내부 노드에서
+  `MapleRange64Node`(gap 없음)로 전환하는 것은 "그 서브트리 전체가
+  꽉 차서 gap이 0으로 고정됐다"는 것이 확실할 때만 안전한 최적화다.
+- **리프 노드**: 대부분의 경우도 `MapleArangeNode`를 그대로 쓴다(리프도
+  "이 리프 안에 아직 빈 슬롯이 있는지"를 gap으로 표현할 수 있어야
+  하므로). `MapleLeaf64Node`/`MapleRange64Node`는 "이 리프가 이미
+  꽉 찼다"고 확정된 뒤에만 gap 없는 형태로 다운그레이드하는 최적화로
+  제안한다.
+- **`MapleDenseNode`**: 트리 전체가 한 노드에 들어갈 만큼 작을 때
+  (루트 = 리프)만 사용 - 프로세스 하나가 처음 몇 개의 VMA만 가진
+  전형적인 초기 상태에 해당한다.
+- **정확한 전환/다운그레이드 타이밍**(예: 언제 Arange→Range64로
+  바꾸는지)은 이번 문서에서 알고리즘 레벨까지 확정하지 않는다 - 노드
+  "종류"는 여기서 전부 정의됐고, 실제 전환 휴리스틱은 구현 착수
+  시점에 실측하며 다듬는 것을 제안한다(RM-23F4B687 §4 취지 - 숫자/
+  전략 튜닝).
+
+### 3.1-B. 포인터 태깅
+
+Linux처럼 256B 정렬(하위 8비트가 항상 0)을 이용해 포인터 자체에
+노드 타입을 인코딩한다 - `slot[]` 배열의 각 항목(자식을 가리킬 때)과
+`MapleTree`가 들고 있는 루트 포인터 모두 이 태깅된 형태로 저장한다:
+
+```cpp
+enum class MapleNodeType : uintptr_t { Dense = 0, Leaf64 = 1, Range64 = 2, Arange64 = 3 };
+
+inline MapleNodeType kMapleNodeType(void* tagged) {
+    return static_cast<MapleNodeType>(reinterpret_cast<uintptr_t>(tagged) & 0x3);
+}
+inline void* kMapleNodePtr(void* tagged) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(tagged) & ~uintptr_t(0x3));
+}
+inline void* kMapleTagNode(void* raw, MapleNodeType type) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(raw) | static_cast<uintptr_t>(type));
+}
+```
+
+`MapleTree`의 모든 내부 순회 함수(§3.3)는 자식 포인터를 역참조하기
+전에 `kMapleNodeType()`으로 분기해 올바른 구조체로 캐스팅한다 -
+값 포인터(리프의 `Vma*` 등)는 태깅하지 않는다(리프 노드 자신의
+타입으로 이미 "이 slot이 값인지 자식인지"가 구분되므로 이중 태깅
+불필요).
 
 ### 3.2 RCU 없음 - v1은 전역/프로세스별 락으로 대체 (중요, 설계자 확인 필요)
 
@@ -146,8 +210,8 @@ gap 탐색)만 그대로 가져오고, 동시성 보호는 RCU 대신 §2의 Spi
 ```cpp
 namespace kernel {
 
-// 값은 전부 void* - 리프에서는 사용자 데이터(§4의 Vma*), 내부에서는
-// 자식 MapleArangeNode*.
+// 값은 전부 void* - 리프에서는 사용자 데이터(§4의 Vma*, 태깅 없음),
+// 내부에서는 §3.1-B로 태깅된 자식 노드 포인터.
 class MapleTree {
 public:
     void init();
@@ -173,10 +237,12 @@ public:
 }  // namespace kernel
 ```
 
-`store`/`erase`의 노드 분할/병합 알고리즘은 Linux 원본의 절차(§3.1의
-`maple_big_node` 임시 버퍼에 기존 항목 + 신규 항목을 모아 분할점을
-계산해 재분배)를 그대로 따르는 것을 제안한다 - 이 부분은 RCU가
-빠진 것 외에는 알고리즘 자체를 바꿀 이유가 없다.
+`store`/`erase`의 노드 분할/병합 알고리즘은 Linux 원본의 절차(임시
+`maple_big_node` 버퍼에 기존 항목 + 신규 항목을 모아 분할점을 계산해
+재분배)를 그대로 따르는 것을 제안한다 - 노드 타입이 4종으로 늘어난
+만큼, 분할/병합 시 "이 서브트리가 지금 어느 타입이어야 하는지"를
+§3.1-A 정책에 따라 다시 판정하는 단계가 추가된다(RCU가 빠진 것 외의
+유일한 알고리즘 차이).
 
 ## 4. VMA 값 구조
 
@@ -266,6 +332,10 @@ struct BrkArgs {
    (SP-7CC5693A)가 실제로 구현되기 전까지는 실행 가능한 코드가 없지만,
    `VmaBacking::FileBacked`의 자료구조/폴트 처리 흐름 자체는 §9.5에서
    설계했다.
+5. **노드 타입 전환/다운그레이드 휴리스틱(§3.1-A)**: 정확히 언제
+   `MapleArangeNode`를 `MapleRange64Node`/`MapleLeaf64Node`/
+   `MapleDenseNode`로 바꿀지의 알고리즘 - 노드 "종류"는 확정됐으나
+   전환 시점은 구현 착수 시 실측하며 다듬는 것으로 열어 둠.
 
 ## 7. 선행 조건
 
