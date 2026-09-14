@@ -9,13 +9,17 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | 추적 코드 | 제목 | 상태 |
 |---|---|---|
 | [DC-427BB6B2](./DC-427BB6B2.md) | 부트 경로 구현 착수 순서 및 부트로더 구현 방식 미정 | approved |
-| [DC-474EE823](./DC-474EE823.md) | 4K 페이지의 2M 페이지 병합 정책 미정 | review |
+| [DC-474EE823](./DC-474EE823.md) | 4K 페이지의 2M 페이지 병합 정책 미정 | approved |
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved |
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved |
 | [DC-79A2387A](./DC-79A2387A.md) | 커널 C++ 런타임/코딩 컨벤션 세부 미정 | approved |
+| [DC-8EA1E7F6](./DC-8EA1E7F6.md) | 스케줄러: 프로세스/스레드 모델 및 컨텍스트 스위칭 구조 미정 | approved |
+| [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | approved |
 | [DS-D4E5C451](./DS-D4E5C451.md) | Minicore 초기 설계 결정 확정 (빌드/부팅/커널서비스/라이선스) | review |
 | [PL-2070E6EF](./PL-2070E6EF.md) | MSI/MSI-X 인터럽트 지원 | approved |
 | [PL-2D149D8F](./PL-2D149D8F.md) | IOAPIC 외부 인터럽트 라우팅 | approved |
+| [PL-2D3184BC](./PL-2D3184BC.md) | 스케줄러 (프로세스/태스크/컨텍스트 스위칭) | draft |
+| [PL-57CF86EF](./PL-57CF86EF.md) | 4K 페이지의 2M 페이지 병합/분할 | draft |
 | [PL-65C20380](./PL-65C20380.md) | SMP AP(나머지 코어) 기동 | approved |
 | [PL-99562483](./PL-99562483.md) | 물리 메모리 관리 범위를 1GiB 한도 밖으로 확장 | approved |
 | [PL-D65F49CC](./PL-D65F49CC.md) | x2APIC 지원 | approved |

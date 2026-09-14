@@ -65,8 +65,45 @@ public:
         return __atomic_fetch_sub(&_value, delta, __ATOMIC_ACQ_REL);
     }
 
+    // lock-free 자료구조(스케줄러 코어별 큐 등, PL-2D3184BC)의 기반 -
+    // *expected와 현재 값이 같으면 desired로 바꾸고 true, 다르면
+    // *expected를 현재 값으로 갱신하고 false(표준 CAS 관례, weak라
+    // 스퓨리어스 실패 가능 - 루프 안에서 재시도하는 용도로만 쓸 것).
+    bool compareExchange(unsigned int& expected, unsigned int desired) {
+        return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+
 private:
     unsigned int _value = 0;
+};
+
+// lock-free 자료구조가 포인터를 원자적으로 교체할 때 쓴다(예: 큐의
+// head/tail, 스택 top) - AtomicU32와 같은 이유로 컴파일러 내장
+// 원자 빌트인만 쓴다. 초기값은 nullptr.
+template <typename T>
+class AtomicPtr {
+public:
+    T* load() const {
+        return __atomic_load_n(&_value, __ATOMIC_ACQUIRE);
+    }
+
+    void store(T* value) {
+        __atomic_store_n(&_value, value, __ATOMIC_RELEASE);
+    }
+
+    T* exchange(T* value) {
+        return __atomic_exchange_n(&_value, value, __ATOMIC_ACQ_REL);
+    }
+
+    // weak CAS(스퓨리어스 실패 가능) - lock-free 알고리즘 관례대로
+    // 루프 안에서 재시도하는 용도. 실패하면 expected가 현재 값으로
+    // 갱신된다.
+    bool compareExchange(T*& expected, T* desired) {
+        return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+
+private:
+    T* _value = nullptr;
 };
 
 }  // namespace kernel
