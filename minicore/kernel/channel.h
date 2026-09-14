@@ -88,8 +88,7 @@ struct RingBuffer {
     // 이 버퍼가 비어서(read) 또는 가득 차서(write) 대기 중인 AsyncTask
     // - 한 방향당 최대 하나만 지원한다(v1 제약 - 같은 BridgePipe
     // 핸들로 동시에 여러 read 또는 여러 write를 동시에 submit하지
-    // 않는다는 전제, UserThread의 "syscall 하나만 동시 대기" 제약과
-    // 같은 성격).
+    // 않는다는 전제, PN-C9625015로 확장 여지를 남겨 둠).
     AsyncTask* pendingReader = nullptr;
     AsyncTask* pendingWriter = nullptr;
 

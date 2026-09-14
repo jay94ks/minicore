@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_SYSCALL_H
 
 #include "async_task.h"
+#include "libkenv/chunked_list.h"
 #include "libkenv/types.h"
 #include "task.h"
 
@@ -33,15 +34,29 @@ constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = 0;
 // 최종 확정한다.
 class UserThread : public Task {
 public:
-    // 대기 중인 syscall 하나 - 한 스레드는 한 번에 최대 하나만 가질 수
-    // 있다(동기적 모델 - 대기 중엔 그 스레드 자체가 실행되지 않는다).
-    // 대기 중이 아니면 valid=false.
+    // 대기 중(아직 wait()/waitForMultipleSyscall()/
+    // waitAnyForMultipleSyscall()로 소비되지 않은) syscall 하나 -
+    // endpoint/token만 담는다("소유권" 자체는 이 값이 pendingSyscalls에
+    // 들어있다는 사실 자체로 표현되므로 별도 valid 플래그 불필요,
+    // ChunkedList::Slot::used가 그 역할을 대신한다).
     struct PendingSyscall {
         SyscallEndpointId endpoint = 0;
         AsyncTaskManageCode token = 0;
-        bool valid = false;
     };
-    PendingSyscall pendingSyscall;
+
+    // 한 스레드가 동시에 여러 syscall을 제출/대기할 수 있어야 한다
+    // (waitForMultipleSyscall/waitAnyForMultipleSyscall, SP-04EE2A18
+    // QU-31402585/QU-F475C6C2 설계자 답변, 2026-09-14) - 그래서 단일
+    // 필드가 아니라 청크 기반 연결 리스트(ChunkedList, libkenv, 재사용
+    // 가능한 GENERIC 컨테이너로 만들라는 설계자 지시)에 여러 개를
+    // 담는다(**단순 배열 금지** - 설계자가 명시).
+    //
+    // 청크 용량 10을 고른 이유: Slot{PendingSyscall(16B)+bool(1B, 8B로
+    // 패딩)} = 24B, Chunk{Slot[10](240B)+next 포인터(8B)} = 248B -
+    // GenericSlabAllocator의 7단계 버킷(SP-D7013B26) 중 256B 버킷에
+    // 8B 낭비로 거의 꽉 채워 들어간다.
+    static constexpr uint32_t kPendingSyscallChunkCapacity = 10;
+    ChunkedList<PendingSyscall, kPendingSyscallChunkCapacity> pendingSyscalls;
 };
 
 // endpointId(공개 ABI, 고정 슬롯) <-> AsyncTaskHandler 매핑 - 내부적으로
@@ -69,20 +84,52 @@ public:
 // 그대로 호출하게 될 예정이다(아직 트랩 진입 자체는 미구현).
 class Syscall {
 public:
-    // endpointId가 등록돼 있지 않거나 AsyncTask 확보에 실패하면
-    // 0(유효하지 않은 토큰)을 반환한다 - 블로킹하지 않는다. 성공하면
-    // 호출한 UserThread의 pendingSyscall에 {endpoint, token, valid=true}
-    // 를 기록하고 그 토큰을 그대로 반환한다.
+    // endpointId가 등록돼 있지 않거나 AsyncTask/목록 슬롯 확보에
+    // 실패하면 0(유효하지 않은 토큰)을 반환한다 - 블로킹하지 않는다.
+    // 성공하면 호출한 UserThread의 pendingSyscalls에 {endpoint, token}
+    // 항목 하나를 추가하고 그 토큰을 그대로 반환한다(한 스레드가 여러
+    // 번 submit()해 여러 토큰을 동시에 들고 있을 수 있다).
     static AsyncTaskManageCode submit(SyscallEndpointId endpointId, void* args);
 
-    // token이 호출한 UserThread 자신의 pendingSyscall.token과 다르면
-    // (위조/타인 토큰, 또는 이미 소비된 토큰) 즉시 false. 이미 완료돼
-    // 있으면 즉시 반환하고, 아직이면 완료될 때까지 블로킹한다(도중
-    // 풀려도 유저랜드가 같은 token으로 다시 부르면 되므로 - 이 함수
-    // 자체가 그 "다시 부름"과 완전히 동일한 코드 경로다, 별도 재합류
-    // API 불필요). 반환값은 AsyncTaskState::Completed로 끝났으면 true,
-    // Failed로 끝났으면 false.
+    // token이 호출한 UserThread 자신의 pendingSyscalls에 없으면(위조/
+    // 타인 토큰, 또는 이미 소비된 토큰) 즉시 false. 이미 완료돼 있으면
+    // 즉시 반환하고, 아직이면 완료될 때까지 블로킹한다(도중 풀려도
+    // 유저랜드가 같은 token으로 다시 부르면 되므로 - 이 함수 자체가
+    // 그 "다시 부름"과 완전히 동일한 코드 경로다, 별도 재합류 API
+    // 불필요). 반환값은 AsyncTaskState::Completed로 끝났으면 true,
+    // Failed로 끝났으면 false. 내부적으로 waitForAnyOf(토큰 1개짜리
+    // 배열)와 완전히 같은 코드 경로를 탄다.
     static bool wait(AsyncTaskManageCode token);
+
+    enum class MultiWaitOutcome { Completed, Failed, Invalid };
+
+    struct MultiWaitResult {
+        AsyncTaskManageCode token = 0;
+        MultiWaitOutcome outcome = MultiWaitOutcome::Invalid;
+    };
+
+    // waitForMultipleSyscall/waitAnyForMultipleSyscall(SP-04EE2A18,
+    // QU-31402585/QU-F475C6C2 설계자 답변, 2026-09-14) - 둘 다 넘겨준
+    // tokens 중 이미 끝났거나(Completed/Failed) 유효하지 않은(자기
+    // 소유가 아니거나 이미 소비된) 게 있으면 그중 하나를 즉시 반환하고,
+    // 전부 아직이면 그중 아무 하나가 끝날 때까지 블로킹한다 - **둘의
+    // 내부 메커니즘은 완전히 동일**하고(그래서 이 헤더에서도 같은
+    // private 구현(waitForAnyOf)을 공유한다), 차이는 순수하게 "호출부가
+    // 몇 번 부르는가"라는 사용 관례뿐이다:
+    //
+    // - waitForMultipleSyscall (AND 의미): tokens로 지정한 N개를 전부
+    //   드레인하려면 호출부(유저랜드)가 "아직 결과를 못 받은 토큰들"만
+    //   추려 이 함수를 최대 N번 반복 호출해야 한다.
+    // - waitAnyForMultipleSyscall (OR 의미): tokens 중 아무 하나가
+    //   끝나면 그걸로 답이 완성되므로 한 번만 불러도 충분하다.
+    static MultiWaitResult waitForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count);
+    static MultiWaitResult waitAnyForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count);
+
+private:
+    // wait()/waitForMultipleSyscall()/waitAnyForMultipleSyscall() 셋
+    // 다가 공유하는 공용 구현 - "주어진 토큰 집합 중 하나가 끝나길
+    // 기다린다"는 하나의 메커니즘.
+    static MultiWaitResult waitForAnyOf(const AsyncTaskManageCode* tokens, uint32_t count);
 };
 
 }  // namespace kernel
