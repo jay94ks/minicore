@@ -42,6 +42,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | review |
+| [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | review |
