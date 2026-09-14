@@ -11,6 +11,13 @@ add_compile_options(-Wall -Wextra)
 
 set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/arch/x86_64/linker.ld)
 
+# PL-2D3184BC 3단계 - Task 커널 스택 언더플로우 감지용 가드 페이지.
+# 디버그 빌드 전용(기본 꺼짐) - 켜지면 스택마다 direct map 밖 전용
+# 가상주소에 4KiB 단위로 개별 매핑하고 바로 아래 한 페이지를 의도적
+# 으로 비워 둔다(task.cpp 참고) - 꺼지면 지금처럼 direct map 안에서
+# 컴팩트하게(추가 페이지테이블 없이) 스택을 쓴다.
+option(MINICORE_TASK_STACK_GUARD_PAGE "Task 커널 스택 가드 페이지 활성화(디버그 전용)" OFF)
+
 # 모듈별 CMakeLists.txt (SP-8B6B8D25 §3 디렉터리 배치와 1:1 대응) -
 # 새 모듈(devmgr/fs/net/tty 등, 전부 유저랜드)이 생기면 여기 목록에
 # 추가한다. 전부 OBJECT 라이브러리라 실제 아카이빙/심볼가지치기 없이

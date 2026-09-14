@@ -17,3 +17,7 @@ add_library(minicore_kernel OBJECT
 )
 
 target_link_libraries(minicore_kernel PUBLIC libkenv minicore_libs_x86_64)
+
+target_compile_definitions(minicore_kernel PRIVATE
+    MINICORE_TASK_STACK_GUARD_PAGE=$<BOOL:${MINICORE_TASK_STACK_GUARD_PAGE}>
+)
