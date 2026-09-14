@@ -99,6 +99,13 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     args = argsIn;
     state = AsyncTaskState::Ready;
     next.store(nullptr);
+    // AsyncTask는 항상 raw slab 메모리 위에 reinterpret_cast로 앉혀지고
+    // (placement new 없음) - 기본 멤버 초기화식은 실행되지 않으므로
+    // 여기서 전부 명시적으로 리셋해야 한다. 특히 waitingTask를 안
+    // 지우면 슬랩 재사용으로 이전 점유자의 낡은 포인터가 남아, 리액터가
+    // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
+    waitingTask = nullptr;
+    autoFree = true;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
@@ -148,7 +155,8 @@ void AsyncTask::yield() {
     // 리액터가 이 AsyncTask를 다시 뽑아 재개하면 이 지점으로 돌아온다.
 }
 
-AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args) {
+AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
+                              bool autoFree) {
     void* mem = GenericSlabAllocator::alloc(sizeof(AsyncTask));
     if (!mem) {
         return nullptr;
@@ -159,6 +167,11 @@ AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCo
         GenericSlabAllocator::free(mem, sizeof(AsyncTask));
         return nullptr;
     }
+    // autoFree는 init()이 리셋한 뒤, 리액터에 보여 완료될 수 있게 되기
+    // 전에(submitCompletion 호출 전에) 반드시 설정해야 한다 - 그렇지
+    // 않으면 아주 빨리 완료되는 작업이 기본값(true)으로 자동 반납될
+    // 수 있다(경쟁).
+    task->autoFree = autoFree;
     AsyncReactor::submitCompletion(task);
     return task;
 }
@@ -206,11 +219,23 @@ void AsyncReactor::reactorTaskEntry(void*) {
         gCurrentAsyncTask[coreIndex] = nullptr;
 
         if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
+            // 이 AsyncTask가 끝나기를 기다리는 kernel::Task가 있으면
+            // (예: Syscall::wait) 먼저 깨운다 - 이 코어에서 실행됐으니
+            // 대기자도 반드시 같은 코어에서 파킹돼 있다(v1 - 코어 간
+            // 이관 없음). 아래에서 task를 반납하기 전에 반드시 먼저
+            // 읽어야 한다(반납 후엔 이 필드도 더 이상 유효하지 않음).
+            if (task->waitingTask) {
+                Scheduler::scheduleImmediate(coreIndex, task->waitingTask);
+            }
             // args의 생성/반납은 처리기 책임(SP-F682B889 §3.1) - 여기서는
-            // 프레임워크 소유물(AsyncTask 구조체 자신과 그 전용 스택)만
-            // 반납한다.
-            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
-            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+            // 프레임워크 소유물(AsyncTask 구조체 자신과 그 전용 스택)만,
+            // 그것도 autoFree인 경우에만 반납한다 - false면 결과를 아직
+            // 못 읽은 소비자(위에서 막 깨운 그 Task)가 직접 반납할
+            // 책임을 진다.
+            if (task->autoFree) {
+                GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
+                GenericSlabAllocator::free(task, sizeof(AsyncTask));
+            }
         }
         // Suspended면 아무 것도 안 함 - 나중에 submitCompletion으로 다시
         // 큐에 들어와야 재개된다.

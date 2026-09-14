@@ -16,6 +16,7 @@
 #include "scheduler.h"
 #include "serial.h"
 #include "smp.h"
+#include "syscall.h"
 #include "timer.h"
 
 namespace {

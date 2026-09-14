@@ -6,6 +6,8 @@
 
 namespace kernel {
 
+struct Task;  // 포인터로만 참조(waitingTask) - 전체 정의는 task.h
+
 // 커널 전용 비동기 프레임워크(SP-F682B889, 확정) - kernel::Task보다
 // 훨씬 가벼운 전용 스택을 쓰는 스케줄링 가능 단위. Task와 같은
 // 소프트웨어 컨텍스트 전환(kContextSwitch)을 그대로 재사용한다(구조가
@@ -36,6 +38,22 @@ struct AsyncTask {
 
     AtomicPtr<AsyncTask> next;  // AsyncReactor 실행 큐용 침습적 다음-포인터
 
+    // 이 AsyncTask가 Completed/Failed에 도달하면 리액터가 이 Task를
+    // scheduleImmediate로 깨워 준다(설정돼 있으면) - 일반 kernel::Task
+    // 하나가 "이 특정 AsyncTask가 끝날 때까지 블로킹"하고 싶을 때 쓰는
+    // 범용 훅이다(Syscall 서브시스템의 waitForSyscall이 첫 소비자).
+    // 완료 시점의 코어(=이 AsyncTask를 실행한 그 코어)에서 깨우므로,
+    // 대기하는 Task도 반드시 같은 코어에서 Scheduler::parkCurrent()로
+    // 잠들어 있어야 한다(v1 범위 - 코어 간 이관 없음).
+    Task* waitingTask = nullptr;
+
+    // false면 완료(Completed/Failed) 후에도 리액터가 이 AsyncTask
+    // 구조체/전용 스택을 자동으로 반납하지 않는다 - 결과를 나중에
+    // 소비해야 하는 호출부(예: waitForSyscall)가 직접 반납할 책임을
+    // 진다. 기본값 true(기존 "제출하고 잊는" 소비자와 동일하게 자동
+    // 정리)라 기존 submit() 호출부의 동작은 그대로 유지된다.
+    bool autoFree = true;
+
     // subjectCode에 등록된 AsyncTaskHandler::onExec을 처음 실행할
     // 준비가 된 상태로 스택을 구성한다(GenericSlabAllocator에서 전용
     // 스택을 확보) - 실패 시(할당 고갈) stackBase가 0으로 남는다,
@@ -49,8 +67,11 @@ struct AsyncTask {
 
     // AsyncTask/AsyncCallbackRegistry가 내부적으로 새 AsyncTask를 만들어
     // 등록하고 이 코어의 리액터에 제출하는 진입점 - 실패 시(구조체
-    // 또는 전용 스택 확보 실패) nullptr.
-    static AsyncTask* submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args);
+    // 또는 전용 스택 확보 실패) nullptr. autoFree=false로 제출하면
+    // 리액터가 완료 후에도 반납하지 않는다(호출부가 나중에 결과를
+    // 읽고 직접 반납해야 함 - waitForSyscall류의 소비 패턴).
+    static AsyncTask* submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
+                             bool autoFree = true);
 };
 
 // 작업 주체(기능)별로 구현 - 실행/실패/취소 셋 다 구현 책임을 진다.
