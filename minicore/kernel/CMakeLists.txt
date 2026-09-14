@@ -18,6 +18,8 @@ add_library(minicore_kernel OBJECT
     scheduler.cpp
     async_task.cpp
     syscall.cpp
+    named_object.cpp
+    channel.cpp
 )
 
 target_link_libraries(minicore_kernel PUBLIC libkenv minicore_libs_x86_64)

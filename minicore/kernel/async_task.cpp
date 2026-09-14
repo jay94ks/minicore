@@ -84,6 +84,29 @@ kernel::uint64_t gReactorSavedRsp[kMaxCores] = {};
 // 다른 Task와 동일하게 다룬다(다만 즉시 스케줄링으로만 깨어남).
 kernel::Task gReactorTasks[kMaxCores];
 
+// 이 리액터가 지금 "명시적으로 깨워 줘야만 다시 도는" 상태(진짜
+// Scheduler::parkCurrent()로 블로킹됨)인지 - **실측으로 발견한 경쟁
+// (2026-09-14, Channel IPC 스트레스 테스트)**: 원래
+// AsyncReactor::submitCompletion()은 `Scheduler::currentTask() !=
+// &gReactorTasks[coreIndex]`로 "리액터가 지금 안 돌고 있으니 깨워야
+// 한다"를 판단했는데, 이 신호는 스케줄러 틱이 리액터 Task를(어떤
+// AsyncTask의 onExec를 대신 실행하는 도중이든, popFront 직후 막
+// parkCurrent()를 부르려던 참이든) Task 수준에서 그냥 보통의
+// 라운드로빈으로 선점해 버리면 완전히 어긋난다 - 그 순간
+// gCurrentTask[coreIndex]는 더 이상 리액터가 아니게 되지만, 리액터
+// Task 자신은 (parkCurrent()를 실제로 부른 게 아니라 그냥 Ready로
+// 재큐잉됐을 뿐이므로) 이미 스스로 다시 스케줄될 수 있는 상태다 -
+// 그런데도 currentTask() 기반 판단은 "안 돌고 있다"고 오판해
+// scheduleImmediate로 또 다른 큐에 넣어 버려, 같은 Task가 두 큐에
+// 동시에 들어가는 이중 스케줄링이 된다(runLoop/yieldCurrent에서 이미
+// 실측 발견한 것과 같은 근본 원인). 이 플래그는 "진짜로 명시적 wake가
+// 필요한가"만을 오직 reactorTaskEntry() 자신이(parkCurrent() 호출
+// 직전, cli로 보호된 구간에서) true로 세우고, submitCompletion()이
+// 그 값을 확인+false로 되돌리는 것으로 대체해 이 오판을 근본적으로
+// 없앤다 - currentTask()가 무엇이든(틱 선점으로 바뀌었든 말든) 상관
+// 없이 항상 정확하다.
+bool gReactorParked[kMaxCores] = {};
+
 constexpr kernel::uint32_t kMaxHandlers = 64;  // v1 상한 - 필요해지면 늘림
 kernel::AsyncTaskHandler* gHandlers[kMaxHandlers] = {};
 kernel::uint32_t gNextSubjectCode = 0;
@@ -206,6 +229,15 @@ void AsyncReactor::reactorTaskEntry(void*) {
     for (;;) {
         AsyncTask* task = gExecQueues[coreIndex].popFront();
         if (!task) {
+            // gReactorParked를 "진짜로 블로킹되는" 이 순간에만 true로
+            // 세운다 - cli로 이 대입과 parkCurrent()의 실제 전환 사이를
+            // 하나로 묶어, 그 틈에 스케줄러 틱이 끼어들어도(리액터를
+            // 그냥 보통의 라운드로빈으로 재큐잉해 버리는 경우도 포함)
+            // submitCompletion()이 이 플래그만 보고 정확히 판단할 수
+            // 있게 한다(위 gReactorParked 선언부 주석 참고 - cli는
+            // parkCurrent() 안의 cli와 중복이라 무해하다).
+            asm volatile("cli");
+            gReactorParked[coreIndex] = true;
             Scheduler::parkCurrent();
             continue;  // 깨어나면(submitCompletion) 다시 popFront부터
         }
@@ -215,7 +247,21 @@ void AsyncReactor::reactorTaskEntry(void*) {
             task->state = AsyncTaskState::Running;
         }
         gCurrentAsyncTask[coreIndex] = task;
-        kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
+        {
+            // AsyncTask 프레임워크의 원래 설계 의도(kAsyncTaskEntryWrapper
+            // 주석 참고 - "리액터가 AsyncTask를 실행하는 동안 바깥
+            // kernel::Task 수준에서는 여전히 리액터가 실행 중이어야
+            // 한다")를 실제로 강제한다 - 이 구간(AsyncTask가 리액터의
+            // 실행 슬롯을 "빌려 쓰는" 동안) 전체를 Task 수준 선점
+            // 대상에서 제외한다(Slab 매거진 보호에 쓰는 것과 같은
+            // PreemptionGuard 재사용 - 인터럽트 자체는 막지 않아 EOI/
+            // 하드웨어 처리는 정상 진행됨). gReactorParked 플래그가
+            // 이중 스케줄링 자체는 이미 막아 주지만, 이 가드가 없으면
+            // 여전히 리액터가 Task 수준에서 불필요하게 선점->재큐잉될
+            // 수 있어 방어적으로 같이 둔다.
+            PreemptionGuard guard;
+            kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
+        }
         gCurrentAsyncTask[coreIndex] = nullptr;
 
         if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
@@ -245,12 +291,34 @@ void AsyncReactor::reactorTaskEntry(void*) {
 void AsyncReactor::submitCompletion(AsyncTask* task) {
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
     gExecQueues[coreIndex].pushBack(task);
-    // 리액터가 이미 실행 중이면(다른 AsyncTask를 처리 중이거나 막
-    // popFront하러 가는 길이면) 다음 자기 루프에서 자연히 이 항목을
-    // 집어간다 - 다시 깨울 필요가 없을 뿐더러, 파킹돼 있지 않은
-    // Task를 scheduleImmediate로 또 큐에 넣으면 이중 스케줄링이 된다
-    // (runLoop/yieldCurrent에서 실측으로 발견한 것과 같은 종류의 버그).
-    if (Scheduler::currentTask() != &gReactorTasks[coreIndex]) {
+    // **실측으로 발견한 경쟁(2026-09-14, Channel IPC 스트레스 테스트)**:
+    // 원래 여기서는 `Scheduler::currentTask() != &gReactorTasks[coreIndex]`
+    // 로 "리액터가 지금 안 돌고 있다"를 판단했는데, 스케줄러 틱이
+    // 리액터 Task를(어떤 onExec 실행 도중이든, popFront 직후 막
+    // parkCurrent()를 부르려던 참이든) Task 수준에서 그냥 보통의
+    // 라운드로빈으로 선점해 버리면 이 판단이 완전히 어긋난다 - 그
+    // 순간 currentTask()는 더 이상 리액터가 아니지만, 리액터 자신은
+    // (parkCurrent()를 실제로 부른 게 아니므로) 이미 스스로 다시
+    // 스케줄될 수 있는 상태다. 그런데도 "안 돌고 있다"고 오판해
+    // scheduleImmediate로 또 다른 큐에 넣으면, 같은 Task가 두 큐에
+    // 동시에 들어가는 이중 스케줄링이 된다(runLoop/yieldCurrent에서
+    // 이미 실측 발견한 것과 같은 근본 원인, PL-2D3184BC 참고). 대신
+    // gReactorParked(reactorTaskEntry가 parkCurrent() 호출 직전
+    // cli로 보호된 구간에서만 true로 세우는 전용 플래그)를 확인+
+    // 소비한다 - currentTask()가 무엇이든(틱 선점으로 바뀌었든 말든)
+    // 상관없이 "진짜로 명시적 wake가 필요한가"만 정확히 반영한다.
+    // 이 함수는 인터럽트 컨텍스트에서도 호출 가능하다고 문서화돼
+    // 있어(async_task.h) 무조건 sti로 끝내면 안 된다 - 원래 RFLAGS.IF
+    // 값을 저장해 뒀다가 그 값이었을 때만 되돌린다(호출 전 인터럽트가
+    // 꺼져 있던 컨텍스트라면 계속 꺼진 채로 반환).
+    uint64_t rflags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(rflags));
+    const bool wasParked = gReactorParked[coreIndex];
+    gReactorParked[coreIndex] = false;
+    if (rflags & (1ULL << 9)) {
+        asm volatile("sti");
+    }
+    if (wasParked) {
         Scheduler::scheduleImmediate(coreIndex, &gReactorTasks[coreIndex]);
     }
 }

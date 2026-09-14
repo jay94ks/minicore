@@ -62,6 +62,22 @@ struct Task {
     // Scheduler::retireCurrentTask()로 스케줄러에서 완전히 떼어낸다.
     bool isUserLevel = false;
 
+    // 이 Task가 지금 스케줄러의 세 큐(즉시/RT/일반) 중 어딘가에
+    // 실제로 들어있는지 - **실측으로 발견한 이중 스케줄링 경쟁의
+    // 구조적 방지책**(2026-09-14, Channel IPC 스트레스 테스트,
+    // PL-2D3184BC 참고). "이 Task를 이미 어딘가에서 큐에 넣어 둔
+    // 시점"과 "그걸 아직 모르는 다른 호출부가 별도로 또
+    // enqueue()/scheduleImmediate()를 부르는 시점" 사이의 창은
+    // 스케줄러 틱이 끼어들 수 있는 모든 지점에서 원리상 생길 수 있어
+    // 하나하나 찾아 막는 방식만으로는 끝이 없다 - Scheduler::enqueue/
+    // scheduleImmediate가 push 직전 이 플래그를 확인해 이미 true면
+    // 조용히 재삽입을 생략하고, Scheduler::pickNext가 실제로 큐에서
+    // 꺼내는 순간 다시 false로 내린다. state(Ready/Running/...)는 이
+    // 용도로 못 쓴다 - Task::init() 직후에도 이미 state=Ready라
+    // "아직 한 번도 큐에 들어간 적 없음"과 "이미 큐에 있음"을 구분하지
+    // 못한다.
+    bool inRunQueue = false;
+
     // 코어별 큐(폴백/lock-free 공용, PL-2D3184BC 4단계)가 쓰는 침습적
     // (intrusive) 다음-포인터 - 이 Task가 큐에 들어있을 때만 유효.
     AtomicPtr<Task> next;

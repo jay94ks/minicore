@@ -80,6 +80,21 @@ bool Syscall::wait(AsyncTaskManageCode token) {
             }
             task->waitingTask = self;
         }
+        // **실측으로 발견한 경쟁(2026-09-14, Channel IPC 스트레스
+        // 테스트)**: 위 PreemptionGuard 스코프가 끝난 시점과 실제로
+        // Scheduler::parkCurrent()에 진입하는 시점 사이에 스케줄러
+        // 틱이 끼어들면, 이 Task를 (아직 parkCurrent를 부르지 않았으니
+        // Blocked가 아니라) 그냥 일반 라운드로빈으로 재큐잉해 버린다 -
+        // 그런데 waitingTask는 이미 위에서 self로 세팅해 뒀으므로, 만약
+        // 바로 이 틈에 리액터가 해당 AsyncTask를 완료시키면
+        // scheduleImmediate로 이 Task를 또 다른 큐에 넣어, 같은 Task가
+        // 두 큐에 동시에 들어가는 이중 스케줄링이 된다
+        // (reactorTaskEntry()의 parkCurrent() 호출부에서 이미 실측
+        // 발견한 것과 같은 근본 원인). parkCurrent() 자신은 이미
+        // cli로 시작하지만, 그 호출 "직전"의 이 틈은 별도로 닫아야
+        // 한다 - 여기서 미리 건 cli는 parkCurrent() 안의 cli와
+        // 중복(멱등)이라 무해하다.
+        asm volatile("cli");
         // 여기서 어떤 이유로든(설계자 지시 2번 - 아직 이 프로젝트에
         // 설계되지 않은 시그널 등) 풀려도, 유저랜드가 그냥 같은
         // token으로 wait()을 다시 부르면 된다 - 위 pendingSyscall 검사가

@@ -129,20 +129,51 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
     if (coreIndex >= gCoreCount) {
         coreIndex = 0;
     }
+    // **실측으로 발견한 경쟁의 구조적 방지책(2026-09-14, Channel IPC
+    // 스트레스 테스트)**: "이 Task를 어딘가에서 이미 큐에 넣어 둔
+    // 시점"과 "그걸 아직 모르는 다른 호출부가 별도로 또
+    // enqueue/scheduleImmediate를 부르는 시점" 사이의 창은
+    // (reactorTaskEntry의 parkCurrent() 진입 직전, Syscall::wait()의
+    // parkCurrent() 진입 직전 등 - 이번 세션에 개별적으로 찾아 cli로
+    // 막은 지점들 참고) 원리상 스케줄러 틱이 "이 Task는 아직 안
+    // 자고 있으니 그냥 라운드로빈으로 넘어간다"고 판단할 수 있는 모든
+    // 지점에서 잠재적으로 생길 수 있어 하나하나 찾아 막는 방식만으로는
+    // 끝이 없다 - 이미 어느 큐엔가 들어가 있는 Task를 다시 넣지 않는
+    // 것으로 근본 클래스 자체를 막는다. **state(Ready/Running/...)는
+    // 이 용도로 못 쓴다** - Task::init() 직후에도 이미 state=Ready라
+    // "아직 한 번도 큐에 들어간 적 없음"과 "이미 큐에 있음"을 구분하지
+    // 못한다 - 그래서 별도의 Task::inRunQueue 플래그를 쓴다. cli로
+    // "확인 + 세팅 + push"를 통째로 원자적으로 묶어야 확인 자체가
+    // 틱과 경쟁하지 않는다.
+    asm volatile("cli");
+    if (task->inRunQueue) {
+        asm volatile("sti");
+        return;  // 이미 어느 큐엔가 들어가 있다 - 다시 넣으면 이중 스케줄링
+    }
+    task->inRunQueue = true;
     task->state = TaskState::Ready;
     if (task->taskClass == TaskClass::RealTime) {
         gRtQueues[coreIndex].pushBack(task);
     } else {
         gNormalQueues[coreIndex].pushBack(task);
     }
+    asm volatile("sti");
 }
 
 void Scheduler::scheduleImmediate(uint32_t coreIndex, Task* task) {
     if (coreIndex >= gCoreCount) {
         coreIndex = 0;
     }
+    // enqueue()와 같은 이유 - 위 주석 참고.
+    asm volatile("cli");
+    if (task->inRunQueue) {
+        asm volatile("sti");
+        return;
+    }
+    task->inRunQueue = true;
     task->state = TaskState::Ready;
     gImmediateQueues[coreIndex].pushBack(task);
+    asm volatile("sti");
 }
 
 Task* Scheduler::pickNext(uint32_t coreIndex) {
@@ -150,14 +181,20 @@ Task* Scheduler::pickNext(uint32_t coreIndex) {
         coreIndex = 0;
     }
     Task* task = gImmediateQueues[coreIndex].popFront();
-    if (task) {
-        return task;
+    if (!task) {
+        task = gRtQueues[coreIndex].popFront();
     }
-    task = gRtQueues[coreIndex].popFront();
-    if (task) {
-        return task;
+    if (!task) {
+        task = gNormalQueues[coreIndex].popFront();
     }
-    return gNormalQueues[coreIndex].popFront();
+    if (task) {
+        // 큐에서 실제로 빠져나온 순간 inRunQueue를 내려야 한다 -
+        // enqueue()/scheduleImmediate()의 "이미 큐에 있으면 재삽입
+        // 생략" 판단이 이 시점부터는 다시 "새로 넣어도 됨"으로
+        // 정확히 반영되게 한다.
+        task->inRunQueue = false;
+    }
+    return task;
 }
 
 void Scheduler::startTickOnThisCore() {
@@ -284,11 +321,7 @@ void Scheduler::yieldCurrent() {
     // next 포인터가 자기 자신을 가리키며 큐가 깨지고, 아직 완성되지
     // 않은 이 kContextSwitch 준비 상태 위에서 또 다른 kContextSwitch가
     // 겹쳐 실행되며 스택이 망가진다(실측으로 발견). runLoop()의 같은
-    // 종류 경쟁과 동일한 이유로 cli를 쓴다 - 여기서 끈 인터럽트는
-    // kContextSwitch의 pushfq를 통해 이 Task 자신의 저장된 상태에만
-    // 반영되고, 나중에 이 Task가 다시 선택될 때 그 저장된 RFLAGS
-    // (IF=1)로 복원되므로 재개 이후로 새어 나가지 않는다 - 그래서
-    // 재개 후 별도로 sti할 필요가 없다.
+    // 종류 경쟁과 동일한 이유로 cli를 쓴다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
     Task* current = gCurrentTask[coreIndex];
@@ -299,8 +332,22 @@ void Scheduler::yieldCurrent() {
     gCurrentTask[coreIndex] = nullptr;
     enqueue(coreIndex, current);
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
-    // runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰 있다가, 다시
-    // 선택되면 이 지점부터(인터럽트 다시 허용된 채로) 재개된다.
+    // **실측으로 발견한 버그(2026-09-14, Channel IPC 스트레스
+    // 테스트)**: 위 kContextSwitch의 pushfq는 방금 실행한 cli 때문에
+    // IF=0인 RFLAGS를 이 Task 자신의 저장 슬롯에 그대로 담아 버린다 -
+    // 이 재개 지점은 인터럽트 프레임을 거치는 iretq가 아니라 순수
+    // 스택 포인터 교환(popfq)이라, "인터럽트가 꺼진 채로 저장했다가
+    // 그대로 복원"이 반복될 뿐 저절로 IF=1로 돌아오지 않는다 - 이
+    // Task가 yieldCurrent()/parkCurrent()를 단 한 번이라도 거치고 나면
+    // 그 뒤로는 매번 IF=0으로 재개되고, runLoop()이 "정말 대기할
+    // 때"(sti;hlt)에 도달하기 전까지는 이 코어의 인터럽트(스케줄러
+    // 틱 포함)가 아예 걸리지 않게 된다 - 부하가 계속 이어져 그
+    // hlt 분기에 도달하지 못하면 사실상 영구히 멈춘다(Channel IPC처럼
+    // 여러 Task가 쉴 새 없이 서로를 깨우는 워크로드에서 실측 발견).
+    // 그래서 재개 직후 여기서 명시적으로 다시 켠다 - 정상적으로
+    // 실행 중인 Task는 항상 IF=1이어야 한다는 불변조건을 저장된 값에
+    // 기대지 않고 직접 강제한다.
+    asm volatile("sti");
 }
 
 void Scheduler::parkCurrent() {
@@ -324,8 +371,11 @@ void Scheduler::parkCurrent() {
     // 보장되므로 이중 스케줄링 걱정이 없다).
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
     // 누군가 깨워 runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰
-    // 있다가, 다시 선택되면 이 지점부터(인터럽트 다시 허용된 채로)
-    // 재개된다.
+    // 있다가, 다시 선택되면 이 지점부터 재개된다 - yieldCurrent()와
+    // 같은 이유로(위 주석 참고) 여기서도 명시적으로 다시 켜야 한다 -
+    // 저장된 RFLAGS에 기대면 cli 때문에 IF=0인 채로 복원되어, 이
+    // Task가 다시 파킹되기 전까지 이 코어의 인터럽트가 전부 막힌다.
+    asm volatile("sti");
 }
 
 void Scheduler::retireCurrentTask() {

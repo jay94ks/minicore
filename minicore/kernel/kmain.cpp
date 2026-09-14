@@ -1,6 +1,7 @@
 #include "acpi.h"
 #include "async_task.h"
 #include "boot_info.h"
+#include "channel.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
 #include "idt.h"
@@ -308,6 +309,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
 
     kernel::AsyncReactor::initForThisCore();
     kernel::Serial::write("minicore: async reactor ready (core 0)\n");
+
+    // 전역 테이블 하나뿐이라 BSP에서 딱 한 번만 - AP(kApMain)는 이걸
+    // 다시 부르지 않는다(SyscallRegistry::registerHandler가 이미 쓰인
+    // 슬롯에 재등록을 거부하므로 안전장치는 있지만, 애초에 호출
+    // 자체를 한 곳에만 둔다).
+    kernel::Channel::registerSyscallEndpoints();
+    kernel::Serial::write("minicore: channel IPC syscall endpoints registered\n");
 
     kernel::IoApic::init();
     kernel::Serial::write("minicore: IOAPIC mapped\n");
