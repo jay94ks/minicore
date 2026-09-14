@@ -4,6 +4,7 @@
 #include "lapic.h"
 #include "libkenv/types.h"
 #include "paging.h"
+#include "scheduler.h"
 #include "serial.h"
 #include "timer.h"
 
@@ -234,8 +235,14 @@ void kPanic(kernel::InterruptFrame* frame) {
 
 // isr_common_stub(isr.S)이 호출한다.
 // - 타이머(kTimerVector)/spurious(0xFF): 하드웨어 인터럽트라 반드시
-//   EOI를 보내야 다음 인터럽트가 들어온다. 스케줄러가 생기기 전까지
-//   타이머는 그냥 틱만 센다.
+//   EOI를 보내야 다음 인터럽트가 들어온다. 이 벡터는 전역 시각
+//   (Timer::tickCount())만 담당한다.
+// - 스케줄러 틱(kSchedulerTickVector, PL-2D3184BC 7/8단계): Timer와는
+//   독립된 코어별 LAPIC 타이머 - Scheduler::onTick이 Task 전환을
+//   할 수도 있어(kContextSwitch가 이 함수 호출 자체를 오래 "매달아
+//   둘" 수 있음) EOI를 일반 동적 핸들러 경로(핸들러 반환 후 EOI)에
+//   맡기지 않고 Scheduler::onTick 안에서 가장 먼저 직접 보낸다 -
+//   kTimerVector와 같은 이유의 특례.
 // - 페이지 폴트(벡터 14): 먼저 Paging::kHandlePageFault로 "온디맨드
 //   매핑으로 해결 가능한 폴트인지" 확인한다 - 처리됐으면 그냥 반환해
 //   iretq가 폴트난 명령어를 재실행하게 둔다.
@@ -249,6 +256,10 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     if (frame->vector == kernel::kTimerVector) {
         kernel::Timer::onTick();
         kernel::Lapic::sendEoi();
+        return;
+    }
+    if (frame->vector == kernel::kSchedulerTickVector) {
+        kernel::Scheduler::onTick(frame);  // EOI는 이 함수가 직접 가장 먼저 보낸다
         return;
     }
     if (frame->vector == 0xFF) {

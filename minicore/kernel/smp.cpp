@@ -9,6 +9,7 @@
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "scheduler.h"
 #include "serial.h"
 #include "timer.h"
 
@@ -91,11 +92,16 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     kernel::Serial::writeHex(kernel::Lapic::id());
     kernel::Serial::write("\n");
 
+    kernel::Scheduler::startTickOnThisCore();
+
     gApStartedCount.fetchAdd(1);
 
-    for (;;) {
-        asm volatile("hlt");
-    }
+    // 이 지점부터 이 AP도 자기 코어의 스케줄러 디스패치 루프에
+    // 들어간다 - 절대 반환하지 않는다(BSP의 kMain과 동일한 패턴,
+    // PL-2D3184BC 5/6단계). AP는 아직 인터럽트가 비활성 상태로 여기
+    // 도달하므로(ap_trampoline.S가 sti를 하지 않음), runLoop 자신의
+    // "sti; hlt" idle 경로가 이 코어의 첫 sti 지점이 된다.
+    kernel::Scheduler::runLoop();
 }
 
 namespace kernel {

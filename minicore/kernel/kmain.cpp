@@ -11,6 +11,7 @@
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "pci.h"
+#include "scheduler.h"
 #include "serial.h"
 #include "smp.h"
 #include "timer.h"
@@ -258,6 +259,11 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         kernel::Serial::write("minicore: ACPI MADT parse FAILED\n");
     }
 
+    // Acpi::cpuCount()만 있으면 되므로 여기서 바로 초기화한다(코어별
+    // 큐를 만들어 두고, 실제 디스패치는 각 코어가 Scheduler::runLoop()
+    // 에 들어가면서 시작된다 - PL-2D3184BC 4/5/6단계).
+    kernel::Scheduler::init();
+
     kernel::PageFrameAllocator::init(
         memmap, memmapEntries,
         reinterpret_cast<kernel::uint64_t>(kernel_phys_start),
@@ -283,6 +289,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Gdt::loadTssForThisCore();
     kernel::Serial::write("minicore: TSS/IST ready (core 0)\n");
 
+    kernel::Scheduler::startTickOnThisCore();
+    kernel::Serial::write("minicore: scheduler tick ready (LAPIC, ");
+    kernel::Serial::writeHex(kernel::kSchedulerTickHz);
+    kernel::Serial::write("Hz, vector=");
+    kernel::Serial::writeHex(kernel::kSchedulerTickVector);
+    kernel::Serial::write(")\n");
+
     kernel::IoApic::init();
     kernel::Serial::write("minicore: IOAPIC mapped\n");
 
@@ -302,7 +315,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
 
     kernel::Smp::startApCores();
 
-    for (;;) {
-        asm volatile("hlt");
-    }
+    // 이 지점부터 BSP 자신도 스케줄러 디스패치 루프에 들어간다 -
+    // 절대 반환하지 않는다(PL-2D3184BC 5/6단계).
+    kernel::Scheduler::runLoop();
 }
