@@ -140,6 +140,23 @@ void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, kernel::uint32_t count)
     }
 }
 
+// usable 영역들의 최대 끝 주소 - Paging::init()이 direct map으로 덮어야
+// 할 실제 설치 메모리 크기다(PN-4AA5425D, PageFrameAllocator::init()이
+// usable 타입만 프레임 풀에 넣는 것과 같은 기준으로 usable만 본다).
+kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap, kernel::uint32_t count) {
+    kernel::uint64_t maxAddr = 0;
+    for (kernel::uint32_t i = 0; i < count; ++i) {
+        if (memmap[i].type != static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kUsable)) {
+            continue;
+        }
+        const kernel::uint64_t end = memmap[i].addr + memmap[i].size;
+        if (end > maxAddr) {
+            maxAddr = end;
+        }
+    }
+    return maxAddr;
+}
+
 }  // namespace
 
 // boot.S가 higher-half로 넘어온 뒤 호출한다. rdi = 부팅 정보 구조체
@@ -224,7 +241,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 테이블용 프레임을 받아옴 - 그 안에서 자기 자신의 id()를 부르지
     // 않도록 Lapic::isReady()로 방어돼 있음, 2026-09-14 실측으로
     // 발견한 초기화 순서 문제).
-    kernel::Paging::init();
+    kernel::Paging::init(kComputeMaxUsablePhysAddr(memmap, memmapEntries));
     kernel::Serial::write("minicore: direct physical map ready\n");
 
     if (kernel::Acpi::init(rsdpPaddr)) {

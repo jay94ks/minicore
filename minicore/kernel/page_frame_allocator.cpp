@@ -10,18 +10,13 @@ namespace {
 
 constexpr kernel::uint64_t kPageSize = 4096;
 constexpr kernel::uint32_t kMaxOrder = 10;  // 4KiB << 10 = 4MiB 최대 블록
-// Paging의 direct physical map이 커버하는 범위와 맞춘다(PL-99562483,
-// 2026-09-14 - 예전엔 boot.S가 정적으로 identity map한 1GiB로
-// 제한했었다). 그 이상(4GiB 초과) RAM을 쓰려면 Paging의 direct map
-// PDPT 엔트리를 먼저 늘려야 한다.
-constexpr kernel::uint64_t kMappedLimit = 4UL << 30;        // 4GiB
 constexpr kernel::uint64_t kLowReservedEnd = 0x200000;      // 2MiB: BIOS 영역 + 커널 자신
 
 // next는 다음 블록의 "물리주소"다(가상 포인터 아님) - 0이면 끝.
 // 널 페이지(물리주소 0)는 kLowReservedEnd 블랭킷 예약에 항상 포함돼
 // 실제 블록으로 절대 안 쓰이므로 sentinel로 안전하다. 물리주소를
-// 그대로 저장/비교해야 kMappedLimit이 1GiB(identity map 가정)를
-// 넘어서도(PL-99562483) 값 자체는 그대로 유효하다 - 실제로 읽고
+// 그대로 저장/비교해야 Paging::directMapLimit()을 넘어서도
+// (PL-99562483/PN-4AA5425D) 값 자체는 그대로 유효하다 - 실제로 읽고
 // 쓸 때만 kPhysToVirt를 거친다.
 struct FreeBlock {
     kernel::uint64_t next;
@@ -269,14 +264,19 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, uint32_t entryCount,
     Range ranges[kMaxRanges];
     int count = 0;
 
+    // Paging::init()이 이미 이 호출보다 먼저 실행돼 확정해 둔 실제
+    // direct map 범위 - 그 이상은 direct map으로 볼 수 없는 물리
+    // 프레임이라 애초에 내줄 수 없다(PL-99562483/PN-4AA5425D).
+    const uint64_t mappedLimit = Paging::directMapLimit();
+
     for (uint32_t i = 0; i < entryCount; ++i) {
         if (memmap[i].type != static_cast<uint32_t>(HvmMemmapType::kUsable)) {
             continue;
         }
         uint64_t start = memmap[i].addr;
         uint64_t end = start + memmap[i].size;
-        if (end > kMappedLimit) {
-            end = kMappedLimit;
+        if (end > mappedLimit) {
+            end = mappedLimit;
         }
         if (start >= end) {
             continue;

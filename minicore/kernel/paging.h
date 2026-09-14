@@ -12,8 +12,12 @@ constexpr uint64_t PAGE_CACHE_DISABLE = 1UL << 4;  // MMIO(LAPIC 등)는 반드�
 
 // 커널이 임의 물리 프레임을 한 번에 볼 수 있게 만드는 direct physical
 // map(가상 kDirectMapBase + 물리주소 = 그 물리 프레임)의 시작 주소.
-// 첫 4GiB를 1GiB 페이지 4개로 매핑해 둔다(Paging::init) - 그 이상은
-// 아직 v1 범위 밖(관련 결정: DS-D4E5C451, 후속 DC 예정).
+// 실제 설치된 usable 메모리를 전부 덮도록 1GiB 페이지로 동적으로
+// 매핑한다(Paging::init(maxPhysAddr) 참고, PN-4AA5425D - "설계 변경
+// 불필요, 순수 확장" 확정) - 최소 4GiB(LAPIC/IOAPIC/HPET 등 저지대
+// MMIO가 항상 이 안에 있음)는 항상 보장하고, 최대 512GiB(PDPT 하나가
+// 가질 수 있는 엔트리 상한)까지 늘어난다. 512GiB를 넘는 메모리는 여전히
+// v1 범위 밖(PDPT를 여러 개 두는 구조 변경이 필요 - 후속 과제).
 constexpr uint64_t kDirectMapBase = 0xFFFF800000000000UL;
 
 inline uint64_t kPhysToVirt(uint64_t physAddr) {
@@ -47,7 +51,18 @@ public:
     // direct physical map을 구성한다 - mapPage/kUnmapPage보다 먼저
     // 호출해야 한다(둘 다 CR3을 그대로 쓰긴 하지만, direct map 없이도
     // 동작은 함 - 다만 커널이 임의 물리 주소를 볼 방법이 없어진다).
-    static void init();
+    // maxPhysAddr: 메모리 맵에서 찾은 usable 영역의 최대 끝 주소(호출부
+    // -kmain.cpp-가 PageFrameAllocator::init()과 같은 memmap을 스캔해
+    // 구한다) - 이 값까지 1GiB 페이지로 direct map을 늘린다(최소
+    // 4GiB/최대 512GiB로 clamp, kDirectMapBase 주석 참고).
+    static void init(uint64_t maxPhysAddr);
+
+    // init()이 실제로 확보한 direct map의 범위(바이트, 위 clamp 적용
+    // 후의 값) - PageFrameAllocator::init()이 이 값을 넘는 usable
+    // 영역을 프레임 풀에서 잘라내는 데 쓴다(그 이상은 direct map으로
+    // 볼 수 없는 물리 프레임이라 애초에 내줄 수 없음). init() 이전에
+    // 부르면 0.
+    static uint64_t directMapLimit();
 
     // virtualAddr을 physicalAddr(4KiB 정렬)에 매핑한다. 필요한 중간
     // 테이블은 그때그때 만든다. 이미 매핑돼 있으면 덮어쓴다.

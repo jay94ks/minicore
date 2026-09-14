@@ -19,10 +19,23 @@ constexpr kernel::uint64_t kPageSizeBit = 1UL << 7;           // PS(PDPT/PD 레�
 constexpr kernel::uint32_t kHigherHalfPml4Start = 256;
 constexpr kernel::uint32_t kPml4EntryCount = 512;
 
+// direct map 1GiB 페이지 개수의 하한/상한(PN-4AA5425D) - 하한 4GiB는
+// LAPIC(0xFEE00000)/IOAPIC/HPET 등 저지대 MMIO가 실제 설치 메모리
+// 크기와 무관하게 항상 이 안에 있어야 하기 때문이고, 상한 512는 PDPT
+// 하나(gDirectMapPdptStorage, 4096B = uint64_t 512개)가 가질 수 있는
+// 엔트리 개수 자체의 물리적 한계다(더 늘리려면 PDPT를 여러 개 두는
+// 구조 변경이 필요 - 후속 과제).
+constexpr kernel::uint32_t kMinDirectMapGib = 4;
+constexpr kernel::uint32_t kMaxDirectMapGib = 512;
+
 // direct map용 PDPT 하나만 정적으로 예약한다(컴파일 타임 .bss, 커널
 // 자신의 higher-half 이미지 안이라 이미 매핑돼 있다 - PageFrameAllocator
 // 초기화 전에도 안전하게 쓸 수 있다). 첫 4GiB만 1GiB 페이지로 덮는다.
 alignas(4096) kernel::uint8_t gDirectMapPdptStorage[4096];
+
+// Paging::init()이 확정한 실제 direct map 범위(바이트) -
+// PageFrameAllocator::init()이 Paging::directMapLimit()으로 읽어간다.
+kernel::uint64_t gDirectMapLimit = 0;
 
 kernel::uint64_t kCurrentPml4Phys() {
     kernel::uint64_t cr3;
@@ -82,14 +95,23 @@ void kInvalidatePage(kernel::uint64_t virtualAddr) {
 
 namespace kernel {
 
-void Paging::init() {
+void Paging::init(uint64_t maxPhysAddr) {
     uint64_t* pml4 = kLowIdentityTable(kCurrentPml4Phys());
     auto* pdpt = reinterpret_cast<uint64_t*>(&gDirectMapPdptStorage[0]);
     kZeroTable(pdpt);
 
-    for (uint32_t i = 0; i < 4; ++i) {  // 0~3GiB, 1GiB 페이지 4개
+    uint64_t gibPages = (maxPhysAddr + kPageSize1G - 1) / kPageSize1G;
+    if (gibPages < kMinDirectMapGib) {
+        gibPages = kMinDirectMapGib;
+    }
+    if (gibPages > kMaxDirectMapGib) {
+        gibPages = kMaxDirectMapGib;
+    }
+
+    for (uint32_t i = 0; i < gibPages; ++i) {  // 1GiB 페이지 gibPages개
         pdpt[i] = (static_cast<uint64_t>(i) * kPageSize1G) | PAGE_PRESENT | PAGE_WRITABLE | kPageSizeBit;
     }
+    gDirectMapLimit = gibPages * kPageSize1G;
 
     // gDirectMapPdptStorage는 커널 이미지(higher-half) 안의 정적
     // 배열이라 그 "주소"는 이미 가상주소다 - PDPT 엔트리에는 물리
@@ -171,6 +193,10 @@ void Paging::unmapPage(uint64_t virtualAddr, uint64_t pml4Phys) {
 
 uint64_t Paging::currentPml4Phys() {
     return kCurrentPml4Phys();
+}
+
+uint64_t Paging::directMapLimit() {
+    return gDirectMapLimit;
 }
 
 uint64_t Paging::createAddressSpace() {
