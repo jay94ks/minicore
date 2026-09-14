@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_IDT_H
 
 #include "interrupt_frame.h"
+#include "libkenv/types.h"
 
 namespace kernel {
 
@@ -30,8 +31,8 @@ public:
     // Lapic::sendEoi()를 대신 호출한다(장치 핸들러마다 EOI를 빼먹는
     // 실수를 구조적으로 막기 위함).
     using InterruptHandler = void (*)(InterruptFrame*);
-    static void registerHandler(unsigned int vector, InterruptHandler handler);
-    static void unregisterHandler(unsigned int vector);
+    static void registerHandler(uint32_t vector, InterruptHandler handler);
+    static void unregisterHandler(uint32_t vector);
 };
 
 }  // namespace kernel

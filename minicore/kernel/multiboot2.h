@@ -3,11 +3,12 @@
 
 #include "boot_info.h"
 #include "hvm_start_info.h"
+#include "libkenv/types.h"
 
 namespace kernel {
 
-constexpr unsigned int kMultiboot2Magic = 0x36D76289;
-constexpr unsigned int kMultiboot2MaxMemmapEntries = 64;
+constexpr uint32_t kMultiboot2Magic = 0x36D76289;
+constexpr uint32_t kMultiboot2MaxMemmapEntries = 64;
 
 // GRUB(멀티부트2)가 넘기는 태그 기반 가변 길이 정보 구조체를 파싱해
 // PVH 경로와 같은 형태(HvmMemmapEntry 배열 + RSDP 물리주소 + BootInfo)
@@ -30,8 +31,8 @@ public:
     // usable 메모리에서 제외하는 데 쓴다(hvm_start_info를 위해 하는
     // 것과 동일한 이유). outBootInfo: 커맨드라인(타입1)/부트로더
     // 이름(타입2)/모듈(타입3, BootModule 배열) 태그를 채운다.
-    static void parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap, unsigned int maxEntries,
-                       unsigned int* outMemmapCount, unsigned long* outRsdpPaddr, unsigned int* outTotalSize,
+    static void parse(uint64_t infoPhysAddr, HvmMemmapEntry* outMemmap, uint32_t maxEntries,
+                       uint32_t* outMemmapCount, uint64_t* outRsdpPaddr, uint32_t* outTotalSize,
                        BootInfo* outBootInfo);
 };
 

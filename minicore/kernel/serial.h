@@ -1,6 +1,8 @@
 #ifndef MINICORE_KERNEL_SERIAL_H
 #define MINICORE_KERNEL_SERIAL_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
 // COM1 UART(0x3F8) 기반 초기 커널 로그 출력 (SP-8B6B8D25 §1 요구사항 -
@@ -11,7 +13,7 @@ public:
     static void init();
     static void putChar(char c);
     static void write(const char* str);
-    static void writeHex(unsigned long value);
+    static void writeHex(uint64_t value);
 };
 
 }  // namespace kernel

@@ -1,6 +1,8 @@
 #ifndef MINICORE_KERNEL_PCI_H
 #define MINICORE_KERNEL_PCI_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
 // PCI Configuration Space 접근 + 최소 버스 열거 + MSI/MSI-X capability
@@ -18,10 +20,10 @@ namespace kernel {
 class Pci {
 public:
     struct Device {
-        unsigned char bus, device, function;
-        unsigned short vendorId, deviceId;
-        unsigned char classCode, subclass, progIf, revisionId;
-        unsigned char headerType;  // 멀티펑션 비트(0x80)는 이미 뗀 값
+        uint8_t bus, device, function;
+        uint16_t vendorId, deviceId;
+        uint8_t classCode, subclass, progIf, revisionId;
+        uint8_t headerType;  // 멀티펑션 비트(0x80)는 이미 뗀 값
     };
 
     // Acpi::init() 이후, Paging::init() 이후에 호출해야 한다(MCFG
@@ -31,11 +33,11 @@ public:
     // 진단/로그용 - bus 0 접근이 실제로 MMCONFIG를 쓰는지.
     static bool usesMmconfig();
 
-    static unsigned int readConfig32(unsigned char bus, unsigned char device, unsigned char function, unsigned char offset);
-    static void writeConfig32(unsigned char bus, unsigned char device, unsigned char function, unsigned char offset, unsigned int value);
-    static unsigned short readConfig16(unsigned char bus, unsigned char device, unsigned char function, unsigned char offset);
-    static void writeConfig16(unsigned char bus, unsigned char device, unsigned char function, unsigned char offset, unsigned short value);
-    static unsigned char readConfig8(unsigned char bus, unsigned char device, unsigned char function, unsigned char offset);
+    static uint32_t readConfig32(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
+    static void writeConfig32(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint32_t value);
+    static uint16_t readConfig16(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
+    static void writeConfig16(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset, uint16_t value);
+    static uint8_t readConfig8(uint8_t bus, uint8_t device, uint8_t function, uint8_t offset);
 
     // bus 0부터 훑어 존재하는 장치(vendorId != 0xFFFF)마다 callback을
     // 부른다 - 멀티펑션 장치(헤더타입 bit7)는 function 1-7도 확인하고,
@@ -48,14 +50,14 @@ public:
     // 따라감)에서 capabilityId(MSI=0x05, MSI-X=0x11)를 찾는다 - 있으면
     // 설정 공간 오프셋을, 없으면 0을 반환(오프셋 0은 헤더 영역이라
     // capability가 될 수 없어 안전한 sentinel).
-    static unsigned char findCapability(unsigned char bus, unsigned char device, unsigned char function, unsigned char capabilityId);
+    static uint8_t findCapability(uint8_t bus, uint8_t device, uint8_t function, uint8_t capabilityId);
 
     // 장치의 MSI capability를 벡터 1개로 프로그래밍하고 Enable
     // 비트를 켠다(Multiple Message Enable=0). MSI capability가 없거나
     // destApicId가 클래식 MSI의 8비트 목적지 필드를 초과하면 false.
     // 여러 벡터가 필요하면
     // enableMsiVectors를 쓴다.
-    static bool enableMsi(unsigned char bus, unsigned char device, unsigned char function, unsigned int vector, unsigned int destApicId);
+    static bool enableMsi(uint8_t bus, uint8_t device, uint8_t function, uint32_t vector, uint32_t destApicId);
 
     // 장치가 여러 MSI 벡터를 지원하면 그만큼(또는 장치 한도까지)
     // 확보해 부하 분산에 쓸 수 있게 한다(QU-7C65048E, 설계자 지시,
@@ -69,9 +71,9 @@ public:
     // 직접 걸어야 한다 - InterruptFrame::vector로 어느 벡터인지 구분).
     // 실패(capability 없음/destApicId가 클래식 MSI의 8비트 목적지
     // 필드를 초과)하면 false, outGrantedCount=0.
-    static bool enableMsiVectors(unsigned char bus, unsigned char device, unsigned char function,
-                                  unsigned int requestedCount, unsigned int preferredBase, unsigned int destApicId,
-                                  unsigned int* outBaseVector, unsigned int* outGrantedCount);
+    static bool enableMsiVectors(uint8_t bus, uint8_t device, uint8_t function,
+                                  uint32_t requestedCount, uint32_t preferredBase, uint32_t destApicId,
+                                  uint32_t* outBaseVector, uint32_t* outGrantedCount);
 
     // MSI-X capability의 테이블 엔트리 하나(tableIndex)를 벡터/목적지로
     // 프로그래밍한다(QU-A62F3008, 설계자 지시, 2026-09-14 - "실제
@@ -82,8 +84,8 @@ public:
     // capability가 없으면 false. 성공하면 해당 엔트리의 마스크를
     // 풀고, 함수 전체 마스크(bit14)도 해제하고, MSI-X Enable(bit15)을
     // 켠다.
-    static bool enableMsix(unsigned char bus, unsigned char device, unsigned char function, unsigned int tableIndex,
-                            unsigned int vector, unsigned int destApicId);
+    static bool enableMsix(uint8_t bus, uint8_t device, uint8_t function, uint32_t tableIndex,
+                            uint32_t vector, uint32_t destApicId);
 };
 
 }  // namespace kernel

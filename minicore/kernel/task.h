@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_TASK_H
 
 #include "libkenv/spinlock.h"
+#include "libkenv/types.h"
 
 namespace kernel {
 
@@ -29,8 +30,8 @@ enum class TaskClass {
 // affinityMask 비트 i가 1이면 코어 i에서 실행 가능 - "이 코어에서만"
 // (허용 목록)과 "이 코어에서는 불가"(제외 목록) 둘 다 전체 마스크에서
 // 시작해 비트를 세우거나/지우는 것으로 자연스럽게 표현된다.
-constexpr unsigned int kTaskAffinityAllCores = 0xFFFFFFFFU;
-constexpr unsigned long kTaskDefaultKernelStackSize = 8UL * 1024UL;  // 8KiB(QU-BA001D73)
+constexpr uint32_t kTaskAffinityAllCores = 0xFFFFFFFFU;
+constexpr uint64_t kTaskDefaultKernelStackSize = 8UL * 1024UL;  // 8KiB(QU-BA001D73)
 
 using TaskEntry = void (*)(void* arg);
 
@@ -42,14 +43,14 @@ struct Task {
     // push한 레지스터들의 맨 위를 가리킨다). init() 직후엔 아직 한
     // 번도 실행되지 않은 상태로 kTaskStartTrampoline에 진입하도록
     // 미리 꾸며 둔 스택을 가리킨다.
-    unsigned long savedRsp = 0;
+    uint64_t savedRsp = 0;
 
-    unsigned long kernelStackPhys = 0;  // PageFrameAllocator가 준 물리주소(해제 시 필요)
-    unsigned long kernelStackSize = 0;
+    uint64_t kernelStackPhys = 0;  // PageFrameAllocator가 준 물리주소(해제 시 필요)
+    uint64_t kernelStackSize = 0;
 
     TaskState state = TaskState::Ready;
     TaskClass taskClass = TaskClass::Normal;
-    unsigned int affinityMask = kTaskAffinityAllCores;
+    uint32_t affinityMask = kTaskAffinityAllCores;
 
     // 코어별 큐(폴백/lock-free 공용, PL-2D3184BC 4단계)가 쓰는 침습적
     // (intrusive) 다음-포인터 - 이 Task가 큐에 들어있을 때만 유효.
@@ -59,7 +60,7 @@ struct Task {
     // 상태로 초기화한다(트램폴린 스택 프레임 구성) - 스케줄러 큐에
     // 넣는 것은 호출부 책임(아직 스케줄러 자체가 없어 별도 API 없음).
     // Paging::init() 이후에만 호출 가능(direct map 필요).
-    void init(TaskEntry entry, void* arg, unsigned long stackSize = kTaskDefaultKernelStackSize);
+    void init(TaskEntry entry, void* arg, uint64_t stackSize = kTaskDefaultKernelStackSize);
 };
 
 // 현재 실행 흐름의 레지스터 상태를 저장하고 newRsp로 전환한다 -
@@ -68,7 +69,7 @@ struct Task {
 // 스위칭") - x86_64 System V 콜리세이브 레지스터(rbx/rbp/r12-r15)와
 // RFLAGS만 저장/복원한다(caller-saved 레지스터는 C++ 호출 규약상
 // 이미 호출부가 필요하면 자기 스택에 저장해 뒀을 것이므로 안 건드림).
-extern "C" void kContextSwitch(unsigned long* oldRspSlot, unsigned long newRsp);
+extern "C" void kContextSwitch(uint64_t* oldRspSlot, uint64_t newRsp);
 
 }  // namespace kernel
 

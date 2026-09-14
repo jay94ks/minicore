@@ -1,11 +1,12 @@
 #include "serial.h"
 
 #include "libkenv/spinlock.h"
+#include "libkenv/types.h"
 #include "x86_64/io_port.h"
 
 namespace {
 
-constexpr unsigned short kCom1 = 0x3F8;
+constexpr kernel::uint16_t kCom1 = 0x3F8;
 
 bool kIsTransmitEmpty() {
     return (kernel::arch::kInB(kCom1 + 5) & 0x20) != 0;
@@ -34,7 +35,7 @@ void Serial::init() {
 void Serial::putChar(char c) {
     while (!kIsTransmitEmpty()) {
     }
-    kernel::arch::kOutB(kCom1, static_cast<unsigned char>(c));
+    kernel::arch::kOutB(kCom1, static_cast<uint8_t>(c));
 }
 
 void Serial::write(const char* str) {
@@ -47,13 +48,13 @@ void Serial::write(const char* str) {
     }
 }
 
-void Serial::writeHex(unsigned long value) {
+void Serial::writeHex(uint64_t value) {
     // buf[0..1]="0x", buf[2..17]=16개 16진 자리, buf[18]='\0'(건드리지
     // 않음) - 여기 인덱스를 잘못 밀면 널 종단이 지워져 스택 밖까지
     // 읽어버린다(실측으로 걸림, 2026-09-14).
     char buf[19] = "0x0000000000000000";
     constexpr char kHexDigits[] = "0123456789abcdef";
-    for (int i = 0; i < 16; ++i) {
+    for (uint32_t i = 0; i < 16; ++i) {
         buf[17 - i] = kHexDigits[(value >> (i * 4)) & 0xF];
     }
     write(buf);

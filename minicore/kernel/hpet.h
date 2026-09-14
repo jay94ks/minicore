@@ -1,9 +1,11 @@
 #ifndef MINICORE_KERNEL_HPET_H
 #define MINICORE_KERNEL_HPET_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
-constexpr unsigned int kHpetVector = 0x22;  // isr.S 동적 벡터(33-254) 대역 중 하나 - Timer0(기본 시간원) 전용
+constexpr uint32_t kHpetVector = 0x22;  // isr.S 동적 벡터(33-254) 대역 중 하나 - Timer0(기본 시간원) 전용
 
 // HPET가 있으면 스케줄러 기본 시간원으로 쓰고, LAPIC 타이머는
 // fallback으로 유지한다(DS-D4E5C451, QU-8E14D3D9 확정). Timer0을
@@ -30,7 +32,7 @@ public:
 
     // 이 HPET가 제공하는 비교기(타이머) 개수 - General Capabilities의
     // NUM_TIM_CAP 필드+1. init() 이후에만 유효하다(그 전엔 0).
-    static unsigned int timerCount();
+    static uint32_t timerCount();
 
     // timerIndex(0 ~ timerCount()-1)번 비교기를 frequencyHz 주기
     // 인터럽트로 설정하고, IOAPIC의 Tn_INT_ROUTE_CAP 비트맵에서 실제로
@@ -39,8 +41,8 @@ public:
     // 의미는 동일하게 유지). 이미 켜져 있던 비교기를 다시 부르면 새
     // 설정으로 덮어쓴다. 실패(주기 모드 미지원/라우팅 가능한 GSI 없음/
     // destApicId가 IOAPIC 8비트 한도 초과 등)하면 false.
-    static bool enableTimer(unsigned int timerIndex, unsigned int frequencyHz, unsigned int vector,
-                             unsigned int destApicId);
+    static bool enableTimer(uint32_t timerIndex, uint32_t frequencyHz, uint32_t vector,
+                             uint32_t destApicId);
 };
 
 }  // namespace kernel

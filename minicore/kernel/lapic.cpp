@@ -1,46 +1,47 @@
 #include "lapic.h"
 
 #include "x86_64/io_port.h"
+#include "libkenv/types.h"
 #include "paging.h"
 
 namespace {
 
-constexpr unsigned long kIa32ApicBaseMsr = 0x1B;
-constexpr unsigned long kApicBaseEnableBit = 1UL << 11;
-constexpr unsigned long kApicBaseExtdBit = 1UL << 10;  // x2APIC 모드 전환 비트
-constexpr unsigned long kApicBaseAddrMask = 0x000FFFFFFFFFF000UL;
+constexpr kernel::uint64_t kIa32ApicBaseMsr = 0x1B;
+constexpr kernel::uint64_t kApicBaseEnableBit = 1UL << 11;
+constexpr kernel::uint64_t kApicBaseExtdBit = 1UL << 10;  // x2APIC 모드 전환 비트
+constexpr kernel::uint64_t kApicBaseAddrMask = 0x000FFFFFFFFFF000UL;
 
-constexpr unsigned int kSpuriousSoftwareEnableBit = 1U << 8;
+constexpr kernel::uint32_t kSpuriousSoftwareEnableBit = 1U << 8;
 
-constexpr unsigned int kX2ApicIcrMsr = 0x830;  // x2APIC은 ICR이 64비트 MSR 하나로 통합됨(xAPIC의 0x300+0x310과 다름)
+constexpr kernel::uint32_t kX2ApicIcrMsr = 0x830;  // x2APIC은 ICR이 64비트 MSR 하나로 통합됨(xAPIC의 0x300+0x310과 다름)
 
-constexpr unsigned int kLapicDivideBy16 = 0x3;
-constexpr unsigned int kLapicLvtPeriodicBit = 1U << 17;
+constexpr kernel::uint32_t kLapicDivideBy16 = 0x3;
+constexpr kernel::uint32_t kLapicLvtPeriodicBit = 1U << 17;
 
-constexpr unsigned short kPitChannel2Data = 0x42;
-constexpr unsigned short kPitCommand = 0x43;
-constexpr unsigned short kPitGateControl = 0x61;  // NMI/스피커 제어 포트
-constexpr unsigned int kPitFrequencyHz = 1193182;
-constexpr unsigned int kCalibrationMs = 10;
+constexpr kernel::uint16_t kPitChannel2Data = 0x42;
+constexpr kernel::uint16_t kPitCommand = 0x43;
+constexpr kernel::uint16_t kPitGateControl = 0x61;  // NMI/스피커 제어 포트
+constexpr kernel::uint32_t kPitFrequencyHz = 1193182;
+constexpr kernel::uint32_t kCalibrationMs = 10;
 
-constexpr unsigned int kIcrDeliveryModeInit = 5U << 8;
-constexpr unsigned int kIcrDeliveryModeStartup = 6U << 8;
-constexpr unsigned int kIcrLevelAssert = 1U << 14;
-constexpr unsigned int kIcrTriggerModeLevel = 1U << 15;
-constexpr unsigned int kIcrDeliveryStatusBit = 1U << 12;  // x2APIC엔 없음(전송이 항상 동기적으로 완료됨)
-constexpr unsigned int kXApicIcrHighDestShift = 24;
+constexpr kernel::uint32_t kIcrDeliveryModeInit = 5U << 8;
+constexpr kernel::uint32_t kIcrDeliveryModeStartup = 6U << 8;
+constexpr kernel::uint32_t kIcrLevelAssert = 1U << 14;
+constexpr kernel::uint32_t kIcrTriggerModeLevel = 1U << 15;
+constexpr kernel::uint32_t kIcrDeliveryStatusBit = 1U << 12;  // x2APIC엔 없음(전송이 항상 동기적으로 완료됨)
+constexpr kernel::uint32_t kXApicIcrHighDestShift = 24;
 
 // LAPIC MMIO는 direct map(WB 캐시)에 그대로 얹으면 안 된다 - 전용
 // 가상주소에 캐시 비활성으로 따로 매핑한다. (x2APIC 모드에서는 MMIO
 // 매핑 자체를 안 쓴다 - 전부 MSR 접근이라 필요 없음.)
-constexpr unsigned long kLapicVirtBase = 0xFFFF901000000000UL;
+constexpr kernel::uint64_t kLapicVirtBase = 0xFFFF901000000000UL;
 
 // x2APIC 레지스터는 MSR 0x800 + (MMIO 오프셋 >> 4)로 접근한다(Intel
 // SDM Vol.3 10.12.1) - ID 레지스터(MMIO 0x020)는 MSR 0x802.
-constexpr unsigned int kX2ApicMsrBase = 0x800;
-constexpr unsigned int kX2ApicIdMsr = 0x802;
+constexpr kernel::uint32_t kX2ApicMsrBase = 0x800;
+constexpr kernel::uint32_t kX2ApicIdMsr = 0x802;
 
-unsigned long gLapicVirtAddr = 0;
+kernel::uint64_t gLapicVirtAddr = 0;
 // xAPIC은 gLapicVirtAddr(!=0)로 준비 여부를 판단했지만, x2APIC은 MMIO
 // 매핑이 아예 없어 그 값이 0으로 남는다 - 그래서 준비 플래그를 따로
 // 둔다(PageFrameAllocator가 kCurrentNumaNode()에서 물어보는 대상).
@@ -57,9 +58,9 @@ bool gX2ApicDisabledByOption = false;
 // CPUID.01H:ECX 비트21 - x2APIC 지원 여부. ebx는 그냥 버리지만 cpuid는
 // eax/ebx/ecx/edx를 전부 건드리므로 전부 출력 제약에 넣어야 한다.
 bool kCpuidHasX2Apic() {
-    unsigned int eax, ebx, ecx, edx;
+    kernel::uint32_t eax, ebx, ecx, edx;
     asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
-    constexpr unsigned int kX2ApicCpuidBit = 1U << 21;
+    constexpr kernel::uint32_t kX2ApicCpuidBit = 1U << 21;
     return (ecx & kX2ApicCpuidBit) != 0;
 }
 
@@ -70,8 +71,8 @@ bool kCpuidHasX2Apic() {
 // 인터럽트(레거시 IRQ7/15)가 새어 나올 수 있기 때문이다 - 리매핑을
 // 안 해 두면 그게 기본 벡터(0x08=더블폴트 등)로 들어와 진짜 CPU
 // 예외로 오진될 수 있다(설계자 지적, 2026-09-14).
-constexpr unsigned char kPicMasterVectorBase = 0xE0;
-constexpr unsigned char kPicSlaveVectorBase = 0xE8;
+constexpr kernel::uint8_t kPicMasterVectorBase = 0xE0;
+constexpr kernel::uint8_t kPicSlaveVectorBase = 0xE8;
 
 void kDisableLegacyPic() {
     // 이 프로젝트는 PIC이 아니라 LAPIC/IOAPIC을 쓴다(설계자 지시 -
@@ -93,13 +94,13 @@ void kDisableLegacyPic() {
 // (0xFFFFFFFF)에서 카운트다운 중인 LAPIC 타이머가 얼마나 줄었는지
 // 재서 "그 시간 동안의 LAPIC 틱 수"를 구한다 - 그 값이 그대로 원하는
 // 주기(같은 kCalibrationMs)의 initial count가 된다.
-unsigned int kCalibrateLapicTicksPerWindow() {
-    const unsigned int pitCount = kPitFrequencyHz / (1000 / kCalibrationMs);
+kernel::uint32_t kCalibrateLapicTicksPerWindow() {
+    const kernel::uint32_t pitCount = kPitFrequencyHz / (1000 / kCalibrationMs);
 
     kernel::arch::kOutB(kPitGateControl, kernel::arch::kInB(kPitGateControl) & 0xFC);  // 게이트/스피커 끄기
     kernel::arch::kOutB(kPitCommand, 0xB0);                                     // 채널2, lobyte/hibyte, 모드0
-    kernel::arch::kOutB(kPitChannel2Data, static_cast<unsigned char>(pitCount & 0xFF));
-    kernel::arch::kOutB(kPitChannel2Data, static_cast<unsigned char>((pitCount >> 8) & 0xFF));
+    kernel::arch::kOutB(kPitChannel2Data, static_cast<kernel::uint8_t>(pitCount & 0xFF));
+    kernel::arch::kOutB(kPitChannel2Data, static_cast<kernel::uint8_t>((pitCount >> 8) & 0xFF));
 
     kernel::Lapic::writeRegister(kernel::kLapicRegDivideConfig, kLapicDivideBy16);
     kernel::Lapic::writeRegister(kernel::kLapicRegLvtTimer, kernel::kLapicLvtMaskedBit);
@@ -113,19 +114,19 @@ unsigned int kCalibrateLapicTicksPerWindow() {
 
     kernel::arch::kOutB(kPitGateControl, kernel::arch::kInB(kPitGateControl) & 0xFC);  // 게이트 끄기
 
-    const unsigned int current = kernel::Lapic::readRegister(kernel::kLapicRegCurrentCount);
+    const kernel::uint32_t current = kernel::Lapic::readRegister(kernel::kLapicRegCurrentCount);
     return 0xFFFFFFFFU - current;
 }
 
-unsigned long kReadMsr(unsigned long msr) {
-    unsigned int low, high;
+kernel::uint64_t kReadMsr(kernel::uint64_t msr) {
+    kernel::uint32_t low, high;
     asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
-    return (static_cast<unsigned long>(high) << 32) | low;
+    return (static_cast<kernel::uint64_t>(high) << 32) | low;
 }
 
-void kWriteMsr(unsigned long msr, unsigned long value) {
-    const auto low = static_cast<unsigned int>(value & 0xFFFFFFFF);
-    const auto high = static_cast<unsigned int>(value >> 32);
+void kWriteMsr(kernel::uint64_t msr, kernel::uint64_t value) {
+    const auto low = static_cast<kernel::uint32_t>(value & 0xFFFFFFFF);
+    const auto high = static_cast<kernel::uint32_t>(value >> 32);
     asm volatile("wrmsr" : : "a"(low), "d"(high), "c"(msr));
 }
 
@@ -137,7 +138,7 @@ void Lapic::init() {
     kDisableLegacyPic();
 
     gUseX2Apic = !gX2ApicDisabledByOption && kCpuidHasX2Apic();
-    unsigned long apicBaseMsr = kReadMsr(kIa32ApicBaseMsr);
+    kernel::uint64_t apicBaseMsr = kReadMsr(kIa32ApicBaseMsr);
 
     if (gUseX2Apic) {
         // x2APIC은 MSR 하나로 활성화+모드전환이 끝난다 - MMIO 매핑이
@@ -151,7 +152,7 @@ void Lapic::init() {
             apicBaseMsr |= kApicBaseEnableBit;
             kWriteMsr(kIa32ApicBaseMsr, apicBaseMsr);
         }
-        const unsigned long lapicPhysAddr = apicBaseMsr & kApicBaseAddrMask;
+        const kernel::uint64_t lapicPhysAddr = apicBaseMsr & kApicBaseAddrMask;
         Paging::mapPage(kLapicVirtBase, lapicPhysAddr, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
         gLapicVirtAddr = kLapicVirtBase;
     }
@@ -179,12 +180,12 @@ void Lapic::init() {
     setTaskPriority(0);
 }
 
-unsigned int Lapic::id() {
+kernel::uint32_t Lapic::id() {
     if (gUseX2Apic) {
         // x2APIC ID 레지스터는 MSR 하위 32비트에 ID가 그대로 들어있다
         // (xAPIC MMIO처럼 상위 8비트로 시프트되어 있지 않음 - 8비트
         // 제한도 없어져 32비트 전체를 ID로 쓸 수 있다).
-        return static_cast<unsigned int>(kReadMsr(kX2ApicIdMsr));
+        return static_cast<kernel::uint32_t>(kReadMsr(kX2ApicIdMsr));
     }
     return readRegister(kLapicRegId) >> 24;
 }
@@ -205,55 +206,55 @@ void Lapic::sendEoi() {
     writeRegister(kLapicRegEoi, 0);
 }
 
-void Lapic::setTaskPriority(unsigned int priority) {
+void Lapic::setTaskPriority(kernel::uint32_t priority) {
     writeRegister(kLapicRegTaskPriority, priority & 0xFF);
 }
 
-unsigned int Lapic::taskPriority() {
+kernel::uint32_t Lapic::taskPriority() {
     return readRegister(kLapicRegTaskPriority) & 0xFF;
 }
 
-unsigned int Lapic::processorPriority() {
+kernel::uint32_t Lapic::processorPriority() {
     return readRegister(kLapicRegProcessorPriority) & 0xFF;
 }
 
-void Lapic::setLogicalDestination(unsigned int logicalId) {
+void Lapic::setLogicalDestination(kernel::uint32_t logicalId) {
     if (gUseX2Apic) {
         return;  // x2APIC엔 LDR이 없음(항상 물리 목적지) - 무해하게 무시
     }
     writeRegister(kLapicRegLogicalDestination, logicalId << 24);
 }
 
-void Lapic::setDestinationFormat(unsigned int format) {
+void Lapic::setDestinationFormat(kernel::uint32_t format) {
     if (gUseX2Apic) {
         return;  // x2APIC엔 DFR이 없음 - 무해하게 무시
     }
     writeRegister(kLapicRegDestinationFormat, format);
 }
 
-void Lapic::writeRegister(unsigned int offset, unsigned int value) {
+void Lapic::writeRegister(kernel::uint32_t offset, kernel::uint32_t value) {
     if (gUseX2Apic) {
         kWriteMsr(kX2ApicMsrBase + (offset >> 4), value);
         return;
     }
-    *reinterpret_cast<volatile unsigned int*>(gLapicVirtAddr + offset) = value;
+    *reinterpret_cast<volatile kernel::uint32_t*>(gLapicVirtAddr + offset) = value;
 }
 
-unsigned int Lapic::readRegister(unsigned int offset) {
+kernel::uint32_t Lapic::readRegister(kernel::uint32_t offset) {
     if (gUseX2Apic) {
-        return static_cast<unsigned int>(kReadMsr(kX2ApicMsrBase + (offset >> 4)));
+        return static_cast<kernel::uint32_t>(kReadMsr(kX2ApicMsrBase + (offset >> 4)));
     }
-    return *reinterpret_cast<volatile unsigned int*>(gLapicVirtAddr + offset);
+    return *reinterpret_cast<volatile kernel::uint32_t*>(gLapicVirtAddr + offset);
 }
 
 namespace {
 
-void kSendIcr(unsigned int destApicId, unsigned int commandLow) {
+void kSendIcr(kernel::uint32_t destApicId, kernel::uint32_t commandLow) {
     if (gUseX2Apic) {
         // x2APIC: 목적지(전체 32비트) + 명령을 한 번의 64비트 MSR
         // 쓰기로 보낸다 - 스펙상 항상 동기적으로 완료되어 xAPIC의
         // delivery status 폴링이 필요 없다.
-        kWriteMsr(kX2ApicIcrMsr, (static_cast<unsigned long>(destApicId) << 32) | commandLow);
+        kWriteMsr(kX2ApicIcrMsr, (static_cast<kernel::uint64_t>(destApicId) << 32) | commandLow);
         return;
     }
     // xAPIC: 목적지를 먼저 ICR_HIGH에 쓰고(8비트, 물리모드), ICR_LOW를
@@ -267,25 +268,25 @@ void kSendIcr(unsigned int destApicId, unsigned int commandLow) {
 
 }  // namespace
 
-void Lapic::sendInitIpi(unsigned int destApicId, bool assert) {
-    unsigned int command = kIcrDeliveryModeInit | kIcrTriggerModeLevel;
+void Lapic::sendInitIpi(kernel::uint32_t destApicId, bool assert) {
+    kernel::uint32_t command = kIcrDeliveryModeInit | kIcrTriggerModeLevel;
     if (assert) {
         command |= kIcrLevelAssert;
     }
     kSendIcr(destApicId, command);
 }
 
-void Lapic::sendStartupIpi(unsigned int destApicId, unsigned int startupVector) {
-    const unsigned int command = kIcrDeliveryModeStartup | (startupVector & 0xFF);
+void Lapic::sendStartupIpi(kernel::uint32_t destApicId, kernel::uint32_t startupVector) {
+    const kernel::uint32_t command = kIcrDeliveryModeStartup | (startupVector & 0xFF);
     kSendIcr(destApicId, command);
 }
 
-void Lapic::startPeriodicTimer(unsigned int vector, unsigned int hz) {
+void Lapic::startPeriodicTimer(kernel::uint32_t vector, kernel::uint32_t hz) {
     // ticksPerWindow는 kCalibrationMs(고정 보정 창) 동안의 LAPIC 틱
     // 수다 - 원하는 주기(1000/hz ms)에 맞는 initial count로 환산한다.
-    const unsigned int ticksPerWindow = kCalibrateLapicTicksPerWindow();
-    const unsigned int ticksPerPeriod =
-        static_cast<unsigned int>((static_cast<unsigned long>(ticksPerWindow) * 1000UL) / (kCalibrationMs * hz));
+    const kernel::uint32_t ticksPerWindow = kCalibrateLapicTicksPerWindow();
+    const kernel::uint32_t ticksPerPeriod =
+        static_cast<kernel::uint32_t>((static_cast<kernel::uint64_t>(ticksPerWindow) * 1000UL) / (kCalibrationMs * hz));
 
     writeRegister(kLapicRegDivideConfig, kLapicDivideBy16);
     writeRegister(kLapicRegLvtTimer, vector | kLapicLvtPeriodicBit);

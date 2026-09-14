@@ -5,6 +5,7 @@
 #include "lapic.h"
 #include "libkenv/mem.h"
 #include "libkenv/spinlock.h"
+#include "libkenv/types.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "serial.h"
@@ -17,8 +18,8 @@ namespace {
 // 세그먼트를 게스트 메모리에 안 올려서(2026-09-14 실측), 링커는 이
 // 바이트를 :boot 세그먼트 안(이미 로드됨이 검증된 곳)에 저장해 두고,
 // startApCores()가 AP를 깨우기 전에 진짜 이 주소로 직접 복사한다.
-constexpr unsigned long kApTrampolineVaddr = 0x8000UL;
-constexpr unsigned int kApTrampolineVector = 0x08;
+constexpr kernel::uint64_t kApTrampolineVaddr = 0x8000UL;
+constexpr kernel::uint32_t kApTrampolineVector = 0x08;
 
 // linker.ld가 정의 - 트램폴린 바이트가 실제로 로드된 위치(물리=가상,
 // boot.S의 저지대 identity map 범위 안)와 그 크기.
@@ -26,34 +27,34 @@ extern "C" char ap_trampoline16_lma[];
 extern "C" char ap_trampoline16_size[];
 
 void kCopyApTrampolineToRuntimeAddress() {
-    const auto size = reinterpret_cast<unsigned long>(ap_trampoline16_size);
+    const auto size = reinterpret_cast<kernel::uint64_t>(ap_trampoline16_size);
     memcpy(reinterpret_cast<void*>(kApTrampolineVaddr), ap_trampoline16_lma, size);
 }
 
 // AP 하나당 스택 크기(4KiB << 3 = 32KiB) - 아직 스레드/프로세스가
 // 없어 idle 루프만 도는 수준이라 넉넉히 잡아도 충분하다.
-constexpr unsigned int kApStackOrder = 3;
+constexpr kernel::uint32_t kApStackOrder = 3;
 
 // Timer가 100Hz(10ms/틱)이므로 50틱 = 500ms - 실제 AP 기동은 보통
 // 수 ms면 끝나서 넉넉한 여유를 둔 값이다.
-constexpr unsigned long kApReadyTimeoutTicks = 50;
+constexpr kernel::uint64_t kApReadyTimeoutTicks = 50;
 
 kernel::AtomicU32 gApStartedCount;
 
 // ap_trampoline.S의 BSP-AP 핸드오프 스크래치 - Smp::startApCores가
 // SIPI를 보내기 직전에 채운다(순차 기동이라 공유해도 안전).
-extern "C" unsigned long ap_boot_stack_top;
-extern "C" unsigned int ap_boot_index;
+extern "C" kernel::uint64_t ap_boot_stack_top;
+extern "C" kernel::uint32_t ap_boot_index;
 
 void kBusyWaitOneTick() {
-    const unsigned long start = kernel::Timer::tickCount();
+    const kernel::uint64_t start = kernel::Timer::tickCount();
     while (kernel::Timer::tickCount() == start) {
         asm volatile("pause");
     }
 }
 
-bool kWaitApReady(unsigned int expectedCount) {
-    const unsigned long deadline = kernel::Timer::tickCount() + kApReadyTimeoutTicks;
+bool kWaitApReady(kernel::uint32_t expectedCount) {
+    const kernel::uint64_t deadline = kernel::Timer::tickCount() + kApReadyTimeoutTicks;
     while (kernel::Timer::tickCount() < deadline) {
         if (gApStartedCount.load() >= expectedCount) {
             return true;
@@ -71,7 +72,7 @@ bool kWaitApReady(unsigned int expectedCount) {
 // 전혀 하지 않는다 - BSP가 이미 살아있는 커널 상태를 그대로 공유해서
 // 쓴다. 이 함수는 절대 반환하지 않는다(ap_trampoline.S가 반환 시
 // hlt 루프로 방어하긴 하지만).
-extern "C" void kApMain(unsigned int apIndex) {
+extern "C" void kApMain(kernel::uint32_t apIndex) {
     kernel::Idt::reloadOnThisCore();
     kernel::Lapic::init();
 
@@ -93,17 +94,17 @@ namespace kernel {
 void Smp::startApCores() {
     kCopyApTrampolineToRuntimeAddress();
 
-    const unsigned int bspApicId = Lapic::id();
-    const unsigned int cpuCount = Acpi::cpuCount();
-    unsigned int expectedStarted = 0;
+    const uint32_t bspApicId = Lapic::id();
+    const uint32_t cpuCount = Acpi::cpuCount();
+    uint32_t expectedStarted = 0;
 
-    for (unsigned int i = 0; i < cpuCount; ++i) {
-        const unsigned int apicId = Acpi::cpuApicId(i);
+    for (uint32_t i = 0; i < cpuCount; ++i) {
+        const uint32_t apicId = Acpi::cpuApicId(i);
         if (apicId == bspApicId) {
             continue;  // 자기 자신(BSP)은 건너뜀
         }
 
-        const unsigned long stackPhys = PageFrameAllocator::allocOrder(kApStackOrder);
+        const uint64_t stackPhys = PageFrameAllocator::allocOrder(kApStackOrder);
         if (!stackPhys) {
             Serial::write("minicore: SMP - AP stack alloc failed, skip apic_id=");
             Serial::writeHex(apicId);
@@ -145,7 +146,7 @@ void Smp::startApCores() {
     Serial::write("\n");
 }
 
-unsigned int Smp::startedCount() {
+uint32_t Smp::startedCount() {
     return gApStartedCount.load();
 }
 

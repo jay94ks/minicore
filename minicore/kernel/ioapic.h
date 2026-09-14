@@ -1,6 +1,8 @@
 #ifndef MINICORE_KERNEL_IOAPIC_H
 #define MINICORE_KERNEL_IOAPIC_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
 // ACPI MADT가 알려주는 IOAPIC들(Acpi::ioApicCount()/ioApicAddress())을
@@ -40,16 +42,16 @@ public:
     // gsiBase+최대 리다이렉션 엔트리 수) 구간에도 안 들어감), 담당
     // IOAPIC은 찾았지만 그 안에서 지역 인덱스가 IOAPICVER가 알려주는
     // 최대 엔트리 수를 넘어도 false.
-    static bool setRedirection(unsigned int gsi, unsigned int vector, unsigned int destApicId,
-                                unsigned int polarity, unsigned int triggerMode);
+    static bool setRedirection(uint32_t gsi, uint32_t vector, uint32_t destApicId,
+                                uint32_t polarity, uint32_t triggerMode);
 
     // ISA IRQ(레거시 핀 번호, 0-15) 하나를 라우팅하는 편의 함수 -
     // Acpi::resolveIsaIrq로 실제 GSI/극성/트리거를 구해 위
     // setRedirection을 호출한다.
-    static bool setRedirectionForIsaIrq(unsigned int isaIrq, unsigned int vector, unsigned int destApicId);
+    static bool setRedirectionForIsaIrq(uint32_t isaIrq, uint32_t vector, uint32_t destApicId);
 
-    static void mask(unsigned int gsi);
-    static void unmask(unsigned int gsi);
+    static void mask(uint32_t gsi);
+    static void unmask(uint32_t gsi);
 };
 
 }  // namespace kernel

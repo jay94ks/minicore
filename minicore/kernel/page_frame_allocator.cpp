@@ -3,18 +3,19 @@
 #include "acpi.h"
 #include "lapic.h"
 #include "libkenv/spinlock.h"
+#include "libkenv/types.h"
 #include "paging.h"
 
 namespace {
 
-constexpr unsigned long kPageSize = 4096;
-constexpr unsigned int kMaxOrder = 10;  // 4KiB << 10 = 4MiB 최대 블록
+constexpr kernel::uint64_t kPageSize = 4096;
+constexpr kernel::uint32_t kMaxOrder = 10;  // 4KiB << 10 = 4MiB 최대 블록
 // Paging의 direct physical map이 커버하는 범위와 맞춘다(PL-99562483,
 // 2026-09-14 - 예전엔 boot.S가 정적으로 identity map한 1GiB로
 // 제한했었다). 그 이상(4GiB 초과) RAM을 쓰려면 Paging의 direct map
 // PDPT 엔트리를 먼저 늘려야 한다.
-constexpr unsigned long kMappedLimit = 4UL << 30;        // 4GiB
-constexpr unsigned long kLowReservedEnd = 0x200000;      // 2MiB: BIOS 영역 + 커널 자신
+constexpr kernel::uint64_t kMappedLimit = 4UL << 30;        // 4GiB
+constexpr kernel::uint64_t kLowReservedEnd = 0x200000;      // 2MiB: BIOS 영역 + 커널 자신
 
 // next는 다음 블록의 "물리주소"다(가상 포인터 아님) - 0이면 끝.
 // 널 페이지(물리주소 0)는 kLowReservedEnd 블랭킷 예약에 항상 포함돼
@@ -23,12 +24,12 @@ constexpr unsigned long kLowReservedEnd = 0x200000;      // 2MiB: BIOS 영역 + 
 // 넘어서도(PL-99562483) 값 자체는 그대로 유효하다 - 실제로 읽고
 // 쓸 때만 kPhysToVirt를 거친다.
 struct FreeBlock {
-    unsigned long next;
+    kernel::uint64_t next;
 };
 
 struct Node {
-    unsigned long freeListHeads[kMaxOrder + 1];  // 물리주소, 0 = 비어있음
-    unsigned long freePageCount;
+    kernel::uint64_t freeListHeads[kMaxOrder + 1];  // 물리주소, 0 = 비어있음
+    kernel::uint64_t freePageCount;
     // 이 노드의 free list를 건드리는 공개 API(allocOrderOnNode/
     // freeOrder) 진입점 하나당 한 번만 잠근다 - kObtainBlock의 내부
     // 재귀는 이미 잠긴 상태로 도는 거라 다시 잠그지 않는다(SMP 0단계,
@@ -37,27 +38,27 @@ struct Node {
 };
 
 Node gNodes[kernel::kPfaMaxNumaNodes];
-unsigned int gNodeCount = 1;
+kernel::uint32_t gNodeCount = 1;
 
-unsigned long kAlignUp(unsigned long value, unsigned long align) {
+kernel::uint64_t kAlignUp(kernel::uint64_t value, kernel::uint64_t align) {
     return (value + align - 1) & ~(align - 1);
 }
 
-unsigned long kAlignDown(unsigned long value, unsigned long align) {
+kernel::uint64_t kAlignDown(kernel::uint64_t value, kernel::uint64_t align) {
     return value & ~(align - 1);
 }
 
-FreeBlock* kAsBlock(unsigned long physAddr) {
+FreeBlock* kAsBlock(kernel::uint64_t physAddr) {
     return reinterpret_cast<FreeBlock*>(kernel::kPhysToVirt(physAddr));
 }
 
-void kInsertBlock(Node& node, unsigned long addr, unsigned int order) {
+void kInsertBlock(Node& node, kernel::uint64_t addr, kernel::uint32_t order) {
     kAsBlock(addr)->next = node.freeListHeads[order];
     node.freeListHeads[order] = addr;
 }
 
-bool kTryRemoveBlock(Node& node, unsigned long addr, unsigned int order) {
-    unsigned long* cur = &node.freeListHeads[order];
+bool kTryRemoveBlock(Node& node, kernel::uint64_t addr, kernel::uint32_t order) {
+    kernel::uint64_t* cur = &node.freeListHeads[order];
     while (*cur) {
         if (*cur == addr) {
             *cur = kAsBlock(*cur)->next;
@@ -68,8 +69,8 @@ bool kTryRemoveBlock(Node& node, unsigned long addr, unsigned int order) {
     return false;
 }
 
-unsigned long kPopBlock(Node& node, unsigned int order) {
-    const unsigned long addr = node.freeListHeads[order];
+kernel::uint64_t kPopBlock(Node& node, kernel::uint32_t order) {
+    const kernel::uint64_t addr = node.freeListHeads[order];
     if (!addr) {
         return 0;
     }
@@ -77,7 +78,7 @@ unsigned long kPopBlock(Node& node, unsigned int order) {
     return addr;
 }
 
-unsigned long kBuddyAddr(unsigned long addr, unsigned int order) {
+kernel::uint64_t kBuddyAddr(kernel::uint64_t addr, kernel::uint32_t order) {
     return addr ^ (kPageSize << order);
 }
 
@@ -85,36 +86,36 @@ unsigned long kBuddyAddr(unsigned long addr, unsigned int order) {
 // 재귀적으로 얻어 반으로 쪼개고(짝 하나는 그 order 리스트에 도로
 // 넣음), 전체 free 카운트는 여기서 건드리지 않는다(쪼개도 총량은
 // 그대로라서 - 카운트 조정은 공개 API에서 한 번만 한다).
-unsigned long kObtainBlock(Node& node, unsigned int order) {
+kernel::uint64_t kObtainBlock(Node& node, kernel::uint32_t order) {
     if (order > kMaxOrder) {
         return 0;
     }
-    unsigned long addr = kPopBlock(node, order);
+    kernel::uint64_t addr = kPopBlock(node, order);
     if (addr) {
         return addr;
     }
-    unsigned long bigger = kObtainBlock(node, order + 1);
+    kernel::uint64_t bigger = kObtainBlock(node, order + 1);
     if (!bigger) {
         return 0;
     }
-    unsigned long buddy = bigger + (kPageSize << order);
+    kernel::uint64_t buddy = bigger + (kPageSize << order);
     kInsertBlock(node, buddy, order);
     return bigger;
 }
 
-void kAddRegionToBuddy(Node& node, unsigned long start, unsigned long end) {
+void kAddRegionToBuddy(Node& node, kernel::uint64_t start, kernel::uint64_t end) {
     start = kAlignUp(start, kPageSize);
     end = kAlignDown(end, kPageSize);
     while (start < end) {
-        unsigned int order = kMaxOrder;
+        kernel::uint32_t order = kMaxOrder;
         while (order > 0) {
-            const unsigned long blockSize = kPageSize << order;
+            const kernel::uint64_t blockSize = kPageSize << order;
             if ((start % blockSize) == 0 && (start + blockSize) <= end) {
                 break;
             }
             --order;
         }
-        const unsigned long blockSize = kPageSize << order;
+        const kernel::uint64_t blockSize = kPageSize << order;
         kInsertBlock(node, start, order);
         node.freePageCount += (1UL << order);
         start += blockSize;
@@ -122,8 +123,8 @@ void kAddRegionToBuddy(Node& node, unsigned long start, unsigned long end) {
 }
 
 struct Range {
-    unsigned long start;
-    unsigned long end;
+    kernel::uint64_t start;
+    kernel::uint64_t end;
 };
 
 constexpr int kMaxRanges = 64;
@@ -131,7 +132,7 @@ constexpr int kMaxRanges = 64;
 // ranges[0..count)에서 [resStart, resEnd)와 겹치는 부분을 전부
 // 잘라낸다 - 겹치는 range는 앞쪽 조각으로 축소(또는 완전히 없어짐)
 // 되고, 뒤쪽 조각이 남으면 목록 끝에 새로 추가한다.
-void kSubtractReservedFromList(Range* ranges, int& count, unsigned long resStart, unsigned long resEnd) {
+void kSubtractReservedFromList(Range* ranges, int& count, kernel::uint64_t resStart, kernel::uint64_t resEnd) {
     if (resStart >= resEnd) {
         return;
     }
@@ -155,15 +156,15 @@ void kSubtractReservedFromList(Range* ranges, int& count, unsigned long resStart
 // 어떤 물리주소가 어느 노드에 속하는지 나중에(freePage 시점에) 다시
 // 찾을 수 있도록 배정 결과를 기록해 둔다.
 struct RangeNode {
-    unsigned long start;
-    unsigned long end;
-    unsigned int node;
+    kernel::uint64_t start;
+    kernel::uint64_t end;
+    kernel::uint32_t node;
 };
 constexpr int kMaxRangeNodes = 128;
 RangeNode gRangeNodeMap[kMaxRangeNodes];
 int gRangeNodeMapCount = 0;
 
-void kAssignRangeToNode(unsigned long start, unsigned long end, unsigned int node) {
+void kAssignRangeToNode(kernel::uint64_t start, kernel::uint64_t end, kernel::uint32_t node) {
     if (start >= end) {
         return;
     }
@@ -182,13 +183,13 @@ void kAssignRangeToNode(unsigned long start, unsigned long end, unsigned int nod
 // (자기 자신을 매핑하려고 이 할당자를 부르는 경우 포함 - 닭-달걀
 // 문제, 2026-09-14 실측으로 발견) id()를 부르지 않고 그냥 노드0을
 // 쓴다 - BSP는 관례상 거의 항상 노드0이라 안전한 기본값이다.
-unsigned int kCurrentNumaNode() {
+kernel::uint32_t kCurrentNumaNode() {
     if (!kernel::Lapic::isReady()) {
         return 0;
     }
-    const unsigned int myApicId = kernel::Lapic::id();
-    const unsigned int cpuCount = kernel::Acpi::cpuCount();
-    for (unsigned int i = 0; i < cpuCount; ++i) {
+    const kernel::uint32_t myApicId = kernel::Lapic::id();
+    const kernel::uint32_t cpuCount = kernel::Acpi::cpuCount();
+    for (kernel::uint32_t i = 0; i < cpuCount; ++i) {
         if (kernel::Acpi::cpuApicId(i) == myApicId) {
             return kernel::Acpi::cpuNumaNode(i);
         }
@@ -196,7 +197,7 @@ unsigned int kCurrentNumaNode() {
     return 0;
 }
 
-unsigned int kNodeForAddress(unsigned long addr) {
+kernel::uint32_t kNodeForAddress(kernel::uint64_t addr) {
     for (int i = 0; i < gRangeNodeMapCount; ++i) {
         if (addr >= gRangeNodeMap[i].start && addr < gRangeNodeMap[i].end) {
             return gRangeNodeMap[i].node;
@@ -209,24 +210,24 @@ unsigned int kNodeForAddress(unsigned long addr) {
 // 어떤 어피니티 엔트리에도 안 걸리는 부분은 노드0으로 떨어진다
 // (정보 없음 fallback, kSubtractReservedFromList와 같은 조각내기
 // 패턴을 "빼기"가 아니라 "겹치는 부분 추출"로 재사용한다).
-void kPartitionRangeByAffinity(unsigned long rangeStart, unsigned long rangeEnd) {
+void kPartitionRangeByAffinity(kernel::uint64_t rangeStart, kernel::uint64_t rangeEnd) {
     Range remaining[kMaxRanges];
     int remainingCount = 1;
     remaining[0] = {rangeStart, rangeEnd};
 
-    const unsigned int affinityCount = kernel::Acpi::memoryAffinityCount();
-    for (unsigned int a = 0; a < affinityCount && remainingCount > 0; ++a) {
-        const unsigned long affBase = kernel::Acpi::memoryAffinityBase(a);
-        const unsigned long affEnd = affBase + kernel::Acpi::memoryAffinityLength(a);
-        const unsigned int affNode = kernel::Acpi::memoryAffinityNode(a);
+    const kernel::uint32_t affinityCount = kernel::Acpi::memoryAffinityCount();
+    for (kernel::uint32_t a = 0; a < affinityCount && remainingCount > 0; ++a) {
+        const kernel::uint64_t affBase = kernel::Acpi::memoryAffinityBase(a);
+        const kernel::uint64_t affEnd = affBase + kernel::Acpi::memoryAffinityLength(a);
+        const kernel::uint32_t affNode = kernel::Acpi::memoryAffinityNode(a);
 
         Range next[kMaxRanges];
         int nextCount = 0;
         for (int i = 0; i < remainingCount; ++i) {
-            const unsigned long pStart = remaining[i].start;
-            const unsigned long pEnd = remaining[i].end;
-            const unsigned long ovStart = pStart > affBase ? pStart : affBase;
-            const unsigned long ovEnd = pEnd < affEnd ? pEnd : affEnd;
+            const kernel::uint64_t pStart = remaining[i].start;
+            const kernel::uint64_t pEnd = remaining[i].end;
+            const kernel::uint64_t ovStart = pStart > affBase ? pStart : affBase;
+            const kernel::uint64_t ovEnd = pEnd < affEnd ? pEnd : affEnd;
             if (ovStart < ovEnd) {
                 kAssignRangeToNode(ovStart, ovEnd, affNode);
                 if (pStart < ovStart && nextCount < kMaxRanges) {
@@ -254,9 +255,9 @@ void kPartitionRangeByAffinity(unsigned long rangeStart, unsigned long rangeEnd)
 
 namespace kernel {
 
-void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCount,
-                               unsigned long kernelPhysStart, unsigned long kernelPhysEnd,
-                               unsigned long startInfoAddr, unsigned long startInfoSize) {
+void PageFrameAllocator::init(const HvmMemmapEntry* memmap, uint32_t entryCount,
+                               uint64_t kernelPhysStart, uint64_t kernelPhysEnd,
+                               uint64_t startInfoAddr, uint64_t startInfoSize) {
     gNodeCount = Acpi::numaNodeCount();
     if (gNodeCount == 0) {
         gNodeCount = 1;
@@ -268,12 +269,12 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCo
     Range ranges[kMaxRanges];
     int count = 0;
 
-    for (unsigned int i = 0; i < entryCount; ++i) {
-        if (memmap[i].type != static_cast<unsigned int>(HvmMemmapType::kUsable)) {
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        if (memmap[i].type != static_cast<uint32_t>(HvmMemmapType::kUsable)) {
             continue;
         }
-        unsigned long start = memmap[i].addr;
-        unsigned long end = start + memmap[i].size;
+        uint64_t start = memmap[i].addr;
+        uint64_t end = start + memmap[i].size;
         if (end > kMappedLimit) {
             end = kMappedLimit;
         }
@@ -285,8 +286,8 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCo
         }
     }
 
-    const auto memmapArrayAddr = reinterpret_cast<unsigned long>(memmap);
-    const auto memmapArrayEnd = memmapArrayAddr + static_cast<unsigned long>(entryCount) * sizeof(HvmMemmapEntry);
+    const auto memmapArrayAddr = reinterpret_cast<uint64_t>(memmap);
+    const auto memmapArrayEnd = memmapArrayAddr + static_cast<uint64_t>(entryCount) * sizeof(HvmMemmapEntry);
 
     kSubtractReservedFromList(ranges, count, 0, kLowReservedEnd);
     kSubtractReservedFromList(ranges, count, kernelPhysStart, kernelPhysEnd);
@@ -306,28 +307,28 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, unsigned int entryCo
     }
 }
 
-unsigned long PageFrameAllocator::allocOrderOnNode(unsigned int node, unsigned int order) {
+uint64_t PageFrameAllocator::allocOrderOnNode(uint32_t node, uint32_t order) {
     if (node >= gNodeCount) {
         return 0;
     }
     Node& n = gNodes[node];
     SpinlockGuard guard(n.lock);
-    const unsigned long addr = kObtainBlock(n, order);
+    const uint64_t addr = kObtainBlock(n, order);
     if (addr) {
         n.freePageCount -= (1UL << order);
     }
     return addr;
 }
 
-unsigned long PageFrameAllocator::allocOrder(unsigned int order) {
-    const unsigned int preferredNode = kCurrentNumaNode();
-    unsigned long addr = allocOrderOnNode(preferredNode, order);
+uint64_t PageFrameAllocator::allocOrder(uint32_t order) {
+    const uint32_t preferredNode = kCurrentNumaNode();
+    uint64_t addr = allocOrderOnNode(preferredNode, order);
     if (addr) {
         return addr;
     }
     // 선호 노드에 없으면 다른 노드를 순서대로 뒤진다(NUMA 지역성보다
     // 할당 성공이 우선 - v1은 그 이상의 정책이 없다).
-    for (unsigned int node = 0; node < gNodeCount; ++node) {
+    for (uint32_t node = 0; node < gNodeCount; ++node) {
         if (node == preferredNode) {
             continue;
         }
@@ -339,13 +340,13 @@ unsigned long PageFrameAllocator::allocOrder(unsigned int order) {
     return 0;
 }
 
-void PageFrameAllocator::freeOrder(unsigned long physAddr, unsigned int order) {
-    const unsigned int node = kNodeForAddress(physAddr);
+void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
+    const uint32_t node = kNodeForAddress(physAddr);
     Node& n = gNodes[node];
     SpinlockGuard guard(n.lock);
     n.freePageCount += (1UL << order);
     while (order < kMaxOrder) {
-        const unsigned long buddy = kBuddyAddr(physAddr, order);
+        const uint64_t buddy = kBuddyAddr(physAddr, order);
         if (!kTryRemoveBlock(n, buddy, order)) {
             break;
         }
@@ -355,31 +356,31 @@ void PageFrameAllocator::freeOrder(unsigned long physAddr, unsigned int order) {
     kInsertBlock(n, physAddr, order);
 }
 
-unsigned long PageFrameAllocator::allocPage() {
+uint64_t PageFrameAllocator::allocPage() {
     return allocOrder(0);
 }
 
-unsigned long PageFrameAllocator::allocPageOnNode(unsigned int node) {
+uint64_t PageFrameAllocator::allocPageOnNode(uint32_t node) {
     return allocOrderOnNode(node, 0);
 }
 
-void PageFrameAllocator::freePage(unsigned long physAddr) {
+void PageFrameAllocator::freePage(uint64_t physAddr) {
     freeOrder(physAddr, 0);
 }
 
-unsigned long PageFrameAllocator::freePageCount() {
-    unsigned long total = 0;
-    for (unsigned int i = 0; i < gNodeCount; ++i) {
+uint64_t PageFrameAllocator::freePageCount() {
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < gNodeCount; ++i) {
         total += gNodes[i].freePageCount;
     }
     return total;
 }
 
-unsigned int PageFrameAllocator::numaNodeCount() {
+uint32_t PageFrameAllocator::numaNodeCount() {
     return gNodeCount;
 }
 
-unsigned long PageFrameAllocator::freePageCountOnNode(unsigned int node) {
+uint64_t PageFrameAllocator::freePageCountOnNode(uint32_t node) {
     return node < gNodeCount ? gNodes[node].freePageCount : 0;
 }
 

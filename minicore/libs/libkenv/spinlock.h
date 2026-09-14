@@ -1,6 +1,8 @@
 #ifndef MINICORE_LIBS_LIBKENV_SPINLOCK_H
 #define MINICORE_LIBS_LIBKENV_SPINLOCK_H
 
+#include "libkenv/types.h"
+
 // libkenv: SMP AP 기동(PL-65C20380) 0단계로 확정된 최소 동시성
 // 프리미티브(설계자 지시, QU-B97FDA44, 2026-09-14) - 코어가 2개
 // 이상 실제로 돌기 전에 공유 자료구조(Serial, PageFrameAllocator의
@@ -27,7 +29,7 @@ public:
     }
 
 private:
-    unsigned char _locked = 0;
+    uint8_t _locked = 0;
 };
 
 // lock()/unlock()을 스코프에 맞춰 자동으로 걸고 푸는 RAII 래퍼.
@@ -46,22 +48,22 @@ private:
 // SMP 기동 동기화(예: "몇 개 AP가 떴는지")에 쓸 최소 원자 카운터.
 class AtomicU32 {
 public:
-    unsigned int load() const {
+    uint32_t load() const {
         return __atomic_load_n(&_value, __ATOMIC_ACQUIRE);
     }
 
-    void store(unsigned int value) {
+    void store(uint32_t value) {
         __atomic_store_n(&_value, value, __ATOMIC_RELEASE);
     }
 
-    unsigned int fetchAdd(unsigned int delta) {
+    uint32_t fetchAdd(uint32_t delta) {
         return __atomic_fetch_add(&_value, delta, __ATOMIC_ACQ_REL);
     }
 
     // kernel::string(libkenv/string.h)의 참조 카운트 감소에 쓴다 -
     // 반환값은 감소 전 값(호출부가 "이번에 0으로 떨어졌는지"를
     // fetchSub(1)==1로 판정할 수 있게).
-    unsigned int fetchSub(unsigned int delta) {
+    uint32_t fetchSub(uint32_t delta) {
         return __atomic_fetch_sub(&_value, delta, __ATOMIC_ACQ_REL);
     }
 
@@ -69,12 +71,12 @@ public:
     // *expected와 현재 값이 같으면 desired로 바꾸고 true, 다르면
     // *expected를 현재 값으로 갱신하고 false(표준 CAS 관례, weak라
     // 스퓨리어스 실패 가능 - 루프 안에서 재시도하는 용도로만 쓸 것).
-    bool compareExchange(unsigned int& expected, unsigned int desired) {
+    bool compareExchange(uint32_t& expected, uint32_t desired) {
         return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
 
 private:
-    unsigned int _value = 0;
+    uint32_t _value = 0;
 };
 
 // lock-free 자료구조가 포인터를 원자적으로 교체할 때 쓴다(예: 큐의

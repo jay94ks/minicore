@@ -5,6 +5,7 @@
 #include "interrupt_frame.h"
 #include "ioapic.h"
 #include "lapic.h"
+#include "libkenv/types.h"
 #include "paging.h"
 #include "timer.h"
 
@@ -12,48 +13,48 @@ namespace {
 
 // LAPIC(kLapicVirtBase)/IOAPIC(kLapicVirtBase+0x1000) 다음 4KiB
 // 페이지 - 셋 다 서로 다른 물리 프레임을 가리키는 독립된 MMIO 매핑.
-constexpr unsigned long kHpetVirtBase = 0xFFFF901000002000UL;
+constexpr kernel::uint64_t kHpetVirtBase = 0xFFFF901000002000UL;
 
-constexpr unsigned int kRegGeneralCapabilities = 0x000;  // 64비트, 읽기전용
-constexpr unsigned int kRegGeneralConfig = 0x010;        // 64비트
-constexpr unsigned int kRegGeneralIntStatus = 0x020;     // 64비트 - 레벨 트리거 비교기 ack용
-constexpr unsigned int kTimerRegStride = 0x20;
-constexpr unsigned int kRegTimer0ConfigBase = 0x100;      // 64비트 - N번은 +0x20*N
-constexpr unsigned int kRegTimer0ComparatorBase = 0x108;  // 64비트 - N번은 +0x20*N
+constexpr kernel::uint32_t kRegGeneralCapabilities = 0x000;  // 64비트, 읽기전용
+constexpr kernel::uint32_t kRegGeneralConfig = 0x010;        // 64비트
+constexpr kernel::uint32_t kRegGeneralIntStatus = 0x020;     // 64비트 - 레벨 트리거 비교기 ack용
+constexpr kernel::uint32_t kTimerRegStride = 0x20;
+constexpr kernel::uint32_t kRegTimer0ConfigBase = 0x100;      // 64비트 - N번은 +0x20*N
+constexpr kernel::uint32_t kRegTimer0ComparatorBase = 0x108;  // 64비트 - N번은 +0x20*N
 
-constexpr unsigned long kGeneralConfigEnableBit = 1UL << 0;
+constexpr kernel::uint64_t kGeneralConfigEnableBit = 1UL << 0;
 
-constexpr unsigned long kTimerConfigTypeLevelBit = 1UL << 1;  // 0=edge, 1=level
-constexpr unsigned long kTimerConfigIntEnableBit = 1UL << 2;
-constexpr unsigned long kTimerConfigPeriodicBit = 1UL << 3;
-constexpr unsigned long kTimerConfigPeriodicCapableBit = 1UL << 4;
-constexpr unsigned long kTimerConfigValSetBit = 1UL << 6;
-constexpr unsigned int kTimerConfigIntRouteShift = 9;
-constexpr unsigned long kTimerConfigIntRouteMask = 0x1FUL << kTimerConfigIntRouteShift;
-constexpr unsigned int kTimerConfigRouteCapShift = 32;  // Tn_INT_ROUTE_CAP - 상위 32비트 비트맵
+constexpr kernel::uint64_t kTimerConfigTypeLevelBit = 1UL << 1;  // 0=edge, 1=level
+constexpr kernel::uint64_t kTimerConfigIntEnableBit = 1UL << 2;
+constexpr kernel::uint64_t kTimerConfigPeriodicBit = 1UL << 3;
+constexpr kernel::uint64_t kTimerConfigPeriodicCapableBit = 1UL << 4;
+constexpr kernel::uint64_t kTimerConfigValSetBit = 1UL << 6;
+constexpr kernel::uint32_t kTimerConfigIntRouteShift = 9;
+constexpr kernel::uint64_t kTimerConfigIntRouteMask = 0x1FUL << kTimerConfigIntRouteShift;
+constexpr kernel::uint32_t kTimerConfigRouteCapShift = 32;  // Tn_INT_ROUTE_CAP - 상위 32비트 비트맵
 
-constexpr unsigned int kCapsNumTimShift = 8;
-constexpr unsigned int kCapsNumTimMask = 0x1F;  // NUM_TIM_CAP: 실제 타이머 개수 - 1
+constexpr kernel::uint32_t kCapsNumTimShift = 8;
+constexpr kernel::uint32_t kCapsNumTimMask = 0x1F;  // NUM_TIM_CAP: 실제 타이머 개수 - 1
 
-constexpr unsigned long kFemtosecondsPerSecond = 1000000000000000UL;
-constexpr unsigned int kDefaultTargetHz = 100;  // timer.cpp의 PIT/LAPIC 경로와 같은 틱 레이트
-constexpr unsigned int kMaxHpetTimers = 32;      // NUM_TIM_CAP 필드가 5비트라 이 이상은 불가능
-constexpr unsigned int kInvalidTimerIndex = 0xFFFFFFFFU;
+constexpr kernel::uint64_t kFemtosecondsPerSecond = 1000000000000000UL;
+constexpr kernel::uint32_t kDefaultTargetHz = 100;  // timer.cpp의 PIT/LAPIC 경로와 같은 틱 레이트
+constexpr kernel::uint32_t kMaxHpetTimers = 32;      // NUM_TIM_CAP 필드가 5비트라 이 이상은 불가능
+constexpr kernel::uint32_t kInvalidTimerIndex = 0xFFFFFFFFU;
 
-unsigned long gHpetVirtAddr = 0;
-unsigned int gTimerCount = 0;
-unsigned int gVectorToTimerIndex[256];  // 초기화는 Hpet::init()에서 전부 kInvalidTimerIndex로
+kernel::uint64_t gHpetVirtAddr = 0;
+kernel::uint32_t gTimerCount = 0;
+kernel::uint32_t gVectorToTimerIndex[256];  // 초기화는 Hpet::init()에서 전부 kInvalidTimerIndex로
 
-unsigned long kReadReg(unsigned int offset) {
-    return *reinterpret_cast<volatile unsigned long*>(gHpetVirtAddr + offset);
+kernel::uint64_t kReadReg(kernel::uint32_t offset) {
+    return *reinterpret_cast<volatile kernel::uint64_t*>(gHpetVirtAddr + offset);
 }
 
-void kWriteReg(unsigned int offset, unsigned long value) {
-    *reinterpret_cast<volatile unsigned long*>(gHpetVirtAddr + offset) = value;
+void kWriteReg(kernel::uint32_t offset, kernel::uint64_t value) {
+    *reinterpret_cast<volatile kernel::uint64_t*>(gHpetVirtAddr + offset) = value;
 }
 
-unsigned int kTimerConfigOffset(unsigned int timerIndex) { return kRegTimer0ConfigBase + timerIndex * kTimerRegStride; }
-unsigned int kTimerComparatorOffset(unsigned int timerIndex) {
+kernel::uint32_t kTimerConfigOffset(kernel::uint32_t timerIndex) { return kRegTimer0ConfigBase + timerIndex * kTimerRegStride; }
+kernel::uint32_t kTimerComparatorOffset(kernel::uint32_t timerIndex) {
     return kRegTimer0ComparatorBase + timerIndex * kTimerRegStride;
 }
 
@@ -62,12 +63,12 @@ unsigned int kTimerComparatorOffset(unsigned int timerIndex) {
 // 어떤 특정 GSI를 우선해야 한다는 규정은 없고, 여러 타이머가 겹치는
 // GSI를 고르지 않도록 호출부(enableTimer)가 순서대로 타이머를 켤
 // 때 자연히 分산되길 기대한다(진짜 충돌 회피까지는 범위 밖).
-unsigned int kPickGsiFromRouteCap(unsigned long timerConfig) {
-    const auto routeCap = static_cast<unsigned int>(timerConfig >> kTimerConfigRouteCapShift);
+kernel::uint32_t kPickGsiFromRouteCap(kernel::uint64_t timerConfig) {
+    const auto routeCap = static_cast<kernel::uint32_t>(timerConfig >> kTimerConfigRouteCapShift);
     if (routeCap == 0) {
         return kInvalidTimerIndex;
     }
-    for (unsigned int gsi = 0; gsi < 32; ++gsi) {
+    for (kernel::uint32_t gsi = 0; gsi < 32; ++gsi) {
         if (routeCap & (1U << gsi)) {
             return gsi;
         }
@@ -77,7 +78,7 @@ unsigned int kPickGsiFromRouteCap(unsigned long timerConfig) {
 
 void kHpetInterruptHandler(kernel::InterruptFrame* frame) {
     kernel::Timer::onTick();
-    const unsigned int timerIndex = gVectorToTimerIndex[frame->vector & 0xFF];
+    const kernel::uint32_t timerIndex = gVectorToTimerIndex[frame->vector & 0xFF];
     if (timerIndex != kInvalidTimerIndex) {
         // 레벨 트리거 비교기는 General Interrupt Status Register의
         // 해당 비트를 직접 지워야 인터럽트가 계속 걸리지 않는다(엣지
@@ -92,43 +93,43 @@ void kHpetInterruptHandler(kernel::InterruptFrame* frame) {
 namespace kernel {
 
 bool Hpet::init() {
-    const unsigned long phys = Acpi::hpetAddress();
+    const kernel::uint64_t phys = Acpi::hpetAddress();
     Paging::mapPage(kHpetVirtBase, phys, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
     gHpetVirtAddr = kHpetVirtBase;
 
-    for (unsigned int i = 0; i < 256; ++i) {
+    for (kernel::uint32_t i = 0; i < 256; ++i) {
         gVectorToTimerIndex[i] = kInvalidTimerIndex;
     }
 
-    const unsigned long caps = kReadReg(kRegGeneralCapabilities);
-    gTimerCount = static_cast<unsigned int>((caps >> kCapsNumTimShift) & kCapsNumTimMask) + 1;
+    const kernel::uint64_t caps = kReadReg(kRegGeneralCapabilities);
+    gTimerCount = static_cast<kernel::uint32_t>((caps >> kCapsNumTimShift) & kCapsNumTimMask) + 1;
     if (gTimerCount > kMaxHpetTimers) {
         gTimerCount = kMaxHpetTimers;
     }
 
-    unsigned long generalConfig = kReadReg(kRegGeneralConfig);
+    kernel::uint64_t generalConfig = kReadReg(kRegGeneralConfig);
     generalConfig |= kGeneralConfigEnableBit;
     kWriteReg(kRegGeneralConfig, generalConfig);
 
     return enableTimer(0, kDefaultTargetHz, kHpetVector, Lapic::id());
 }
 
-unsigned int Hpet::timerCount() { return gTimerCount; }
+kernel::uint32_t Hpet::timerCount() { return gTimerCount; }
 
-bool Hpet::enableTimer(unsigned int timerIndex, unsigned int frequencyHz, unsigned int vector,
-                        unsigned int destApicId) {
+bool Hpet::enableTimer(kernel::uint32_t timerIndex, kernel::uint32_t frequencyHz, kernel::uint32_t vector,
+                        kernel::uint32_t destApicId) {
     if (timerIndex >= gTimerCount || frequencyHz == 0) {
         return false;
     }
 
-    const unsigned long caps = kReadReg(kRegGeneralCapabilities);
-    const auto periodFemtoseconds = static_cast<unsigned int>(caps >> 32);
+    const kernel::uint64_t caps = kReadReg(kRegGeneralCapabilities);
+    const auto periodFemtoseconds = static_cast<kernel::uint32_t>(caps >> 32);
     if (periodFemtoseconds == 0) {
         return false;  // 잘못된/에뮬레이션 안 된 HPET - 0으로 나누기 방지
     }
 
-    const unsigned int timerConfigOffset = kTimerConfigOffset(timerIndex);
-    const unsigned long timerConfig = kReadReg(timerConfigOffset);
+    const kernel::uint32_t timerConfigOffset = kTimerConfigOffset(timerIndex);
+    const kernel::uint64_t timerConfig = kReadReg(timerConfigOffset);
     if (!(timerConfig & kTimerConfigPeriodicCapableBit)) {
         return false;  // 이 비교기가 주기 모드를 지원 안 함
     }
@@ -137,7 +138,7 @@ bool Hpet::enableTimer(unsigned int timerIndex, unsigned int frequencyHz, unsign
     // 라우팅 가능한 GSI를 Tn_INT_ROUTE_CAP 비트맵에서 직접 고른다
     // (QU-1CC6BB1D, 설계자 지시, 2026-09-14 - "고정된 Legacy
     // Replacement가 아닌 비트맵을 읽어 원하는 GSI를 골라야 한다").
-    const unsigned int gsi = kPickGsiFromRouteCap(timerConfig);
+    const kernel::uint32_t gsi = kPickGsiFromRouteCap(timerConfig);
     if (gsi == kInvalidTimerIndex) {
         return false;  // 이 타이머가 라우팅 가능한 GSI가 하나도 없음(비정상)
     }
@@ -150,7 +151,7 @@ bool Hpet::enableTimer(unsigned int timerIndex, unsigned int frequencyHz, unsign
         return false;  // destApicId가 8비트 한도 초과거나 gsi가 이 IOAPIC 범위 밖
     }
 
-    const unsigned long ticksPerInterval = (kFemtosecondsPerSecond / frequencyHz) / periodFemtoseconds;
+    const kernel::uint64_t ticksPerInterval = (kFemtosecondsPerSecond / frequencyHz) / periodFemtoseconds;
 
     Idt::registerHandler(vector, kHpetInterruptHandler);
     gVectorToTimerIndex[vector & 0xFF] = timerIndex;
@@ -163,10 +164,10 @@ bool Hpet::enableTimer(unsigned int timerIndex, unsigned int frequencyHz, unsign
     // 같은 값을 두 번 쓰면 된다. 이 두 번 쓰기를 빼먹으면(한 번만
     // 쓰면) 실제 하드웨어/일부 에뮬레이터에서 주기가 안 걸리고 한 번
     // 쏘고 멈추는 것처럼 보일 수 있다 - 관계도에 기록.
-    unsigned long config = timerConfig;
+    kernel::uint64_t config = timerConfig;
     config |= kTimerConfigIntEnableBit | kTimerConfigPeriodicBit | kTimerConfigValSetBit | kTimerConfigTypeLevelBit;
     config &= ~kTimerConfigIntRouteMask;
-    config |= (static_cast<unsigned long>(gsi) << kTimerConfigIntRouteShift) & kTimerConfigIntRouteMask;
+    config |= (static_cast<kernel::uint64_t>(gsi) << kTimerConfigIntRouteShift) & kTimerConfigIntRouteMask;
     kWriteReg(timerConfigOffset, config);
     kWriteReg(kTimerComparatorOffset(timerIndex), ticksPerInterval);
     kWriteReg(kTimerComparatorOffset(timerIndex), ticksPerInterval);

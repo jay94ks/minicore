@@ -1,13 +1,15 @@
 #ifndef MINICORE_KERNEL_BOOT_INFO_H
 #define MINICORE_KERNEL_BOOT_INFO_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
-constexpr unsigned int kBootInfoMaxModules = 16;
+constexpr uint32_t kBootInfoMaxModules = 16;
 
 struct BootModule {
-    unsigned long physStart;
-    unsigned long physEnd;
+    uint64_t physStart;
+    uint64_t physEnd;
     const char* cmdline;  // 없으면 nullptr
 };
 
@@ -23,7 +25,7 @@ struct BootModule {
 struct BootInfo {
     const char* cmdline;         // 없으면 nullptr(양쪽 다 null-terminated)
     const char* bootloaderName;  // multiboot2 전용 - PVH는 항상 nullptr
-    unsigned int moduleCount;
+    uint32_t moduleCount;
     BootModule modules[kBootInfoMaxModules];
 };
 

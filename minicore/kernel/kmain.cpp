@@ -3,6 +3,7 @@
 #include "hvm_start_info.h"
 #include "idt.h"
 #include "libcpio/cpio.h"
+#include "libkenv/types.h"
 #include "ioapic.h"
 #include "lapic.h"
 #include "multiboot2.h"
@@ -20,7 +21,7 @@ namespace {
 // (PL-FC38956C). PVH는 이 값의 기본값(0)이자 "else" 케이스로 처리
 // 한다 - 별도 상수를 안 둔 건 boot.S가 인식 못 하는 값을 보낼 방법이
 // 없어서(두 진입점만 존재) 대칭적인 분기가 오히려 불필요.
-constexpr unsigned int kBootProtocolMultiboot2 = 1;
+constexpr kernel::uint32_t kBootProtocolMultiboot2 = 1;
 
 void kLogPciDevice(const kernel::Pci::Device& dev) {
     kernel::Serial::write("  pci ");
@@ -96,7 +97,7 @@ void kLogBootInfo(const kernel::BootInfo& bootInfo) {
     kernel::Serial::write("minicore: modules=");
     kernel::Serial::writeHex(bootInfo.moduleCount);
     kernel::Serial::write("\n");
-    for (unsigned int i = 0; i < bootInfo.moduleCount; ++i) {
+    for (kernel::uint32_t i = 0; i < bootInfo.moduleCount; ++i) {
         const kernel::BootModule& mod = bootInfo.modules[i];
         kernel::Serial::write("  module[");
         kernel::Serial::writeHex(i);
@@ -113,16 +114,16 @@ void kLogBootInfo(const kernel::BootInfo& bootInfo) {
         // 자체 설정 파일)이어도 안전하다. 물리주소를 그대로 포인터로
         // 캐스팅한다(Paging::init() 이전, 저지대 identity map 범위).
         const auto* archive = reinterpret_cast<const void*>(mod.physStart);
-        const unsigned long archiveSize = mod.physEnd - mod.physStart;
+        const kernel::uint64_t archiveSize = mod.physEnd - mod.physStart;
         cpio::forEachEntry(archive, archiveSize, kLogCpioEntry, nullptr);
     }
 }
 
-void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, unsigned int count) {
+void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, kernel::uint32_t count) {
     kernel::Serial::write("minicore: memory map (");
     kernel::Serial::writeHex(count);
     kernel::Serial::write(" entries)\n");
-    for (unsigned int i = 0; i < count; ++i) {
+    for (kernel::uint32_t i = 0; i < count; ++i) {
         kernel::Serial::write("  base=");
         kernel::Serial::writeHex(memmap[i].addr);
         kernel::Serial::write(" size=");
@@ -143,27 +144,27 @@ void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, unsigned int count) {
 // (HvmMemmapEntry 배열 + 물리주소)로 통일하고 나면, 그 뒤부터는 완전히
 // 프로토콜 무관 공통 경로다. 이 시점에는 커널(ring 0)만 실행 중이다 -
 // devmgr 등 "커널 서비스"는 아직 존재하지 않는다(SP-8B6B8D25 §2-A).
-extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
+extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProtocol) {
     kernel::Serial::init();
 
     static kernel::HvmMemmapEntry gMb2MemmapBuffer[kernel::kMultiboot2MaxMemmapEntries];
     const kernel::HvmMemmapEntry* memmap = nullptr;
-    unsigned int memmapEntries = 0;
-    unsigned long rsdpPaddr = 0;
-    unsigned long startInfoSize = 0;
+    kernel::uint32_t memmapEntries = 0;
+    kernel::uint64_t rsdpPaddr = 0;
+    kernel::uint64_t startInfoSize = 0;
     kernel::BootInfo bootInfo{};
 
     if (bootProtocol == kBootProtocolMultiboot2) {
         kernel::Serial::write("minicore: booted via multiboot2 (GRUB, higher-half, long mode)\n");
-        unsigned int mb2TotalSize = 0;
-        kernel::Multiboot2Info::parse(static_cast<unsigned long>(startInfoAddr), gMb2MemmapBuffer,
+        kernel::uint32_t mb2TotalSize = 0;
+        kernel::Multiboot2Info::parse(static_cast<kernel::uint64_t>(startInfoAddr), gMb2MemmapBuffer,
                                        kernel::kMultiboot2MaxMemmapEntries, &memmapEntries, &rsdpPaddr, &mb2TotalSize,
                                        &bootInfo);
         memmap = gMb2MemmapBuffer;
         startInfoSize = mb2TotalSize;
     } else {
         kernel::Serial::write("minicore: booted via Xen PVH (higher-half, long mode)\n");
-        const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<unsigned long>(startInfoAddr));
+        const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<kernel::uint64_t>(startInfoAddr));
         if (startInfo->magic == kernel::kHvmStartInfoMagic) {
             kernel::Serial::write("minicore: hvm_start_info magic OK\n");
         } else {
@@ -183,11 +184,11 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
                                : nullptr;
         bootInfo.bootloaderName = nullptr;
         bootInfo.moduleCount = 0;
-        const unsigned int moduleCount =
+        const kernel::uint32_t moduleCount =
             startInfo->nrModules < kernel::kBootInfoMaxModules ? startInfo->nrModules : kernel::kBootInfoMaxModules;
         if (startInfo->modlistPaddr) {
             const auto* modlist = reinterpret_cast<const kernel::HvmModlistEntry*>(startInfo->modlistPaddr);
-            for (unsigned int i = 0; i < moduleCount; ++i) {
+            for (kernel::uint32_t i = 0; i < moduleCount; ++i) {
                 kernel::BootModule& mod = bootInfo.modules[bootInfo.moduleCount];
                 mod.physStart = modlist[i].paddr;
                 mod.physEnd = modlist[i].paddr + modlist[i].size;
@@ -229,7 +230,7 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
         kernel::Serial::write(" hpet=");
         kernel::Serial::write(kernel::Acpi::hasHpet() ? "yes" : "no");
         kernel::Serial::write("\n");
-        for (unsigned int i = 0; i < kernel::Acpi::cpuCount(); ++i) {
+        for (kernel::uint32_t i = 0; i < kernel::Acpi::cpuCount(); ++i) {
             kernel::Serial::write("  cpu[");
             kernel::Serial::writeHex(i);
             kernel::Serial::write("] apic_id=");
@@ -238,7 +239,7 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
             kernel::Serial::writeHex(kernel::Acpi::cpuNumaNode(i));
             kernel::Serial::write("\n");
         }
-        for (unsigned int i = 0; i < kernel::Acpi::ioApicCount(); ++i) {
+        for (kernel::uint32_t i = 0; i < kernel::Acpi::ioApicCount(); ++i) {
             kernel::Serial::write("  ioapic[");
             kernel::Serial::writeHex(i);
             kernel::Serial::write("] id=");
@@ -255,9 +256,9 @@ extern "C" void kMain(unsigned int startInfoAddr, unsigned int bootProtocol) {
 
     kernel::PageFrameAllocator::init(
         memmap, memmapEntries,
-        reinterpret_cast<unsigned long>(kernel_phys_start),
-        reinterpret_cast<unsigned long>(kernel_phys_end),
-        static_cast<unsigned long>(startInfoAddr), startInfoSize);
+        reinterpret_cast<kernel::uint64_t>(kernel_phys_start),
+        reinterpret_cast<kernel::uint64_t>(kernel_phys_end),
+        static_cast<kernel::uint64_t>(startInfoAddr), startInfoSize);
 
     kernel::Serial::write("minicore: page frame allocator ready, nodes=");
     kernel::Serial::writeHex(kernel::PageFrameAllocator::numaNodeCount());

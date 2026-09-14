@@ -1,106 +1,107 @@
 #include "acpi.h"
 
+#include "libkenv/types.h"
 #include "paging.h"
 
 namespace {
 
 struct Rsdp {
     char signature[8];
-    unsigned char checksum;
+    kernel::uint8_t checksum;
     char oemId[6];
-    unsigned char revision;
-    unsigned int rsdtAddress;
+    kernel::uint8_t revision;
+    kernel::uint32_t rsdtAddress;
     // ACPI 2.0+에만 유효(revision >= 2) - 그 이하 리비전에서는 이
     // 뒤를 읽으면 안 된다(구조체 길이 자체가 짧음).
-    unsigned int length;
-    unsigned long xsdtAddress;
-    unsigned char extendedChecksum;
-    unsigned char reserved[3];
+    kernel::uint32_t length;
+    kernel::uint64_t xsdtAddress;
+    kernel::uint8_t extendedChecksum;
+    kernel::uint8_t reserved[3];
 } __attribute__((packed));
 
 struct SdtHeader {
     char signature[4];
-    unsigned int length;
-    unsigned char revision;
-    unsigned char checksum;
+    kernel::uint32_t length;
+    kernel::uint8_t revision;
+    kernel::uint8_t checksum;
     char oemId[6];
     char oemTableId[8];
-    unsigned int oemRevision;
-    unsigned int creatorId;
-    unsigned int creatorRevision;
+    kernel::uint32_t oemRevision;
+    kernel::uint32_t creatorId;
+    kernel::uint32_t creatorRevision;
 } __attribute__((packed));
 
 struct MadtEntryHeader {
-    unsigned char type;
-    unsigned char length;
+    kernel::uint8_t type;
+    kernel::uint8_t length;
 } __attribute__((packed));
 
 struct MadtLocalApicEntry {
     MadtEntryHeader header;
-    unsigned char acpiProcessorId;
-    unsigned char apicId;
-    unsigned int flags;
+    kernel::uint8_t acpiProcessorId;
+    kernel::uint8_t apicId;
+    kernel::uint32_t flags;
 } __attribute__((packed));
 
 struct MadtIoApicEntry {
     MadtEntryHeader header;
-    unsigned char ioApicId;
-    unsigned char reserved;
-    unsigned int ioApicAddress;
-    unsigned int globalSystemInterruptBase;
+    kernel::uint8_t ioApicId;
+    kernel::uint8_t reserved;
+    kernel::uint32_t ioApicAddress;
+    kernel::uint32_t globalSystemInterruptBase;
 } __attribute__((packed));
 
 struct MadtInterruptSourceOverrideEntry {
     MadtEntryHeader header;
-    unsigned char bus;   // 항상 0(ISA)
-    unsigned char source;  // ISA IRQ 번호
-    unsigned int globalSystemInterrupt;
-    unsigned short flags;  // MPS INTI Flags: bit0-1 극성, bit2-3 트리거 모드
+    kernel::uint8_t bus;   // 항상 0(ISA)
+    kernel::uint8_t source;  // ISA IRQ 번호
+    kernel::uint32_t globalSystemInterrupt;
+    kernel::uint16_t flags;  // MPS INTI Flags: bit0-1 극성, bit2-3 트리거 모드
 } __attribute__((packed));
 
-constexpr unsigned char kMadtTypeLocalApic = 0;
-constexpr unsigned char kMadtTypeIoApic = 1;
-constexpr unsigned char kMadtTypeInterruptSourceOverride = 2;
-constexpr unsigned int kMadtLocalApicEnabledFlag = 1U << 0;
+constexpr kernel::uint8_t kMadtTypeLocalApic = 0;
+constexpr kernel::uint8_t kMadtTypeIoApic = 1;
+constexpr kernel::uint8_t kMadtTypeInterruptSourceOverride = 2;
+constexpr kernel::uint32_t kMadtLocalApicEnabledFlag = 1U << 0;
 
 // MPS INTI Flags(ACPI 스펙 5.2.12.5) - 극성 2비트/트리거 2비트, 각각
 // 0=버스 기본값(conforms), 1=고정값, 2=예약, 3=반대 고정값.
-constexpr unsigned short kMpsFlagsPolarityMask = 0x3;
-constexpr unsigned short kMpsFlagsTriggerShift = 2;
-constexpr unsigned short kMpsFlagsTriggerMask = 0x3 << kMpsFlagsTriggerShift;
+constexpr kernel::uint16_t kMpsFlagsPolarityMask = 0x3;
+constexpr kernel::uint16_t kMpsFlagsTriggerShift = 2;
+constexpr kernel::uint16_t kMpsFlagsTriggerMask = 0x3 << kMpsFlagsTriggerShift;
 
 struct SratEntryHeader {
-    unsigned char type;
-    unsigned char length;
+    kernel::uint8_t type;
+    kernel::uint8_t length;
 } __attribute__((packed));
 
 struct SratProcessorApicAffinity {
     SratEntryHeader header;
-    unsigned char proximityDomainLow;
-    unsigned char apicId;
-    unsigned int flags;
-    unsigned char localSapicEid;
-    unsigned char proximityDomainHigh[3];
-    unsigned int clockDomain;
+    kernel::uint8_t proximityDomainLow;
+    kernel::uint8_t apicId;
+    kernel::uint32_t flags;
+    kernel::uint8_t localSapicEid;
+    kernel::uint8_t proximityDomainHigh[3];
+    kernel::uint32_t clockDomain;
 } __attribute__((packed));
 
 struct SratMemoryAffinity {
     SratEntryHeader header;
-    unsigned int proximityDomain;
-    unsigned short reserved1;
-    unsigned int baseAddressLow;
-    unsigned int baseAddressHigh;
-    unsigned int lengthLow;
-    unsigned int lengthHigh;
-    unsigned int reserved2;
-    unsigned int flags;
-    unsigned long reserved3;
+    kernel::uint32_t proximityDomain;
+    kernel::uint16_t reserved1;
+    kernel::uint32_t baseAddressLow;
+    kernel::uint32_t baseAddressHigh;
+    kernel::uint32_t lengthLow;
+    kernel::uint32_t lengthHigh;
+    kernel::uint32_t reserved2;
+    kernel::uint32_t flags;
+    kernel::uint64_t reserved3;
 } __attribute__((packed));
 
-constexpr unsigned char kSratTypeProcessorApicAffinity = 0;
-constexpr unsigned char kSratTypeMemoryAffinity = 1;
-constexpr unsigned int kSratAffinityEnabledFlag = 1U << 0;
-constexpr unsigned int kSratHeaderPad = 12;  // tableRevision(4) + reserved(8)
+constexpr kernel::uint8_t kSratTypeProcessorApicAffinity = 0;
+constexpr kernel::uint8_t kSratTypeMemoryAffinity = 1;
+constexpr kernel::uint32_t kSratAffinityEnabledFlag = 1U << 0;
+constexpr kernel::uint32_t kSratHeaderPad = 12;  // tableRevision(4) + reserved(8)
 
 // ACPI HPET 테이블(IA-PC HPET 규격 3.2.4) - SdtHeader(36바이트) 바로
 // 뒤에 이어진다. Generic Address Structure(주소공간ID+너비+비트오프셋
@@ -109,79 +110,79 @@ constexpr unsigned int kSratHeaderPad = 12;  // tableRevision(4) + reserved(8)
 // 사례가 없음).
 struct HpetTable {
     SdtHeader header;
-    unsigned int eventTimerBlockId;
-    unsigned char addressSpaceId;
-    unsigned char registerBitWidth;
-    unsigned char registerBitOffset;
-    unsigned char reserved0;
-    unsigned long address;
-    unsigned char hpetNumber;
-    unsigned short minimumTick;
-    unsigned char pageProtection;
+    kernel::uint32_t eventTimerBlockId;
+    kernel::uint8_t addressSpaceId;
+    kernel::uint8_t registerBitWidth;
+    kernel::uint8_t registerBitOffset;
+    kernel::uint8_t reserved0;
+    kernel::uint64_t address;
+    kernel::uint8_t hpetNumber;
+    kernel::uint16_t minimumTick;
+    kernel::uint8_t pageProtection;
 } __attribute__((packed));
 
 // ACPI MCFG(PCI Firmware Spec 3.0 §4.1.2) - SdtHeader(36바이트) +
 // 예약 8바이트 뒤에 가변 개수의 엔트리가 이어진다. 세그먼트 그룹 0
 // (첫 엔트리)만 다룬다.
 struct McfgEntry {
-    unsigned long baseAddress;
-    unsigned short pciSegmentGroup;
-    unsigned char startBusNumber;
-    unsigned char endBusNumber;
-    unsigned int reserved;
+    kernel::uint64_t baseAddress;
+    kernel::uint16_t pciSegmentGroup;
+    kernel::uint8_t startBusNumber;
+    kernel::uint8_t endBusNumber;
+    kernel::uint32_t reserved;
 } __attribute__((packed));
-constexpr unsigned int kMcfgHeaderPad = 8;  // 예약 필드
+constexpr kernel::uint32_t kMcfgHeaderPad = 8;  // 예약 필드
 
-unsigned long gLocalApicAddress = 0;
-unsigned int gIoApicIds[kernel::kAcpiMaxIoApics];
-unsigned int gIoApicAddresses[kernel::kAcpiMaxIoApics];
-unsigned int gIoApicGsiBases[kernel::kAcpiMaxIoApics];
-unsigned int gIoApicCount = 0;
+kernel::uint64_t gLocalApicAddress = 0;
+kernel::uint32_t gIoApicIds[kernel::kAcpiMaxIoApics];
+kernel::uint32_t gIoApicAddresses[kernel::kAcpiMaxIoApics];
+kernel::uint32_t gIoApicGsiBases[kernel::kAcpiMaxIoApics];
+kernel::uint32_t gIoApicCount = 0;
 bool gHasHpet = false;
-unsigned long gHpetAddress = 0;
+kernel::uint64_t gHpetAddress = 0;
 bool gHasMcfg = false;
-unsigned long gMcfgBaseAddress = 0;
-unsigned char gMcfgStartBus = 0;
-unsigned char gMcfgEndBus = 0;
-unsigned int gCpuApicIds[kernel::kAcpiMaxCpus];
-unsigned int gCpuNumaNode[kernel::kAcpiMaxCpus];
-unsigned int gCpuCount = 0;
+kernel::uint64_t gMcfgBaseAddress = 0;
+kernel::uint8_t gMcfgStartBus = 0;
+kernel::uint8_t gMcfgEndBus = 0;
+kernel::uint32_t gCpuApicIds[kernel::kAcpiMaxCpus];
+kernel::uint32_t gCpuNumaNode[kernel::kAcpiMaxCpus];
+kernel::uint32_t gCpuCount = 0;
 
 // ISA IRQ(인덱스) -> override 존재 여부/GSI/극성/트리거. override가
 // 없는 IRQ는 gIsoPresent[irq]==false로 남고, Acpi::resolveIsaIrq가
 // ISA 기본값(GSI=IRQ, active-high, edge)으로 채워 돌려준다.
 bool gIsoPresent[kernel::kAcpiMaxIsoEntries];
-unsigned int gIsoGsi[kernel::kAcpiMaxIsoEntries];
-unsigned int gIsoPolarity[kernel::kAcpiMaxIsoEntries];
-unsigned int gIsoTriggerMode[kernel::kAcpiMaxIsoEntries];
+kernel::uint32_t gIsoGsi[kernel::kAcpiMaxIsoEntries];
+kernel::uint32_t gIsoPolarity[kernel::kAcpiMaxIsoEntries];
+kernel::uint32_t gIsoTriggerMode[kernel::kAcpiMaxIsoEntries];
 
-unsigned int gDomainValues[kernel::kAcpiMaxNumaNodes];
-unsigned int gDomainCount = 0;
+kernel::uint32_t gDomainValues[kernel::kAcpiMaxNumaNodes];
+kernel::uint32_t gDomainCount = 0;
 
 struct MemAffinity {
-    unsigned long base;
-    unsigned long length;
-    unsigned int node;
+    kernel::uint64_t base;
+    kernel::uint64_t length;
+    kernel::uint32_t node;
 };
 MemAffinity gMemAffinities[kernel::kAcpiMaxMemoryAffinityEntries];
-unsigned int gMemAffinityCount = 0;
+kernel::uint32_t gMemAffinityCount = 0;
 
 template <typename T>
-const T* kAsTable(unsigned long physAddr) {
+const T* kAsTable(kernel::uint64_t physAddr) {
     return reinterpret_cast<const T*>(kernel::kPhysToVirt(physAddr));
 }
 
-bool kChecksumOk(const void* data, unsigned int length) {
-    unsigned char sum = 0;
-    const auto* bytes = reinterpret_cast<const unsigned char*>(data);
-    for (unsigned int i = 0; i < length; ++i) {
-        sum = static_cast<unsigned char>(sum + bytes[i]);
+bool kChecksumOk(const void* data, kernel::uint32_t length) {
+    kernel::uint8_t sum = 0;
+    const auto* bytes = reinterpret_cast<const kernel::uint8_t*>(data);
+    for (kernel::uint32_t i = 0; i < length; ++i) {
+        sum = static_cast<kernel::uint8_t>(sum + bytes[i]);
     }
     return sum == 0;
 }
 
-bool kSignatureIs(const char* sig, const char* expected, int len) {
-    for (int i = 0; i < len; ++i) {
+bool kSignatureIs(const char* sig, const char* expected, kernel::int32_t len) {
+    for (kernel::int32_t i = 0; i < len; ++i) {
         if (sig[i] != expected[i]) {
             return false;
         }
@@ -191,8 +192,8 @@ bool kSignatureIs(const char* sig, const char* expected, int len) {
 
 // proximity domain 값(펌웨어가 매긴 임의의 ID)을 0부터 시작하는
 // 내부 노드 인덱스로 바꾼다 - 처음 보는 값이면 새 노드를 만든다.
-unsigned int kNodeIndexForDomain(unsigned int domain) {
-    for (unsigned int i = 0; i < gDomainCount; ++i) {
+kernel::uint32_t kNodeIndexForDomain(kernel::uint32_t domain) {
+    for (kernel::uint32_t i = 0; i < gDomainCount; ++i) {
         if (gDomainValues[i] == domain) {
             return i;
         }
@@ -205,12 +206,12 @@ unsigned int kNodeIndexForDomain(unsigned int domain) {
 }
 
 void kParseMadt(const SdtHeader* madtHeader) {
-    const auto* base = reinterpret_cast<const unsigned char*>(madtHeader);
-    const auto* localApicAddrField = reinterpret_cast<const unsigned int*>(base + sizeof(SdtHeader));
+    const auto* base = reinterpret_cast<const kernel::uint8_t*>(madtHeader);
+    const auto* localApicAddrField = reinterpret_cast<const kernel::uint32_t*>(base + sizeof(SdtHeader));
     gLocalApicAddress = *localApicAddrField;
 
-    const unsigned char* entry = base + sizeof(SdtHeader) + 8;  // localApicAddress(4) + flags(4)
-    const unsigned char* end = base + madtHeader->length;
+    const kernel::uint8_t* entry = base + sizeof(SdtHeader) + 8;  // localApicAddress(4) + flags(4)
+    const kernel::uint8_t* end = base + madtHeader->length;
 
     while (entry < end) {
         const auto* entryHeader = reinterpret_cast<const MadtEntryHeader*>(entry);
@@ -238,13 +239,13 @@ void kParseMadt(const SdtHeader* madtHeader) {
                 gIsoPresent[iso->source] = true;
                 gIsoGsi[iso->source] = iso->globalSystemInterrupt;
 
-                const unsigned int rawPolarity = iso->flags & kMpsFlagsPolarityMask;
+                const kernel::uint32_t rawPolarity = iso->flags & kMpsFlagsPolarityMask;
                 gIsoPolarity[iso->source] =
                     (rawPolarity == 0 || rawPolarity == kernel::kAcpiPolarityActiveHigh)
                         ? kernel::kAcpiPolarityActiveHigh
                         : kernel::kAcpiPolarityActiveLow;
 
-                const unsigned int rawTrigger = (iso->flags & kMpsFlagsTriggerMask) >> kMpsFlagsTriggerShift;
+                const kernel::uint32_t rawTrigger = (iso->flags & kMpsFlagsTriggerMask) >> kMpsFlagsTriggerShift;
                 gIsoTriggerMode[iso->source] =
                     (rawTrigger == 0 || rawTrigger == kernel::kAcpiTriggerEdge)
                         ? kernel::kAcpiTriggerEdge
@@ -256,9 +257,9 @@ void kParseMadt(const SdtHeader* madtHeader) {
 }
 
 void kParseSrat(const SdtHeader* sratHeader) {
-    const auto* base = reinterpret_cast<const unsigned char*>(sratHeader);
-    const unsigned char* entry = base + sizeof(SdtHeader) + kSratHeaderPad;
-    const unsigned char* end = base + sratHeader->length;
+    const auto* base = reinterpret_cast<const kernel::uint8_t*>(sratHeader);
+    const kernel::uint8_t* entry = base + sizeof(SdtHeader) + kSratHeaderPad;
+    const kernel::uint8_t* end = base + sratHeader->length;
 
     while (entry < end) {
         const auto* entryHeader = reinterpret_cast<const SratEntryHeader*>(entry);
@@ -268,12 +269,12 @@ void kParseSrat(const SdtHeader* sratHeader) {
         if (entryHeader->type == kSratTypeProcessorApicAffinity) {
             const auto* p = reinterpret_cast<const SratProcessorApicAffinity*>(entry);
             if (p->flags & kSratAffinityEnabledFlag) {
-                const unsigned int domain = p->proximityDomainLow |
-                                             (static_cast<unsigned int>(p->proximityDomainHigh[0]) << 8) |
-                                             (static_cast<unsigned int>(p->proximityDomainHigh[1]) << 16) |
-                                             (static_cast<unsigned int>(p->proximityDomainHigh[2]) << 24);
-                const unsigned int node = kNodeIndexForDomain(domain);
-                for (unsigned int i = 0; i < gCpuCount; ++i) {
+                const kernel::uint32_t domain = p->proximityDomainLow |
+                                             (static_cast<kernel::uint32_t>(p->proximityDomainHigh[0]) << 8) |
+                                             (static_cast<kernel::uint32_t>(p->proximityDomainHigh[1]) << 16) |
+                                             (static_cast<kernel::uint32_t>(p->proximityDomainHigh[2]) << 24);
+                const kernel::uint32_t node = kNodeIndexForDomain(domain);
+                for (kernel::uint32_t i = 0; i < gCpuCount; ++i) {
                     if (gCpuApicIds[i] == p->apicId) {
                         gCpuNumaNode[i] = node;
                         break;
@@ -283,8 +284,8 @@ void kParseSrat(const SdtHeader* sratHeader) {
         } else if (entryHeader->type == kSratTypeMemoryAffinity) {
             const auto* m = reinterpret_cast<const SratMemoryAffinity*>(entry);
             if ((m->flags & kSratAffinityEnabledFlag) && gMemAffinityCount < kernel::kAcpiMaxMemoryAffinityEntries) {
-                const unsigned long memBase = (static_cast<unsigned long>(m->baseAddressHigh) << 32) | m->baseAddressLow;
-                const unsigned long memLength = (static_cast<unsigned long>(m->lengthHigh) << 32) | m->lengthLow;
+                const kernel::uint64_t memBase = (static_cast<kernel::uint64_t>(m->baseAddressHigh) << 32) | m->baseAddressLow;
+                const kernel::uint64_t memLength = (static_cast<kernel::uint64_t>(m->lengthHigh) << 32) | m->lengthLow;
                 gMemAffinities[gMemAffinityCount++] = {memBase, memLength, kNodeIndexForDomain(m->proximityDomain)};
             }
         }
@@ -296,17 +297,17 @@ void kParseSrat(const SdtHeader* sratHeader) {
 // signature와 일치하는 테이블을 찾는다 - 둘 다 헤더 형태가 같아서
 // 템플릿 하나로 처리한다.
 template <typename PointerType>
-const SdtHeader* kFindTable(unsigned long sdtPhys, const char* signature) {
+const SdtHeader* kFindTable(kernel::uint64_t sdtPhys, const char* signature) {
     const auto* header = kAsTable<SdtHeader>(sdtPhys);
     if (!kChecksumOk(header, header->length)) {
         return nullptr;
     }
-    const auto* base = reinterpret_cast<const unsigned char*>(header);
+    const auto* base = reinterpret_cast<const kernel::uint8_t*>(header);
     const auto* pointers = reinterpret_cast<const PointerType*>(base + sizeof(SdtHeader));
-    const unsigned int count = (header->length - sizeof(SdtHeader)) / sizeof(PointerType);
+    const kernel::uint32_t count = (header->length - sizeof(SdtHeader)) / sizeof(PointerType);
 
-    for (unsigned int i = 0; i < count; ++i) {
-        const auto* candidate = kAsTable<SdtHeader>(static_cast<unsigned long>(pointers[i]));
+    for (kernel::uint32_t i = 0; i < count; ++i) {
+        const auto* candidate = kAsTable<SdtHeader>(static_cast<kernel::uint64_t>(pointers[i]));
         if (kSignatureIs(candidate->signature, signature, 4) && kChecksumOk(candidate, candidate->length)) {
             return candidate;
         }
@@ -318,7 +319,7 @@ const SdtHeader* kFindTable(unsigned long sdtPhys, const char* signature) {
 
 namespace kernel {
 
-bool Acpi::init(unsigned long rsdpPhys) {
+bool Acpi::init(kernel::uint64_t rsdpPhys) {
     const auto* rsdp = kAsTable<Rsdp>(rsdpPhys);
     if (!kSignatureIs(rsdp->signature, "RSD PTR ", 8)) {
         return false;
@@ -330,15 +331,15 @@ bool Acpi::init(unsigned long rsdpPhys) {
     const SdtHeader* mcfg = nullptr;
 
     if (rsdp->revision >= 2 && kChecksumOk(rsdp, sizeof(Rsdp)) && rsdp->xsdtAddress) {
-        madt = kFindTable<unsigned long>(rsdp->xsdtAddress, "APIC");
-        srat = kFindTable<unsigned long>(rsdp->xsdtAddress, "SRAT");
-        hpet = kFindTable<unsigned long>(rsdp->xsdtAddress, "HPET");
-        mcfg = kFindTable<unsigned long>(rsdp->xsdtAddress, "MCFG");
+        madt = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "APIC");
+        srat = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "SRAT");
+        hpet = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "HPET");
+        mcfg = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "MCFG");
     } else if (kChecksumOk(rsdp, 20)) {  // ACPI 1.0 RSDP는 처음 20바이트만 체크섬 대상
-        madt = kFindTable<unsigned int>(rsdp->rsdtAddress, "APIC");
-        srat = kFindTable<unsigned int>(rsdp->rsdtAddress, "SRAT");
-        hpet = kFindTable<unsigned int>(rsdp->rsdtAddress, "HPET");
-        mcfg = kFindTable<unsigned int>(rsdp->rsdtAddress, "MCFG");
+        madt = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "APIC");
+        srat = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "SRAT");
+        hpet = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "HPET");
+        mcfg = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "MCFG");
     } else {
         return false;
     }
@@ -349,7 +350,7 @@ bool Acpi::init(unsigned long rsdpPhys) {
     }
 
     if (mcfg && mcfg->length >= sizeof(SdtHeader) + kMcfgHeaderPad + sizeof(McfgEntry)) {
-        const auto* mcfgBase = reinterpret_cast<const unsigned char*>(mcfg);
+        const auto* mcfgBase = reinterpret_cast<const kernel::uint8_t*>(mcfg);
         const auto* entry = reinterpret_cast<const McfgEntry*>(mcfgBase + sizeof(SdtHeader) + kMcfgHeaderPad);
         gHasMcfg = true;
         gMcfgBaseAddress = entry->baseAddress;
@@ -371,22 +372,22 @@ bool Acpi::init(unsigned long rsdpPhys) {
         // 처리해야 한다.
         gDomainCount = 1;
         gDomainValues[0] = 0;
-        for (unsigned int i = 0; i < gCpuCount; ++i) {
+        for (kernel::uint32_t i = 0; i < gCpuCount; ++i) {
             gCpuNumaNode[i] = 0;
         }
     }
     return true;
 }
 
-unsigned long Acpi::localApicAddress() { return gLocalApicAddress; }
-unsigned int Acpi::cpuCount() { return gCpuCount; }
-unsigned int Acpi::cpuApicId(unsigned int index) { return gCpuApicIds[index]; }
-unsigned int Acpi::ioApicCount() { return gIoApicCount; }
-unsigned int Acpi::ioApicId(unsigned int index) { return gIoApicIds[index]; }
-unsigned int Acpi::ioApicAddress(unsigned int index) { return gIoApicAddresses[index]; }
-unsigned int Acpi::ioApicGsiBase(unsigned int index) { return gIoApicGsiBases[index]; }
+kernel::uint64_t Acpi::localApicAddress() { return gLocalApicAddress; }
+kernel::uint32_t Acpi::cpuCount() { return gCpuCount; }
+kernel::uint32_t Acpi::cpuApicId(kernel::uint32_t index) { return gCpuApicIds[index]; }
+kernel::uint32_t Acpi::ioApicCount() { return gIoApicCount; }
+kernel::uint32_t Acpi::ioApicId(kernel::uint32_t index) { return gIoApicIds[index]; }
+kernel::uint32_t Acpi::ioApicAddress(kernel::uint32_t index) { return gIoApicAddresses[index]; }
+kernel::uint32_t Acpi::ioApicGsiBase(kernel::uint32_t index) { return gIoApicGsiBases[index]; }
 
-Acpi::IsaIrqRouting Acpi::resolveIsaIrq(unsigned int isaIrq) {
+Acpi::IsaIrqRouting Acpi::resolveIsaIrq(kernel::uint32_t isaIrq) {
     if (isaIrq < kAcpiMaxIsoEntries && gIsoPresent[isaIrq]) {
         return {gIsoGsi[isaIrq], gIsoPolarity[isaIrq], gIsoTriggerMode[isaIrq]};
     }
@@ -395,19 +396,19 @@ Acpi::IsaIrqRouting Acpi::resolveIsaIrq(unsigned int isaIrq) {
 }
 
 bool Acpi::hasHpet() { return gHasHpet; }
-unsigned long Acpi::hpetAddress() { return gHpetAddress; }
+kernel::uint64_t Acpi::hpetAddress() { return gHpetAddress; }
 
 bool Acpi::hasMcfg() { return gHasMcfg; }
-unsigned long Acpi::mcfgBaseAddress() { return gMcfgBaseAddress; }
-unsigned char Acpi::mcfgStartBus() { return gMcfgStartBus; }
-unsigned char Acpi::mcfgEndBus() { return gMcfgEndBus; }
+kernel::uint64_t Acpi::mcfgBaseAddress() { return gMcfgBaseAddress; }
+kernel::uint8_t Acpi::mcfgStartBus() { return gMcfgStartBus; }
+kernel::uint8_t Acpi::mcfgEndBus() { return gMcfgEndBus; }
 
-unsigned int Acpi::numaNodeCount() { return gDomainCount; }
-unsigned int Acpi::cpuNumaNode(unsigned int index) { return gCpuNumaNode[index]; }
+kernel::uint32_t Acpi::numaNodeCount() { return gDomainCount; }
+kernel::uint32_t Acpi::cpuNumaNode(kernel::uint32_t index) { return gCpuNumaNode[index]; }
 
-unsigned int Acpi::memoryAffinityCount() { return gMemAffinityCount; }
-unsigned long Acpi::memoryAffinityBase(unsigned int index) { return gMemAffinities[index].base; }
-unsigned long Acpi::memoryAffinityLength(unsigned int index) { return gMemAffinities[index].length; }
-unsigned int Acpi::memoryAffinityNode(unsigned int index) { return gMemAffinities[index].node; }
+kernel::uint32_t Acpi::memoryAffinityCount() { return gMemAffinityCount; }
+kernel::uint64_t Acpi::memoryAffinityBase(kernel::uint32_t index) { return gMemAffinities[index].base; }
+kernel::uint64_t Acpi::memoryAffinityLength(kernel::uint32_t index) { return gMemAffinities[index].length; }
+kernel::uint32_t Acpi::memoryAffinityNode(kernel::uint32_t index) { return gMemAffinities[index].node; }
 
 }  // namespace kernel

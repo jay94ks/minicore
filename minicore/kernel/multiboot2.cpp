@@ -1,31 +1,33 @@
 #include "multiboot2.h"
 
+#include "libkenv/types.h"
+
 namespace {
 
 struct TagHeader {
-    unsigned int type;
-    unsigned int size;
+    kernel::uint32_t type;
+    kernel::uint32_t size;
 } __attribute__((packed));
 
-constexpr unsigned int kTagTypeEnd = 0;
-constexpr unsigned int kTagTypeCmdline = 1;
-constexpr unsigned int kTagTypeBootloaderName = 2;
-constexpr unsigned int kTagTypeModule = 3;
-constexpr unsigned int kTagTypeMemoryMap = 6;
-constexpr unsigned int kTagTypeAcpiOldRsdp = 14;
-constexpr unsigned int kTagTypeAcpiNewRsdp = 15;
+constexpr kernel::uint32_t kTagTypeEnd = 0;
+constexpr kernel::uint32_t kTagTypeCmdline = 1;
+constexpr kernel::uint32_t kTagTypeBootloaderName = 2;
+constexpr kernel::uint32_t kTagTypeModule = 3;
+constexpr kernel::uint32_t kTagTypeMemoryMap = 6;
+constexpr kernel::uint32_t kTagTypeAcpiOldRsdp = 14;
+constexpr kernel::uint32_t kTagTypeAcpiNewRsdp = 15;
 
 struct MemoryMapTag {
     TagHeader header;
-    unsigned int entrySize;
-    unsigned int entryVersion;
+    kernel::uint32_t entrySize;
+    kernel::uint32_t entryVersion;
 } __attribute__((packed));
 
 struct MemoryMapEntryRaw {
-    unsigned long baseAddr;
-    unsigned long length;
-    unsigned int type;
-    unsigned int reserved;
+    kernel::uint64_t baseAddr;
+    kernel::uint64_t length;
+    kernel::uint32_t type;
+    kernel::uint32_t reserved;
 } __attribute__((packed));
 
 // 타입1(커맨드라인)/타입2(부트로더 이름)은 헤더 바로 뒤에 그냥
@@ -33,26 +35,26 @@ struct MemoryMapEntryRaw {
 
 struct ModuleTag {
     TagHeader header;
-    unsigned int modStart;
-    unsigned int modEnd;
+    kernel::uint32_t modStart;
+    kernel::uint32_t modEnd;
     // 바로 뒤에 null-terminated 문자열(모듈 커맨드라인)이 이어진다.
 } __attribute__((packed));
 
 // 멀티부트2 메모리맵 태그의 타입 값은 E820과 거의 같다(1=usable,
 // 3=ACPI reclaimable, 4=ACPI NVS, 5=defective, 그 외 전부 예약) -
 // kernel::HvmMemmapType과 그대로 맞춰 변환한다.
-unsigned int kMapMemType(unsigned int mb2Type) {
+kernel::uint32_t kMapMemType(kernel::uint32_t mb2Type) {
     switch (mb2Type) {
         case 1:
-            return static_cast<unsigned int>(kernel::HvmMemmapType::kUsable);
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kUsable);
         case 3:
-            return static_cast<unsigned int>(kernel::HvmMemmapType::kAcpiReclaimable);
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kAcpiReclaimable);
         case 4:
-            return static_cast<unsigned int>(kernel::HvmMemmapType::kAcpiNvs);
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kAcpiNvs);
         case 5:
-            return static_cast<unsigned int>(kernel::HvmMemmapType::kUnusable);
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kUnusable);
         default:
-            return static_cast<unsigned int>(kernel::HvmMemmapType::kReserved);
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kReserved);
     }
 }
 
@@ -60,11 +62,11 @@ unsigned int kMapMemType(unsigned int mb2Type) {
 
 namespace kernel {
 
-void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap, unsigned int maxEntries,
-                            unsigned int* outMemmapCount, unsigned long* outRsdpPaddr, unsigned int* outTotalSize,
+void Multiboot2Info::parse(uint64_t infoPhysAddr, HvmMemmapEntry* outMemmap, uint32_t maxEntries,
+                            uint32_t* outMemmapCount, uint64_t* outRsdpPaddr, uint32_t* outTotalSize,
                             BootInfo* outBootInfo) {
-    const auto* base = reinterpret_cast<const unsigned char*>(infoPhysAddr);
-    const unsigned int totalSize = *reinterpret_cast<const unsigned int*>(base);
+    const auto* base = reinterpret_cast<const uint8_t*>(infoPhysAddr);
+    const uint32_t totalSize = *reinterpret_cast<const uint32_t*>(base);
     *outTotalSize = totalSize;
     *outMemmapCount = 0;
     *outRsdpPaddr = 0;
@@ -72,9 +74,9 @@ void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap
     outBootInfo->bootloaderName = nullptr;
     outBootInfo->moduleCount = 0;
 
-    unsigned long oldRsdpPhys = 0;
-    const unsigned char* tagPtr = base + 8;  // total_size(4)+reserved(4) 헤더 다음부터 태그 시작
-    const unsigned char* end = base + totalSize;
+    uint64_t oldRsdpPhys = 0;
+    const uint8_t* tagPtr = base + 8;  // total_size(4)+reserved(4) 헤더 다음부터 태그 시작
+    const uint8_t* end = base + totalSize;
 
     while (tagPtr + sizeof(TagHeader) <= end) {
         const auto* tag = reinterpret_cast<const TagHeader*>(tagPtr);
@@ -83,8 +85,8 @@ void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap
         }
         if (tag->type == kTagTypeMemoryMap) {
             const auto* mmTag = reinterpret_cast<const MemoryMapTag*>(tagPtr);
-            const unsigned char* entryPtr = tagPtr + sizeof(MemoryMapTag);
-            const unsigned char* entryEnd = tagPtr + mmTag->header.size;
+            const uint8_t* entryPtr = tagPtr + sizeof(MemoryMapTag);
+            const uint8_t* entryEnd = tagPtr + mmTag->header.size;
             while (entryPtr + sizeof(MemoryMapEntryRaw) <= entryEnd && *outMemmapCount < maxEntries) {
                 const auto* entry = reinterpret_cast<const MemoryMapEntryRaw*>(entryPtr);
                 HvmMemmapEntry& out = outMemmap[*outMemmapCount];
@@ -96,9 +98,9 @@ void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap
                 entryPtr += mmTag->entrySize;
             }
         } else if (tag->type == kTagTypeAcpiNewRsdp) {
-            *outRsdpPaddr = reinterpret_cast<unsigned long>(tagPtr + sizeof(TagHeader));
+            *outRsdpPaddr = reinterpret_cast<uint64_t>(tagPtr + sizeof(TagHeader));
         } else if (tag->type == kTagTypeAcpiOldRsdp && oldRsdpPhys == 0) {
-            oldRsdpPhys = reinterpret_cast<unsigned long>(tagPtr + sizeof(TagHeader));
+            oldRsdpPhys = reinterpret_cast<uint64_t>(tagPtr + sizeof(TagHeader));
         } else if (tag->type == kTagTypeCmdline) {
             outBootInfo->cmdline = reinterpret_cast<const char*>(tagPtr + sizeof(TagHeader));
         } else if (tag->type == kTagTypeBootloaderName) {
@@ -114,7 +116,7 @@ void Multiboot2Info::parse(unsigned long infoPhysAddr, HvmMemmapEntry* outMemmap
             }
         }
 
-        const unsigned int advance = (tag->size + 7) & ~7U;  // 태그는 8바이트 경계로 패딩된다(스펙)
+        const uint32_t advance = (tag->size + 7) & ~7U;  // 태그는 8바이트 경계로 패딩된다(스펙)
         if (advance == 0) {
             break;  // 손상 방어 - 무한루프 방지
         }

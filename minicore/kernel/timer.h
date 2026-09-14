@@ -1,9 +1,11 @@
 #ifndef MINICORE_KERNEL_TIMER_H
 #define MINICORE_KERNEL_TIMER_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
-constexpr unsigned int kTimerVector = 32;  // 첫 하드웨어 인터럽트 벡터(CPU 예외 0-31 다음)
+constexpr uint32_t kTimerVector = 32;  // 첫 하드웨어 인터럽트 벡터(CPU 예외 0-31 다음)
 
 // 스케줄러 틱의 시간원을 초기화한다(DS-D4E5C451, QU-8E14D3D9) - HPET가
 // 있고 Timer0이 주기 모드를 지원하면 그쪽을 기본으로 쓰고(hpet.cpp),
@@ -15,7 +17,7 @@ constexpr unsigned int kTimerVector = 32;  // 첫 하드웨어 인터럽트 벡�
 class Timer {
 public:
     static void init();
-    static unsigned long tickCount();
+    static uint64_t tickCount();
 
     // 진단/로그용 - 실제로 HPET을 시간원으로 쓰는지(false면 LAPIC/PIT
     // 폴백 경로).

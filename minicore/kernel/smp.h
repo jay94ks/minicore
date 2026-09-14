@@ -1,6 +1,8 @@
 #ifndef MINICORE_KERNEL_SMP_H
 #define MINICORE_KERNEL_SMP_H
 
+#include "libkenv/types.h"
+
 namespace kernel {
 
 // SMP AP(BSP 이외 코어) 기동 (PL-65C20380). ACPI MADT로 확보한 코어
@@ -23,7 +25,7 @@ public:
     static void startApCores();
 
     // 진단/로그용 - 실제로 기동에 성공한 AP 수(BSP 제외).
-    static unsigned int startedCount();
+    static uint32_t startedCount();
 };
 
 }  // namespace kernel

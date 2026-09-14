@@ -2,6 +2,7 @@
 
 #include "interrupt_frame.h"
 #include "lapic.h"
+#include "libkenv/types.h"
 #include "paging.h"
 #include "serial.h"
 #include "timer.h"
@@ -9,25 +10,25 @@
 namespace {
 
 struct IdtEntry {
-    unsigned short offsetLow;
-    unsigned short selector;
-    unsigned char ist;
-    unsigned char typeAttr;
-    unsigned short offsetMid;
-    unsigned int offsetHigh;
-    unsigned int reserved;
+    kernel::uint16_t offsetLow;
+    kernel::uint16_t selector;
+    kernel::uint8_t ist;
+    kernel::uint8_t typeAttr;
+    kernel::uint16_t offsetMid;
+    kernel::uint32_t offsetHigh;
+    kernel::uint32_t reserved;
 } __attribute__((packed));
 
 struct IdtPointer {
-    unsigned short limit;
-    unsigned long base;
+    kernel::uint16_t limit;
+    kernel::uint64_t base;
 } __attribute__((packed));
 
-constexpr int kVectorCount = 32;
-constexpr unsigned int kDynamicVectorBase = 33;   // isr.S의 kIsrDynamicStubTable[0]에 대응
-constexpr unsigned int kDynamicVectorEnd = 254;   // 포함(inclusive)
-constexpr unsigned short kKernelCodeSelector = 0x08;
-constexpr unsigned char kInterruptGateTypeAttr = 0x8E;  // present, DPL0, 64비트 interrupt gate
+constexpr kernel::uint32_t kVectorCount = 32;
+constexpr kernel::uint32_t kDynamicVectorBase = 33;   // isr.S의 kIsrDynamicStubTable[0]에 대응
+constexpr kernel::uint32_t kDynamicVectorEnd = 254;   // 포함(inclusive)
+constexpr kernel::uint16_t kKernelCodeSelector = 0x08;
+constexpr kernel::uint8_t kInterruptGateTypeAttr = 0x8E;  // present, DPL0, 64비트 interrupt gate
 
 IdtEntry gIdt[256];
 IdtPointer gIdtPointer;
@@ -74,7 +75,7 @@ extern "C" void isr31();
 // 나머지(33-254)는 isr.S가 만든 주소 표(kIsrDynamicStubTable)로 받는다.
 extern "C" void isr32();
 extern "C" void isr255();
-extern "C" const unsigned long kIsrDynamicStubTable[kDynamicVectorEnd - kDynamicVectorBase + 1];
+extern "C" const kernel::uint64_t kIsrDynamicStubTable[kDynamicVectorEnd - kDynamicVectorBase + 1];
 
 using IsrStub = void (*)();
 
@@ -85,18 +86,18 @@ const IsrStub kIsrStubs[kVectorCount] = {
     isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31,
 };
 
-void kSetGate(int vector, unsigned long handlerAddr) {
-    gIdt[vector].offsetLow = static_cast<unsigned short>(handlerAddr & 0xFFFF);
+void kSetGate(kernel::uint32_t vector, kernel::uint64_t handlerAddr) {
+    gIdt[vector].offsetLow = static_cast<kernel::uint16_t>(handlerAddr & 0xFFFF);
     gIdt[vector].selector = kKernelCodeSelector;
     gIdt[vector].ist = 0;
     gIdt[vector].typeAttr = kInterruptGateTypeAttr;
-    gIdt[vector].offsetMid = static_cast<unsigned short>((handlerAddr >> 16) & 0xFFFF);
-    gIdt[vector].offsetHigh = static_cast<unsigned int>((handlerAddr >> 32) & 0xFFFFFFFF);
+    gIdt[vector].offsetMid = static_cast<kernel::uint16_t>((handlerAddr >> 16) & 0xFFFF);
+    gIdt[vector].offsetHigh = static_cast<kernel::uint32_t>((handlerAddr >> 32) & 0xFFFFFFFF);
     gIdt[vector].reserved = 0;
 }
 
-void kSetGate(int vector, IsrStub handler) {
-    kSetGate(vector, reinterpret_cast<unsigned long>(handler));
+void kSetGate(kernel::uint32_t vector, IsrStub handler) {
+    kSetGate(vector, reinterpret_cast<kernel::uint64_t>(handler));
 }
 
 }  // namespace
@@ -104,17 +105,17 @@ void kSetGate(int vector, IsrStub handler) {
 namespace kernel {
 
 void Idt::init() {
-    for (int vector = 0; vector < kVectorCount; ++vector) {
+    for (uint32_t vector = 0; vector < kVectorCount; ++vector) {
         kSetGate(vector, kIsrStubs[vector]);
     }
     kSetGate(kTimerVector, isr32);
     kSetGate(0xFF, isr255);
-    for (unsigned int vector = kDynamicVectorBase; vector <= kDynamicVectorEnd; ++vector) {
-        kSetGate(static_cast<int>(vector), kIsrDynamicStubTable[vector - kDynamicVectorBase]);
+    for (uint32_t vector = kDynamicVectorBase; vector <= kDynamicVectorEnd; ++vector) {
+        kSetGate(vector, kIsrDynamicStubTable[vector - kDynamicVectorBase]);
     }
 
-    gIdtPointer.limit = static_cast<unsigned short>(sizeof(gIdt) - 1);
-    gIdtPointer.base = reinterpret_cast<unsigned long>(&gIdt[0]);
+    gIdtPointer.limit = static_cast<uint16_t>(sizeof(gIdt) - 1);
+    gIdtPointer.base = reinterpret_cast<uint64_t>(&gIdt[0]);
     asm volatile("lidt %0" : : "m"(gIdtPointer));
 }
 
@@ -122,14 +123,14 @@ void Idt::reloadOnThisCore() {
     asm volatile("lidt %0" : : "m"(gIdtPointer));
 }
 
-void Idt::registerHandler(unsigned int vector, InterruptHandler handler) {
+void Idt::registerHandler(uint32_t vector, InterruptHandler handler) {
     if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd) {
         return;
     }
     gDynamicHandlers[vector] = handler;
 }
 
-void Idt::unregisterHandler(unsigned int vector) {
+void Idt::unregisterHandler(uint32_t vector) {
     if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd) {
         return;
     }
@@ -155,8 +156,8 @@ const char* const kExceptionNames[32] = {
 
 namespace {
 
-unsigned long kReadCr2() {
-    unsigned long cr2;
+kernel::uint64_t kReadCr2() {
+    kernel::uint64_t cr2;
     asm volatile("mov %%cr2, %0" : "=r"(cr2));
     return cr2;
 }
@@ -221,7 +222,7 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
         return;  // spurious - EOI 불필요(스펙상 안 보내도 됨)
     }
     if (frame->vector == 14) {
-        const unsigned long faultAddr = kReadCr2();
+        const kernel::uint64_t faultAddr = kReadCr2();
         if (kernel::Paging::handlePageFault(faultAddr, frame->errorCode)) {
             return;
         }
