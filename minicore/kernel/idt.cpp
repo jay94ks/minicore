@@ -30,14 +30,34 @@ constexpr kernel::uint32_t kDynamicVectorEnd = 254;   // 포함(inclusive)
 constexpr kernel::uint16_t kKernelCodeSelector = 0x08;
 constexpr kernel::uint8_t kInterruptGateTypeAttr = 0x8E;  // present, DPL0, 64비트 interrupt gate
 
-// #DF(더블 폴트) 전용 - gdt.cpp의 Gdt::loadTssForThisCore()가 채우는
-// TSS.IST1을 가리킨다(DC-3D3212A4/QU-4E00C118). 이 벡터만은 현재
-// RSP가 뭐든(설령 Task 커널 스택 오버플로우로 고장나 있어도) 항상
-// 유효한 별도 스택에서 실행되게 강제한다 - 안 그러면 #PF 전달 중
-// 재폴트 -> #DF -> 트리플 폴트로 이어져 kPanic 진단 로그를 전혀
-// 남기지 못한다(실측으로 확인된 문제, gdt.h 참고).
+// IST(Interrupt Stack Table) 배정 - gdt.cpp의 Gdt::loadTssForThisCore()
+// 가 채우는 TSS.ISTn을 가리킨다(DC-3D3212A4/QU-4E00C118, 설계자 후속
+// 지시 2026-09-14 - "#DF 외 다른 벡터(NMI/#MC/#DB)의 IST 배정도
+// 고려하라"). 이 네 벡터는 현재 RSP가 뭐든(설령 Task 커널 스택
+// 오버플로우로 고장나 있어도, 또는 애초에 임의 시점에 비동기로
+// 들어와도) 항상 유효한 별도 스택에서 실행되게 강제한다:
+//   - #DF(8): #PF 등 다른 예외 전달 중 재폴트 시 격상된다 - IST 없이는
+//     그 재폴트가 다시 실패해 트리플 폴트(조용한 리셋)로 이어진다
+//     (실측으로 확인된 문제, gdt.h 참고).
+//   - NMI(2): 마스크 불가능(cli로도 못 막음) - 커널이 스핀락을 쥔
+//     채거나 컨텍스트 전환 도중처럼 RSP가 일시적으로 불안정한 어떤
+//     순간에도 끼어들 수 있다.
+//   - #MC(18, Machine Check): 하드웨어 오류 - NMI와 같은 이유로 임의
+//     시점에 들어올 수 있다.
+//   - #DB(1, Debug): 디버그 예외(브레이크포인트/싱글스텝) - 향후
+//     디버깅 지원 시 같은 이유로 안전한 스택이 필요해질 것을 대비해
+//     지금 같이 배정해 둔다.
+// IST1-7 중 4개만 쓰고 나머지(IST5-7)는 향후 다른 벡터가 필요해지면
+// 같은 패턴으로 배정한다(SP-677210E6 참고).
+constexpr kernel::uint32_t kDebugVector = 1;
+constexpr kernel::uint32_t kNmiVector = 2;
 constexpr kernel::uint32_t kDoubleFaultVector = 8;
+constexpr kernel::uint32_t kMachineCheckVector = 18;
+
 constexpr kernel::uint8_t kDoubleFaultIst = 1;
+constexpr kernel::uint8_t kNmiIst = 2;
+constexpr kernel::uint8_t kMachineCheckIst = 3;
+constexpr kernel::uint8_t kDebugIst = 4;
 
 IdtEntry gIdt[256];
 IdtPointer gIdtPointer;
@@ -117,7 +137,10 @@ void Idt::init() {
     for (uint32_t vector = 0; vector < kVectorCount; ++vector) {
         kSetGate(vector, kIsrStubs[vector]);
     }
+    gIdt[kDebugVector].ist = kDebugIst;
+    gIdt[kNmiVector].ist = kNmiIst;
     gIdt[kDoubleFaultVector].ist = kDoubleFaultIst;
+    gIdt[kMachineCheckVector].ist = kMachineCheckIst;
     kSetGate(kTimerVector, isr32);
     kSetGate(0xFF, isr255);
     for (uint32_t vector = kDynamicVectorBase; vector <= kDynamicVectorEnd; ++vector) {

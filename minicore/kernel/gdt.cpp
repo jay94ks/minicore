@@ -15,7 +15,15 @@ constexpr kernel::uint64_t kCode64Descriptor = 0x00AF9A000000FFFFULL;
 constexpr kernel::uint64_t kData64Descriptor = 0x00CF92000000FFFFULL;
 
 constexpr kernel::uint32_t kMaxCores = kernel::kAcpiMaxCpus;
-constexpr kernel::uint64_t kIst1StackSize = 8192;  // #DF 전용 - Task 기본 커널 스택(8KiB)과 동일 크기
+constexpr kernel::uint64_t kIstStackSize = 8192;  // Task 기본 커널 스택(8KiB)과 동일 크기
+
+// IST1-4를 이 순서로 쓴다(idt.cpp의 kDoubleFaultIst/kNmiIst/
+// kMachineCheckIst/kDebugIst와 정확히 대응) - #DF/NMI/#MC/#DB 넷 다
+// "현재 RSP가 뭐든 무관하게 항상 유효한 스택이 필요한" 벡터라
+// 코어마다 각자의 전용 스택을 하나씩 받는다(DC-3D3212A4/QU-4E00C118
+// 후속 지시, 2026-09-14). IST5-7은 아직 안 쓴다 - 필요해지면 이
+// 배열을 늘리고 idt.cpp에 같은 패턴으로 추가한다.
+constexpr kernel::uint32_t kIstSlotCount = 4;
 
 // GDT 배치: [0]=null, [1]=code64, [2]=data64(각 8바이트), 그 뒤로
 // 코어마다 16바이트짜리 TSS 디스크립터가 하나씩 이어진다 - 셀렉터
@@ -55,7 +63,14 @@ struct Tss {
 static_assert(sizeof(Tss) == 104, "x86_64 TSS 레이아웃이 SDM Vol.3 Figure 8-11과 정확히 일치해야 한다");
 
 Tss gTssPerCore[kMaxCores];
-alignas(16) kernel::uint8_t gIst1Stacks[kMaxCores][kIst1StackSize];
+
+// gIstStacks[slot][coreIndex]가 IST(slot+1)용 스택이다(슬롯 0=IST1
+// #DF, 1=IST2 NMI, 2=IST3 #MC, 3=IST4 #DB - 위 주석 참고).
+alignas(16) kernel::uint8_t gIstStacks[kIstSlotCount][kMaxCores][kIstStackSize];
+
+kernel::uint64_t kIstStackTop(kernel::uint32_t slot, kernel::uint32_t coreIndex) {
+    return reinterpret_cast<kernel::uint64_t>(&gIstStacks[slot][coreIndex][kIstStackSize]);
+}
 
 struct TssDescriptorPair {
     kernel::uint64_t low;
@@ -143,7 +158,10 @@ void Gdt::loadTssForThisCore() {
     }
 
     Tss& tss = gTssPerCore[coreIndex];
-    tss.ist1 = reinterpret_cast<uint64_t>(&gIst1Stacks[coreIndex][kIst1StackSize]);
+    tss.ist1 = kIstStackTop(0, coreIndex);  // #DF
+    tss.ist2 = kIstStackTop(1, coreIndex);  // NMI
+    tss.ist3 = kIstStackTop(2, coreIndex);  // #MC
+    tss.ist4 = kIstStackTop(3, coreIndex);  // #DB
     tss.ioMapBase = sizeof(Tss);  // IOPB 없음 - 세그먼트 한계를 벗어나게 해 비활성화
 
     const uint16_t selector = Gdt::tssSelectorForCore(coreIndex);
