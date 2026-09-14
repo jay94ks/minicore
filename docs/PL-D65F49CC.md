@@ -5,12 +5,12 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: PL-D65F49CC
   status: approved
-  updatedAt: 2026-09-13T18:33:31.466Z
+  updatedAt: 2026-09-14T11:58:20.641Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 실행 계획: x2APIC 지원
 
-**[완료, 2026-09-14, 2026-09-14 재작업 반영]** QA-26450C3E 체크됨. 아래는 완료 기록으로 남긴다.
+**[완료, 2026-09-14, 2026-09-14 재작업 반영 - 계획 PN-B39C2E12]** QA-26450C3E 체크됨. 아래는 완료 기록으로 남긴다.
 
 지금 Lapic은 xAPIC(MMIO) 모드만 구현돼 있다(DS-D4E5C451 - 설계자
 지시로 고려 대상에 등록). x2APIC은 접근 방식 자체가 다르므로 Lapic을

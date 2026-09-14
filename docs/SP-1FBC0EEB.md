@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-1FBC0EEB
   status: approved
-  updatedAt: 2026-09-14T06:59:39.868Z
+  updatedAt: 2026-09-14T11:50:09.906Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 ## 배경
@@ -38,6 +38,10 @@
    실패 코드 - §"링버퍼 크기 정책" 신설.
 5. **`destroyChannel` 포함 확정**(필수 API로 승격).
 
+**[커널 내부 구현 완료, 2026-09-14, 계획 PN-A5C06B9B]** 아래 설계
+전부가 PL-C8648D4D로 구현·검증됐다(ring3 트랩 진입 제외 - 계획
+PN-124C105B).
+
 관련 기존 결정:
 
 - **SP-8B6B8D25 §2/§4** - 커널의 책임 "3. IPC를 해석하여 메시징
@@ -49,7 +53,7 @@
 - **DS-D4E5C451** - IPC 메시지 포맷은 **raw binary**로 이미 확정 -
   `read`/`write`가 주고받는 데이터는 별도 직렬화 없이 그대로의
   바이트열. "프로세스간 공개 인터페이스 registry"는 **아직 열린
-  설계 영역**으로 명시적으로 미뤄져 있다 - `/sys/live/named/`가 그
+  설계 영역**으로 명시적으로 미뤄져 있다(계획 PN-268F062B) - `/sys/live/named/`가 그
   registry의 네이밍 계층에 해당한다(§"이름 있는 오브젝트" 참고,
   registry 전체를 여기서 다 설계하지는 않는다).
 - **SP-04EE2A18(Syscall 디스패치 및 비동기 처리 서브시스템, 짝을
@@ -58,7 +62,8 @@
   `waitForSyscall`" 모델을 `read`/`write`의 기본 비동기 동작이 그대로
   물려받는다(§"데이터 전송" 참고).
 - **PL-57CF86EF(4K→2M 페이지 병합/분할)** - huge page 옵션과 관련은
-  있지만 **같은 메커니즘은 아니다**(§"링버퍼 크기 정책"의 구분 참고).
+  있지만 **같은 메커니즘은 아니다**(§"링버퍼 크기 정책"의 구분 참고,
+  Channel 쪽 huge page 지원은 계획 PN-34B34DB4).
 
 ## 이름 있는 오브젝트 = `/sys/live/named/` 가상 파일
 
@@ -241,7 +246,8 @@ struct BridgePipe {
   정확한 소스는 구현 시 확정)이 상한이다.
 - `useHugePage=true`인데 커널 설정이 huge page를 금지했으면(예:
   해당 하드웨어/구성에서 비활성화) **그 자리에서 실패 코드를 반환**
-  한다 - 조용히 일반 페이지로 폴백하지 않는다.
+  한다 - 조용히 일반 페이지로 폴백하지 않는다. **v1은 항상 이 경로다
+  (계획 PN-34B34DB4로 huge page 실제 매핑 지원을 별도 등록)**.
 - **PL-57CF86EF와는 다른 메커니즘이다**: PL-57CF86EF는 *이미 4KiB
   단위로 흩어져 매핑된* 페이지들을 나중에 2MiB로 병합/재분할하는
   기능이고, 여기서 필요한 건 *처음부터* 물리적으로 연속인 2MiB
@@ -253,21 +259,22 @@ struct BridgePipe {
   PS 매핑은 direct map 전용 특수 경로) - 이 기능이 없으면 huge page
   플래그는 "물리적으로만 연속인 2MiB, 하지만 4KiB PTE 512개로
   매핑"으로 축소 구현하거나(TLB 이득 없음), `Paging`에 2M 매핑
-  경로를 먼저 추가해야 한다 - 구현 계획(PL) 단계에서 확정.
+  경로를 먼저 추가해야 한다(계획 PN-34B34DB4, PL-57CF86EF의 계획
+  PN-D28DD9F3과 인프라 공유 가능).
 
-## Channel ID 전달 (범위 밖 - 교차 참조만)
+## Channel ID 전달 (범위 밖 - 교차 참조만, 계획 PN-6D497EB0)
 
 "채널 ID를 공유할 대상 프로세스에게 어떻게든 전달"은 이 제안이
 풀지 않는다 - 후보 경로(프로세스 생성 시 인자로 전달, 이미 연결된
 다른 `BridgePipe`로 전달, `/sys/live/named/`를 통한 이름 기반 발견)
 중 마지막 것은 위에서 이미 다뤘고, 나머지(프로세스 생성/exec)는
-**다른 설계 영역**에 속한다.
+**다른 설계 영역**(프로세스 모델, 계획 PN-16CA347D)에 속한다.
 
 ## 취소/실패 처리와 Syscall 제안의 연동
 
 `connectChannel`/`acceptFromChannel`/`read`/`write`로 대기 중인
 스레드가 죽으면(SP-04EE2A18의 "종료 시 취소 처리", `AsyncTaskHandler
-::onCancel` 반영 완료) 각각 다음을 정리해야 한다:
+::onCancel` 반영 완료, 계획 PN-40E976F2) 각각 다음을 정리해야 한다:
 
 - `connectChannel` 취소: 그 `Channel`의 대기열에서 자신의
   `PendingConnectRequest`를 제거.

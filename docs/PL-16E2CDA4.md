@@ -5,12 +5,12 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: PL-16E2CDA4
   status: approved
-  updatedAt: 2026-09-14T07:55:27.107Z
+  updatedAt: 2026-09-14T11:53:38.212Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 실행 계획: Slab 할당자(libkmm)
 
-**[구현 완료, 2026-09-14]** SP-D7013B26(2026-09-14 확정, QU-4F905C08)의
+**[구현 완료, 2026-09-14 - 계획 PN-DC75D601]** SP-D7013B26(2026-09-14 확정, QU-4F905C08)의
 Slab 할당자를 구현했다. **착수 전제조건**이었던 스케줄러(PL-2D3184BC)의
 선점 비활성화 프리미티브(`Scheduler::disablePreemption()`/
 `enablePreemption()`/`PreemptionGuard`)가 먼저 완료되어 이 계획에
@@ -120,6 +120,12 @@ DC 논의 불필요, 설계자 명시).
   단순화).
 - 32B 미만 요청은 실패시키지 않고 최소 버킷(32)으로 올림 - 위 5번
   항목.
+
+## 남은 것
+
+- **512~2048 버킷의 Order 1 슬랩 적용 여부** (계획 PN-DE8C27B1): SP-D7013B26 §5가
+  "실측 후 별도 검토"로 열어 둔 항목 - 실제 워크로드로 낭비율을
+  계측해 판단한다.
 
 ## 다음 소비자
 

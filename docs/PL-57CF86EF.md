@@ -5,12 +5,12 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: PL-57CF86EF
   status: draft
-  updatedAt: 2026-09-14T01:07:21.164Z
+  updatedAt: 2026-09-14T11:56:13.233Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 실행 계획: 4K 페이지의 2M 페이지 병합/분할
 
-**[설계 확정, 구현 대기, 2026-09-14]** DC-474EE823/QU-87D0CE15 답변으로
+**[설계 확정, 구현 대기, 2026-09-14 - 계획 PN-D28DD9F3]** DC-474EE823/QU-87D0CE15 답변으로
 설계가 확정됐다. 아직 구현은 시작하지 않았다 - 이 문서는 착수 시
 그대로 따를 계획을 남겨 둔다.
 
@@ -71,6 +71,9 @@ QA-26450C3E("4K 페이지가 조건에 따라 2M 페이지로 병합된다")가
 - MSI-X/MMCONFIG처럼 캐시비활성(UC) 매핑도 병합 대상에 포함되는지
   재확인(4번 조건상 플래그 일치만 하면 포함되는 게 자연스러움 -
   PAGE_CACHE_DISABLE도 "플래그"의 일부).
+
+**관련 계획**: Channel IPC의 huge page 링버퍼 지원(PN-34B34DB4)이
+이 작업의 2M 매핑 인프라를 그대로 재사용할 수 있다.
 
 ## 아직 시작 안 함
 
