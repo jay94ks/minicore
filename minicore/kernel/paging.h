@@ -20,6 +20,14 @@ inline uint64_t kPhysToVirt(uint64_t physAddr) {
     return kDirectMapBase + physAddr;
 }
 
+// kPhysToVirt의 역변환 - direct map 안의 가상주소에만 유효하다(그
+// 밖의 임의 가상주소를 넘기면 안 됨, 호출부 책임). GenericSlabAllocator
+// (SP-D7013B26)가 2048B 초과 요청을 PageFrameAllocator로 직접 위임할
+// 때, free() 시점에 되돌려줄 물리주소를 구하는 데 쓴다.
+inline uint64_t kVirtToPhys(uint64_t virtAddr) {
+    return virtAddr - kDirectMapBase;
+}
+
 // 아직 실제 유저/커널 주소공간 서술자(VMA)가 없어서, 온디맨드 매핑을
 // 시험할 "지연 매핑 구역"을 하나 고정으로 둔다 - 이 범위 안에서
 // not-present 폴트가 나면 프레임을 새로 붙여준다. 나중에 진짜 힙/

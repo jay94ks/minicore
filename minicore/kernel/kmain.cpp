@@ -8,6 +8,7 @@
 #include "ioapic.h"
 #include "lapic.h"
 #include "multiboot2.h"
+#include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "pci.h"
@@ -275,6 +276,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Serial::write(" free_pages=");
     kernel::Serial::writeHex(kernel::PageFrameAllocator::freePageCount());
     kernel::Serial::write("\n");
+
+    // PageFrameAllocator 이후, Scheduler::currentCoreIndex()/
+    // PreemptionGuard를 실제로 쓰는 첫 alloc()/free() 호출(Lapic::init()
+    // 이후) 전이면 아무때나 무방하다 - init() 자체는 정적 구조만
+    // 채운다(SP-D7013B26).
+    kernel::GenericSlabAllocator::init();
+    kernel::Serial::write("minicore: slab allocator ready (libkmm)\n");
 
     kernel::Lapic::init();
     kernel::Serial::write("minicore: LAPIC ready, mode=");

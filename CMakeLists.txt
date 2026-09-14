@@ -24,6 +24,7 @@ option(MINICORE_TASK_STACK_GUARD_PAGE "Task 커널 스택 가드 페이지 활�
 # 오브젝트가 그대로 최종 실행 파일에 들어간다.
 add_subdirectory(minicore/libs/libkenv)
 add_subdirectory(minicore/libs/libcpio)
+add_subdirectory(minicore/libs/libkmm)
 add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
@@ -34,6 +35,7 @@ target_link_libraries(minicore.elf PRIVATE
     minicore_kernel
     libkenv
     libcpio
+    libkmm
     minicore_libs_x86_64
 )
 
