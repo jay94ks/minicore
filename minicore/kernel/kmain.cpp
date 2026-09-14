@@ -1,5 +1,6 @@
 #include "acpi.h"
 #include "boot_info.h"
+#include "gdt.h"
 #include "hvm_start_info.h"
 #include "idt.h"
 #include "libcpio/cpio.h"
@@ -198,6 +199,9 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         }
     }
 
+    kernel::Gdt::init();
+    kernel::Serial::write("minicore: GDT ready\n");
+
     kernel::Idt::init();
     kernel::Serial::write("minicore: IDT ready\n");
 
@@ -272,6 +276,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Serial::write(" id=");
     kernel::Serial::writeHex(kernel::Lapic::id());
     kernel::Serial::write("\n");
+
+    // Acpi::cpuApicId()/Lapic::id()로 자기 코어 인덱스를 찾아야 해서
+    // 반드시 이 둘 이후에 호출해야 한다(gdt.h 참고 - IST1을 #DF
+    // 전용으로 채우고 ltr).
+    kernel::Gdt::loadTssForThisCore();
+    kernel::Serial::write("minicore: TSS/IST ready (core 0)\n");
 
     kernel::IoApic::init();
     kernel::Serial::write("minicore: IOAPIC mapped\n");

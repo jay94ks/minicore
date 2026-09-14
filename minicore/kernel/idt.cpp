@@ -30,6 +30,15 @@ constexpr kernel::uint32_t kDynamicVectorEnd = 254;   // 포함(inclusive)
 constexpr kernel::uint16_t kKernelCodeSelector = 0x08;
 constexpr kernel::uint8_t kInterruptGateTypeAttr = 0x8E;  // present, DPL0, 64비트 interrupt gate
 
+// #DF(더블 폴트) 전용 - gdt.cpp의 Gdt::loadTssForThisCore()가 채우는
+// TSS.IST1을 가리킨다(DC-3D3212A4/QU-4E00C118). 이 벡터만은 현재
+// RSP가 뭐든(설령 Task 커널 스택 오버플로우로 고장나 있어도) 항상
+// 유효한 별도 스택에서 실행되게 강제한다 - 안 그러면 #PF 전달 중
+// 재폴트 -> #DF -> 트리플 폴트로 이어져 kPanic 진단 로그를 전혀
+// 남기지 못한다(실측으로 확인된 문제, gdt.h 참고).
+constexpr kernel::uint32_t kDoubleFaultVector = 8;
+constexpr kernel::uint8_t kDoubleFaultIst = 1;
+
 IdtEntry gIdt[256];
 IdtPointer gIdtPointer;
 
@@ -108,6 +117,7 @@ void Idt::init() {
     for (uint32_t vector = 0; vector < kVectorCount; ++vector) {
         kSetGate(vector, kIsrStubs[vector]);
     }
+    gIdt[kDoubleFaultVector].ist = kDoubleFaultIst;
     kSetGate(kTimerVector, isr32);
     kSetGate(0xFF, isr255);
     for (uint32_t vector = kDynamicVectorBase; vector <= kDynamicVectorEnd; ++vector) {

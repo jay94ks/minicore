@@ -1,6 +1,7 @@
 #include "smp.h"
 
 #include "acpi.h"
+#include "gdt.h"
 #include "idt.h"
 #include "lapic.h"
 #include "libkenv/mem.h"
@@ -74,7 +75,15 @@ bool kWaitApReady(kernel::uint32_t expectedCount) {
 // hlt 루프로 방어하긴 하지만).
 extern "C" void kApMain(kernel::uint32_t apIndex) {
     kernel::Idt::reloadOnThisCore();
+    // ap_trampoline.S가 boot.S의 예전 gdt64(TSS 디스크립터 없음)를
+    // 그대로 쓴 채로 여기 도달하므로, BSP가 만들어 둔 새 GDT로 이
+    // 코어의 GDTR을 갈아 껴야 loadTssForThisCore가 쓸 TSS 디스크립터를
+    // 찾을 수 있다(gdt.h 참고).
+    kernel::Gdt::reloadOnThisCore();
     kernel::Lapic::init();
+    // Acpi::cpuApicId()/Lapic::id()로 자기 코어 인덱스를 찾아야 해서
+    // 반드시 Lapic::init() 이후에 호출해야 한다.
+    kernel::Gdt::loadTssForThisCore();
 
     kernel::Serial::write("minicore: AP started, index=");
     kernel::Serial::writeHex(apIndex);
