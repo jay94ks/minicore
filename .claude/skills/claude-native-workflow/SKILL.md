@@ -109,6 +109,14 @@ document next-statuses <trackingCode>`로 확인한다.
   [--ref <r>] [--offset <n>] [--limit <n>]` - 1부터 시작하는 줄
   번호로 범위를 지정, 둘 다 생략하면 처음 2000줄. `totalLines`로
   전체 줄 수를 알 수 있다.
+- **부분 치환(문서 전용)**: `docs patch <trackingCode> <oldStr>
+  <newStr> [--replace-all]` - 본문 전체를 다시 구성해 `docs save`로
+  덮어쓰지 않고, `oldStr`이 본문에 정확히 한 번만 있을 때만 그
+  자리만 바꾼다(없거나 여러 번 있으면 아무것도 안 바꾸고 실패,
+  `--replace-all`이면 전부 교체) - 긴 문서에 짧은 내용만 끼워
+  넣을 때 쓴다. 여러 문서에 각자 다른 치환을 한 번에 적용하려면
+  `docs patch-batch <file>`(로컬 JSON 배열)/`document_patch_batch`
+  (items 배열)로 - 항목별 성공/실패 반환.
 - **본문 검색**: 문서는 `docs grep <trackingCode> <pattern>
   [--case-insensitive] [--context <n>]`, 소스 파일은 `docs git grep
   <projectId> <path> <pattern> [--ref <r>] [--case-insensitive]
@@ -120,6 +128,12 @@ document next-statuses <trackingCode>`로 확인한다.
   단위 결과(`added`/`removed`/`value`)를 그대로 반환한다. 소스 파일의
   버전 비교는 이미 `docs git log/diff/show`(커밋 단위 unified diff)로
   되므로 별도 명령을 안 둔다.
+- **문서 검색은 `--codes-only`가 기본**: `docs search`는 기본적으로
+  히트마다 본문 전체를 그대로 담아 돌려준다 - 트래킹 코드만
+  필요하면(예: 다른 명령의 `--refs`에 넘길 목록을 모으는 중) 항상
+  `--codes-only`로 본문/메타 없이 코드 배열만 받는다. 본문이 필요하지만
+  전체까지는 아니면 `--lines <n>`으로 각 히트의 앞부분만 자를 수 있다
+  (실제로 잘렸으면 `bodyTruncated:true`).
 
 전부 문서는 검색 엔진에서, 소스 파일은 Gitea REST에서 가져온 내용
 위에서 동작하는 순수 읽기 후처리라 문서 상태/리비전 이력이나 git
@@ -303,10 +317,16 @@ team-admin-add/team-admin-remove/team-admins <teamId> [<userId>]`.
 Document/DocType/DocStatus 체계와 완전히 별도로 관리되는 독립
 엔티티 - 작업 중 "이건 지금 당장이 아니라 나중에 따로 계획을 잡아야
 한다"고 판단한 항목을 즉시 트래킹 코드(`PN-XXXXXXXX`)로 남겨두는
-체크리스트다. 상태는 5개로 고정(`계획됨`/`승인대기`/`검토중`/
-`예정`/`거부`, `plan statuses`로 조회) - DocStatus처럼 프로젝트마다
-커스터마이즈되지 않고, 전이도 그래프로 제약되지 않아 언제든 5개 중
-아무 값으로나 바꿀 수 있다.
+체크리스트다. 상태는 6개로 고정(`계획됨`/`승인대기`/`검토중`/
+`예정`/`완료`/`거부`, `plan statuses`로 조회) - DocStatus처럼
+프로젝트마다 커스터마이즈되지 않고, 전이도 그래프로 제약되지 않아
+언제든 6개 중 아무 값으로나 바꿀 수 있다.
+
+**선행 조건(계획 간 의존성)도 걸 수 있다** - 이 계획을 시작하기 전에
+먼저 끝나야 하는 다른 계획들을 여러 개 지정할 수 있다(`plan depend`/
+`plan undepend`, 생성 시엔 `plan new --depends-on`). 관련 문서와
+마찬가지로 순수 참조 목록이라 실행 순서를 강제로 검사하지 않고
+순환도 막지 않는다 - 자기 자신을 선행 조건으로 지정하는 것만 거부.
 
 **작업 중 스스로 판단해 기록한다** - 코드 관계도/칸반 카드와 같은
 원칙: 설계자가 시켜서가 아니라, 지금 처리할 일이 아니라고 판단되면
@@ -316,9 +336,20 @@ Document/DocType/DocStatus 체계와 완전히 별도로 관리되는 독립
 챙겨야 할 항목만 기록한다.
 
 웹 UI에는 "계획" 탭이 있어 설계자가 상태를 검토/승인 처리할 수 있다
-- 관련 문서는 항상 검색 기반 선택기로 고르고, `PN-XXXXXXXX` 코드는
-메시지/코멘트/문서 본문 어디서든 클릭하면 미리보기가 뜬다(질의/칸반
-카드 코드와 같은 방식).
+- 관련 문서/선행 조건은 항상 검색 기반 선택기로 고르고(선행 조건
+선택기는 편집 중인 계획 자기 자신을 목록에서 제외), `PN-XXXXXXXX`
+코드는 메시지/코멘트/문서 본문 어디서든 클릭하면 미리보기가 뜬다
+(질의/칸반 카드 코드와 같은 방식).
+
+**여러 계획을 한 번에 다뤄야 할 땐 bulk 명령**(`#plan-bulk-ops`) -
+`plan bulk-export`(조건에 맞는 전체를 페이지 상한 없이 로컬 JSON
+파일로, "계획을 하나의 파일로" 내보낼 때)/`plan bulk-import`(로컬
+JSON 파일의 여러 계획 정의를 한 번에 생성 - 항목별 성공/실패 반환,
+`refs`/`dependsOn`은 이미 존재하는 문서/계획만 가리킬 수 있고 같은
+파일 안 다른 항목은 못 가리킴)/`plan status-bulk`·`plan link-bulk`·
+`plan depend-bulk`(같은 상태/관련 문서/선행 조건을 여러 계획에 한
+번에 적용, 각각 `<value> <trackingCode...>` 형태 - `transition-bulk`
+와 같은 관례).
 
 ## 목록 명령의 페이지네이션
 
@@ -479,14 +510,20 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 문서 생성 | `docs new <projectId> <typeCode> --title <t> --body <file>` | `document_new` |
 | 문서 조회 | `docs get <trackingCode>` | `document_get` |
 | 문서 목록 | `docs list <projectId>` | `document_list` |
-| 검색 | `docs search <projectId> <query>` | `document_search` |
+| 검색 | `docs search <projectId> <query> [--page <n>] [--count <n>] [--lines <n>] [--codes-only]` | `document_search` |
 | 본문 갱신 | `docs save <trackingCode> <file>` | `document_save` |
+| 본문 부분 치환(str_replace) | `docs patch <trackingCode> <oldStr> <newStr> [--replace-all]` | `document_patch` |
+| 본문 일괄 부분 치환(로컬 JSON 파일) | `docs patch-batch <file>` | `document_patch_batch`(items 배열을 직접 전달) |
 | 상태 전이 | `docs transition <trackingCode> <toStatusCode>` | `document_transition` |
 | 상태 일괄 전이 | `docs transition-bulk <toStatusCode> <trackingCode...>` | `document_transition_bulk` |
 | 우선순위 설정(review/pending 전용) | `docs priority-set <trackingCode> <n>` | `document_priority_set` |
 | 다음 가능 상태 조회 | `docs next-statuses <trackingCode>` | `document_next_statuses` |
 | 문서 삭제 | `docs delete <trackingCode>` | `document_delete` |
 | 문서 링크 | `docs link <from> <to>` | `document_link` |
+| 정방향 링크 조회(이 문서가 링크한 문서들, 순서대로) | `docs links-out <trackingCode>` | `document_links_out` |
+| 문서 링크 해제 | `docs unlink <from> <to> [--type <linkType>]` | `document_unlink` |
+| 문서 링크 순서 변경 | `docs links-reorder <trackingCode> <orderedTrackingCodes...>` | `document_links_reorder` |
+| 프로젝트 문서 관계 그래프(문서간 관계 서브탭과 같은 데이터) | `docs doc-graph <projectId>` | `document_graph` |
 | 역참조 조회 | `docs backlinks <trackingCode>` | `document_backlinks` |
 | 버전 이력 조회 | `docs revisions <trackingCode>` | `document_revisions` |
 | 부분 읽기(줄 범위) | `docs read <trackingCode> [--offset <n>] [--limit <n>]` | `document_read` |
@@ -563,7 +600,7 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 칸반 카드 목록 | `docs kanban-cards <projectId> [--column <columnId>]` | `kanban_cards` |
 | 칸반 카드 상세 | `docs kanban-card-get <trackingCode>` | `kanban_card_get` |
 | 칸반 카드 이동 | `docs kanban-card-move <trackingCode> <toColumnId> [--index <n>]` | `kanban_card_move` |
-| 계획 생성(+관련 문서) | `docs plan new <projectId> <title> --body <file> [--status <code>] [--refs <codes>]` | `plan_new` |
+| 계획 생성(+관련 문서/선행 조건) | `docs plan new <projectId> <title> --body <file> [--status <code>] [--refs <codes>] [--depends-on <codes>]` | `plan_new` |
 | 계획 목록 | `docs plan list <projectId> [--status <code>] [--q <text>] [--page <n>] [--count <n>]` | `plan_list` |
 | 계획 상태 코드 목록(고정값) | `docs plan statuses` | `plan_statuses` |
 | 계획 상세 | `docs plan get <trackingCode>` | `plan_get` |
@@ -572,6 +609,13 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 계획 삭제 | `docs plan delete <trackingCode>` | `plan_delete` |
 | 계획에 관련 문서 추가 | `docs plan link <trackingCode> <docTrackingCode>` | `plan_link` |
 | 계획에서 관련 문서 제거 | `docs plan unlink <trackingCode> <docTrackingCode>` | `plan_unlink` |
+| 계획에 선행 조건 추가 | `docs plan depend <trackingCode> <dependsOnTrackingCode>` | `plan_depend` |
+| 계획에서 선행 조건 제거 | `docs plan undepend <trackingCode> <dependsOnTrackingCode>` | `plan_undepend` |
+| 계획 전체 내보내기(페이지 상한 없음, 로컬 파일로 저장) | `docs plan bulk-export <projectId> <outFile> [--status <code>] [--q <text>]` | `plan_export`(파일 저장 없이 배열만 반환) |
+| 계획 일괄 생성(로컬 JSON 파일) | `docs plan bulk-import <projectId> <file>` | `plan_bulk_import`(items 배열을 직접 전달) |
+| 계획 상태 일괄 변경 | `docs plan status-bulk <status> <trackingCode...>` | `plan_bulk_status` |
+| 계획 일괄 관련 문서 추가 | `docs plan link-bulk <docTrackingCode> <trackingCode...>` | `plan_bulk_link` |
+| 계획 일괄 선행 조건 추가 | `docs plan depend-bulk <dependsOnTrackingCode> <trackingCode...>` | `plan_bulk_depend` |
 | 코드 관계 추가 | `docs relation add <projectId> --target <t> --referrer <r> --purpose <p> --file <path> [--line <n>] [--column <n>] [--data <json>] [--refs <codes>] [--tags <t1,t2>] [--parents <id1,id2>] [--children <id1,id2>] [--branch <name>]` | `relation_add` |
 | 코드 관계 수정 | `docs relation update <projectId> <id> [필드 옵션...] [--refs <codes>] [--add-parents/--remove-parents/--add-children/--remove-children <id1,id2>] [--branch <name>]` | `relation_update` |
 | 코드 관계 삭제 | `docs relation remove <projectId> <id>` | `relation_remove` |
