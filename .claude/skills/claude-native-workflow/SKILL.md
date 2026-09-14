@@ -102,7 +102,12 @@ document next-statuses <trackingCode>`로 확인한다.
 항상 전체 내용을 반환한다 - 라운드 기록이나 큰 소스 파일을 그냥
 훑어보거나 특정 키워드만 확인하려는 거라면 굳이 전체를 컨텍스트에
 올릴 필요 없이 아래를 먼저 쓴다(파일에 대한 Read/Grep 도구와 같은
-역할을 문서 본문/소스 파일 양쪽에 그대로 적용한 것):
+역할을 문서 본문/소스 파일 양쪽에 그대로 적용한 것). `docs get`/
+`document_get` 응답에는 본문과 함께 `linksOut`(이 문서가 링크한
+문서)/`backlinks`(이 문서를 링크한 문서)도 실려 온다
+(`#document-detail-related-codes`) - 문서 하나를 조회했을 때 그
+문서가 다른 어떤 문서와 연결돼 있는지 별도로 `docs links-out`/
+`docs backlinks`를 또 호출하지 않아도 바로 알 수 있다:
 
 - **부분 읽기**: 문서는 `docs read <trackingCode> [--offset <n>]
   [--limit <n>]`, 소스 파일은 `docs git read <projectId> <path>
@@ -120,7 +125,14 @@ document next-statuses <trackingCode>`로 확인한다.
 - **본문 검색**: 문서는 `docs grep <trackingCode> <pattern>
   [--case-insensitive] [--context <n>]`, 소스 파일은 `docs git grep
   <projectId> <path> <pattern> [--ref <r>] [--case-insensitive]
-  [--context <n>]` - JS 정규식 문법, 매치된 줄 번호+텍스트 배열을
+  [--context <n>]` - 정규식 규격은 **POSIX ERE**로 고정돼 있다
+  (`#posix-regex-parser`) - `grep -E`/`egrep`과 같은 문법. `[[:alpha:]]`
+  같은 POSIX 문자 클래스는 실제로 지원되고, 반대로 `\d`/`\w`/`\s`/`\b`
+  같은 JS 전용 단축 클래스는 POSIX 문법이 아니라서 그 알파벳 자체를
+  가리키는 리터럴로 취급된다(`\d`는 숫자가 아니라 그냥 문자 "d") -
+  JS 정규식에 익숙하다면 이 차이를 주의한다. 대괄호 미종료·알 수
+  없는 POSIX 클래스처럼 패턴 자체가 잘못됐으면 조용히 다른 걸로
+  둔갑하지 않고 에러를 반환한다. 매치된 줄 번호+텍스트 배열을
   반환한다(`--context`로 앞뒤 줄도 같이).
 - **버전 비교(문서 전용)**: `docs diff <trackingCode> <from> [<to>]` -
   `from`/`to`는 `docs revisions`가 주는 리비전 id 또는 리터럴
@@ -508,7 +520,7 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 목적 | CLI | MCP 도구 |
 |---|---|---|
 | 문서 생성 | `docs new <projectId> <typeCode> --title <t> --body <file>` | `document_new` |
-| 문서 조회 | `docs get <trackingCode>` | `document_get` |
+| 문서 조회(본문+linksOut/backlinks) | `docs get <trackingCode>` | `document_get` |
 | 문서 목록 | `docs list <projectId>` | `document_list` |
 | 검색 | `docs search <projectId> <query> [--page <n>] [--count <n>] [--lines <n>] [--codes-only]` | `document_search` |
 | 본문 갱신 | `docs save <trackingCode> <file>` | `document_save` |
@@ -527,7 +539,7 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 역참조 조회 | `docs backlinks <trackingCode>` | `document_backlinks` |
 | 버전 이력 조회 | `docs revisions <trackingCode>` | `document_revisions` |
 | 부분 읽기(줄 범위) | `docs read <trackingCode> [--offset <n>] [--limit <n>]` | `document_read` |
-| 본문 정규식 검색 | `docs grep <trackingCode> <pattern> [--case-insensitive] [--context <n>]` | `document_grep` |
+| 본문 정규식 검색(POSIX ERE) | `docs grep <trackingCode> <pattern> [--case-insensitive] [--context <n>]` | `document_grep` |
 | 버전 비교 | `docs diff <trackingCode> <from> [<to>]`(from/to는 리비전 id 또는 "current") | `document_diff` |
 | 연관 소스코드 연결 | `docs link-source <trackingCode> <path>` | `document_link_source` |
 | 연관 소스코드 해제 | `docs unlink-source <trackingCode> <linkId>` | `document_unlink_source` |
@@ -568,12 +580,14 @@ UI와 강하게 결합돼 있음) - 그 외 조회/대화/진행 내역/머지·
 | 디렉터리 목록 | `docs git tree <projectId> [--path <p>] [--ref <r>]` | `git_tree` |
 | 파일 내용 조회 | `docs git cat <projectId> <path> [--ref <r>]` | `git_cat` |
 | 파일 부분 읽기(줄 범위) | `docs git read <projectId> <path> [--ref <r>] [--offset <n>] [--limit <n>]` | `git_read` |
-| 파일 정규식 검색 | `docs git grep <projectId> <path> <pattern> [--ref <r>] [--case-insensitive] [--context <n>]` | `git_grep` |
+| 파일 정규식 검색(POSIX ERE) | `docs git grep <projectId> <path> <pattern> [--ref <r>] [--case-insensitive] [--context <n>]` | `git_grep` |
 | 파일 저장(커밋) | `docs git put <projectId> <path> <localFile> [--message <m>]` | `git_put` |
 | 파일 삭제(커밋) | `docs git delete <projectId> <path> [--message <m>]` | `git_delete` |
 | 여러 파일 한번에 조회 | `docs git cat-batch <projectId> <path1,path2,...>` | `git_cat_batch` |
 | 파일 변경 스테이징 | `docs git add <projectId> <path> <localFile>` | `git_add` |
+| 파일 변경 일괄 스테이징 | `docs git add-bulk <projectId> <manifestFile>` | `git_add_bulk` |
 | 파일 삭제 스테이징 | `docs git rm <projectId> <path>` | `git_rm` |
+| 파일 삭제 일괄 스테이징 | `docs git rm-bulk <projectId> <path...>` | `git_rm_bulk` |
 | 스테이징 상태 조회(diff+드리프트) | `docs git status <projectId>` | `git_status` |
 | 스테이징 취소 | `docs git restore <projectId> <path>` | `git_restore` |
 | 스테이징 반영(커밋) | `docs git commit <projectId> --message <m>` | `git_commit` |
@@ -722,6 +736,17 @@ git publish-queue-done <projectId> <id>`로 완료를 보고한다 - 이
 바뀌었는지)를 같이 보여준다** - 커밋을 시도하기 전에 충돌 가능성을
 미리 확인할 수 있다. `git restore <projectId> <path>`로 스테이징을
 취소한다(스테이징된 게 없으면 명확한 에러).
+
+**여러 파일을 스테이징해야 할 땐 `git add`/`git rm`을 파일마다 반복
+호출하지 않고 일괄 명령을 쓴다**(`#git-staging-bulk`) - 파일 수만큼
+CLI 프로세스 기동+HTTP 왕복이 누적되면 체감상 느려진다. `git
+add-bulk <projectId> <manifestFile>`(MCP `git_add_bulk`)은 로컬 JSON
+매니페스트(`[{"path": "...", "localFile": "..."}, ...]`, `docs
+relation add-bulk`와 같은 "로컬 파일 참조 배열" 관례)로 여러 파일을
+한 번에 스테이징하고, `git rm-bulk <projectId> <path...>`(MCP
+`git_rm_bulk`)는 여러 삭제를 경로 목록만으로 한 번에 스테이징한다.
+둘 다 항목별 결과(`{path, ok, error?}[]`)를 반환해 일부만 실패해도
+나머지는 계속 진행된다.
 
 **`git commit`은 항상 원자적이다** - 드리프트가 있어도 겹치지 않는
 변경이면 3-way 자동 병합해 한 커밋에 반영하지만, 같은 줄을 건드리는
