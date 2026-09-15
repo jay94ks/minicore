@@ -16,17 +16,25 @@ class Process;  // 포인터로만 참조(UserThread::process) - 전체 정의�
 // SyscallRegistry 참고).
 using SyscallEndpointId = uint32_t;
 
-// User-Level로 격하된 Task가 자연 종료(kTaskFallingToEnd)될 때 자기
-// 자신을 종료 처리해 달라고 제출하는 예약 endpoint(PL-2D3184BC "Task
-// 종료 프로토콜", QU-26F9420E 설계자 답변 1번, 2026-09-14 - "자기
-// 자신을 종료처리하라는 System Call 명세를 별도로 만들고 그걸로
-// 제출"). **아직 이 endpoint에 등록된 핸들러가 없다**(프로세스
-// 모델/ring3 데모션 메커니즘 자체가 아직 없어 이 경로가 실제로
-// 트리거될 수 없음) - 그 인프라가 생길 때 실제 정리 로직(프로세스
-// 자원 회수, 부모에게 종료 통지 등)을 이 endpoint의 핸들러로 등록
-// 하면 된다. 그 전까지 submit()은 항상 미등록으로 실패하지만
-// (SyscallRegistry::resolveSubjectCode가 false), 호출부(scheduler.cpp
-// 의 kTaskOnFallingToEnd)는 그 결과를 wait하지 않으므로 무해하다.
+// User-Level UserThread가 자연 종료(kTaskFallingToEnd)될 때 자기 자신을
+// 종료 처리해 달라고 제출하는 예약 endpoint(PL-2D3184BC "Task 종료
+// 프로토콜", QU-26F9420E 설계자 답변 1번, 2026-09-14 - "자기 자신을
+// 종료처리하라는 System Call 명세를 별도로 만들고 그걸로 제출"). 핸들러
+// (scheduler.cpp의 SelfTerminateHandler)가 Scheduler::init()에서 등록돼
+// 있다(PN-71C3D483, QU-84E5B3D5 설계자 답변으로 확정) - 실행 흐름은
+// kTaskOnFallingToEnd가 `Syscall::submitDetached()`로 제출하고,
+// 핸들러의 onExec가 `Scheduler::retireTask()`로 실제 정리(커널 스택
+// 회수)를 수행한다. **아직 남은 범위**: Process 자원 회수(주소공간
+// unmap+Process::destroy())는 유저 영역에 매핑된 페이지 목록을 추적하는
+// 자료구조(VMA/Maple Tree, SP-2AAD7C8D)가 아직 없어 이 핸들러가 하지
+// 않는다 - 그 인프라가 생길 때 SelfTerminateHandler::onExec에 이어
+// 붙인다. 또한 이 자연-종료 경로는 UserThread의 entry(항상
+// process.cpp의 kEnterRing3, `[[noreturn]]`이라 정상적으로는 절대
+// "반환"하지 않음)가 실제로 반환하는 경우에만 트리거되는데, 지금은
+// 그런 경로가 없다 - ring3의 명시적 `mc::selfTerminate()` 호출(아직
+// userland/libs/libmc/syscall.cpp의 `for(;;){}` 스텁)이 이 종료
+// 시퀀스를 어떻게 트리거할지는 별도로 확인 필요(userland의 syscall
+// 트랩이 절대 ring3로 돌아가면 안 된다는 점이 일반 syscall과 다름).
 constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = 0;
 
 // 유저 프로세스에 속한 스레드의 커널 쪽 표현(SP-04EE2A18, 설계자 지시
@@ -100,6 +108,17 @@ public:
     // 항목 하나를 추가하고 그 토큰을 그대로 반환한다(한 스레드가 여러
     // 번 submit()해 여러 토큰을 동시에 들고 있을 수 있다).
     static AsyncTaskManageCode submit(SyscallEndpointId endpointId, void* args);
+
+    // PN-71C3D483 - submit()과 달리 "제출하고 완전히 잊는다"(SP-F682B889
+    // §3.1의 autoFree=true 패턴 그대로) - pendingSyscalls에 아무것도
+    // 남기지 않고, 아무도 나중에 wait()으로 결과를 소비하지 않는다는
+    // 전제다. 그래서 **UserThread 실행 흐름일 필요가 없다**(submit()과
+    // 달리 `Scheduler::currentTask()`를 전혀 안 건드림) - 첫 소비자는
+    // kTaskOnFallingToEnd의 self-terminate 제출(scheduler.cpp) - 종료
+    // 중인 Task 자신은 그 결과를 절대 기다리지 않는다. endpointId가
+    // 등록 안 돼 있거나 AsyncTask 확보에 실패하면 조용히 무시한다
+    // (호출부가 결과를 확인할 방법 자체가 없으므로 반환값도 없다).
+    static void submitDetached(SyscallEndpointId endpointId, void* args);
 
     // token이 호출한 UserThread 자신의 pendingSyscalls에 없으면(위조/
     // 타인 토큰, 또는 이미 소비된 토큰) 즉시 false. 이미 완료돼 있으면

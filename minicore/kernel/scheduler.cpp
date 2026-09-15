@@ -150,6 +150,23 @@ void kSyncCr3ForDispatch(Task* next) {
     }
 }
 
+// kSyscallEndpointSelfTerminate(PN-71C3D483)의 실제 핸들러 - args는
+// kTaskOnFallingToEnd가 `Syscall::submitDetached()`로 넘긴, 종료 대상
+// UserThread 자신(Task*)이다. **이 onExec가 실행되고 있다는 사실 자체가
+// target이 이미 이 코어에서 실행 중이 아님을 증명한다**(한 코어에서는
+// 항상 하나의 Task만 실행되고, 지금은 리액터가 실행 중이므로) -
+// target은 kTaskOnFallingToEnd에서 이미 스스로를 Zombie로 표시해 뒀고
+// (그래서 `Scheduler::onTick()`이 그 이후로 다시는 재삽입하지 않았다),
+// Scheduler::retireTask() 문서 주석 참고.
+class SelfTerminateHandler : public AsyncTaskHandler {
+public:
+    void onExec(AsyncTask*, void* args) override { Scheduler::retireTask(static_cast<Task*>(args)); }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+SelfTerminateHandler gSelfTerminateHandler;
+
 }  // namespace
 
 void Scheduler::init() {
@@ -160,6 +177,12 @@ void Scheduler::init() {
     if (gCoreCount > kMaxCores) {
         gCoreCount = kMaxCores;
     }
+    // BSP에서 한 번만(다른 registerSyscallEndpoints류 호출과 같은 이유
+    // - 이미 쓰인 슬롯에 재등록하면 SyscallRegistry::registerHandler가
+    // 거부한다) - kSyscallEndpointSelfTerminate(값 0)는 syscall.h가
+    // 예약해 둔 고정 슬롯(PN-71C3D483 완료 전까지는 핸들러 없이
+    // 비어 있었다).
+    SyscallRegistry::registerHandler(kSyscallEndpointSelfTerminate, &gSelfTerminateHandler);
 }
 
 uint32_t Scheduler::currentCoreIndex() {
@@ -299,7 +322,14 @@ void Scheduler::onTick(InterruptFrame*) {
         return;  // 대기 중인 다른 Task 없음 - 그대로 계속 실행(타임퀀텀 소진 안 함)
     }
 
-    enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
+    // Zombie면(PN-71C3D483 - kTaskOnFallingToEnd가 self-terminate 제출
+    // 직전 스스로 표시해 둔 상태) 재삽입하지 않는다 - 곧 리액터의
+    // SelfTerminateHandler가 Scheduler::retireTask(current)로 정리
+    // 큐에 등록한다. 그 전까지 이 Task는 어느 큐에도 없는 채로 그냥
+    // "스위칭되어 나간" 상태로만 남는다(다시 뽑힐 걱정 없음).
+    if (current->state != TaskState::Zombie) {
+        enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
+    }
     gCurrentTask[coreIndex] = next;
     next->state = TaskState::Running;
     kSyncRsp0ForDispatch(next);
@@ -471,6 +501,18 @@ void Scheduler::retireCurrentTask() {
     }
 }
 
+void Scheduler::retireTask(Task* task) {
+    // scheduler.h의 문서 주석 참고 - 호출자 자신이 지금 이 코어에서
+    // 실행 중이라는 사실 자체가 target은 이미 실행 중이 아님을
+    // 보장한다(한 코어 = 동시에 하나의 Task). retireCurrentTask()와
+    // 달리 kContextSwitch가 필요 없다 - target은 스위칭할 "실행 중인
+    // 자기 자신"이 아니라 이미 정지해 있는 다른 Task이므로, 정리
+    // 큐에 등록해 두기만 하면 이 코어의 runLoop()이 나중에(idle
+    // 컨텍스트에서) 커널 스택을 회수한다.
+    task->state = TaskState::Zombie;
+    gCleanupQueues[currentCoreIndex()].pushBack(task);
+}
+
 void Scheduler::disablePreemption() {
     ++gPreemptDisableCount[currentCoreIndex()];
 }
@@ -496,13 +538,21 @@ extern "C" void kTaskOnFallingToEnd() {
         return;  // 이론상 도달 불가 - 방어적으로 그냥 hlt 루프로
     }
     if (self->isUserLevel) {
-        // User-Level로 격하된 Task(설계자 지시 1번) - 자기종료
-        // syscall을 wait 없이 제출만 하고 반환한다. 아직 이 endpoint에
-        // 등록된 핸들러가 없어(프로세스 모델 미착수) submit이 항상
-        // 실패로 끝나지만, 그 실패 자체를 이 지점에서 신경 쓸 필요가
-        // 없다 - 어차피 바로 이어서 hlt 루프로 들어가 다시는 실행되지
-        // 않을 Task이기 때문이다.
-        kernel::Syscall::submit(kernel::kSyscallEndpointSelfTerminate, nullptr);
+        // User-Level로 격하된 Task(설계자 지시 1번, PN-71C3D483로
+        // 실제 정리 경로까지 완성됨) - **반드시 제출 전에** 스스로를
+        // Zombie로 표시해야 한다(QU-84E5B3D5 - Scheduler::retireTask()
+        // 문서 주석 참고) - 그래야 잠시 뒤 이 Task가 스위칭되어 나갈
+        // 때 `Scheduler::onTick()`이 라운드로빈 재삽입을 건너뛰어,
+        // 다시는 이 Task가 pickNext에 뽑히지 않는다는 보장이 성립한다.
+        // 자기종료 syscall은 wait 없이 제출만 하고(Syscall::
+        // submitDetached - autoFree라 결과를 아무도 안 봐도 리액터가
+        // 알아서 정리한다) 반환한다 - 리액터가 나중에 비동기로
+        // SelfTerminateHandler::onExec에서 Scheduler::retireTask(self)
+        // 로 실제 정리(cleanup 큐 등록 -> runLoop()이 커널 스택 회수)
+        // 를 수행한다. 그 사이(제출 후 ~ 리액터가 실제로 처리하기
+        // 전) 이 Task는 그냥 hlt 루프에서 계속 대기한다.
+        self->state = kernel::TaskState::Zombie;
+        kernel::Syscall::submitDetached(kernel::kSyscallEndpointSelfTerminate, self);
         return;
     }
     // Kernel-Level Task가 계속 커널에 머물러 있는 경우(설계자 지시

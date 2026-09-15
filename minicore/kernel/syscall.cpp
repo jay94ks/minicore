@@ -76,6 +76,17 @@ AsyncTaskManageCode Syscall::submit(SyscallEndpointId endpointId, void* args) {
     return token;
 }
 
+void Syscall::submitDetached(SyscallEndpointId endpointId, void* args) {
+    AsyncTaskSubjectCode subjectCode = 0;
+    if (!SyscallRegistry::resolveSubjectCode(endpointId, &subjectCode)) {
+        return;
+    }
+    // submit()과 달리 pendingSyscalls 부기가 전혀 없다 - autoFree=true라
+    // 리액터가 onExec 완료 직후(reactorTaskEntry, async_task.cpp) 이
+    // AsyncTask 구조체/전용 스택을 스스로 반납한다.
+    AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/true);
+}
+
 bool Syscall::wait(AsyncTaskManageCode token) {
     return waitForAnyOf(&token, 1).outcome == MultiWaitOutcome::Completed;
 }

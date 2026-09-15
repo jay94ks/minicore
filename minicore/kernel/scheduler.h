@@ -124,6 +124,36 @@ public:
     // (다른 스택) 위에서 이 큐를 드레인하며 나중에 처리한다.
     [[noreturn]] static void retireCurrentTask();
 
+    // PN-71C3D483/QU-84E5B3D5(설계자 답변, 2026-09-15 - "새
+    // Scheduler::retireTask(Task*) API 추가") - retireCurrentTask()와
+    // 달리 **호출자 자신이 아닌, 이미 이 코어에서 실행 중이 아닌**
+    // 임의의 Task를 정리한다. 첫 소비자는 self-terminate 핸들러
+    // (scheduler.cpp의 SelfTerminateHandler) - User-Level로 격하된
+    // Task가 자연 종료(kTaskOnFallingToEnd)되며 스스로를 Zombie로
+    // 표시하고 hlt 루프로 떨어진 뒤, 리액터가 비동기로(다른 Task의
+    // 실행 흐름에서) 이 함수를 불러 대신 정리한다.
+    //
+    // **왜 이게 안전한가(핵심 불변조건)**: 한 코어에서는 항상 정확히
+    // 하나의 Task만 실행된다 - 이 함수가 호출되고 있다는 사실 자체가
+    // "지금 이 코어의 currentTask는 호출자(예: 리액터)"라는 뜻이고,
+    // 따라서 target은 이미 그 이전에 반드시 스위칭되어 나간 상태다.
+    // 다만 target이 스위칭되어 나간 뒤 **다시 pickNext에 뽑혀 재실행
+    // 되지 않는다는 보장**은 이 함수만으로는 안 나온다 - 그래서
+    // 호출부가 target을 스위칭해 나가기 전에(예: kTaskOnFallingToEnd가
+    // Syscall::submitDetached보다 먼저) 반드시 `target->state =
+    // TaskState::Zombie`로 표시해 둬야 한다 - `Scheduler::onTick()`이
+    // Zombie 상태의 outgoing task는 라운드로빈 재삽입(enqueue) 자체를
+    // 건너뛰므로, 한 번 Zombie로 표시되고 스위칭되어 나간 Task는 그
+    // 뒤로 다시는 어느 큐에도 들어가지 않는다(v1 - 코어 간 이관 없음,
+    // target의 마지막 실행 코어가 항상 currentCoreIndex()와 같다는
+    // 전제도 이래서 성립).
+    //
+    // retireCurrentTask()와 달리 자기 자신을 다음 Task로 전환할 필요가
+    // 없다(target은 이미 실행 중이 아니므로 kContextSwitch 불필요) -
+    // 단순히 정리 큐에 등록해 그 코어의 runLoop()이 이후 idle
+    // 컨텍스트에서 커널 스택을 회수하게 한다.
+    static void retireTask(Task* task);
+
     // 선점 비활성화 카운터(공개 API, PL-2D3184BC 8단계) - 인터럽트
     // 자체는 막지 않는다(onTick이 이 카운트를 보고 Task 전환만
     // 보류한다) - Slab 할당자(SP-D7013B26)의 PreemptionGuard가 코어별

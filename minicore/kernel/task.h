@@ -102,14 +102,16 @@ struct Task {
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
 
-    // 이 Task가 ring3 유저 코드로 격하(demote)된 적이 있으면 true -
-    // 아직 이 프로젝트엔 그 격하 메커니즘 자체가 없어(프로세스 모델
-    // 미착수) 항상 기본값 false로 남는다. kTaskFallingToEnd(entry가
-    // 반환해 이 Task의 실행이 자연 종료되는 지점, context_switch.S)가
-    // 이 플래그로 종료 처리를 분기한다(PL-2D3184BC "Task 종료
-    // 프로토콜", QU-26F9420E 설계자 답변, 2026-09-14) - true면
-    // 자기종료 syscall만 제출, false(지금 항상 이 경우)면
-    // Scheduler::retireCurrentTask()로 스케줄러에서 완전히 떼어낸다.
+    // 이 Task가 ring3 유저 코드를 실행하는 UserThread면 true -
+    // Process::execImage()가 그 UserThread 생성 시점에 직접 세팅한다
+    // (PN-55D24891). 순수 커널 전용 Task는 항상 기본값 false로 남는다.
+    // kTaskFallingToEnd(entry가 반환해 이 Task의 실행이 자연 종료되는
+    // 지점, context_switch.S)가 이 플래그로 종료 처리를 분기한다
+    // (PL-2D3184BC "Task 종료 프로토콜", QU-26F9420E 설계자 답변,
+    // 2026-09-14) - true면 자기종료 syscall만 제출하고 실제 정리는
+    // 리액터가 비동기로 Scheduler::retireTask()에 위임(PN-71C3D483),
+    // false면 그 자리에서 바로 Scheduler::retireCurrentTask()로
+    // 스케줄러에서 완전히 떼어낸다.
     bool isUserLevel = false;
 
     // 이 Task가 지금 스케줄러의 세 큐(즉시/RT/일반) 중 어딘가에
