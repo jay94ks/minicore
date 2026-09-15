@@ -22,6 +22,7 @@ add_library(minicore_kernel OBJECT
     named_object.cpp
     channel.cpp
     process.cpp
+    tlb_shootdown.cpp
 )
 
 target_link_libraries(minicore_kernel PUBLIC libkenv libelf minicore_libs_x86_64)

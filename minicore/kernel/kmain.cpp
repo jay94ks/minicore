@@ -19,6 +19,7 @@
 #include "smp.h"
 #include "syscall.h"
 #include "timer.h"
+#include "tlb_shootdown.h"
 
 namespace {
 
@@ -333,6 +334,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 자체를 한 곳에만 둔다).
     kernel::Channel::registerSyscallEndpoints();
     kernel::Serial::write("minicore: channel IPC syscall endpoints registered\n");
+
+    // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
+    // 같은 이유) - 실제 소비자(KernelAddressSpaceManager, SP-2AAD7C8D)
+    // 는 아직 없다(SP-DE19BB1C).
+    kernel::TlbShootdown::init();
+    kernel::Serial::write("minicore: TLB shootdown IPI handler registered\n");
 
     kernel::IoApic::init();
     kernel::Serial::write("minicore: IOAPIC mapped\n");

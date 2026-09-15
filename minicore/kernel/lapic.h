@@ -126,6 +126,13 @@ public:
     // 실모드로 시작한다.
     static void sendStartupIpi(uint32_t destApicId, uint32_t startupVector);
 
+    // 일반 고정 벡터(Fixed delivery mode) IPI - TLB 샷다운
+    // (SP-DE19BB1C, TlbShootdown::broadcast) 등 코어간 통지 전용.
+    // sendInitIpi/sendStartupIpi와 같은 ICR 경로를 재사용하되 delivery
+    // mode 필드만 다르다 - INIT처럼 별도의 assert/de-assert 시퀀스가
+    // 없다(edge-triggered, 한 번 쓰면 즉시 전달).
+    static void sendFixedIpi(uint32_t destApicId, uint8_t vector);
+
     // 이 코어의 LAPIC 자체 주기 타이머를 PIT 채널2로 보정해 hz 주기로
     // 프로그래밍하고 vector로 인터럽트를 걸어 켠다 - LAPIC 타이머는
     // 코어마다 독립된 하드웨어라 BSP/AP가 각자 호출해도 서로 간섭하지

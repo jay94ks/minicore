@@ -281,6 +281,15 @@ void Lapic::sendStartupIpi(kernel::uint32_t destApicId, kernel::uint32_t startup
     kSendIcr(destApicId, command);
 }
 
+void Lapic::sendFixedIpi(kernel::uint32_t destApicId, kernel::uint8_t vector) {
+    // Fixed delivery mode는 필드값 0b000이라 kIcrDeliveryModeInit/
+    // Startup처럼 OR할 상수가 따로 없다 - level assert 비트만 세워
+    // 보낸다(트리거 모드는 기본 edge, 0). INIT과 달리 de-assert가
+    // 필요 없어 sendInitIpi(assert=false)에 대응하는 반쪽이 없다.
+    const kernel::uint32_t command = kIcrLevelAssert | static_cast<kernel::uint32_t>(vector);
+    kSendIcr(destApicId, command);
+}
+
 void Lapic::startPeriodicTimer(kernel::uint32_t vector, kernel::uint32_t hz) {
     // ticksPerWindow는 kCalibrationMs(고정 보정 창) 동안의 LAPIC 틱
     // 수다 - 원하는 주기(1000/hz ms)에 맞는 initial count로 환산한다.
