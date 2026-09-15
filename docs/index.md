@@ -29,6 +29,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [PL-21344323](./PL-21344323.md) | Syscall 디스패치 서브시스템 구현 | approved |
 | [PL-2D149D8F](./PL-2D149D8F.md) | IOAPIC 외부 인터럽트 라우팅 | approved |
 | [PL-2D3184BC](./PL-2D3184BC.md) | 스케줄러 (프로세스/태스크/컨텍스트 스위칭) | approved |
+| [PL-4BA2B446](./PL-4BA2B446.md) | 멀티 프로세스 실행 기반 완성 (ring3 오염 버그 + 프로세스 생명주기) | review |
 | [PL-57CF86EF](./PL-57CF86EF.md) | 4K 페이지의 2M 페이지 병합/분할 | draft |
 | [PL-65C20380](./PL-65C20380.md) | SMP AP(나머지 코어) 기동 | approved |
 | [PL-99562483](./PL-99562483.md) | 물리 메모리 관리 범위를 1GiB 한도 밖으로 확장 | approved |
