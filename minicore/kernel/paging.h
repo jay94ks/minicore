@@ -80,6 +80,15 @@ public:
     // 안 한다. pml4Phys 의미는 mapPage와 동일(생략 시 현재 CR3).
     static void unmapPage(uint64_t virtualAddr, uint64_t pml4Phys = 0);
 
+    // virtualAddr이 매핑된 물리 주소(4KiB 정렬)를 반환한다 - 매핑돼
+    // 있지 않으면 0. unmapPage()는 매핑을 지우기만 하고 그 전에 물리
+    // 프레임이 무엇이었는지 알려주지 않는데(#PF 온디맨드 매핑 경로엔
+    // 필요 없었음), VMA 관리자(SP-2AAD7C8D §2, ProcessAddressSpaceManager/
+    // KernelAddressSpaceManager)가 unmap 시 그 물리 프레임을
+    // PageFrameAllocator에 실제로 반납하려면 unmapPage 호출 전에 먼저
+    // 이 함수로 읽어 둬야 한다.
+    static uint64_t translatePage(uint64_t virtualAddr, uint64_t pml4Phys = 0);
+
     // #PF(vector 14) 핸들러가 호출한다(idt.cpp). faultAddr는 CR2,
     // errorCode는 하드웨어가 스택에 남긴 값 그대로. 이 폴트를 정말
     // 처리했으면(=매핑을 새로 붙여서 재실행하면 될 상황) true를

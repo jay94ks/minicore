@@ -22,6 +22,7 @@ add_library(minicore_kernel OBJECT
     named_object.cpp
     channel.cpp
     process.cpp
+    address_space.cpp
     tlb_shootdown.cpp
     tls.cpp
 )

@@ -1,4 +1,5 @@
 #include "acpi.h"
+#include "address_space.h"
 #include "async_task.h"
 #include "boot_info.h"
 #include "channel.h"
@@ -404,10 +405,15 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Serial::write("minicore: channel IPC syscall endpoints registered\n");
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
-    // 같은 이유) - 실제 소비자(KernelAddressSpaceManager, SP-2AAD7C8D)
-    // 는 아직 없다(SP-DE19BB1C).
+    // 같은 이유).
     kernel::TlbShootdown::init();
     kernel::Serial::write("minicore: TLB shootdown IPI handler registered\n");
+
+    // KernelAddressSpaceManager(SP-2AAD7C8D §2, PN-012E8C1A) - 위
+    // TlbShootdown::init() 이후에만 안전(unmapRegion()이 broadcast()를
+    // 부름). 전역 싱글턴이라 BSP에서 한 번만.
+    kernel::KernelAddressSpaceManager::init();
+    kernel::Serial::write("minicore: kernel address space manager ready\n");
 
     kernel::IoApic::init();
     kernel::Serial::write("minicore: IOAPIC mapped\n");

@@ -11,7 +11,7 @@ constexpr kernel::uint64_t kAddrMask = 0x000FFFFFFFFFF000UL;  // 엔트리에서
 constexpr kernel::uint64_t kPageSizeBit = 1UL << 7;           // PS(PDPT/PD 레벨 대형 페이지)
 
 // 커널 higher-half의 시작 PML4 인덱스(Paging::createAddressSpace) -
-// kDirectMapBase(0xFFFF800000000000)가 정확히 이 경계다(canonical
+// kDirectMapBase(0xFFFF800000000000)가 정확히 그 경계다(canonical
 // 주소의 부호 확장 경계, bit 47). 인덱스 256~511(총 256개)을 통째로
 // 복사하면 direct map/지연 매핑 구역/커널 이미지 자신(kKernelVma
 // 근방)까지 전부 한 번에 커버된다 - 이 셋의 정확한 하위 배치를
@@ -189,6 +189,31 @@ void Paging::unmapPage(uint64_t virtualAddr, uint64_t pml4Phys) {
     if (pml4Phys == kCurrentPml4Phys()) {
         kInvalidatePage(virtualAddr);
     }
+}
+
+uint64_t Paging::translatePage(uint64_t virtualAddr, uint64_t pml4Phys) {
+    virtualAddr &= ~(kPageSize4K - 1);
+    if (pml4Phys == 0) {
+        pml4Phys = kCurrentPml4Phys();
+    }
+
+    uint64_t* pml4 = kAsTable(pml4Phys);
+    if (!(pml4[kPml4Index(virtualAddr)] & PAGE_PRESENT)) {
+        return 0;
+    }
+    uint64_t* pdpt = kAsTable(pml4[kPml4Index(virtualAddr)] & kAddrMask);
+    if (!(pdpt[kPdptIndex(virtualAddr)] & PAGE_PRESENT)) {
+        return 0;
+    }
+    uint64_t* pd = kAsTable(pdpt[kPdptIndex(virtualAddr)] & kAddrMask);
+    if (!(pd[kPdIndex(virtualAddr)] & PAGE_PRESENT)) {
+        return 0;
+    }
+    uint64_t* pt = kAsTable(pd[kPdIndex(virtualAddr)] & kAddrMask);
+    if (!(pt[kPtIndex(virtualAddr)] & PAGE_PRESENT)) {
+        return 0;
+    }
+    return pt[kPtIndex(virtualAddr)] & kAddrMask;
 }
 
 uint64_t Paging::currentPml4Phys() {

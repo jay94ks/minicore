@@ -145,6 +145,24 @@ public:
     // `ProcessAddressSpaceManager`, §5)의 책임이다.
     bool erase(uint64_t start, uint64_t end);
 
+    // 트리 안의 모든 실제 값(비-gap) 엔트리를 방문한다 - fn(start, end,
+    // value). ProcessAddressSpaceManager::unmapAll()(SP-2AAD7C8D §2)처럼
+    // "지금 등록된 모든 범위를 알아야" 하는 소비자를 위해 추가했다(§3.3
+    // 원 설계엔 없던 구현 세부 - RM-23F4B687 §4 취지, decompose()를
+    // 그대로 재사용). v1(단일 루트=리프)이므로 항상 최대
+    // kMapleArangeSlotCount(10)개까지만 순회한다(멀티레벨 트리가 생기면
+    // 재귀 순회로 확장 필요 - PN-38D17292).
+    template <typename Fn>
+    void forEach(Fn&& fn) const {
+        Span spans[kMapleArangeSlotCount];
+        const uint32_t count = decompose(spans);
+        for (uint32_t i = 0; i < count; ++i) {
+            if (spans[i].value != nullptr) {
+                fn(spans[i].lower, spans[i].upper, spans[i].value);
+            }
+        }
+    }
+
 private:
     struct Span {
         uint64_t lower;

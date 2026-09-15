@@ -37,6 +37,30 @@ void MapleTree::init() {
         _free(_root, sizeof(MapleArangeNode));
         _root = nullptr;
     }
+
+    // **버그 수정(PN-012E8C1A 검증 중 실측 발견, 2026-09-15)**: 이 함수가
+    // _root를 nullptr로만 남겨 두면, decompose()가 빈 트리를 "스팬
+    // 0개"로 취급한다 - find()/findGap()는 (store()와 달리) const라서
+    // "루트가 없으면 지금 새로 만든다"는 지연 생성을 할 수 없어, 그
+    // 결과 **init() 직후 첫 findGap() 호출이 항상 실패**했다(실제로는
+    // 전체 주소공간이 하나의 거대한 gap이어야 하는데, decompose가 아예
+    // 스팬을 하나도 안 내놓으므로 findGap의 순회 루프 자체가 안 돎).
+    // MapleArangeNode::usedSlotCount 필드 주석이 이미 "비어 있는
+    // 트리는 슬롯 1개짜리 큰 gap 하나로 시작한다"고 명시한 불변조건을
+    // store()의 지연 생성 분기만 지키고 이 함수는 안 지켰던 것 - 여기서
+    // 도 똑같이 즉시 그 불변조건을 채워 둔다(할당 실패 시엔 _root가
+    // nullptr로 남고, store()의 기존 지연 생성 분기가 다음 store() 시점에
+    // 다시 시도한다 - 비블로킹 정책 그대로 유지).
+    void* mem = _alloc(sizeof(MapleArangeNode));
+    if (!mem) {
+        return;
+    }
+    _root = reinterpret_cast<MapleArangeNode*>(mem);
+    _root->parent = nullptr;
+    _root->usedSlotCount = 1;
+    _root->slot[0] = nullptr;
+    _root->gap[0] = kMapleTreeMaxAddr;
+    _root->maxGapSlot = 0;
 }
 
 uint32_t MapleTree::decompose(Span* outSpans) const {
