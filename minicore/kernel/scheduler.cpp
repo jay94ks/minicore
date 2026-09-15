@@ -103,18 +103,50 @@ Task* gCurrentTask[kMaxCores] = {};
 // 건드리므로 원자 연산이 필요 없다).
 uint32_t gPreemptDisableCount[kMaxCores] = {};
 
-// PN-AEA74E1B - 이 코어에서 next로 실제로 전환하기(kContextSwitch) 직전
-// 마다 부른다. next가 ring3 코드를 실행할 수 있는 UserThread면(v1은
-// isUserLevel==true가 정확히 이 뜻 - process.cpp의 kEnterRing3가 처음
-// 진입할 때만 세팅했었는데, 이제 매 디스패치마다 여기서 갱신해 "코어당
-// UserThread 하나" 전제를 없앤다) 이 코어의 TSS.RSP0을 그 Task 자신의
-// 커널 스택 top으로 맞춰 둔다 - 안 그러면 다른 UserThread가 트랩할 때
-// 엉뚱한(이전에 디스패치됐던 UserThread의) 커널 스택을 밟는다. 커널
-// 전용 Task는 애초에 ring3로 안 내려가 RSP0을 아무도 안 읽으므로 굳이
-// 갱신할 필요 없다(불필요한 쓰기 생략).
+// 이 코어에서 next로 실제로 전환하기(kContextSwitch) 직전마다 부른다
+// (PN-AEA74E1B). next가 ring3 코드를 실행할 수 있는 UserThread면(v1은
+// isUserLevel==true가 정확히 이 뜻) 이 코어의 TSS.RSP0을 그 Task 자신의
+// 커널 스택 top으로 맞춰 둔다 - 안 맞추면 다른 UserThread가 트랩할 때
+// 엉뚱한(이전에 디스패치됐던 UserThread의) 커널 스택을 밟는다.
+//
+// **`Scheduler::runLoop()`/`onTick()` 둘 다에서 안전하게 부를 수 있다**
+// - TSS 구조체에 값을 쓰는 것뿐이라 지금 어떤 스택 위에서 실행
+// 중이든(이 함수를 호출하는 시점엔 아직 next의 스택으로 넘어가기
+// 전이다) 무해하다. CR3 복원은 이것과 달리 **runLoop()에서는 안전하지
+// 않다** - 아래 kSyncCr3ForDispatch 참고.
 void kSyncRsp0ForDispatch(Task* next) {
     if (next->isUserLevel) {
         Gdt::setRsp0ForThisCore(next->kernelStackTop);
+    }
+}
+
+// **`Scheduler::onTick()`에서만 부른다 - `runLoop()`에서 부르면 안 된다**
+// (PN-63BCFE45, 실측으로 발견). next가 UserThread면 CR3를 그 Task
+// 자신의 유저 주소공간(userPml4Phys)으로 되돌린다 - `kContextSwitch`가
+// 저장/복원하는 레지스터 집합(콜리세이브+RFLAGS)에도, `iretq`가
+// 복원하는 InterruptFrame에도 CR3는 없다. process.cpp의 kEnterRing3가
+// "첫 진입 때만" CR3를 설정하는 것만으로는, 이 Task가 두 번째로
+// 디스패치될 때(그 사이 다른 UserThread가 실행되며 CR3를 자기 것으로
+// 바꿔 놓은 뒤) 아무도 CR3를 되돌리지 않아 잘못된 주소공간으로 실행을
+// 재개하는 버그가 있었다(서로 다른 프로세스가 우연히 완전히 같은
+// 코드/스택 레이아웃이 아닌 한 반드시 크래시 - 코드가 우연히 동일한
+// 스레드끼리는 겉보기엔 멀쩡해서 한동안 발견되지 않았다).
+//
+// **왜 onTick()에서만 안전한가**: `mov cr3`는 그 자리에서 즉시 전체
+// TLB를 무효화하고 이후 모든 메모리 접근을 새 주소공간 기준으로
+// 해석시킨다 - `onTick()`은 항상 "지금 막 트랩/인터럽트로 끊긴 Task
+// 자신의(커널 higher-half, 모든 프로세스가 공유) 스택" 위에서 실행
+// 중이므로 안전하다. 반면 `runLoop()`은 idle 상태일 때 코어의 최초
+// 부트 스택(BSP의 kMain()/AP의 kApMain()이 쓰던, 저지대 identity map
+// 스택 - 어떤 프로세스의 PML4에도 안 들어있음, PN-58501EAA "중요
+// 발견")에서 실행되고 있을 수 있어, 그 위에서 CR3를 바꾸면 다음
+// 스택 접근에서 즉시 폴트/트리플 폴트가 난다 - 그래서 UserThread의
+// "첫 진입" CR3 설정은 이 함수가 아니라(runLoop()이 호출하는 자리라)
+// kEnterRing3 자신이(이미 그 Task 고유의 안전한 스택으로 넘어온 뒤)
+// 맡는다.
+void kSyncCr3ForDispatch(Task* next) {
+    if (next->isUserLevel) {
+        asm volatile("mov %0, %%cr3" : : "r"(next->userPml4Phys) : "memory");
     }
 }
 
@@ -271,6 +303,7 @@ void Scheduler::onTick(InterruptFrame*) {
     gCurrentTask[coreIndex] = next;
     next->state = TaskState::Running;
     kSyncRsp0ForDispatch(next);
+    kSyncCr3ForDispatch(next);
     // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
@@ -314,6 +347,13 @@ void Scheduler::runLoop() {
         asm volatile("cli");
         gCurrentTask[coreIndex] = next;
         next->state = TaskState::Running;
+        // CR3는 여기서 안 건드린다(kSyncCr3ForDispatch 문서 주석 참고
+        // - 이 idle 컨텍스트의 스택이 안전하지 않을 수 있다). next가
+        // 처음 디스패치되는 UserThread면 kEnterRing3가, 이미 한 번
+        // 실행된 적 있는 UserThread를 유휴 상태였다가 다시 여기서
+        // 고르는 경우엔(현재는 어떤 ring3 코드도 yieldCurrent/
+        // parkCurrent를 거치지 않아 실제로는 발생하지 않음) 아직
+        // 해결되지 않은 채로 남아있다 - PN-63BCFE45 참고.
         kSyncRsp0ForDispatch(next);
         kContextSwitch(&gIdleSavedRsp[coreIndex], next->savedRsp);
         // yieldCurrent()로 되돌아온 경우에만 이 지점으로 온다(onTick의

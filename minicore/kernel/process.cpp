@@ -4,6 +4,7 @@
 #include "libelf/elf.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "scheduler.h"
 #include "syscall.h"
 
 namespace {
@@ -19,9 +20,12 @@ constexpr kernel::uint64_t kUserStackSize = 16UL * 4096UL;  // 64KiB
 // Task::init()의 단일 void* arg 슬롯으로 kEnterRing3에 넘길 값들 -
 // v1은 프로세스가 하나뿐이라 전역 인스턴스 하나로 충분하다(여러
 // 프로세스를 동시에 exec()하게 되면 UserThread 자신에 이 값을 옮겨
-// 담는 확장이 필요하다 - 후속 과제).
+// 담는 확장이 필요하다 - 후속 과제, PN-63BCFE45 참고). pml4Phys는
+// 여기 없다 - `Task::userPml4Phys`(PN-63BCFE45)에 저장해 두고
+// kEnterRing3(첫 진입)와 scheduler.cpp의 kSyncCr3ForDispatch(이후
+// 재디스패치, onTick 전용)가 각자 안전한 지점에서 그 필드를 직접
+// 읽어 CR3를 맞춘다.
 struct Ring3EntryParams {
-    kernel::uint64_t pml4Phys = 0;
     kernel::uint64_t entryPoint = 0;
     kernel::uint64_t userStackTop = 0;
 };
@@ -41,15 +45,33 @@ Ring3EntryParams gRing3EntryParams;
 // 필요 없다).
 [[noreturn]] void kEnterRing3(void* argPtr) {
     auto* params = reinterpret_cast<Ring3EntryParams*>(argPtr);
+    auto* self = kernel::Scheduler::currentTask();
 
-    // RSP0 - 이 UserThread가 ring3에서 트랩할 때마다 하드웨어가 자동
-    // 전환할 커널 스택. 이 함수에 도달하는 유일한 경로가
-    // Scheduler::runLoop()/onTick()의 디스패치(kContextSwitch 직전에
-    // kSyncRsp0ForDispatch(next)를 호출, PN-AEA74E1B)이므로, 이 시점엔
-    // 이미 이 코어의 TSS.RSP0이 이 Task 자신의 kernelStackTop으로
-    // 맞춰져 있다 - 여기서 다시 설정할 필요가 없다(예전 v1은 첫 진입
-    // 때만 여기서 직접 설정했었는데, 이제 스케줄러가 매 디스패치마다
-    // 갱신하므로 그 특별 취급이 필요 없어졌다).
+    // RSP0은 이 함수에 도달하기 전에 이미 스케줄러가 맞춰 둔다
+    // (Scheduler::runLoop()의 idle->Task 디스패치, PN-AEA74E1B) - GDT
+    // TSS 구조체 쓰기는 지금 어떤 스택 위에서 실행 중이든 안전해서
+    // (메모리 매핑과 무관한 순수 데이터 쓰기) runLoop() 자신이 아직
+    // 이 Task 고유의 스택으로 넘어오기 전(idle 컨텍스트)에 해도 된다.
+    //
+    // **CR3는 다르다(PN-63BCFE45 실측으로 발견)**: `mov cr3`은 그
+    // 자리에서 즉시 전체 TLB를 무효화하고 이후의 모든 메모리 접근을
+    // 새 주소공간 기준으로 해석하게 만든다 - PN-58501EAA "중요
+    // 발견"이 이미 경고했듯, BSP의 kMain()/AP의 kApMain()이 진입할
+    // 때부터 쓰는 최초 부트 스택은 저지대 identity map에 있어(커널
+    // 자신의 higher-half 이미지 안이 아님) 어떤 프로세스의 PML4에도
+    // 안 들어있다 - 그 스택 위에서(=아직 이 Task 자신의 스택으로
+    // 넘어오기 전인 idle 컨텍스트에서) CR3를 바꾸면 다음 명령(스택
+    // 접근)에서 즉시 폴트/트리플 폴트가 난다. 그래서 CR3는 **반드시
+    // 이 Task 자신의(커널 higher-half에 있는, 모든 프로세스가
+    // 공유하는) 스택으로 이미 넘어온 뒤에만** 설정해야 한다 - 이
+    // 함수(kTaskStartTrampoline이 이 Task 자신의 스택 위에서 부른
+    // entry 콜백) 안이 바로 그 지점이다. 이후 이 Task가 다시
+    // 디스패치될 때는 `Scheduler::onTick()`이 같은 이유로 안전한
+    // 지점(트랩으로 들어와 이미 이 Task 자신의 스택 위)에서
+    // `next->userPml4Phys`를 CR3에 다시 싣는다 - `Scheduler::
+    // runLoop()`의 idle->Task 경로는 CR3를 건드리지 않는다(idle
+    // 컨텍스트 자체가 안전하지 않은 스택이므로).
+    asm volatile("mov %0, %%cr3" : : "r"(self->userPml4Phys) : "memory");
 
     // 아래 인라인 asm은 리터럴 0x1b/0x23을 직접 쓴다(피연산자 제약
     // 안에서 이름 있는 상수를 쓰면 크기 불일치 등으로 더 위험할 수
@@ -58,31 +80,26 @@ Ring3EntryParams gRing3EntryParams;
     static_assert(kernel::kGdtUserDataSelector == 0x1b, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
     static_assert(kernel::kGdtUserCodeSelector == 0x23, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
 
-    const kernel::uint64_t pml4Phys = params->pml4Phys;
     const kernel::uint64_t entryPoint = params->entryPoint;
     const kernel::uint64_t userStackTop = params->userStackTop;
 
-    // CR3 전환은 이 Task 자신의(커널 higher-half에 있는) 스택/코드
-    // 위에서 실행 중이므로 안전하다 - 모든 프로세스가 커널 상위
-    // 절반을 공유한다(PN-58501EAA "중요 발견" 참고). 세그먼트
-    // 레지스터는 유저 데이터 셀렉터로 미리 맞춰 두고(SS 자체는 iretq
-    // 프레임이 담당), iretq 프레임(SS/RSP/RFLAGS/CS/RIP)을 쌓은 뒤
-    // iretq로 실제 특권 레벨 전환을 일으킨다.
+    // 세그먼트 레지스터는 유저 데이터 셀렉터로 미리 맞춰 두고(SS
+    // 자체는 iretq 프레임이 담당), iretq 프레임(SS/RSP/RFLAGS/CS/RIP)
+    // 을 쌓은 뒤 iretq로 실제 특권 레벨 전환을 일으킨다.
     asm volatile(
-        "mov %0, %%cr3\n\t"
         "mov $0x1b, %%ax\n\t"
         "mov %%ax, %%ds\n\t"
         "mov %%ax, %%es\n\t"
         "mov %%ax, %%fs\n\t"
         "mov %%ax, %%gs\n\t"
         "pushq $0x1b\n\t"
-        "pushq %1\n\t"
+        "pushq %0\n\t"
         "pushq $0x202\n\t"
         "pushq $0x23\n\t"
-        "pushq %2\n\t"
+        "pushq %1\n\t"
         "iretq\n\t"
         :
-        : "r"(pml4Phys), "r"(userStackTop), "r"(entryPoint)
+        : "r"(userStackTop), "r"(entryPoint)
         : "rax", "memory");
     __builtin_unreachable();
 }
@@ -123,12 +140,12 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
         Paging::mapPage(kUserStackTop - kUserStackSize + off, phys, PAGE_WRITABLE | PAGE_USER, pml4Phys);
     }
 
-    gRing3EntryParams.pml4Phys = pml4Phys;
     gRing3EntryParams.entryPoint = image.entryPoint();
     gRing3EntryParams.userStackTop = kUserStackTop;
 
     thread->process = this;
     thread->isUserLevel = true;
+    thread->userPml4Phys = pml4Phys;
     thread->init(kEnterRing3, &gRing3EntryParams);
     mainThread = thread;
     return thread;

@@ -64,6 +64,26 @@ struct Task {
     // 계산식 자체가 틀렸다 - 이 필드로 그 중복/오류 가능성을 없앤다).
     uint64_t kernelStackTop = 0;
 
+    // 이 Task가 ring3에서 실행될 때 쓰는 유저 주소공간의 PML4 물리
+    // 프레임(PN-63BCFE45) - `isUserLevel`인 Task만 의미가 있다.
+    // **왜 필요한가**: CR3는 소프트웨어 컨텍스트 스위칭(kContextSwitch)
+    // 이 저장/복원하는 레지스터 집합(콜리세이브+RFLAGS)에 들어있지
+    // 않다 - `iretq`도 CR3를 건드리지 않는다. 그래서 이 Task가 ring3
+    // 첫 진입(process.cpp의 kEnterRing3) 이후 두 번째로 디스패치될
+    // 때는 CR3가 여전히 "그 사이 마지막으로 실행됐던 다른 UserThread"
+    // 의 값으로 남아 있다 - `Scheduler::onTick()`이 매 Task-to-Task
+    // 전환마다 이 필드를 다시 CR3에 실어야(scheduler.cpp의
+    // kSyncCr3ForDispatch - `Scheduler::runLoop()`의 idle 컨텍스트에서는
+    // 안전하지 않아 호출하지 않는다) 서로 다른 프로세스가 코드/스택
+    // 레이아웃이 실제로 다를 때 즉시 크래시하는 실측 버그를 막는다 -
+    // 우연히 코드가 동일한 스레드끼리는 겉보기엔 멀쩡해 보여서(같은
+    // 가상주소에 같은 명령이 있으니) 늦게 발견됐다. **아직 완전히
+    // 해결되진 않았다** - runLoop()이 이미 한 번 실행된 적 있는
+    // UserThread를 idle 상태에서 다시 고르는 경우(yieldCurrent/
+    // parkCurrent 경로, 현재는 어떤 ring3 코드도 안 거침)는 여전히
+    // CR3가 안 맞을 수 있다 - PN-63BCFE45 참고.
+    uint64_t userPml4Phys = 0;
+
     TaskState state = TaskState::Ready;
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
