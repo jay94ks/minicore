@@ -148,8 +148,8 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     *(--sp) = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);
     *(--sp) = 0x202;                                            // RFLAGS: IF=1
     *(--sp) = 0;                                                // rbp
-    *(--sp) = reinterpret_cast<uint64_t>(&kAsyncTaskEntryWrapper);  // rbx -> 트램폴리가 call
-    *(--sp) = reinterpret_cast<uint64_t>(this);                 // r12 -> 트램폴리가 rdi로 옥김
+    *(--sp) = reinterpret_cast<uint64_t>(&kAsyncTaskEntryWrapper);  // rbx -> 트램폴린이 call
+    *(--sp) = reinterpret_cast<uint64_t>(this);                 // r12 -> 트램폴린이 rdi로 옥김
     *(--sp) = 0;                                                // r13
     *(--sp) = 0;                                                // r14
     *(--sp) = 0;                                                // r15
@@ -249,7 +249,7 @@ void AsyncReactor::reactorTaskEntry(void*) {
         if (task->state == AsyncTaskState::Cancelled) {
             // [PN-40E976F2] 이 AsyncTask를 기다리던 UserThread가 이미
             // 죽어(scheduler.cpp의 SelfTerminateHandler::onExec) 결과를
-            // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곷장
+            // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곳장
             // onCancel만 부른 뒤 자원을 반납한다. autoFree는 취소
             // 시점에 이미 강제로 true가 돼 있다(그 시점 이후로는 아무도
             // wait()로 직접 반납할 수 없으므로).
