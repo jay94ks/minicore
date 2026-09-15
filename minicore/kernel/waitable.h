@@ -14,6 +14,8 @@ struct Task;
 // 있는지"를 추상 인터페이스로 표현한다. Task::blockedOn이 이 포인터를
 // 들고 있다.
 enum class WaitCancelReason : uint32_t {
+    None,     // 강제 취소된 적 없음(정상 웨이크업, 또는 아직 파킹 중) -
+              // Task::lastCancelReason의 기본값(§9.6-3 참고)
     Signal,   // 강제 시그널(Kill 등)에 의한 취소
     Timeout,  // 향후 타임아웃 기능이 생기면 재사용(v1 범위 밖)
 };

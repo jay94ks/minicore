@@ -3,10 +3,11 @@
 
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "waitable.h"
 
 namespace kernel {
 
-class Waitable;  // 포인터로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2)
+class Waitable;  // 포인터로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
 
 // SP-0666DB3C §11 - 명시적(explicit) TLS 슬롯 개수. Task::tlsSlots의
 // 배열 크기이자 TlsRegistry::allocateSlot()(tls.h)의 발급 상한이라
@@ -148,6 +149,16 @@ struct Task {
     // this)로 정확히 그 코어에서 재개시키는 데 쓴다(다른 코어로 옮겨
     // 깨우는 로드밸런싱은 v1 범위 밖, §5-1).
     uint32_t parkedCoreIndex = 0;
+
+    // §9.6-3(설계 문서 pseudocode에 있었으나 미구현이던 부분,
+    // PN-71E50394에서 발견/구현) - 이번에 파킹된 동안 강제로 취소됐다면
+    // 그 사유, 정상적으로 깨어났다면(또는 아직 파킹 전이면) None.
+    // parkCurrentAndUnlock()가 매번 새로 파킹할 때 None으로 리셋하고,
+    // cancel()이 실제로 취소할 때만 그 사유로 덮어쓴다 - 재개된 코드가
+    // (예: MutexCore::lock()의 재시도 루프) 이 값을 확인해 "정상
+    // 재경쟁"과 "강제로 끌려나옴"을 구분할 수 있게 한다. 아직 이 값을
+    // 실제로 읽는 호출부는 없다(다음 후속 항목).
+    WaitCancelReason lastCancelReason = WaitCancelReason::None;
 
     // 명시적(explicit) Thread Local Storage 슬롯 배열(SP-0666DB3C §11) -
     // 진짜 컴파일러 thread_local이 아니라 TlsRegistry::allocateSlot()로
