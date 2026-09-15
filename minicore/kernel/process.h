@@ -3,6 +3,7 @@
 
 #include "address_space.h"
 #include "libkenv/types.h"
+#include "signal.h"
 
 namespace elf {
 class Image;  // 전방 선언(minicore/libs/libelf/elf.h) - Process::execImage 시그니처용
@@ -105,6 +106,14 @@ public:
     // 장부(PN-71C3D483 항목 3, SP-2AAD7C8D §2/§4) - destroy()가 이걸로
     // 실제 페이지를 찾아 반납한다. init()이 pml4Phys 확보 직후 초기화.
     ProcessAddressSpaceManager addressSpace;
+
+    // Signal 전달 인프라(SP-0666DB3C §4.3, PN-71E50394) - 아직 대기
+    // 중(전달 시도 전)인 신호들의 목록 + 각 신호 번호별 처리 방식.
+    // 둘 다 init()에서 명시적으로 리셋한다 - Resurrect(§6.2)가 같은
+    // 정적 Process 인스턴스를 재사용하므로, 이전 생애의 신호 상태가
+    // 새 생애로 새어 들어가면 안 된다.
+    ChunkedList<PendingSignal, kPendingSignalChunkCapacity> pendingSignals;
+    SignalDisposition dispositions[kSignalCount];
 
     // pml4Phys를 새로 확보하고 커널 상위 절반(higher-half)을 공유하는
     // 상태로 초기화한다(Paging::createAddressSpace 참고 - 하위 절반은
