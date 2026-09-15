@@ -15,12 +15,17 @@ struct Task;  // 포인터로만 참조(waitingTask) - 전체 정의는 task.h
 using AsyncTaskSubjectCode = uint32_t;   // 어느 AsyncTaskHandler에 속하는지
 using AsyncTaskManageCode = uint64_t;    // 그 작업 주체 안에서 이 인스턴스를 식별하는 관리 코드
 
-enum class AsyncTaskState { Ready, Running, Suspended, Completed, Failed };
+// Cancelled(PN-40E976F2) - 이 AsyncTask를 기다리던 UserThread가
+// 완료/실패보다 먼저 죽어, 결과를 가져갈 사람이 아무도 남지 않았을 때
+// 전이하는 상태. onExec을 실행/재개하지 않고 바로 AsyncTaskHandler::
+// onCancel만 호출한 뒤 프레임워크가 자원을 반납한다(AsyncReactor::
+// reactorTaskEntry, scheduler.cpp의 SelfTerminateHandler::onExec 참고).
+enum class AsyncTaskState { Ready, Running, Suspended, Completed, Failed, Cancelled };
 
 // 전용 스택 크기 - PL-1E247831이 "정확한 크기는 실측 확정"으로 남겨둔
 // 값(v1 시작값 4KiB, GenericSlabAllocator::alloc이 2048B 초과 요청을
 // PageFrameAllocator 직행 경로(Order 0)로 자동 위임하므로 그대로 재사용
-// 가능 - 버킷화 없이 페이지 하나를 통째로 받는다).
+// 가능하다(페이지 하나를 그대로 받는다).
 constexpr uint64_t kAsyncTaskStackSize = 4096;
 
 struct AsyncTask {
@@ -47,6 +52,15 @@ struct AsyncTask {
     // 잠들어 있어야 한다(v1 범위 - 코어 간 이관 없음).
     Task* waitingTask = nullptr;
 
+    // [PN-40E976F2, 설계자 지시] 이 AsyncTask의 실제 소유자는 그것을
+    // 실행하는 커널 Task(리액터 - AsyncReactor::submit이 호출된 그
+    // 코어의 gReactorTasks[coreIndex])이지, waitingTask(완료를 기다리는
+    // 대상일 뿐 소유자가 아님)나 그걸 제출한 UserThread가 아니다 -
+    // AsyncTask::submit()이 채운다. 지금은 진단/문서화 목적으로만
+    // 쓰이고(v1은 코어 간 이관이 없어 항상 자기 코어의 리액터를
+    // 가리킴이 자명하다) 실제 로직이 이 필드를 읽지는 않는다.
+    Task* ownerTask = nullptr;
+
     // false면 완료(Completed/Failed) 후에도 리액터가 이 AsyncTask
     // 구조체/전용 스택을 자동으로 반납하지 않는다 - 결과를 나중에
     // 소비해야 하는 호출부(예: waitForSyscall)가 직접 반납할 책임을
@@ -62,7 +76,7 @@ struct AsyncTask {
 
     // 현재 실행 중인 AsyncTask 자신이 호출 - 리액터 컨텍스트로 복귀해
     // 다음 AsyncTask를 처리하게 한다. 나중에 리액터가 이 AsyncTask를
-    // 다시 큐에서 뽑아 재개시키면 이 호출 지점부터 이어진다.
+    // 다시 큐에서 뿑아 재개시키면 이 호출 지점부터 이어진다.
     static void yield();
 
     // AsyncTask/AsyncCallbackRegistry가 내부적으로 새 AsyncTask를 만들어
@@ -88,10 +102,13 @@ public:
     // 결정한다(예: 여기서 다시 submit).
     virtual void onFailure(AsyncTask* task) = 0;
     // 이 작업의 소유 스레드/프로세스가 완료 전에 종료돼 강제로
-    // 취소될 때 호출된다(onExec/onFailure 둘 다와 배타적). **아직
-    // 이 경로를 실제로 호출하는 Task/프로세스 종료 절차 자체가
-    // 구현돼 있지 않다** - 프로세스 모델이 생길 때 그 종료 시퀀스가
-    // 이 메서드를 호출하는 지점을 가져야 한다(SP-04EE2A18 참고).
+    // 취소될 때 호출된다(onExec/onFailure 둘 다와 배타적). **[구현
+    // 완료, PN-40E976F2]** 이 UserThread가 종료될 때
+    // (scheduler.cpp의 SelfTerminateHandler::onExec) 아직 완료/실패
+    // 전인 pendingSyscalls 항목을 전부 AsyncTaskState::Cancelled로
+    // 전이시키고, AsyncReactor::reactorTaskEntry가 그 상태를 보면
+    // onExec 대신 이 메서드만 호출한다 - args의 해제도 이 호출
+    // 안에서 처리기가 직접 책임진다(onExec/onFailure와 동일한 계약).
     virtual void onCancel(AsyncTask* task, void* args) = 0;
 };
 
@@ -107,7 +124,7 @@ public:
 class AsyncReactor {
 public:
     // BSP/AP 각자 자기 코어에서 한 번씩 호출한다(Scheduler::init() 이후,
-    // Lapic::init() 이전이든 이후든 무방 - 실제 실행은 Scheduler가
+    // Lapic::init() 이전이든 이후이든 무방 - 실제 실행은 Scheduler가
     // 디스패치를 시작한 뒤에나 일어난다). 이 코어의 리액터 Task를
     // 만들어 일반 큐에 최초 1회 넣는다 - 실행되면 즉시 자기 할 일이
     // 없음을 확인하고 파킹한다.
