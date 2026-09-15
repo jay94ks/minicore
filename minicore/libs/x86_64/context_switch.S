@@ -42,6 +42,12 @@ kContextSwitch:
  * task.cpp 참고). 진입 시 rbx=entry 함수 포인터, r12=entry에 넘길
  * arg(둘 다 kContextSwitch의 pop rbx/pop r12로 이미 복원됨).
  *
+ * entry를 부르기 전에 kSyncCr3OnTaskStart(scheduler.cpp)를 먼저
+ * 호출한다(SP-83A07867 §3.2 갈래② - "Task가 태어나서 처음 실행되는
+ * 지점"에서 CR3를 이 Task 자신의 주소공간으로 동기화). 이미 이 Task
+ * 자신의 스택으로 넘어온 뒤라 안전하다 - rbx/r12는 System V
+ * 콜리세이브라 이 호출을 거쳐도 그대로 보존된다.
+ *
  * entry가 반환하면 kTaskFallingToEnd로 떨어진다(예전 이름
  * kTaskStartTrampoline_halt - PL-2D3184BC "Task 종료 프로토콜",
  * QU-26F9420E 설계자 답변, 2026-09-14로 개명+확장) - C++ 쪽
@@ -54,6 +60,7 @@ kContextSwitch:
  */
 .global kTaskStartTrampoline
 kTaskStartTrampoline:
+    call kSyncCr3OnTaskStart
     mov rdi, r12
     call rbx
 

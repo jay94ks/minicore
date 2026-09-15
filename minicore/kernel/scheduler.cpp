@@ -177,9 +177,23 @@ void kSyncRsp0ForDispatch(Task* next) {
 // (`gIdleSavedRsp`가 가리키는 곳)만은 예외라 실제로 Double Fault를
 // 유발했다(리액터가 자기 일을 마치고 parkCurrent()로 idle 컨텍스트에
 // 되돌아가려는 순간 실측 발견).
-void kSyncCr3ForDispatch(Task* next) {
-    const uint64_t targetPml4 = next->isUserLevel ? next->userPml4Phys : gBootPml4Phys;
-    asm volatile("mov %0, %%cr3" : : "r"(targetPml4) : "memory");
+//
+// **통합 및 최적화(SP-83A07867, QU-892AB38A 설계자 답변, 2026-09-15)**:
+// 이 함수(옛 이름 kSyncCr3ForDispatch)가 onTick()에서만 안전하다는
+// 제약 자체는 그대로다(위 문서 주석 참고 - PN-58501EAA의 부팅 스택
+// 안전성 논리는 변하지 않았다) - 달라진 건 두 가지뿐이다: (1) 이름을
+// `kSyncCr3`로 통일해 kTaskStartTrampoline(아래 kSyncCr3OnTaskStart
+// 참고)/yieldCurrent()/parkCurrent() 재개 지점과 정확히 같은 로직을
+// 공유하게 했고(전에는 CR3 동기화가 이 함수 하나에만 있어 나머지
+// 세 지점은 아예 손대지 않았다 - SP-83A07867 §2가 정리한 근본 원인),
+// (2) `Paging::currentPml4Phys()`로 현재 값을 먼저 읽어 target과
+// 같으면 `mov cr3` 자체를 생략하는 최적화를 추가했다(§5 - 불필요한
+// 전체 TLB flush 회피, 레지스터 읽기 자체는 매우 저렴해 항상 이득).
+void kSyncCr3(Task* task) {
+    const uint64_t targetPml4 = task->isUserLevel ? task->userPml4Phys : gBootPml4Phys;
+    if (Paging::currentPml4Phys() != targetPml4) {
+        asm volatile("mov %0, %%cr3" : : "r"(targetPml4) : "memory");
+    }
 }
 
 // kSyscallEndpointSelfTerminate(PN-71C3D483)의 실제 핸들러 - args는
@@ -370,7 +384,7 @@ void Scheduler::onTick(InterruptFrame*) {
     gCurrentTask[coreIndex] = next;
     next->state = TaskState::Running;
     kSyncRsp0ForDispatch(next);
-    kSyncCr3ForDispatch(next);
+    kSyncCr3(next);
     // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
@@ -414,13 +428,15 @@ void Scheduler::runLoop() {
         asm volatile("cli");
         gCurrentTask[coreIndex] = next;
         next->state = TaskState::Running;
-        // CR3는 여기서 안 건드린다(kSyncCr3ForDispatch 문서 주석 참고
-        // - 이 idle 컨텍스트의 스택이 안전하지 않을 수 있다). next가
-        // 처음 디스패치되는 UserThread면 kEnterRing3가, 이미 한 번
-        // 실행된 적 있는 UserThread를 유휴 상태였다가 다시 여기서
-        // 고르는 경우엔(현재는 어떤 ring3 코드도 yieldCurrent/
-        // parkCurrent를 거치지 않아 실제로는 발생하지 않음) 아직
-        // 해결되지 않은 채로 남아있다 - PN-63BCFE45 참고.
+        // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - 이 idle
+        // 컨텍스트의 스택이 안전하지 않을 수 있다). **SP-83A07867로
+        // 더 이상 여기서 신경 쓸 필요가 없다** - 이 kContextSwitch가
+        // 도착하는 지점(최초 실행이면 kTaskStartTrampoline의
+        // kSyncCr3OnTaskStart 호출, yieldCurrent/parkCurrent로
+        // 파킹됐다가 재개되는 것이면 그 함수들 자신의 재개 지점)이
+        // 전부 자기 자신의 안전한 스택으로 이미 넘어온 뒤 CR3를
+        // 동기화하므로, runLoop()은 그 도착 지점이 무엇이든 몰라도
+        // 된다(§3.2 - 이 설계의 핵심 이점).
         kSyncRsp0ForDispatch(next);
         kContextSwitch(&gIdleSavedRsp[coreIndex], next->savedRsp);
         // yieldCurrent()로 되돌아온 경우에만 이 지점으로 온다(onTick의
@@ -457,6 +473,15 @@ void Scheduler::yieldCurrent() {
     gCurrentTask[coreIndex] = nullptr;
     enqueue(coreIndex, current);
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    // **SP-83A07867(QU-892AB38A 설계자 답변, 2026-09-15) - 이 재개
+    // 지점이 바로 §3.2 갈래②의 세 곳 중 하나다.** 위 kContextSwitch가
+    // 반환한 이 시점은 이미 이 Task 자신의(안전한) 스택으로 넘어온
+    // 뒤라 CR3를 동기화해도 된다 - 파킹되기 전 다른 UserThread가 실행
+    // 되며 CR3를 자기 것으로 바꿔 놓았을 수 있는데, 예전엔 이 경로가
+    // 전혀 CR3를 건드리지 않아 "아직 실제로 발현되지 않은 세 번째
+    // 공백"으로 남아 있었다(지금은 이 프로젝트의 어떤 ring3 코드도
+    // yieldCurrent를 타지 않아 관찰되지 않았을 뿐).
+    kSyncCr3(current);
     // **실측으로 발견한 버그(2026-09-14, Channel IPC 스트레스
     // 테스트)**: 위 kContextSwitch의 pushfq는 방금 실행한 cli 때문에
     // IF=0인 RFLAGS를 이 Task 자신의 저장 슬롯에 그대로 담아 버린다 -
@@ -495,6 +520,11 @@ void Scheduler::parkCurrent() {
     // 큐에 넣어야 한다(그 시점엔 이 Task가 어느 큐에도 없다는 게
     // 보장되므로 이중 스케줄링 걱정이 없다).
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    // SP-83A07867 §3.2 갈래②의 나머지 한 곳 - yieldCurrent()의 재개
+    // 지점과 완전히 동일한 이유로 여기서도 CR3를 동기화한다(위
+    // yieldCurrent() 주석 참고 - 이 함수가 첫 실제 소비자가 되기
+    // 전까지는 아직 발현되지 않았던 공백이었다).
+    kSyncCr3(current);
     // 누군가 깨워 runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰
     // 있다가, 다시 선택되면 이 지점부터 재개된다 - yieldCurrent()와
     // 같은 이유로(위 주석 참고) 여기서도 명시적으로 다시 켜야 한다 -
@@ -562,6 +592,22 @@ void Scheduler::enablePreemption() {
 }
 
 }  // namespace kernel
+
+// context_switch.S의 kTaskStartTrampoline이 entry 콜백(`call rbx`)을
+// 부르기 직전에 호출한다 - SP-83A07867 §3.2 갈래②의 세 지점 중
+// "Task가 태어나서 처음 실행되는 지점". 이미 이 Task 자신의(이제 막
+// kContextSwitch로 넘어온) 스택 위에서 실행 중이라 CR3를 바꿔도
+// 안전하다(kEnterRing3가 예전엔 UserThread 한정으로 직접 하던 일 -
+// 이제 모든 Task의 첫 실행에 똑같이 적용된다, kEnterRing3 자신의
+// 수동 CR3 설정은 이 함수로 대체되어 제거됐다). r12(entry arg)/
+// rbx(entry 함수 포인터)는 System V 콜리세이브라 이 호출 전후로
+// 그대로 보존된다 - 어셈블리 쪽에서 별도로 save/restore할 필요 없음.
+extern "C" void kSyncCr3OnTaskStart() {
+    kernel::Task* self = kernel::Scheduler::currentTask();
+    if (self) {
+        kernel::kSyncCr3(self);
+    }
+}
 
 // context_switch.S의 kTaskFallingToEnd(entry가 반환해 Task 실행이
 // 자연 종료되는 지점)가 호출한다 - PL-2D3184BC "Task 종료 프로토콜"

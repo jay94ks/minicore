@@ -31,8 +31,20 @@ constexpr kernel::uint64_t kUserStackSize = 16UL * 4096UL;  // 64KiB
 // void* arg 슬롯이 아니라 이 Task 자신의 `ring3EntryPoint`/
 // `ring3UserStackTop` 필드에서 직접 읽는다(PN-D0ED9611 - 예전엔 전역
 // 인스턴스 하나를 공유해 두 번째 프로세스 exec() 시 첫 번째 값이
-// 덮어써지는 결함이 있었다) - CR3를 `self->userPml4Phys`에서 읽는
-// 것과 완전히 같은 패턴.
+// 덮어써지는 결함이 있었다).
+//
+// **CR3 설정은 이 함수가 더 이상 직접 하지 않는다**(SP-83A07867,
+// QU-892AB38A 설계자 답변, 2026-09-15 - CR3 동기화를 스케줄러 디스패치
+// 공통 경로로 통합) - `kTaskStartTrampoline`(context_switch.S)이 이
+// entry 콜백을 부르기 **직전**에 `kSyncCr3OnTaskStart()`(scheduler.cpp)
+// 를 호출해 이미 `self->userPml4Phys`로 맞춰 둔다. 예전엔 이 함수가
+// UserThread 한정으로 직접 CR3를 설정했는데(PN-63BCFE45 실측 발견 -
+// 반드시 이 Task 자신의 안전한 스택으로 넘어온 뒤에만 `mov cr3`가
+// 안전하다는 제약 자체는 그대로 유효), 그 로직이 이 함수 하나에만
+// 있어 재디스패치/커널 Task/yieldCurrent 재개 등 다른 경로는 전혀
+// CR3를 동기화하지 않는 문제가 반복 재발했다(PN-71C3D483) - 이제는
+// "Task가 실행을 (재)시작하는 모든 지점"이 같은 `kSyncCr3()` 로직을
+// 공유한다(SP-83A07867 §3.2).
 [[noreturn]] void kEnterRing3(void*) {
     auto* self = kernel::Scheduler::currentTask();
 
@@ -41,26 +53,6 @@ constexpr kernel::uint64_t kUserStackSize = 16UL * 4096UL;  // 64KiB
     // TSS 구조체 쓰기는 지금 어떤 스택 위에서 실행 중이든 안전해서
     // (메모리 매핑과 무관한 순수 데이터 쓰기) runLoop() 자신이 아직
     // 이 Task 고유의 스택으로 넘어오기 전(idle 컨텍스트)에 해도 된다.
-    //
-    // **CR3는 다르다(PN-63BCFE45 실측으로 발견)**: `mov cr3`은 그
-    // 자리에서 즉시 전체 TLB를 무효화하고 이후의 모든 메모리 접근을
-    // 새 주소공간 기준으로 해석하게 만든다 - PN-58501EAA "중요
-    // 발견"이 이미 경고했듯, BSP의 kMain()/AP의 kApMain()이 진입할
-    // 때부터 쓰는 최초 부트 스택은 저지대 identity map에 있어(커널
-    // 자신의 higher-half 이미지 안이 아님) 어떤 프로세스의 PML4에도
-    // 안 들어있다 - 그 스택 위에서(=아직 이 Task 자신의 스택으로
-    // 넘어오기 전인 idle 컨텍스트에서) CR3를 바꾸면 다음 명령(스택
-    // 접근)에서 즉시 폴트/트리플 폴트가 난다. 그래서 CR3는 **반드시
-    // 이 Task 자신의(커널 higher-half에 있는, 모든 프로세스가
-    // 공유하는) 스택으로 이미 넘어온 뒤에만** 설정해야 한다 - 이
-    // 함수(kTaskStartTrampoline이 이 Task 자신의 스택 위에서 부른
-    // entry 콜백) 안이 바로 그 지점이다. 이후 이 Task가 다시
-    // 디스패치될 때는 `Scheduler::onTick()`이 같은 이유로 안전한
-    // 지점(트랩으로 들어와 이미 이 Task 자신의 스택 위)에서
-    // `next->userPml4Phys`를 CR3에 다시 싣는다 - `Scheduler::
-    // runLoop()`의 idle->Task 경로는 CR3를 건드리지 않는다(idle
-    // 컨텍스트 자체가 안전하지 않은 스택이므로).
-    asm volatile("mov %0, %%cr3" : : "r"(self->userPml4Phys) : "memory");
 
     // 아래 인라인 asm은 리터럴 0x1b/0x23을 직접 쓴다(피연산자 제약
     // 안에서 이름 있는 상수를 쓰면 크기 불일치 등으로 더 위험할 수
