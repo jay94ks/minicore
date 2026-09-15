@@ -41,6 +41,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review |
+| [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review |
@@ -60,7 +61,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [SP-7CC5693A](./SP-7CC5693A.md) | VFS 커널 서브시스템 — 설계 제안 | approved |
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | review |
-| [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | draft |
+| [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | review |
 | [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | review |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | pending |

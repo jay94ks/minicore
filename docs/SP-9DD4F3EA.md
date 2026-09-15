@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-15T15:44:19.471Z
+  updatedAt: 2026-09-15T16:13:35.107Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 장치 자동 인식 및 핫플러그 프레임워크("PnP") — 설계 제안
@@ -329,8 +329,12 @@ blacklist)을 devmgr 프로세스 하나의 실제 시작 시퀀스로 엮는다
    프로세스로 스폰(§3.2, `ProcessRole::KernelService` 상속 -
    SP-EAB162FC §2.2 개정).
 6. **자식 쪽**: `RequestIoPermission`(§3.3)으로 BAR/IRQ 확보 →
-   자체 데이터 Channel `openChannel()` → `PublishInterface`
-   (SP-B071E628)로 등록 → 이제 소비자가 발견 가능.
+   자체 데이터 Channel `openChannel()` → **[갱신, 2026-09-16,
+   설계자 지시로 재설계]** `pubreg` 서비스(SP-B071E628, 5번째 커널
+   서비스)에 연결해 MCP 스타일 tool 선언(예: `ahci.blockRead`)을
+   `register` 메시지로 등록 → 이제 소비자가 `pubreg`에서 발견 가능
+   (예전 안의 커널 syscall `PublishInterface`는 폐기됨,
+   RM-48E1E610 참고).
 7. **핫플러그 대기**: PCIe Slot Capability/USB 포트 상태 변경
    인터럽트(§3.4)를 PN-B3DD3D19 라우팅으로 수신 대기 - 도착하면
    2번부터 그 슬롯/포트만 재실행.

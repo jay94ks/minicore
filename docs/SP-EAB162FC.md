@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-EAB162FC
   status: approved
-  updatedAt: 2026-09-15T12:20:45.024Z
+  updatedAt: 2026-09-15T16:12:26.501Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안
@@ -57,7 +57,7 @@ QU-E6D37232(SP-71DA77B3 §3 "미결" - exclusive 인터럽트 구독 자격
 ```cpp
 enum class ProcessRole : uint8_t {
     Normal = 0,        // 기본값 - 일반 유저 프로세스, exec()/fork()로 만들어진 모든 프로세스
-    KernelService = 1, // devmgr/fs/net/tty 등 - 오직 부팅 매니페스트로만 부여
+    KernelService = 1, // devmgr/fs/net/tty/pubreg 등 - 오직 부팅 매니페스트로만 부여
 };
 ```
 
@@ -70,7 +70,9 @@ enum class ProcessRole : uint8_t {
 `kmain.cpp`의 초기 부팅 시퀀스(SP-8B6B8D25 §2-A가 이미 "devmgr을
 커널이 유저랜드 서비스로 직접 기동한다"고 전제한 지점)에서, 커널이
 initrd/부트 모듈로부터 고정된 이름 목록(`devmgr`, `fs`, `net`,
-`tty` - CLAUDE.md 디렉터리 규칙이 이미 이 네 이름을 공식화해 둠)과
+`tty`, **`pubreg`**[추가, 2026-09-16, 설계자 지시 - SP-B071E628
+"프로세스간 공개 인터페이스" 재설계로 5번째 커널 서비스 신설] -
+SP-8B6B8D25 §3 디렉터리 규칙이 이 다섯 이름을 공식화해 둠)과
 정확히 일치하는 실행 파일만 `ProcessRole::KernelService`로 스폰한다.
 **[개정, QU-3AAAB5E9 답변, 2026-09-15]** devmgr이 PnP 드라이버
 스폰 경로(SP-9DD4F3EA §3.2, `probe()` 성공 시 자식으로 띄우는
