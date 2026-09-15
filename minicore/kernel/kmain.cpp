@@ -15,6 +15,7 @@
 #include "livefs.h"
 #include "mount_table.h"
 #include "multiboot2.h"
+#include "named_object.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
@@ -222,6 +223,16 @@ void kLogBootInfo(const kernel::BootInfo& bootInfo) {
         const auto* archive = reinterpret_cast<const void*>(mod.physStart);
         const kernel::uint64_t archiveSize = mod.physEnd - mod.physStart;
         cpio::forEachEntry(archive, archiveSize, kLogCpioEntry, nullptr);
+
+        // /sys/live/initrd.cpio(SP-7CC5693A §2.4, PN-71C2B857) - 개별
+        // 엔트리만 뽑아 담는 gInitImageBuffer류와 달리 아카이브 원본
+        // 바이트 전체를 그대로 보존해야 한다(하나의 불투명한 파일로
+        // 노출하므로) - PageFrameAllocator::init()보다 먼저인 지금
+        // 복사해 둬야 안전한 이유는 gInitImageBuffer 문서 주석과 동일
+        // (QU-A7D8E49B). CPIO가 아닌 모듈이어도 captureCpioArchive()가
+        // 크기 상한만 확인하고 그대로 복사하지만, 첫 모듈만 채택되고
+        // 실제 initrd 부팅 시나리오는 모듈이 하나뿐이라 문제되지 않는다.
+        kernel::LiveFs::captureCpioArchive(archive, archiveSize);
     }
 }
 
@@ -281,6 +292,10 @@ void kSpawnInitProcess() {
         kernel::Serial::write("minicore: init process address space allocation FAILED\n");
         return;
     }
+    // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - role/startFlags와 같은
+    // 관례로 init() 직후 호출부가 직접 채운다.
+    memcpy(gInitProcess.spawnName, "init", 4);
+    gInitProcess.spawnNameLen = 4;
     kernel::UserThread* thread = gInitProcess.execImage(gInitImage, &gInitThread);
     if (!thread) {
         kernel::Serial::write("minicore: init process execImage FAILED\n");
@@ -325,6 +340,11 @@ void kSpawnServiceProcesses() {
         // role은 스폰 시점에 고정(SP-EAB162FC §1/§2.2 - 이후 바꾸는
         // API를 두지 않는다는 원칙 그대로, execImage 이전에 채운다).
         gServiceProcess[i].role = kernel::ProcessRole::KernelService;
+        // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - LiveFs::open(
+        // "kernel/<name>")이 호출자가 정말 그 이름의 서비스 자신인지
+        // 검사하는 데 쓴다(role과 같은 관례).
+        memcpy(gServiceProcess[i].spawnName, svc.name, svc.nameLength);
+        gServiceProcess[i].spawnNameLen = svc.nameLength;
         kernel::UserThread* thread = gServiceProcess[i].execImage(gServiceImage[i], &gServiceThread[i]);
         if (!thread) {
             kernel::Serial::write("minicore: service process execImage FAILED: ");
@@ -551,6 +571,18 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 요구하는 "MountTable::init() 직후" 시점 확보).
     kernel::MountTable::init();
     kernel::Serial::write("minicore: mount table ready\n");
+
+    // livefs(SP-7CC5693A §2.4, PN-71C2B857) - 어떤 유저 프로세스도 아직
+    // 없는 이 시점에 커널 스스로 마운트한다(§2.4 부팅 시퀀스 그대로,
+    // fs 서비스의 Mount syscall과는 다른 경로). named/kernel/
+    // initrd.cpio 세 하위 경로를 이 하나의 마운트가 전부 담당한다.
+    static constexpr char kLiveFsMountPath[] = "/sys/live";
+    if (!kernel::MountTable::mountKernel(kLiveFsMountPath, sizeof(kLiveFsMountPath) - 1,
+                                          &kernel::LiveFs::instance())) {
+        kernel::Serial::write("minicore: livefs mount FAILED\n");
+    } else {
+        kernel::Serial::write("minicore: livefs mounted at /sys/live\n");
+    }
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).

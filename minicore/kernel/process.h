@@ -94,6 +94,18 @@ public:
     ProcessRole role = ProcessRole::Normal;
     ProcessStartFlags startFlags;
 
+    // 이 프로세스를 스폰할 때 커널이 알고 있던 이름(예: "devmgr") -
+    // `role`과 같은 이유로 스폰 시점에 호출부가 직접 채우고 이후
+    // 바꾸는 setter는 없다. **왜 필요한가(SP-00CA7175 §2.0/RM-C65F7760,
+    // PN-71C2B857 조사 중 발견)**: `LiveFs::open("kernel/<name>")`이
+    // 호출자가 정말 그 이름으로 스폰된 `ProcessRole::KernelService`
+    // 프로세스 자신인지 검사해야 하는데, 이 필드가 생기기 전까지는
+    // 그 비교 대상 자체가 Process에 없었다 - `KernelReservedEntry::
+    // name`(livefs.h)과 같은 관례(char 배열 + 길이)로 맞춘다.
+    static constexpr uint32_t kMaxSpawnNameLen = 32;
+    char spawnName[kMaxSpawnNameLen] = {};
+    uint32_t spawnNameLen = 0;
+
     // §6.4 - `role`/`startFlags`와 달리 살아있는 동안 불변인 값이
     // **아니다**. 재스폰마다 이어지는 런타임 카운터라 별도 필드로
     // 둔다 - 재스폰 트리거 지점(SelfTerminateHandler::onExec)이 옷
