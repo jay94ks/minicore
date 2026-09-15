@@ -14,6 +14,23 @@ constexpr kernel::uint64_t kNullDescriptor = 0;
 constexpr kernel::uint64_t kCode64Descriptor = 0x00AF9A000000FFFFULL;
 constexpr kernel::uint64_t kData64Descriptor = 0x00CF92000000FFFFULL;
 
+// ring3 유저 코드/데이터 디스크립터(PN-124C105B) - 커널 것과 완전히
+// 같은 비트 패턴에서 access byte의 DPL 필드만 0(00)->3(11)으로 바꾼
+// 값이다(access byte 0x9A/0x92 -> 0xFA/0xF2, 그 외 base/limit/flags는
+// 전부 동일 - 롱모드에선 실질적으로 무시되는 필드들이다). 배치 순서/
+// 자리(0x18=데이터, 0x20=코드)는 gdt.h의 kGdtUserDataSelector/
+// kGdtUserCodeSelector 주석 참고(SYSRET 규약).
+constexpr kernel::uint64_t kUserDataDescriptor = 0x00CFF2000000FFFFULL;
+constexpr kernel::uint64_t kUserCodeDescriptor = 0x00AFFA000000FFFFULL;
+
+// SYSRET의 STAR[63:48]+8/+16 규약이 정확히 이 GDT 오프셋을 가리키게
+// 될 것이므로(향후 syscall MSR 설정 시점의 전제), 이 배치가 실수로
+// 바뀌면 여기서 바로 걸리게 해 둔다.
+static_assert((kernel::kGdtUserDataSelector & ~0x3) == 0x18,
+              "kGdtUserDataSelector는 GDT 오프셋 0x18에 있어야 한다(SYSRET 규약)");
+static_assert((kernel::kGdtUserCodeSelector & ~0x3) == 0x20,
+              "kGdtUserCodeSelector는 GDT 오프셋 0x20에 있어야 한다(SYSRET 규약)");
+
 constexpr kernel::uint32_t kMaxCores = kernel::kAcpiMaxCpus;
 constexpr kernel::uint64_t kIstStackSize = 8192;  // Task 기본 커널 스택(8KiB)과 동일 크기
 
@@ -25,11 +42,14 @@ constexpr kernel::uint64_t kIstStackSize = 8192;  // Task 기본 커널 스택(8
 // 배열을 늘리고 idt.cpp에 같은 패턴으로 추가한다.
 constexpr kernel::uint32_t kIstSlotCount = 4;
 
-// GDT 배치: [0]=null, [1]=code64, [2]=data64(각 8바이트), 그 뒤로
-// 코어마다 16바이트짜리 TSS 디스크립터가 하나씩 이어진다 - 셀렉터
-// 계산이 쉽도록 고정 오프셋(3*8=0x18)부터 시작한다.
-constexpr kernel::uint32_t kFixedEntryCount = 3;
-constexpr kernel::uint32_t kTssDescriptorBaseOffset = kFixedEntryCount * 8;  // 0x18
+// GDT 배치: [0]=null, [1]=code64(ring0), [2]=data64(ring0),
+// [3]=data(ring3, 0x18), [4]=code64(ring3, 0x20)(각 8바이트) - 유저
+// 세그먼트 두 개를 이 순서/자리에 두는 이유는 gdt.h 상단 주석 참고
+// (SYSRET 규약). 그 뒤로 코어마다 16바이트짜리 TSS 디스크립터가
+// 하나씩 이어진다 - 셀렉터 계산이 쉽도록 고정 오프셋(5*8=0x28)부터
+// 시작한다.
+constexpr kernel::uint32_t kFixedEntryCount = 5;
+constexpr kernel::uint32_t kTssDescriptorBaseOffset = kFixedEntryCount * 8;  // 0x28
 
 alignas(16) kernel::uint64_t gGdt[kFixedEntryCount + 2 * kMaxCores];
 
@@ -129,6 +149,8 @@ void Gdt::init() {
     gGdt[0] = kNullDescriptor;
     gGdt[1] = kCode64Descriptor;
     gGdt[2] = kData64Descriptor;
+    gGdt[3] = kUserDataDescriptor;
+    gGdt[4] = kUserCodeDescriptor;
 
     for (uint32_t i = 0; i < kMaxCores; ++i) {
         kSetTssDescriptor(i, reinterpret_cast<uint64_t>(&gTssPerCore[i]), sizeof(Tss) - 1);

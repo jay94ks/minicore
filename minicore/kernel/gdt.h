@@ -8,6 +8,17 @@ namespace kernel {
 constexpr uint16_t kGdtKernelCodeSelector = 0x08;
 constexpr uint16_t kGdtKernelDataSelector = 0x10;
 
+// ring3 유저 코드/데이터 세그먼트(PN-124C105B, SP-04EE2A18 "유저랜드
+// ABI" 절) - RPL=3을 이미 OR해 둔 완성 셀렉터 값이다(그대로 CS/SS에
+// 적재). 배치가 0x18(데이터)/0x20(코드) 순서인 이유는 x86_64
+// `sysretq`의 하드웨어 규약 때문 - STAR[63:48]=0x10으로 두면
+// SYSRET이 CS=STAR[63:48]+16=0x20, SS=STAR[63:48]+8=0x18을 자동으로
+// 골라 쓴다(Intel SDM Vol.2 SYSRET 설명, 32비트 호환 코드 세그먼트
+// 자리는 이 프로젝트가 32비트 유저 코드를 지원하지 않아 생략 -
+// STAR[63:48]+0 자리가 비게 되지만 sysretq는 그 자리를 쓰지 않는다).
+constexpr uint16_t kGdtUserDataSelector = 0x18 | 3;
+constexpr uint16_t kGdtUserCodeSelector = 0x20 | 3;
+
 // 런타임 GDT + 코어별 TSS(DC-3D3212A4/QU-4E00C118, 설계자 지시,
 // 2026-09-14 - "TSS+IST를 정식 구현하여 가드 페이지가 실제 진단
 // 로그를 남기게 만들고, TSS+IST가 다른 곳에서도 활용 할 수 있도록

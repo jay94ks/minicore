@@ -31,6 +31,18 @@ constexpr kernel::uint32_t kDynamicVectorEnd = 254;   // 포함(inclusive)
 constexpr kernel::uint16_t kKernelCodeSelector = 0x08;
 constexpr kernel::uint8_t kInterruptGateTypeAttr = 0x8E;  // present, DPL0, 64비트 interrupt gate
 
+// 레거시 syscall 트랩 진입 벡터(PN-124C105B, SP-04EE2A18 "유저랜드
+// ABI" 절 - "int 0x80류 소프트웨어 인터럽트 게이트") - 33-254 범위
+// 안에 있어(kDynamicVectorBase/kDynamicVectorEnd 참고) Init()의 일반
+// 루프가 먼저 여느 하드웨어 인터럽트 벡터처럼 채우지만, 이 벡터
+// 하나만 등록 직후 DPL=3으로 다시 덮어써 ring3의 `int 0x80`을 허용
+// 한다(위 kInterruptGateTypeAttr은 모든 게이트에 DPL=0을 고정하므로
+// 이 벡터만 예외). registerHandler/unregisterHandler 양쪽에서
+// 명시적으로 배제해 device 인터럽트 라우팅이 실수로 이 번호를
+// 재사용하지 못하게 막는다.
+constexpr kernel::uint32_t kSyscallVector = 0x80;
+constexpr kernel::uint8_t kInterruptGateTypeAttrDpl3 = 0xEE;  // present, DPL3, 64비트 interrupt gate
+
 // IST(Interrupt Stack Table) 배정 - gdt.cpp의 Gdt::loadTssForThisCore()
 // 가 채우는 TSS.ISTn을 가리킨다(DC-3D3212A4/QU-4E00C118, 설계자 후속
 // 지시 2026-09-14 - "#DF 외 다른 벡터(NMI/#MC/#DB)의 IST 배정도
@@ -116,11 +128,11 @@ const IsrStub kIsrStubs[kVectorCount] = {
     isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31,
 };
 
-void kSetGate(kernel::uint32_t vector, kernel::uint64_t handlerAddr) {
+void kSetGate(kernel::uint32_t vector, kernel::uint64_t handlerAddr, kernel::uint8_t typeAttr = kInterruptGateTypeAttr) {
     gIdt[vector].offsetLow = static_cast<kernel::uint16_t>(handlerAddr & 0xFFFF);
     gIdt[vector].selector = kKernelCodeSelector;
     gIdt[vector].ist = 0;
-    gIdt[vector].typeAttr = kInterruptGateTypeAttr;
+    gIdt[vector].typeAttr = typeAttr;
     gIdt[vector].offsetMid = static_cast<kernel::uint16_t>((handlerAddr >> 16) & 0xFFFF);
     gIdt[vector].offsetHigh = static_cast<kernel::uint32_t>((handlerAddr >> 32) & 0xFFFFFFFF);
     gIdt[vector].reserved = 0;
@@ -147,6 +159,10 @@ void Idt::init() {
     for (uint32_t vector = kDynamicVectorBase; vector <= kDynamicVectorEnd; ++vector) {
         kSetGate(vector, kIsrDynamicStubTable[vector - kDynamicVectorBase]);
     }
+    // 위 루프가 kSyscallVector도 여느 하드웨어 인터럽트 벡터처럼
+    // DPL=0으로 채웠으니, 여기서 그 한 슬롯만 DPL=3으로 다시 덮어써
+    // ring3의 `int 0x80`을 허용한다(핸들러 주소는 그대로 재사용).
+    kSetGate(kSyscallVector, kIsrDynamicStubTable[kSyscallVector - kDynamicVectorBase], kInterruptGateTypeAttrDpl3);
 
     gIdtPointer.limit = static_cast<uint16_t>(sizeof(gIdt) - 1);
     gIdtPointer.base = reinterpret_cast<uint64_t>(&gIdt[0]);
@@ -158,14 +174,14 @@ void Idt::reloadOnThisCore() {
 }
 
 void Idt::registerHandler(uint32_t vector, InterruptHandler handler) {
-    if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd) {
-        return;
+    if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd || vector == kSyscallVector) {
+        return;  // kSyscallVector(0x80)은 device 라우팅 대상이 아니다 - 위 kSyscallVector 주석 참고
     }
     gDynamicHandlers[vector] = handler;
 }
 
 void Idt::unregisterHandler(uint32_t vector) {
-    if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd) {
+    if (vector < kDynamicVectorBase || vector > kDynamicVectorEnd || vector == kSyscallVector) {
         return;
     }
     gDynamicHandlers[vector] = nullptr;
@@ -231,6 +247,24 @@ void kPanic(kernel::InterruptFrame* frame) {
     }
 }
 
+// 레거시 syscall 트랩(vector 0x80) 진입점 - PN-124C105B. 게이트 자체
+// (DPL=3, Idt::init() 참고)는 이미 동작하지만, 실제 endpointId/args
+// 레지스터 배치와 syscall(제출)/waitForSyscall(대기) 두 동작을 어떻게
+// 구분할지는 아직 설계자 확정 대기 중이다(QU-E7E51931, SP-04EE2A18
+// "유저랜드 ABI" 절 - "정확한 구현은 PL에서"로 남겨진 부분). 지금은
+// 아무도 이 벡터를 실제로 트리거할 ring3 코드가 없어(프로세스
+// 생성/exec, PN-16CA347D 6번 미착수) 이 경로 자체가 호출될 일이
+// 없다 - 답변이 오는 대로, 그리고 실제로 실행할 ring3 코드가 생기는
+// 대로(6번과 함께) 여기서 Syscall::submit/wait로 이어붙인다.
+void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
+    kernel::Serial::write("\nminicore: PANIC - syscall trap(int 0x80) fired but ABI not yet wired (QU-E7E51931)\n  rip=");
+    kernel::Serial::writeHex(frame->rip);
+    kernel::Serial::write("\n");
+    for (;;) {
+        asm volatile("cli; hlt");
+    }
+}
+
 }  // namespace
 
 // isr_common_stub(isr.S)이 호출한다.
@@ -270,6 +304,12 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
         if (kernel::Paging::handlePageFault(faultAddr, frame->errorCode)) {
             return;
         }
+    }
+    if (frame->vector == kSyscallVector) {
+        // 소프트웨어 트랩(ring3의 `int 0x80`)이라 EOI 불필요 - 하드웨어
+        // 인터럽트가 아니다.
+        kHandleSyscallTrap(frame);
+        return;
     }
     if (frame->vector >= kDynamicVectorBase && frame->vector <= kDynamicVectorEnd) {
         auto* handler = gDynamicHandlers[frame->vector];
