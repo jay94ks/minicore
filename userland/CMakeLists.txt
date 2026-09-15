@@ -22,3 +22,9 @@ set(MINICORE_USERLAND_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/linker-use
 
 add_subdirectory(libs/libmc)
 add_subdirectory(tests/userlandtest)
+
+# minicore/init(SP-68182FBD §2.4) - userland/ 밖에 있지만 다른 유저
+# 프로그램과 완전히 같은 실행 파일 형태(ET_EXEC, 0x400000, 비-PIE)로
+# 빌드해야 해서 이 트리를 그대로 재사용(out-of-tree add_subdirectory,
+# 바이너리 디렉터리를 명시해 소스 트리 밖에서도 안전).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BINARY_DIR}/minicore-init)
