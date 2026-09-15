@@ -6,6 +6,8 @@
 #include "hvm_start_info.h"
 #include "idt.h"
 #include "libcpio/cpio.h"
+#include "libelf/elf.h"
+#include "libkenv/mem.h"
 #include "libkenv/types.h"
 #include "ioapic.h"
 #include "lapic.h"
@@ -14,6 +16,7 @@
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "pci.h"
+#include "process.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "smp.h"
@@ -74,11 +77,29 @@ bool kCmdlineHasFlag(const char* cmdline, const char* flag) {
     return false;
 }
 
-// 부팅 모듈(initrd)이 있으면 libcpio로 훑어 로그를 남긴다(QU-9DCDCE3E
-// - "initrd 역시도 마찬가지다"). 아직 이 CPIO 내용을 실제로 마운트할
-// 파일시스템/디바이스 관리자가 없어 지금은 진단 로그까지만 한다 -
-// 실제 사용(파일 열람 등)은 그 서브시스템이 생길 때 이 파서를 그대로
-// 재사용하면 된다.
+// initrd 안의 "init"(SP-68182FBD "initrd 레이아웃: 서브디렉터리 없이
+// 전부 루트에 평면 배치", "커널이 최초로 구동할 유저영역 프로그램은
+// init 하나로 하드코딩")을 이 버퍼로 복사해 둔다. **왜 여기서 즉시
+// 복사하는가(QU-A7D8E49B 설계자 답변, 2026-09-15)**: PageFrameAllocator
+// 는 부트 모듈의 물리 범위를 예약 목록에 넣지 않아(kLowReservedEnd/
+// 커널 자신/start_info/memmap 배열 넷뿐, page_frame_allocator.cpp)
+// 그 프레임이 나중에 버디 할당기로 재할당돼 덮어써질 수 있다 - 이
+// 버퍼가 커널 자신의 BSS 안에 있으므로(=kernelPhysStart..End 안에
+// 있으므로) 그 예약에 자동으로 포함돼 별도 처리가 필요 없다. 그래서
+// 실제로 다시 쓰기 전(PageFrameAllocator::init() 호출보다도 먼저,
+// kLogBootInfo가 호출되는 이 시점)에 필요한 바이트만 뽑아 두고,
+// 모듈의 원본 물리 페이지는 그 뒤로 일반 usable 메모리처럼 재활용돼도
+// 안전하다.
+constexpr kernel::uint64_t kMaxInitImageSize = 1UL * 1024UL * 1024UL;  // 1MiB v1 상한(실측 후 조정, RM-23F4B687 §4)
+kernel::uint8_t gInitImageBuffer[kMaxInitImageSize];
+kernel::uint64_t gInitImageSize = 0;
+bool gInitImageFound = false;
+
+// 부팅 모듈(initrd)이 있으면 libcpio로 훑어 로그를 남기고(QU-9DCDCE3E -
+// "initrd 역시도 마찬가지다"), 그중 이름이 "init"인 파일이 있으면 위
+// 버퍼로 즉시 복사해 둔다(PN-DF4E626D). 실제 마운트 가능한 파일시스템/
+// 디바이스 관리자가 아직 없어 "init" 외 나머지 파일은 여전히 진단
+// 로그까지만 한다 - 그 서브시스템이 생기면 이 파서를 그대로 재사용.
 void kLogCpioEntry(const cpio::Entry& entry, void*) {
     // entry.name은 아카이브 안의 파일명 바이트를 그대로 가리킨다 -
     // nameSize(원본 필드)가 null 포함이라 name[nameLength]가 이미
@@ -90,6 +111,18 @@ void kLogCpioEntry(const cpio::Entry& entry, void*) {
     kernel::Serial::write(" mode=");
     kernel::Serial::writeHex(entry.mode);
     kernel::Serial::write("\n");
+
+    if (gInitImageFound || !entry.data || entry.nameLength != 4 ||
+        entry.name[0] != 'i' || entry.name[1] != 'n' || entry.name[2] != 'i' || entry.name[3] != 't') {
+        return;
+    }
+    if (entry.dataSize > kMaxInitImageSize) {
+        kernel::Serial::write("minicore: init image exceeds kMaxInitImageSize - skipping load\n");
+        return;
+    }
+    memcpy(gInitImageBuffer, entry.data, entry.dataSize);
+    gInitImageSize = entry.dataSize;
+    gInitImageFound = true;
 }
 
 void kLogBootInfo(const kernel::BootInfo& bootInfo) {
@@ -156,6 +189,41 @@ kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap,
         }
     }
     return maxAddr;
+}
+
+// 실제 첫 프로세스 기동(QA-26450C3E "유저랜드 준비", PN-16CA347D 6번
+// 마지막 조각, PN-DF4E626D) - gInitImageFound가 세팅돼 있으면(위
+// kLogCpioEntry가 이미 부팅 극초반에 채워 둠) 그 ELF를 파싱해 실제
+// Process/UserThread로 ring3 진입시킨다(Process::execImage/kEnterRing3,
+// PN-55D24891). PageFrameAllocator/Scheduler/AsyncReactor가 전부 준비된
+// 뒤(=이 함수 호출 시점)에만 안전하다 - execImage가 유저 스택 페이지를
+// 확보하고 UserThread::init()이 커널 스택을 확보하기 때문.
+elf::Image gInitImage;
+kernel::Process gInitProcess;
+kernel::UserThread gInitThread;
+
+void kSpawnInitProcess() {
+    if (!gInitImageFound) {
+        kernel::Serial::write("minicore: no \"init\" entry found in initrd modules - skipping first process spawn\n");
+        return;
+    }
+    if (elf::Image::parse(gInitImageBuffer, gInitImageSize, &gInitImage) != elf::Error::None) {
+        kernel::Serial::write("minicore: init image ELF parse FAILED\n");
+        return;
+    }
+    if (!gInitProcess.init()) {
+        kernel::Serial::write("minicore: init process address space allocation FAILED\n");
+        return;
+    }
+    kernel::UserThread* thread = gInitProcess.execImage(gInitImage, &gInitThread);
+    if (!thread) {
+        kernel::Serial::write("minicore: init process execImage FAILED\n");
+        return;
+    }
+    kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
+    kernel::Serial::write("minicore: init process spawned, entry=");
+    kernel::Serial::writeHex(gInitImage.entryPoint());
+    kernel::Serial::write("\n");
 }
 
 }  // namespace
@@ -354,6 +422,8 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Serial::write(kernel::Pci::usesMmconfig() ? "mmconfig+legacy" : "legacy");
     kernel::Serial::write("\nminicore: PCI enumeration:\n");
     kernel::Pci::enumerate(kLogPciDevice);
+
+    kSpawnInitProcess();
 
     // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
     asm volatile("sti");
