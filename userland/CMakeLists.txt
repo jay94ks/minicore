@@ -20,4 +20,5 @@ add_compile_options(-Wall -Wextra)
 
 set(MINICORE_USERLAND_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/linker-userland-x86_64.ld)
 
+add_subdirectory(libs/libmc)
 add_subdirectory(tests/userlandtest)
