@@ -97,11 +97,42 @@ kernel::uint8_t gInitImageBuffer[kMaxInitImageSize];
 kernel::uint64_t gInitImageSize = 0;
 bool gInitImageFound = false;
 
+// 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - initrd 안에서
+// "devmgr"/"fs"/"net"/"tty"라는 정확한 이름과 일치하는 실행 파일을
+// 찾아 ProcessRole::KernelService로 스폰하는 고정 이름 목록. "init"과
+// 완전히 같은 물리 메모리 안전성 이유(위 gInitImageBuffer 문서 주석
+// 참고 - PageFrameAllocator::init() 이전에 커널 BSS 안으로 복사해
+// 둬야 그 예약 범위에 자동으로 포함된다)로 각자 전용 정적 버퍼를
+// 쓴다. v1은 이 네 이름 각각 정확히 하나의 인스턴스만 지원(여러
+// 개가 있으면 마지막으로 매치된 것만 남는다 - 지금은 문제되지 않음,
+// 실제로 여러 인스턴스가 필요해지면 재검토).
+constexpr kernel::uint32_t kServiceManifestCount = 4;
+kernel::uint8_t gDevmgrImageBuffer[kMaxInitImageSize];
+kernel::uint8_t gFsImageBuffer[kMaxInitImageSize];
+kernel::uint8_t gNetImageBuffer[kMaxInitImageSize];
+kernel::uint8_t gTtyImageBuffer[kMaxInitImageSize];
+
+struct ServiceManifestEntry {
+    const char* name;
+    kernel::uint32_t nameLength;  // cpio::Entry::nameLength와 같은 규약(널 제외)
+    kernel::uint8_t* buffer;
+    kernel::uint64_t size = 0;
+    bool found = false;
+};
+
+ServiceManifestEntry gServiceManifest[kServiceManifestCount] = {
+    {"devmgr", 6, gDevmgrImageBuffer},
+    {"fs", 2, gFsImageBuffer},
+    {"net", 3, gNetImageBuffer},
+    {"tty", 3, gTtyImageBuffer},
+};
+
 // 부팅 모듈(initrd)이 있으면 libcpio로 훑어 로그를 남기고(QU-9DCDCE3E -
-// "initrd 역시도 마찬가지다"), 그중 이름이 "init"인 파일이 있으면 위
-// 버퍼로 즉시 복사해 둔다(PN-DF4E626D). 실제 마운트 가능한 파일시스템/
-// 디바이스 관리자가 아직 없어 "init" 외 나머지 파일은 여전히 진단
-// 로그까지만 한다 - 그 서브시스템이 생기면 이 파서를 그대로 재사용.
+// "initrd 역시도 마찬가지다"), 그중 이름이 "init" 또는 부팅 매니페스트
+// (위 gServiceManifest)와 일치하는 파일이 있으면 각자 버퍼로 즉시
+// 복사해 둔다(PN-DF4E626D/PN-D3C05C0B). 실제 마운트 가능한 파일시스템이
+// 아직 없어 이 다섯 이름 외 나머지 파일은 여전히 진단 로그까지만
+// 한다 - fs 서비스가 생기면 이 파서를 그대로 재사용.
 void kLogCpioEntry(const cpio::Entry& entry, void*) {
     // entry.name은 아카이브 안의 파일명 바이트를 그대로 가리킨다 -
     // nameSize(원본 필드)가 null 포함이라 name[nameLength]가 이미
@@ -114,17 +145,48 @@ void kLogCpioEntry(const cpio::Entry& entry, void*) {
     kernel::Serial::writeHex(entry.mode);
     kernel::Serial::write("\n");
 
-    if (gInitImageFound || !entry.data || entry.nameLength != 4 ||
-        entry.name[0] != 'i' || entry.name[1] != 'n' || entry.name[2] != 'i' || entry.name[3] != 't') {
+    if (!entry.data) {
         return;
     }
-    if (entry.dataSize > kMaxInitImageSize) {
-        kernel::Serial::write("minicore: init image exceeds kMaxInitImageSize - skipping load\n");
+
+    if (!gInitImageFound && entry.nameLength == 4 && entry.name[0] == 'i' && entry.name[1] == 'n' &&
+        entry.name[2] == 'i' && entry.name[3] == 't') {
+        if (entry.dataSize > kMaxInitImageSize) {
+            kernel::Serial::write("minicore: init image exceeds kMaxInitImageSize - skipping load\n");
+            return;
+        }
+        memcpy(gInitImageBuffer, entry.data, entry.dataSize);
+        gInitImageSize = entry.dataSize;
+        gInitImageFound = true;
         return;
     }
-    memcpy(gInitImageBuffer, entry.data, entry.dataSize);
-    gInitImageSize = entry.dataSize;
-    gInitImageFound = true;
+
+    for (kernel::uint32_t i = 0; i < kServiceManifestCount; ++i) {
+        ServiceManifestEntry& svc = gServiceManifest[i];
+        if (svc.found || entry.nameLength != svc.nameLength) {
+            continue;
+        }
+        bool matches = true;
+        for (kernel::uint32_t j = 0; j < svc.nameLength; ++j) {
+            if (entry.name[j] != svc.name[j]) {
+                matches = false;
+                break;
+            }
+        }
+        if (!matches) {
+            continue;
+        }
+        if (entry.dataSize > kMaxInitImageSize) {
+            kernel::Serial::write("minicore: service image exceeds kMaxInitImageSize - skipping load: ");
+            kernel::Serial::write(svc.name);
+            kernel::Serial::write("\n");
+            return;
+        }
+        memcpy(svc.buffer, entry.data, entry.dataSize);
+        svc.size = entry.dataSize;
+        svc.found = true;
+        return;
+    }
 }
 
 void kLogBootInfo(const kernel::BootInfo& bootInfo) {
@@ -226,6 +288,55 @@ void kSpawnInitProcess() {
     kernel::Serial::write("minicore: init process spawned, entry=");
     kernel::Serial::writeHex(gInitImage.entryPoint());
     kernel::Serial::write("\n");
+}
+
+// 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - devmgr/fs/net/tty
+// 중 initrd에 실제로 존재하는 것만 ProcessRole::KernelService로
+// 스폰한다. "init"과 달리 하나라도 없다고 부팅을 막지 않는다(로그만
+// 남기고 계속 진행 - 이 넷은 아직 실제 구현이 하나도 없으므로
+// initrd에 없는 게 v1의 정상 상태다).
+elf::Image gServiceImage[kServiceManifestCount];
+kernel::Process gServiceProcess[kServiceManifestCount];
+kernel::UserThread gServiceThread[kServiceManifestCount];
+
+void kSpawnServiceProcesses() {
+    for (kernel::uint32_t i = 0; i < kServiceManifestCount; ++i) {
+        const ServiceManifestEntry& svc = gServiceManifest[i];
+        if (!svc.found) {
+            kernel::Serial::write("minicore: no \"");
+            kernel::Serial::write(svc.name);
+            kernel::Serial::write("\" entry found in initrd modules - skipping service spawn\n");
+            continue;
+        }
+        if (elf::Image::parse(svc.buffer, svc.size, &gServiceImage[i]) != elf::Error::None) {
+            kernel::Serial::write("minicore: service image ELF parse FAILED: ");
+            kernel::Serial::write(svc.name);
+            kernel::Serial::write("\n");
+            continue;
+        }
+        if (!gServiceProcess[i].init()) {
+            kernel::Serial::write("minicore: service process address space allocation FAILED: ");
+            kernel::Serial::write(svc.name);
+            kernel::Serial::write("\n");
+            continue;
+        }
+        // role은 스폰 시점에 고정(SP-EAB162FC §1/§2.2 - 이후 바꾸는
+        // API를 두지 않는다는 원칙 그대로, execImage 이전에 채운다).
+        gServiceProcess[i].role = kernel::ProcessRole::KernelService;
+        kernel::UserThread* thread = gServiceProcess[i].execImage(gServiceImage[i], &gServiceThread[i]);
+        if (!thread) {
+            kernel::Serial::write("minicore: service process execImage FAILED: ");
+            kernel::Serial::write(svc.name);
+            kernel::Serial::write("\n");
+            continue;
+        }
+        kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
+        kernel::Serial::write("minicore: service process spawned (KernelService): ");
+        kernel::Serial::write(svc.name);
+        kernel::Serial::write(", entry=");
+        kernel::Serial::writeHex(gServiceImage[i].entryPoint());
+        kernel::Serial::write("\n");
+    }
 }
 
 }  // namespace
@@ -437,6 +548,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Pci::enumerate(kLogPciDevice);
 
     kSpawnInitProcess();
+    kSpawnServiceProcesses();
 
     // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
     asm volatile("sti");
