@@ -3,6 +3,10 @@
 
 #include "libkenv/types.h"
 
+namespace elf {
+class Image;  // 전방 선언(minicore/libs/libelf/elf.h) - Process::execImage 시그니처용
+}
+
 namespace kernel {
 
 class UserThread;
@@ -63,6 +67,22 @@ public:
     // 프로젝트에 없다(PN-40E976F2 참고 - onCancel 호출 경로와 같은
     // 선행 조건 대기 상태).
     void destroy();
+
+    // ELF 이미지를 이 프로세스 주소공간에 로드하고, thread(호출부가
+    // 마련해 둔, 아직 init() 전인 UserThread)를 그 진입점으로 ring3
+    // 진입하도록 준비시킨다(PN-16CA347D 6번/PN-124C105B) - 성공하면
+    // thread 자신을 반환한다(호출부가 Scheduler::enqueue해야 실제로
+    // 실행 시작), 실패(ELF 로드/유저 스택 확보 실패) 시 nullptr.
+    //
+    // **v1 한계**:
+    // - 유저 스택은 고정 크기(64KiB)/고정 주소, 가드 페이지 없음
+    //   (커널 스택 가드 페이지와 같은 패턴으로 후속 추가 예정, 새 DC
+    //   불필요 수준).
+    // - syscall MSR 경로(STAR/LSTAR/SFMASK)가 아직 없어 유저 코드는
+    //   반드시 `int 0x80`으로만 트랩해야 한다(PN-124C105B 남은 항목).
+    // - 프로세스당 스레드 하나 전제(위 클래스 주석과 동일) - thread는
+    //   호출부가 소유(동적 할당/해제는 이번 범위 밖, PN-40E976F2).
+    UserThread* execImage(const elf::Image& image, UserThread* thread);
 };
 
 }  // namespace kernel

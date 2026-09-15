@@ -120,6 +120,20 @@ void kSetTssDescriptor(kernel::uint32_t coreIndex, kernel::uint64_t base, kernel
     gGdt[qwordIndex + 1] = pair.high;
 }
 
+// loadTssForThisCore()/Gdt::setRsp0ForThisCore() 공용 - 이 코어의
+// Lapic::id()를 Acpi::cpuApicId() 배열에서 역산해 코어 인덱스를 찾는다
+// (page_frame_allocator.cpp의 kCurrentNumaNode()와 같은 패턴).
+kernel::uint32_t kCoreIndexForTss() {
+    const kernel::uint32_t apicId = kernel::Lapic::id();
+    const kernel::uint32_t cpuCount = kernel::Acpi::cpuCount();
+    for (kernel::uint32_t i = 0; i < cpuCount; ++i) {
+        if (kernel::Acpi::cpuApicId(i) == apicId) {
+            return (i < kMaxCores) ? i : 0;  // 방어적 fallback(kAcpiMaxCpus 상한 초과 - 있을 수 없는 경우)
+        }
+    }
+    return 0;
+}
+
 // GDTR을 gGdt로 (다시) 적재하고 데이터 세그먼트 레지스터를 방어적으로
 // 다시 로드한다 - 코드 셀렉터(0x08)는 boot.S의 gdt64와 내용이 완전히
 // 같아 재적재가 필요 없다(Gdt::init 위 주석 참고).
@@ -166,18 +180,7 @@ void Gdt::reloadOnThisCore() {
 }
 
 void Gdt::loadTssForThisCore() {
-    const uint32_t apicId = Lapic::id();
-    uint32_t coreIndex = 0;
-    const uint32_t cpuCount = Acpi::cpuCount();
-    for (uint32_t i = 0; i < cpuCount; ++i) {
-        if (Acpi::cpuApicId(i) == apicId) {
-            coreIndex = i;
-            break;
-        }
-    }
-    if (coreIndex >= kMaxCores) {
-        coreIndex = 0;  // 방어적 fallback(kAcpiMaxCpus 상한 초과 - 있을 수 없는 경우)
-    }
+    const uint32_t coreIndex = kCoreIndexForTss();
 
     Tss& tss = gTssPerCore[coreIndex];
     tss.ist1 = kIstStackTop(0, coreIndex);  // #DF
@@ -188,6 +191,10 @@ void Gdt::loadTssForThisCore() {
 
     const uint16_t selector = Gdt::tssSelectorForCore(coreIndex);
     asm volatile("ltr %0" : : "r"(selector));
+}
+
+void Gdt::setRsp0ForThisCore(uint64_t rsp0) {
+    gTssPerCore[kCoreIndexForTss()].rsp0 = rsp0;
 }
 
 }  // namespace kernel

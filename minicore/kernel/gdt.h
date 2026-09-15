@@ -75,6 +75,16 @@ public:
     // 코어 인덱스(Acpi::cpuApicId와 같은 배열 인덱스)에 대응하는 TSS
     // 셀렉터 - 진단/장래 재사용 목적으로 공개해 둔다.
     static uint16_t tssSelectorForCore(uint32_t coreIndex);
+
+    // ring3로 처음 진입하기 직전에, 그 UserThread 자신의 커널 스택
+    // top을 이 코어의 TSS.RSP0에 심어 둔다(PN-124C105B/PN-16CA347D
+    // 6번 - RSP0의 첫 실사용처). 이후 이 코어에서 ring3->ring0 전환
+    // (인터럽트/트랩)이 일어나면 하드웨어가 자동으로 이 값을 RSP로
+    // 쓴다. **v1 한계**: 코어당 한 번에 하나의 UserThread만 이 방식
+    // 으로 실행됨을 전제한다 - 멀티 UserThread 스케줄링이 생기면 매
+    // 디스패치마다 갱신하는 일반화가 필요하다(후속 과제,
+    // PN-16CA347D 진행하며 실측).
+    static void setRsp0ForThisCore(uint64_t rsp0);
 };
 
 }  // namespace kernel
