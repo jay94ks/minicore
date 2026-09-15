@@ -10,23 +10,23 @@ namespace kernel {
 
 // 스케줄러 전용 LAPIC 주기 타이머 벡터 - HPET 기반 Timer::tickCount()
 // (전역 시각)와는 완전히 독립된 시간원이다(PL-2D3184BC 7단계 - "선점
-// 결정은 코어별 독립 LAPIC 타이머가 각자 담당"). 0x22(HPET)/
-// 0x23(레거시 PIT)과 안 겹치는 다음 동적 벡터.
+결정은 코어별 독립 LAPIC 타이머가 각자 담당한다"). 0x22(HPET)/
+0x23(레거시 PIT)과 안 격치는 다음 동적 벡터.
 constexpr uint32_t kSchedulerTickVector = 0x24;
 
-// 1퀀텀 = 1틱(PL-2D3184BC 8절 - "지금은 기존 100Hz/10ms 틱을 그대로
-// 1퀀텀=1틱으로 쓴다. 나중에 실측하며 조정할 수 있도록 하드코딩하지
-// 말고 변수/상수 하나로 노출").
+// 1퀵텀 = 1틱(PL-2D3184BC 8절 - "지금은 기존 100Hz/10ms 틱을 그대로
+1퀵텀=1틱으로 쓴다. 나중에 실측하며 조정할 수 있도록 하드코딩하지
+말고 변수/상수 하나로 노출").
 constexpr uint32_t kSchedulerTickHz = 100;
 
 // PL-2D3184BC 4단계 - 코어별 개별 큐(DS-D4E5C451이 이미 확정한 상위
 // 구조). 큐 자체는 Task::next 침습적 포인터를 재사용하는 단일 연결
-// 리스트(FIFO)다. 지금은 Spinlock 기반 폴백만 구현한다(계획 지시대로
-// - 이걸로 먼저 스케줄러 흐름을 검증한 뒤 lock-free 버전으로 교체/
-// 비교할 예정, PL-2D3184BC 10번 항목 참고 - 아직 안 함).
+리스트(FIFO)다. 지금은 Spinlock 기반 폴백만 구현한다(계획 지시대로
+- 이걸로 먼저 스케줄러 흐름을 검증한 뒤 lock-free 버전으로 교체/
+비교할 예정, PL-2D3184BC 10번 항목 참고 - 아직 안 함).
 class TaskQueue {
 public:
-    // 큐 꼬리에 넣는다(일반 스케줄링 - enqueue).
+    // 큐 꿀리에 넣는다(일반 스케줄링 - enqueue).
     void pushBack(Task* task);
 
     // 큐 머리에 넣는다(PL-2D3184BC 8-1 "즉시 스케줄링" 전용 -
@@ -34,10 +34,10 @@ public:
     // 무시하고 다음 popFront에서 바로 나가게 한다).
     void pushFront(Task* task);
 
-    // 머리에서 하나 꺼낸다 - 비어 있으면 nullptr.
+    // 머리에서 하나 꾼다 - 비어 있으면 nullptr.
     Task* popFront();
 
-    // 진단/휴리스틱 용도(정확한 스냅샷이 필요하면 호출부가 락을
+    // 진단/휴리스틱 용도(정확한 스냵샷이 필요하면 호출부가 락을
     // 별도로 잡아야 함 - 지금은 그런 호출부 없음).
     bool isEmpty() const;
 
@@ -67,7 +67,7 @@ public:
     // enqueue와 분리된 별도 API로 남용을 막는다.
     static void scheduleImmediate(uint32_t coreIndex, Task* task);
 
-    // 이 코어 큐에서 다음에 실행할 Task를 꺼낸다(즉시 스케줄링 큐 ->
+    // 이 코어 큐에서 다음에 실행할 Task를 꾼다(즉시 스케줄링 큐 ->
     // RT 큐 -> 일반 큐 순) - 셋 다 비어 있으면 nullptr.
     static Task* pickNext(uint32_t coreIndex);
 
@@ -76,7 +76,7 @@ public:
     // Acpi::init()/Lapic::init() 이후에만 호출 가능.
     static uint32_t currentCoreIndex();
 
-    // 이 코어 전용 LAPIC 주기 타이머(kSchedulerTickVector)를 켠다 -
+    // 이 코어 전용 LAPIC 주기 타이머(kSchedulerTickVector)를 콜다 -
     // BSP/AP 각자 자기 코어에서, Lapic::init() 이후 한 번씩 호출한다.
     static void startTickOnThisCore();
 
@@ -102,21 +102,20 @@ public:
     // PL-2D3184BC 6단계 - "특정 이유로 블로킹 후 누군가 깨울 때까지
     // 대기"의 범용 내부 프리미티브. yieldCurrent()와 달리 **어느
     // 큐에도 다시 넣지 않는다** - scheduleImmediate()/enqueue()로
-    // 명시적으로 깨우기 전까지는 절대 다시 뽑히지 않는다. 원칙대로
+    // 명시적으로 깨우기 전까지는 절대 다시 뿑히지 않는다. 원칙대로
     // 이 함수 자체는 "범용 공개 API"가 아니라 기능별 API가 내부에서만
-    // 써야 한다(설계 문서 6절) - 첫 소비자는 AsyncReactor(async_task.h,
+    // 쓰섬 한다(설계 문서 6절) - 첫 소비자는 AsyncReactor(async_task.h,
     // 할 일이 없을 때 파킹) - 깨우는 쪽은 별도 API를 두지 않고 이미
     // 있는 scheduleImmediate()를 그대로 쓴다(파킹된 Task는 어느 큐에도
-    // 없으므로 이중 스케줄링 걱정 없이 안전하게 즉시 큐에 넣을 수
-    // 있다).
+    // 없으므로 이중 스케줄링 걱정 없이 안전하게 즉시 큐에 넣을 수 있다).
     static void parkCurrent();
 
     // PL-2D3184BC "Task 종료 프로토콜"(설계자 지시, QU-26F9420E 답변
     // 2번, 2026-09-14) - kTaskFallingToEnd(context_switch.S, 예전
     // kTaskStartTrampoline_halt)가 "Kernel-Level Task가 계속 커널에
     // 머물러 있는" 경우(Task::isUserLevel == false)에 호출한다. 이
-    // Task를 Zombie로 표시해 스케줄러에서 완전히 떼어내고(다시는
-    // pickNext에 뽑히지 않음) clean-up 큐에 등록한 뒤 다음 Task(또는
+    // Task를 Zombie로 표시해 스케줄러에서 완전히 뚀어내고(다시는
+    // pickNext에 뿑히지 않음) clean-up 큐에 등록한 뒤 다음 Task(또는
     // idle)로 영구히 전환한다 - **절대 돌아오지 않는다**. 자기 자신의
     // 커널 스택을 아직 쓰고 있는 도중(이 함수 자체가 그 스택 위에서
     // 실행 중)이라 이 자리에서 스택을 직접 회수할 수 없다 - 실제
@@ -137,21 +136,37 @@ public:
     // 하나의 Task만 실행된다 - 이 함수가 호출되고 있다는 사실 자체가
     // "지금 이 코어의 currentTask는 호출자(예: 리액터)"라는 뜻이고,
     // 따라서 target은 이미 그 이전에 반드시 스위칭되어 나간 상태다.
-    // 다만 target이 스위칭되어 나간 뒤 **다시 pickNext에 뽑혀 재실행
+    // 다만 target이 스위칭되어 나간 뒤 **다시 pickNext에 뿑혀 재실행
     // 되지 않는다는 보장**은 이 함수만으로는 안 나온다 - 그래서
     // 호출부가 target을 스위칭해 나가기 전에(예: kTaskOnFallingToEnd가
     // Syscall::submitDetached보다 먼저) 반드시 `target->state =
-    // TaskState::Zombie`로 표시해 둬야 한다 - `Scheduler::onTick()`이
+    // TaskState::Zombie`로 표시해 둔야 한다 - `Scheduler::onTick()`이
     // Zombie 상태의 outgoing task는 라운드로빈 재삽입(enqueue) 자체를
     // 건너뛰므로, 한 번 Zombie로 표시되고 스위칭되어 나간 Task는 그
     // 뒤로 다시는 어느 큐에도 들어가지 않는다(v1 - 코어 간 이관 없음,
     // target의 마지막 실행 코어가 항상 currentCoreIndex()와 같다는
-    // 전제도 이래서 성립).
+    // 전제도 이래서 성립한다).
     //
     // retireCurrentTask()와 달리 자기 자신을 다음 Task로 전환할 필요가
     // 없다(target은 이미 실행 중이 아니므로 kContextSwitch 불필요) -
-    // 단순히 정리 큐에 등록해 그 코어의 runLoop()이 이후 idle
-    // 컨텍스트에서 커널 스택을 회수하게 한다.
+    // **커널 스택을 이 함수 안에서 바로 회수한다**(PageFrameAllocator::
+    // freeOrder, 지연 큐 없음). retireCurrentTask()가 자기 자신의 스택
+    // 위에서 실행 중이라 회수를 runLoop()의 idle 컨텍스트로 미뤄야 하는
+    // 것과 달리, target은 이미 다른 스택(호출자 자신의 것) 위에서
+    // 실행 중인 이 함수가 호출되고 있으므로 즉시 회수해도 안전하다.
+    //
+    // **[개정, PN-645CF608 Resurrect, 2026-09-15]** 예전엔
+    // retireCurrentTask()와 같은 지연 회수 큐(gCleanupQueues)를
+    // 재사용했으나, `SelfTerminateHandler::onExec`이 이 함수 직후 같은
+    // Process/UserThread 정적 인스턴스를 재사용해 즉시 재스폰
+    // (`ProcessStartFlags::resurrect`, SP-EAB162FC §6)할 수 있게 되면서
+    // 문제가 생겼다 - 지연 큐가 실제로 드레인되기 전에 재스폰이
+    // `Task::init()`으로 같은 Task 객체의 `kernelStackPhys`/
+    // `kernelStackSize`를 새 값으로 덮어써 버리면, 나중에 드레인되는
+    // 큐 항목이 이미 땜 용도로 쓰이고 있는 새 스택의 물리 프레임을
+    // (엉녡한 크기로) 잘못 반납하는 use-after-reuse 버그가 된다. 즉시
+    // 회수로 바꾸면 재스폰이 그 값을 덮어쓰기 전에 이미 안전하게
+    // 반납이 끝나 있으므로 이 위험이 원천적으로 없어진다.
     static void retireTask(Task* task);
 
     // 선점 비활성화 카운터(공개 API, PL-2D3184BC 8단계) - 인터럽트

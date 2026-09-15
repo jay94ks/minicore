@@ -12,6 +12,31 @@ namespace kernel {
 
 class UserThread;
 
+// 프로세스 신원 - 이 프로세스가 신뢰할 수 있는 커널 서비스인지를
+// syscall 레벨에서 판정하는 불변 속성(SP-EAB162FC §2.1). 생성
+// 시점에 스폰한 코드(kmain.cpp의 부팅 매니폐스트 인식, 또는 devmgr의
+// PnP 드라이버 로더 - §2.2)가 직접 채운다 - 이 필드를 바꾸는 API는
+// 의도적으로 두지 않는다(재조정/위임 체인 금지, §1).
+enum class ProcessRole : uint8_t {
+    Normal = 0,        // 기본값 - fork()/exec() 등 일반 경로로 만들어진 모든 프로세스
+    KernelService = 1, // devmgr/fs/net/tty 및 그 PnP 드라이버 자식 - 고정 스폰 경로로만 부여
+};
+
+// 프로세스 생성 시점에 고정되는 시작 플래그(SP-EAB162FC §6) -
+// `ProcessRole`과 마찬가지로 생성 이후 바꾸는 API를 두지 않는다.
+struct ProcessStartFlags {
+    // true면 이 프로세스가 종료되는 즉시(별도 감시 Task/폴링 없이,
+    // SelfTerminateHandler::onExec 안에서 같은 흐름으로) `respawn`을
+    // 호출해 재생성한다. backoff/최대 재시도 상한 없음(설계자 지시를
+    // 그대로 따름, §6.4).
+    bool resurrect = false;
+
+    // resurrect==true일 때만 유효 - 이 프로세스를 원래와 동일한
+    // 방식으로 다시 스폰하는 함수(스폰 헤퍼 자신을 가리킨, §6.2 -
+    // 모듈 버퍼/경로를 이미 들고 있는 고정 스폰 경로만 v1 대상).
+    void (*respawn)() = nullptr;
+};
+
 // 유저 프로세스의 커널 쪽 표현(SP-8B6B8D25 §2-B/§5, 유저랜드 준비
 // 마일스톤 - 계획 PN-16CA347D) - 이름 자체는 제안일 뿐 확정이 아니다
 // (UserThread/Task와 동일 각주, SP-04EE2A18). "커널 Task와 (유저)
@@ -26,7 +51,7 @@ class UserThread;
 // 구현/검증 가능) - ELF 로더/프로세스 생성-exec/ring3 진입은 유저
 // 주소공간 레이아웃(128TiB, 코드 베이스 0x400000, 스택은 끝점부터,
 // 코드/스택 양쪽 가드 페이지 - SP-8B6B8D25 §5/§5-A, QU-72108298/
-// QU-7043EA6D 답변으로 확정 완료) 자체는 준비됐지만, **QU-FF3F0CAA
+// QU-7043EA6D 답변으로 확정 완료) 자체는 준비되었지만, **QU-FF3F0CAA
 // ("첫 프로세스"의 정체/유저랜드 빌드 체계) 답변이 아직 없어** 실제로
 // 실측 검증할 방법이 정해지기 전까지는 별도로 이어간다.
 class Process {
@@ -47,12 +72,17 @@ public:
         bool pending = false;
         uint64_t faultAddr = 0;    // CR2
         uint64_t errorCode = 0;    // 하드웨어가 스택에 남긴 에러 코드
-        uint64_t rip = 0;          // 폴트를 일으킨 명령어
+        uint64_t rip = 0;          // 폴트를 일으키 명령어
     };
 
     uint64_t pml4Phys = 0;        // 이 프로세스 전용 주소공간의 PML4 물리 프레임(Paging::createAddressSpace)
     UserThread* mainThread = nullptr;  // v1: 프로세스당 스레드 하나(위 클래스 주석 참고)
     FaultInfo lastFault;
+
+    // 신원/시작 플래그(SP-EAB162FC) - 둘 다 스폰 시점에 호출부가 직접
+    // 채우고, 그 이후 바꾸는 setter는 두지 않는다(§1/§6 원칙).
+    ProcessRole role = ProcessRole::Normal;
+    ProcessStartFlags startFlags;
 
     // 이 프로세스가 소유한 VMA(코드/데이터/스택 - execImage()가 채움)의
     // 장부(PN-71C3D483 항목 3, SP-2AAD7C8D §2/§4) - destroy()가 이걸로

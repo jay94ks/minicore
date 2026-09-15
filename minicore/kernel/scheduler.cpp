@@ -82,7 +82,7 @@ bool gBspCoreIndexKnown = false;
 // 만든 커널 전용 PML4인 시점)의 CR3 - `Scheduler::init()`에서 한 번만
 // 확정한다(PN-63BCFE45 후속 발견, 2026-09-15 실측). **왜 필요한가**:
 // `kSyncCr3ForDispatch`가 UserThread로 디스패치할 때는 그 프로세스의
-// `userPml4Phys`를 실지만, 예전엔 커널 전용 Task(리액터 등)로
+// `userPml4Phys`를 싶지만, 예전엔 커널 전용 Task(리액터 등)로
 // 디스패치할 때는 CR3를 아예 안 건드렸다 - 그러면 그 직전에 실행 중이던
 // UserThread의 CR3가 그대로 남는다. 커널 higher-half(direct map/커널
 // 이미지)는 모든 프로세스 PML4에 공유돼 있어 대개는 문제가 없지만,
@@ -258,7 +258,17 @@ public:
         Scheduler::retireTask(target);
         auto* userThread = static_cast<UserThread*>(target);
         if (userThread->process) {
-            userThread->process->destroy();
+            // Resurrect(SP-EAB162FC §6) - destroy() 이후에도 Process
+            // 객체 자체(캐스팅 근거: 정적/장기수명 인스턴스 - destroy()는
+            // 주소공간만 반납할 뿐 이 구조체를 지우지 않는다)는 살아있어
+            // startFlags를 안전하게 읽을 수 있다. 재스폰은 옷 주소공간이
+            // 완전히 반납된 뒤에 한다(자원 회수 -> 재생성 순서).
+            Process* process = userThread->process;
+            const ProcessStartFlags startFlags = process->startFlags;
+            process->destroy();
+            if (startFlags.resurrect && startFlags.respawn) {
+                startFlags.respawn();
+            }
         }
     }
     void onFailure(AsyncTask*) override {}
@@ -385,7 +395,7 @@ void Scheduler::startTickOnThisCore() {
     // 물리 LAPIC 타이머는 코어당 하나뿐이다 - HPET가 있으면
     // Timer::init()이 LAPIC을 아예 건드리지 않으므로(timer.cpp)
     // 여기서 그대로 독점할 수 있다. HPET가 없는 폴백 환경에서는
-    // Timer::init()도 더 이상 이 하드웨어를 재프로그램하지 않는다
+    // Timer::init()도 더 이상 이 하드웨어를 재프로그래밍하지 않는다
     // (DC-0CC88ABB/QU-3218B790 설계자 답변 (a), 2026-09-14로 확정 -
     // 대신 onTick()이 BSP에서 Timer::onTick()까지 대신 호출한다).
     Lapic::startPeriodicTimer(kSchedulerTickVector, kSchedulerTickHz);
@@ -516,7 +526,7 @@ void Scheduler::yieldCurrent() {
     // 보고 pickNext()로 자기 자신을 다시 뿑아버릴 수 있다 - 침습적
     // next 포인터가 자기 자신을 가리키며 큐가 깨지고, 아직 완성되지
     // 않은 이 kContextSwitch 준비 상태 위에서 또 다른 kContextSwitch가
-    // 격쳐 실행되며 스택이 망가진다(실측으로 발견). runLoop()의 같은
+    // 격쳤 실행되며 스택이 망가진다(실측으로 발견). runLoop()의 같은
     // 종류 경쟁과 동일한 이유로 cli를 쓴다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
@@ -548,7 +558,7 @@ void Scheduler::yieldCurrent() {
     // 그 뒤로는 매번 IF=0으로 재개되고, runLoop()이 "정말 대기할
     // 때"(sti;hlt)에 도달하기 전까지는 이 코어의 인터럽트(스케줄러
     // 틱 포함)이 아예 걸리지 않게 된다 - 부하가 계속 이어져 그
-    // hlt 분기에 도달하지 못하면 사실상 영구히 멈춘다(Channel IPC처럼
+    // hlt 분기에 도달하지 못하면 사실상 영구히 멈추다(Channel IPC처럼
     // 여러 Task가 쉼 새 없이 서로를 깨우는 워크로드에서 실측 발견).
     // 그래서 재개 직후 여기서 명시적으로 다시 켜다 - 정상적으로
     // 실행 중인 Task는 항상 IF=1이어야 한다는 불변조건을 저장된 값에
@@ -561,7 +571,7 @@ void Scheduler::parkCurrent() {
     // 상태만 Blocked로 바꾸면, 그 사이 끼인 스케줄러 틱이 이 Task를
     // "아직 실행 중"으로 보고 pickNext()가 (큐에 없으니 이 Task 본인은
     // 아니지만) 다른 전환을 시도하다가 gCurrentTask가 가리키는 대상과
-    // 어긋난 상태로 kContextSwitch를 부를 위험을 없앀다.
+    // 어긋난 상태로 kContextSwitch를 부를 위험을 없애다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
     Task* current = gCurrentTask[coreIndex];
@@ -627,14 +637,15 @@ void Scheduler::retireCurrentTask() {
 
 void Scheduler::retireTask(Task* task) {
     // scheduler.h의 문서 주석 참고 - 호출자 자신이 지금 이 코어에서
-    // 실행 중이라는 사실 자체가 target은 이미 실행 중이 아니임을
+    // 실행 중이라는 사실 자체가 target은 이미 실행 중이 아님을
     // 보장한다(한 코어 = 동시에 하나의 Task). retireCurrentTask()와
     // 달리 kContextSwitch가 필요 없다 - target은 스위칭할 "실행 중인
-    // 자기 자신"이 아니라 이미 정지해 있는 다른 Task이므로, 정리
-    // 큐에 등록해 두기만 하면 이 코어의 runLoop()이 나중에(idle
-    // 컨텍스트에서) 커널 스택을 회수한다.
+    // 자기 자신"이 아니라 이미 정지해 있는 다른 Task이므로, **커널
+    // 스택을 여기서 바로 회수한다**(지연 큐 없음 - PN-645CF608
+    // Resurrect 도입으로 지연 회수가 use-after-reuse 위험이 됨,
+    // scheduler.h 문서 주석 참고).
     task->state = TaskState::Zombie;
-    gCleanupQueues[currentCoreIndex()].pushBack(task);
+    PageFrameAllocator::freeOrder(task->kernelStackPhys, kOrderForCleanup(task->kernelStackSize));
 }
 
 void Scheduler::disablePreemption() {
@@ -726,9 +737,10 @@ extern "C" void kTaskOnFallingToEnd() {
         // submitDetached - autoFree라 결과를 아무도 안 봐도 리액터가
         // 알아서 정리한다) 반환한다 - 리액터가 나중에 비동기적으로
         // SelfTerminateHandler::onExec에서 Scheduler::retireTask(self)
-        // 로 실제 정리(cleanup 큐 등록 -> runLoop()이 커널 스택 회수)
-        // 를 수행한다. 그 사이(제출 후 ~ 리액터가 실제로 처리하기
-        // 전) 이 Task는 그냥 hlt 루프에서 계속 대기한다.
+        // 로 실제 정리(커널 스택 즉시 회수 - PN-645CF608부터는 지연
+        // 큐 없음, scheduler.h 문서 주석 참고)를 수행한다. 그 사이
+        // (제출 후 ~ 리액터가 실제로 처리하기 전) 이 Task는 그냥 hlt
+        // 루프에서 계속 대기한다.
         self->state = kernel::TaskState::Zombie;
         kernel::Syscall::submitDetached(kernel::kSyscallEndpointSelfTerminate, self);
         return;
