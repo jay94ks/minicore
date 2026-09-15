@@ -8,6 +8,7 @@
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "process.h"
 #include "syscall.h"
 #include "timer.h"
 
@@ -232,9 +233,25 @@ void kSyncFpu(Task* task, uint32_t coreIndex) {
 // target은 kTaskOnFallingToEnd에서 이미 스스로를 Zombie로 표시해 뒀고
 // (그래서 `Scheduler::onTick()`이 그 이후로 다시는 재삽입하지 않았다),
 // Scheduler::retireTask() 문서 주석 참고.
+//
+// **항목 3(Process 자원 회수, PN-71C3D483) 완료** - 커널 스택 회수
+// (retireTask)만으로는 이 UserThread가 쓰던 유저 주소공간이 그대로
+// 남는다. self-terminate는 항상 isUserLevel Task에서만 제출되므로
+// (kTaskOnFallingToEnd의 분기 참고) target을 UserThread로 안전하게
+// 캐스팅할 수 있다 - v1은 프로세스당 스레드 하나뿐이라(process.h
+// 클래스 문서) 이 스레드가 끝나는 순간이 곧 그 Process 전체가 끝나는
+// 순간과 같다. `process` 필드는 execImage()가 항상 채워 두지만
+// (process.cpp의 `thread->process = this;`) 방어적으로 null 확인한다.
 class SelfTerminateHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* args) override { Scheduler::retireTask(static_cast<Task*>(args)); }
+    void onExec(AsyncTask*, void* args) override {
+        auto* target = static_cast<Task*>(args);
+        Scheduler::retireTask(target);
+        auto* userThread = static_cast<UserThread*>(target);
+        if (userThread->process) {
+            userThread->process->destroy();
+        }
+    }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
 };
@@ -469,7 +486,7 @@ void Scheduler::runLoop() {
         kSyncRsp0ForDispatch(next);
         kContextSwitch(&gIdleSavedRsp[coreIndex], next->savedRsp);
         // yieldCurrent()로 되돌아온 경우에만 이 지점으로 온다(onTick의
-        // Task-to-Task 전환은 이 프레임을 거치지 않는다) - 다음
+        // Task-to-Task 직접 전환은 이 프레임을 거치지 않는다) - 다음
         // 루프에서 pickNext가 새 상태를 다시 판단한다. 이 시점의
         // 인터럽트 상태는 idle이 마지막으로 저장했던 그대로(위 cli로
         // 꺼져 있음)이므로, 아래에서 다시 준비 없이 바로 다음

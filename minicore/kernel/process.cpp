@@ -17,6 +17,18 @@ namespace {
 constexpr kernel::uint64_t kUserStackTop = 0x00007FFFFFFFF000UL;
 constexpr kernel::uint64_t kUserStackSize = 16UL * 4096UL;  // 64KiB
 
+// Process::addressSpace(ProcessAddressSpaceManager)의 findGap 탐색
+// 범위(mmap 가능 영역, SP-2AAD7C8D §5-A "코드 공간 위쪽 ~ 스택 하단
+// 사이 전부") - Mmap syscall(RM-48E1E610 17-19)이 아직 없어 이 범위
+// 자체는 지금은 어느 mapRegion() 호출도 실제로 겪지 않는다(execImage()
+// 의 코드/스택 매핑은 registerFixedRegion으로 findGap 없이 직접
+// 등록). 정확한 정렬/여유 공간 상수는 SP-2AAD7C8D 자신이 "구현 시점
+// 튜닝"으로 명시해 둔 항목이라(§5-A 이전 논의 상속) 새 DC 없이 이
+// 자리에서 정한다 - 코드 베이스(0x400000)보다 충분히 위, 고정 유저
+// 스택(kUserStackTop - kUserStackSize)보다 충분히 아래.
+constexpr kernel::uint64_t kMmapRegionFloor = 0x10000000UL;         // 256MiB
+constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x100000UL;  // 스택 아래 1MiB 여유
+
 // PN-124C105B/PN-16CA347D 6번 - UserThread가 ring3으로 "처음" 진입하는
 // 자리. Task::init()의 entry로 등록되어 kTaskStartTrampoline이 평범한
 // ring0 함수처럼 호출하지만(`call rbx`, context_switch.S), 이 함수는
@@ -96,21 +108,29 @@ bool Process::init() {
     }
     mainThread = nullptr;
     lastFault = FaultInfo{};
+    addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
     return true;
 }
 
 void Process::destroy() {
     if (pml4Phys) {
+        // PN-71C3D483 항목 3 - execImage()가 registerFixedRegion으로
+        // 장부에 남겨 둔 코드/데이터/스택 VMA를 전부 찾아 실제 페이지를
+        // 반납한다. Paging::destroyAddressSpace(PML4 프레임 자체만
+        // 반납)보다 반드시 먼저 불러야 한다(address_space.h의
+        // unmapAll() 문서 주석과 동일한 전제).
+        addressSpace.unmapAll();
         Paging::destroyAddressSpace(pml4Phys);
         pml4Phys = 0;
     }
 }
 
 UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
-    if (!elf::loadIntoAddressSpace(image, pml4Phys)) {
+    if (!elf::loadIntoAddressSpace(image, pml4Phys, &addressSpace)) {
         return nullptr;
     }
 
+    const uint64_t stackStart = kUserStackTop - kUserStackSize;
     for (uint64_t off = 0; off < kUserStackSize; off += 4096UL) {
         const uint64_t phys = PageFrameAllocator::allocPage();
         if (!phys) {
@@ -118,7 +138,14 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
             // 호출부 책임(elf::loadIntoAddressSpace와 동일한 관례).
             return nullptr;
         }
-        Paging::mapPage(kUserStackTop - kUserStackSize + off, phys, PAGE_WRITABLE | PAGE_USER, pml4Phys);
+        Paging::mapPage(stackStart + off, phys, PAGE_WRITABLE | PAGE_USER, pml4Phys);
+    }
+    if (!addressSpace.registerFixedRegion(stackStart, kUserStackSize, PAGE_WRITABLE | PAGE_USER,
+                                           VmaBacking::Anonymous)) {
+        // 장부 등록 실패(트리 포화 등) - 이미 매핑된 스택 페이지 자체의
+        // 롤백은 elf::loadIntoAddressSpace와 동일하게 호출부(Process::
+        // destroy()) 책임으로 남긴다.
+        return nullptr;
     }
 
     thread->process = this;

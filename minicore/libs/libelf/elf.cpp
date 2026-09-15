@@ -76,13 +76,14 @@ const u8* Image::segmentData(const ProgramHeader& seg) const {
 
 #if defined(MINICORE_LIBELF_KERNEL)
 
+#include "address_space.h"
 #include "libkenv/mem.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 
 namespace elf {
 
-bool loadIntoAddressSpace(const Image& image, u64 pml4Phys) {
+bool loadIntoAddressSpace(const Image& image, u64 pml4Phys, kernel::ProcessAddressSpaceManager* addressSpace) {
     constexpr u64 kPageSize = 4096;
 
     for (u32 i = 0; i < image.segmentCount(); ++i) {
@@ -127,6 +128,11 @@ bool loadIntoAddressSpace(const Image& image, u64 pml4Phys) {
             }
 
             kernel::Paging::mapPage(pageAddr, phys, flags, pml4Phys);
+        }
+
+        if (!addressSpace->registerFixedRegion(segStartPage, segEndPage - segStartPage, flags,
+                                                kernel::VmaBacking::Anonymous)) {
+            return false;  // 장부 등록 실패 - 이미 매핑된 페이지 자체의 롤백은 호출부 책임(위 문서 주석 참고)
         }
     }
     return true;

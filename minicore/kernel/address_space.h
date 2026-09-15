@@ -102,6 +102,22 @@ public:
     // 10회(실제로는 최대 8개 VMA).
     void unmapAll();
 
+    // **mapRegion()과 달리 페이지를 직접 매핑하지 않는다** - 호출부가
+    // (ELF 로더의 세그먼트, 유저 스택처럼) findGap이 아니라 이미 정해진
+    // 고정 가상주소에 Paging::mapPage로 직접 매핑을 마친 뒤, 그 사실만
+    // 이 관리자에 등록(bookkeeping)하는 순수 장부 기입 API다(PN-71C3D483
+    // 항목 3 - Process::execImage()가 만드는 코드/데이터/스택 매핑을
+    // unmapAll()이 나중에 찾아 반납할 수 있게 하려면 이 트리에 먼저
+    // 존재를 알려야 한다). start/length는 이미 4KiB 경계에 맞춰
+    // 매핑됐다고 가정한다(호출부 책임 - mapRegion()처럼 내부에서 다시
+    // 올림하지 않음). 등록에 성공하면 이후 unmapRegion()/unmapAll()이
+    // 이 범위를 정확히 [start, start+length)로 인식해 Paging::unmapPage
+    // + (Anonymous면) PageFrameAllocator 반납까지 대신한다. 트리 포화
+    // 등으로 실패하면 false - 이미 끝난 실제 매핑 자체는 그대로 남는다
+    // (호출부가 이 실패를 execImage() 자체의 실패로 취급해 되돌리는
+    // 것까지는 이 함수 책임 밖 - address_space.cpp의 호출부 참고).
+    bool registerFixedRegion(uint64_t start, uint64_t length, uint64_t prot, VmaBacking backing);
+
 private:
     uint64_t _pml4Phys = 0;
     uint64_t _regionFloor = 0;

@@ -121,6 +121,34 @@ bool ProcessAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
     return true;
 }
 
+bool ProcessAddressSpaceManager::registerFixedRegion(uint64_t start, uint64_t length, uint64_t prot,
+                                                      VmaBacking backing) {
+    if (length == 0) {
+        return false;
+    }
+
+    SpinlockGuard guard(_lock);
+
+    auto* vma = static_cast<Vma*>(GenericSlabAllocator::alloc(sizeof(Vma)));
+    if (!vma) {
+        return false;
+    }
+    *vma = Vma{};
+    vma->start = start;
+    vma->end = start + length - 1;
+    vma->prot = prot;
+    vma->backing = backing;
+
+    if (!_tree.store(vma->start, vma->end, vma)) {
+        // 실제 페이지 매핑은 호출부가 이미 끝냈다 - 이 함수는 그 사실을
+        // 장부에 못 남긴 것뿐이라, 여기서는 되돌릴 매핑이 없다(위 클래스
+        // 선언부 문서 주석 참고 - 되돌림은 호출부 책임).
+        GenericSlabAllocator::free(vma, sizeof(Vma));
+        return false;
+    }
+    return true;
+}
+
 void ProcessAddressSpaceManager::unmapAll() {
     SpinlockGuard guard(_lock);
 

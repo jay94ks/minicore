@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_PROCESS_H
 #define MINICORE_KERNEL_PROCESS_H
 
+#include "address_space.h"
 #include "libkenv/types.h"
 
 namespace elf {
@@ -53,19 +54,27 @@ public:
     UserThread* mainThread = nullptr;  // v1: 프로세스당 스레드 하나(위 클래스 주석 참고)
     FaultInfo lastFault;
 
+    // 이 프로세스가 소유한 VMA(코드/데이터/스택 - execImage()가 채움)의
+    // 장부(PN-71C3D483 항목 3, SP-2AAD7C8D §2/§4) - destroy()가 이걸로
+    // 실제 페이지를 찾아 반납한다. init()이 pml4Phys 확보 직후 초기화.
+    ProcessAddressSpaceManager addressSpace;
+
     // pml4Phys를 새로 확보하고 커널 상위 절반(higher-half)을 공유하는
     // 상태로 초기화한다(Paging::createAddressSpace 참고 - 하위 절반은
     // 전부 비어 있는 채로 시작, ELF 로더가 채울 자리). 실패(Slab/페이지
     // 고갈) 시 false - 블로킹하지 않는다.
     bool init();
 
-    // pml4Phys를 반납한다 - **호출 전에 이 프로세스가 실제로 매핑한
-    // 하위 절반의 모든 페이지를 먼저 Paging::unmapPage로 해제해 둬야
-    // 한다**(이 함수 자신은 PML4 프레임 자체만 반납, 그 안의 하위
-    // 절반 엔트리가 가리키는 하위 테이블/데이터 페이지는 건드리지
-    // 않는다 - 호출부 책임). 프로세스 종료 시퀀스 자체는 아직 이
-    // 프로젝트에 없다(PN-40E976F2 참고 - onCancel 호출 경로와 같은
-    // 선행 조건 대기 상태).
+    // pml4Phys를 반납한다 - **이 함수 자신이 먼저 `addressSpace.
+    // unmapAll()`로 이 프로세스가 실제로 매핑한 하위 절반의 모든
+    // VMA(코드/데이터/스택)를 Paging::unmapPage로 해제한 뒤에 PML4
+    // 프레임을 반납한다**(PN-71C3D483 항목 3 완료 - 예전엔 이 순서를
+    // 호출부가 직접 챙겨야 했으나, VMA 추적 자료구조가 생겨 이제
+    // 이 함수 하나로 완결된다). **알려진 한계**: `Paging::
+    // destroyAddressSpace`는 PML4 프레임 자체만 반납하고, 그 하위에
+    // 매달린 PDPT/PD/PT 중간 테이블 프레임은 건드리지 않는다(leaf
+    // 데이터 페이지만 이 함수가 회수 - 중간 테이블 프레임 회수는 이
+    // 항목의 스코프 밖, 별도로 추적한다).
     void destroy();
 
     // ELF 이미지를 이 프로세스 주소공간에 로드하고, thread(호출부가

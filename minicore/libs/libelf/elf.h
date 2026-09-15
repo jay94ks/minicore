@@ -120,15 +120,28 @@ private:
 
 #if defined(MINICORE_LIBELF_KERNEL)
 
+}  // namespace elf
+
+namespace kernel {
+class ProcessAddressSpaceManager;  // 포인터로만 참조 - 전체 정의는 address_space.h(PN-71C3D483 항목 3)
+}  // namespace kernel
+
+namespace elf {
+
 // 커널 전용 편의 함수 - Image가 가진 모든 PT_LOAD 세그먼트를 주어진
 // 프로세스 주소공간(pml4Phys, Paging::createAddressSpace가 만든 것)에
 // 실제로 매핑한다. GenericSlabAllocator/PageFrameAllocator로 세그먼트당
 // 필요한 프레임을 확보해 파일 내용을 복사하고(memsz > filesz분은 0으로
 // 채움 - BSS), Paging::mapPage(..., pml4Phys)로 유저 권한(PAGE_USER)
-// 매핑한다. 실패(할당 고갈 등) 시 false - 이미 매핑한 세그먼트를
-// 되돌리는 롤백은 호출부(프로세스 생성 실패 처리) 책임이다(이 함수는
-// Process::destroy()가 있으니 그쪽에서 정리 가능).
-bool loadIntoAddressSpace(const Image& image, u64 pml4Phys);
+// 매핑한다. 세그먼트마다 매핑을 마치는 즉시
+// `addressSpace->registerFixedRegion(...)`으로 그 범위를 장부에
+// 등록한다(PN-71C3D483 항목 3 - Process::destroy()가 나중에
+// ProcessAddressSpaceManager::unmapAll()로 이 페이지들을 찾아 반납할
+// 수 있으려면 먼저 존재를 알아야 한다). 실패(할당 고갈, 또는 겹치는
+// 세그먼트라 등록 자체가 거부됨 등) 시 false - 이미 매핑/등록한
+// 세그먼트를 되돌리는 롤백은 호출부(프로세스 생성 실패 처리) 책임이다
+// (이 함수는 Process::destroy()가 있으니 그쪽에서 정리 가능).
+bool loadIntoAddressSpace(const Image& image, u64 pml4Phys, kernel::ProcessAddressSpaceManager* addressSpace);
 
 #endif  // MINICORE_LIBELF_KERNEL
 
