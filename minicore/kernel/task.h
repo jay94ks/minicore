@@ -156,6 +156,21 @@ struct Task {
     // 서브시스템 책임 - Task 자신은 포인터 배열만 소유한다.
     void* tlsSlots[kMaxTlsSlots] = {};
 
+    // CR0.TS 기반 lazy FPU/SSE 컨텍스트 저장 영역(SP-83A07867 §8,
+    // PN-F258698E) - FXSAVE/FXRSTOR이 요구하는 16바이트 정렬 512바이트
+    // 블록. 이 Task가 실제로 마지막 FPU 소유자였던 시점의 스냅샷만
+    // 담는다 - scheduler.cpp의 #NM 핸들러(Scheduler::handleFpuTrap)가
+    // 다른 Task로 소유권이 넘어가는 순간에만 채운다(매 컨텍스트
+    // 스위칭마다 무조건 저장하지 않는 게 이 최적화의 핵심).
+    alignas(16) uint8_t fpuState[512] = {};
+
+    // fpuState가 이 Task 자신의 유효한 저장값을 담고 있는지 - false면
+    // 이 Task가 FPU/SSE를 아직 한 번도 쓴 적이 없다는 뜻이라, #NM
+    // 핸들러가 FXRSTOR 대신 FNINIT로 깨끗한 초기 FPU 상태를 만들고 이
+    // 플래그를 true로 올린다(모든 Task가 정의되지 않은 이전 소유자의
+    // 찌꺼기 상태를 보지 않게 하기 위함).
+    bool fpuInitialized = false;
+
     // 커널 스택을 새로 할당하고, entry(arg)를 처음 실행할 준비가 된
     // 상태로 초기화한다(트램폴린 스택 프레임 구성) - 스케줄러 큐에
     // 넣는 것은 호출부 책임(아직 스케줄러 자체가 없어 별도 API 없음).

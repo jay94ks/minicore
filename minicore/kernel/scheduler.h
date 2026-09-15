@@ -160,6 +160,15 @@ public:
     // 매거진을 보호하는 데 재사용한다. 중첩 호출 가능(카운터 방식).
     static void disablePreemption();
     static void enablePreemption();
+
+    // #NM(Device Not Available, 벡터 7) 트랩 핸들러(SP-83A07867 §8,
+    // PN-F258698E) - idt.cpp의 kIsrHandler가 벡터 7을 이 함수로 그대로
+    // 넘긴다. 디스패치마다 kSyncFpu가 세워 둔 CR0.TS 때문에, 이 코어의
+    // 현재 Task가 실제로 FPU/SSE 명령을 처음 실행하는 순간에만 걸린다 -
+    // 직전 FPU 소유자(있다면)를 FXSAVE로 내보내고, 이 Task 자신의
+    // 상태를 FXRSTOR(처음이면 FNINIT)로 불러온 뒤 CLTS로 트랩을 풀고
+    // 소유권을 넘긴다.
+    static void handleFpuTrap();
 };
 
 // 진입 시 이 코어의 선점을 비활성화하고 소멸 시 복구하는 RAII 래퍼

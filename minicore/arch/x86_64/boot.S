@@ -284,7 +284,22 @@ setup_page_tables:
 
 /* ap_trampoline.S(SMP AP 기동)도 재사용한다 - 코어별 CR3/CR4/EFER/CR0
  * 설정이라 AP마다 다시 실행해야 하지만, 페이지 테이블 자체(pml4)는
- * BSP가 이미 만들어 둔 걸 그대로 가리키기만 한다(다시 만들지 않음). */
+ * BSP가 이미 만들어 둔 걸 그대로 가리키기만 한다(다시 만들지 않음).
+ *
+ * SSE/FXSAVE 베이스라인도 여기서 코어마다 같이 켠다(SP-83A07867 §8,
+ * PN-F258698E 조사 중 실측 확인 - long mode 진입 전까지는 CR4.OSFXSR/
+ * OSXMMEXCPT, CR0.MP/EM/NE 중 아무것도 설정돼 있지 않았다). x86_64
+ * System V ABI는 SSE2를 기본으로 요구해 clang이 보통의 float/double
+ * 연산에도 이미 SSE 명령을 내고 있었는데, CR4.OSFXSR=0인 채로 SSE
+ * 명령을 실행하면 즉시 #UD(Invalid Opcode)다 - 지금까지 커널이 SSE를
+ * 실제로 밟는 경로가 없어서 드러나지 않았을 뿐이다. CR0.MP=1/EM=0은
+ * FPU/SSE 명령이 트랩 없이 실제 실행되게 하고(EM=1이면 모든 FPU 명령이
+ * #UD), CR0.TS는 스케줄러의 lazy 저장/복원(scheduler.cpp의 kSyncFpu,
+ * #NM 핸들러)이 태스크 디스패치마다 동적으로 켜고 끈다 - 여기서는
+ * 항상 0으로 시작한다(TS=1로 시작하면 그 사이 실행되는 어떤 FPU/SSE
+ * 명령도 아직 준비 안 된 #NM 핸들러를 건드릴 위험). CR0.NE=1은 레거시
+ * #FERR IRQ13 대신 네이티브 #MF 예외 보고를 쓴다(PIC/IRQ13 배선 자체가
+ * 없는 이 커널에 맞는 선택). */
 .global enable_long_mode
 enable_long_mode:
     mov eax, offset pml4
@@ -292,6 +307,8 @@ enable_long_mode:
 
     mov eax, cr4
     or eax, 1 << 5          /* PAE */
+    or eax, 1 << 9          /* OSFXSR - FXSAVE/FXRSTOR 및 SSE 명령 허용 */
+    or eax, 1 << 10         /* OSXMMEXCPT - SIMD 부동소수점 예외(#XM) 허용 */
     mov cr4, eax
 
     mov ecx, 0xC0000080      /* IA32_EFER */
@@ -301,6 +318,9 @@ enable_long_mode:
 
     mov eax, cr0
     or eax, 1 << 31          /* PG */
+    and eax, ~(1 << 2)       /* EM 해제 - FPU/SSE 명령을 에뮬레이션 트랩하지 않음 */
+    or eax, 1 << 1           /* MP - WAIT/FWAIT가 TS를 존중하게 함(lazy FPU 전제조건) */
+    or eax, 1 << 5           /* NE - 네이티브 x87 에러 보고(#MF), 레거시 IRQ13 안 씀 */
     mov cr0, eax
 
     ret

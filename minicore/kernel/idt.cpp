@@ -402,6 +402,10 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
             return;
         }
     }
+    if (frame->vector == 7) {  // #NM(Device Not Available) - lazy FPU/SSE 소유권 전환(SP-83A07867 §8, PN-F258698E)
+        kernel::Scheduler::handleFpuTrap();
+        return;
+    }
     if (frame->vector == kSyscallVector) {
         // 소프트웨어 트랩(ring3의 `int 0x80`)이라 EOI 불필요 - 하드웨어
         // 인터럽트가 아니다.

@@ -122,6 +122,14 @@ uint64_t gIdleSavedRsp[kMaxCores] = {};
 // 만 갱신한다. nullptr이면 idle(runLoop이 pickNext/hlt를 돌고 있음).
 Task* gCurrentTask[kMaxCores] = {};
 
+// 이 코어의 하드웨어 FPU/SSE 레지스터가 지금 어느 Task의 상태를 담고
+// 있는지(SP-83A07867 §8, PN-F258698E) - kSyncFpu/Scheduler::handleFpuTrap
+// 만 갱신한다. nullptr이면 아직 아무도 이 코어에서 FPU/SSE를 쓴 적이
+// 없다는 뜻(부팅 직후 기본값). kSyncCr3의 gBootPml4Phys와 달리 "부팅
+// 전용 기본 소유자" 개념이 없다 - idle 컨텍스트 자체는 FPU를 절대 쓰지
+// 않으므로 nullptr을 그대로 "소유자 없음"으로 취급해도 충분하다.
+Task* gFpuOwner[kMaxCores] = {};
+
 // 선점 비활성화 카운터 - 코어별로 그 코어 자신만 읽고 쓴다(인터럽트
 // 게이트라 같은 코어 안에서 재진입 없음, 다른 코어는 자기 배열만
 // 건드리므로 원자 연산이 필요 없다).
@@ -194,6 +202,26 @@ void kSyncCr3(Task* task) {
     if (Paging::currentPml4Phys() != targetPml4) {
         asm volatile("mov %0, %%cr3" : : "r"(targetPml4) : "memory");
     }
+}
+
+// kSyncCr3와 정확히 같은 세 지점(§3.2 갈래①/②)에서 같은 이유로 호출된다
+// (SP-83A07867 §8 - "FPU 상태 관리는 별도의 새 디스패치 훅을 파지 않고
+// §3.2의 공용 진입점에 CR0.TS 제어 로직을 삽입하는 방식으로 구현할
+// 것"). kSyncCr3와 달리 실제로 레지스터 내용을 옮기지 않는다(FXSAVE/
+// FXRSTOR는 비싸므로 여기서 미리 하지 않고, #NM 트랩이 실제로 필요한
+// 순간에만 하도록 미룬다 - lazy 전략의 핵심) - 이 함수가 하는 일은
+// 오직 "이 Task가 이미 이 코어 하드웨어의 현재 소유자인가"만 보고
+// CR0.TS를 세우거나(다르면, 다음 FPU/SSE 명령에서 #NM 유도) 지우는
+// 것뿐이다(같으면, 트랩 없이 바로 쓰게 허용 - 예를 들어 짧은 시간 안에
+// 같은 Task가 반복 디스패치되는 경우 불필요한 트랩 반복을 피한다).
+void kSyncFpu(Task* task, uint32_t coreIndex) {
+    if (gFpuOwner[coreIndex] == task) {
+        asm volatile("clts");
+        return;
+    }
+    uint64_t cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    asm volatile("mov %0, %%cr0" : : "r"(cr0 | (1ULL << 3)) : "memory");
 }
 
 // kSyscallEndpointSelfTerminate(PN-71C3D483)의 실제 핸들러 - args는
@@ -385,6 +413,7 @@ void Scheduler::onTick(InterruptFrame*) {
     next->state = TaskState::Running;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
+    kSyncFpu(next, coreIndex);
     // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
@@ -482,6 +511,7 @@ void Scheduler::yieldCurrent() {
     // 공백"으로 남아 있었다(지금은 이 프로젝트의 어떤 ring3 코드도
     // yieldCurrent를 타지 않아 관찰되지 않았을 뿐).
     kSyncCr3(current);
+    kSyncFpu(current, coreIndex);
     // **실측으로 발견한 버그(2026-09-14, Channel IPC 스트레스
     // 테스트)**: 위 kContextSwitch의 pushfq는 방금 실행한 cli 때문에
     // IF=0인 RFLAGS를 이 Task 자신의 저장 슬롯에 그대로 담아 버린다 -
@@ -525,6 +555,7 @@ void Scheduler::parkCurrent() {
     // yieldCurrent() 주석 참고 - 이 함수가 첫 실제 소비자가 되기
     // 전까지는 아직 발현되지 않았던 공백이었다).
     kSyncCr3(current);
+    kSyncFpu(current, coreIndex);
     // 누군가 깨워 runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰
     // 있다가, 다시 선택되면 이 지점부터 재개된다 - yieldCurrent()와
     // 같은 이유로(위 주석 참고) 여기서도 명시적으로 다시 켜야 한다 -
@@ -591,6 +622,37 @@ void Scheduler::enablePreemption() {
     }
 }
 
+// idt.cpp의 kIsrHandler가 벡터 7(#NM)마다 호출한다(SP-83A07867 §8,
+// PN-F258698E) - kSyncFpu가 디스패치마다 CR0.TS를 세워 뒀다가, 이
+// Task가 실제로 FPU/SSE 명령을 처음 실행하는 순간에만 하드웨어가 이
+// 트랩을 건다. **CLTS를 가장 먼저 한다** - 이 핸들러 자신도, 재개된
+// 원래 명령도 더 이상 트랩 없이 FPU/SSE를 쓸 수 있어야 하기 때문이다
+// (FXSAVE/FXRSTOR 자체도 TS=1이면 마찬가지로 #NM을 유발한다).
+void Scheduler::handleFpuTrap() {
+    asm volatile("clts");
+    const uint32_t coreIndex = currentCoreIndex();
+    Task* current = gCurrentTask[coreIndex];
+    if (!current) {
+        return;  // idle 컨텍스트는 FPU/SSE를 쓰지 않는다 - 이론상 도달 불가
+    }
+    Task* owner = gFpuOwner[coreIndex];
+    if (owner == current) {
+        return;  // 이미 이 Task가 소유자인데 걸린 가짜 트랩(kSyncFpu가 놓친 경우 없음) - 방어적 처리
+    }
+    if (owner) {
+        asm volatile("fxsave (%0)" : : "r"(owner->fpuState) : "memory");
+    }
+    if (current->fpuInitialized) {
+        asm volatile("fxrstor (%0)" : : "r"(current->fpuState) : "memory");
+    } else {
+        // 이 Task가 FPU/SSE를 쓰는 게 처음이다 - 이전 소유자의 찌꺼기
+        // 상태를 물려받지 않도록 깨끗한 초기 상태로 시작한다.
+        asm volatile("fninit");
+        current->fpuInitialized = true;
+    }
+    gFpuOwner[coreIndex] = current;
+}
+
 }  // namespace kernel
 
 // context_switch.S의 kTaskStartTrampoline이 entry 콜백(`call rbx`)을
@@ -606,6 +668,13 @@ extern "C" void kSyncCr3OnTaskStart() {
     kernel::Task* self = kernel::Scheduler::currentTask();
     if (self) {
         kernel::kSyncCr3(self);
+        // SP-83A07867 §8/PN-F258698E - "Task가 태어나서 처음 실행되는
+        // 지점"도 §3.2 갈래②의 세 곳 중 하나라 kSyncFpu를 그대로 같이
+        // 부른다(이름은 kSyncCr3OnTaskStart로 남겨 둔다 - context_switch.S가
+        // 이 심볼명을 직접 참조하고, 이 함수 자체가 "디스패치 도착 지점
+        // 하나"라는 §3.2의 단위이지 CR3 전용 훅이 아니었다는 게 원래
+        // 설계 의도였으므로 새 심볼을 만들지 않는다).
+        kernel::kSyncFpu(self, kernel::Scheduler::currentCoreIndex());
     }
 }
 
