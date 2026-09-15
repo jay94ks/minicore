@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-1FBC0EEB
   status: approved
-  updatedAt: 2026-09-15T17:29:30.002Z
+  updatedAt: 2026-09-15T18:09:07.248Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 ## 배경
@@ -52,10 +52,14 @@ PN-124C105B).
   새로 추가되는 하위 트리다.
 - **DS-D4E5C451** - IPC 메시지 포맷은 **raw binary**로 이미 확정 -
   `read`/`write`가 주고받는 데이터는 별도 직렬화 없이 그대로의
-  바이트열. "프로세스간 공개 인터페이스 registry"는 **아직 열린
-  설계 영역**으로 명시적으로 미뤄져 있다(계획 PN-268F062B) - `/sys/live/named/`가 그
-  registry의 네이밍 계층에 해당한다(§"이름 있는 오브젝트" 참고,
-  registry 전체를 여기서 다 설계하지는 않는다).
+  바이트열. "프로세스간 공개 인터페이스 registry"는 작성 당시
+  아직 열린 설계 영역이었으나 **[갱신, 2026-09-16]** 이후 5번째
+  커널 서비스 `pubreg`(유저랜드, MCP 스타일 tool 선언, SP-B071E628)
+  로 완전히 확정됐다(계획 PN-268F062B, 완료 처리됨 - 실제 구현은
+  PN-185406F6) - `/sys/live/named/`는 그와 별개로, 이 문서(Channel
+  IPC)가 다루는 채널/향후 큐/공유메모리 등 커널 자체 오브젝트의
+  네이밍 계층이다(§"이름 있는 오브젝트" 참고, pubreg의 tool 레지스트리와는
+  다른 네임스페이스).
 - **SP-04EE2A18(Syscall 디스패치 및 비동기 처리 서브시스템, 짝을
   이루는 제안)** - 아래 모든 API는 전부 그 제안의 syscall endpoint
   하나씩으로 구현된다 - "제출(submit)은 즉시 반환, 실제 대기는

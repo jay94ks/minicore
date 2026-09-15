@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-15T16:13:35.107Z
+  updatedAt: 2026-09-15T17:57:07.791Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 장치 자동 인식 및 핫플러그 프레임워크("PnP") — 설계 제안
@@ -289,9 +289,11 @@ DC 없이 임의로 확정하지 않고 질의로 등록해 둔다(RM-23F4B687 �
 
 - 프로세스 모델(PN-16CA347D) - **[갱신, 2026-09-15] 완료됨** - devmgr
   자체가 실행되려면 필요했던 이 전제는 충족됐다. 실제 devmgr 프로세스
-  스폰은 여전히 별도 인프라(PN-D3C05C0B, devmgr/fs/net/tty 스폰
-  체계 자체가 코드베이스에 없음)를 기다린다 - "프로세스를 만들 수
-  있다"와 "devmgr을 실제로 스폰한다"는 별개 공백이다.
+  스폰 체계(PN-D3C05C0B)도 **[재갱신, 2026-09-16] 완료됨**(commit
+  6fae6c1) - 다만 devmgr 자신의 실행 파일 내용(minicore/devmgr 실코드,
+  PN-BD9AAE2F)이 아직 없어 "스폰 메커니즘이 준비됐다"와 "devmgr이
+  실제로 뜬다"는 여전히 별개다(현재는 initrd에 devmgr 이름의
+  바이너리가 없어 "not found, skip"으로 처리됨).
 - 커널→유저 인터럽트 라우팅(PN-B3DD3D19, `scheduled` - 설계 확정,
   실제 배선은 미착수).
 - IO 권한 부여 syscall(§3.3, 이 문서가 처음 구체화 - 신규 계획 등록

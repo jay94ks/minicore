@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-E35FD36C
   status: approved
-  updatedAt: 2026-09-15T14:41:51.009Z
+  updatedAt: 2026-09-15T17:56:39.202Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안
@@ -123,9 +123,12 @@ Ring, Device Context 전부 컨트롤러가 DMA로 직접 접근하는 물리
 - PnP 프레임워크(SP-9DD4F3EA)의 IO 권한 부여 syscall - xHCI
   컨트롤러 자체를 PCI 장치로 발견하는 데 필요.
 - DMA 버퍼 관리자(SP-39F18E30, §3.2 참고 - AHCI 제안과 공유).
-- 프로세스 모델(PN-16CA347D, **[갱신, 2026-09-15] 완료됨** - devmgr
-  프로세스 스폰 체계 자체는 별도로 PN-D3C05C0B가 미구현), Syscall
-  서브시스템(SP-04EE2A18, 이미 구현 완료 - 제어 전송 동기화에 재사용).
+- 프로세스 모델(PN-16CA347D, **[갱신, 2026-09-15] 완료됨**) -
+  devmgr 프로세스 스폰 체계(PN-D3C05C0B)도 **[재갱신, 2026-09-16]
+  완료됨**(commit 6fae6c1), 다만 devmgr 자신의 실행 파일 내용
+  (PN-BD9AAE2F)이 아직 없어 이 USB 드라이버(devmgr 자식 프로세스로
+  실행 예정)의 실제 착수는 그쪽을 기다린다. Syscall 서브시스템
+  (SP-04EE2A18, 이미 구현 완료 - 제어 전송 동기화에 재사용).
 
 ## 6. 레거시 호스트 컨트롤러(UHCI/OHCI/EHCI) 지원 설계 (초안, 2026-09-14)
 
