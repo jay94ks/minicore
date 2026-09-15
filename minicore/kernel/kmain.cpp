@@ -22,6 +22,7 @@
 #include "serial.h"
 #include "smp.h"
 #include "syscall.h"
+#include "syscall_fastpath.h"
 #include "timer.h"
 #include "tlb_shootdown.h"
 
@@ -30,7 +31,7 @@ namespace {
 // boot.S가 esi로 넘기는 값(saved_boot_protocol, 0=PVH/1=multiboot2) -
 // 두 부팅 경로 모두 Idt::init() 이후로는 완전히 같은 코드를 탄다
 // (PL-FC38956C). PVH는 이 값의 기본값(0)이자 "else" 케이스로 처리
-// 한다 - 별도 상수를 안 둔 건 boot.S가 인식 못 하는 값을 보낼 방법이
+// 한다 - 별도 상수를 안 둔 건 boot.S가 인식 못하는 값을 보낼 방법이
 // 없어서(두 진입점만 존재) 대칭적인 분기가 오히려 불필요.
 constexpr kernel::uint32_t kBootProtocolMultiboot2 = 1;
 
@@ -59,7 +60,7 @@ extern "C" char kernel_phys_end[];
 
 // 커널 커맨드라인에서 flag(예: "--disable-x2apic")를 찾는다 - 표준
 // strstr이 freestanding에 없어 직접 구현(libkenv에 문자열 유틸리티가
-// 아직 없음 - QU-19B76E06 open, 답변 오면 그쪽으로 옮길 수 있음).
+// 아직 없음 - QU-19B76E06 open, 답변 오면 그쪽으로 옥길 수 있음).
 bool kCmdlineHasFlag(const char* cmdline, const char* flag) {
     if (!cmdline) {
         return false;
@@ -78,17 +79,17 @@ bool kCmdlineHasFlag(const char* cmdline, const char* flag) {
     return false;
 }
 
-// initrd 안의 "init"(SP-68182FBD "initrd 레이아웃: 서브디렉터리 없이
+// initrd 안의 "init"(SP-68182FBD "initrd 레이아웃: 서브디렉토리 없이
 // 전부 루트에 평면 배치", "커널이 최초로 구동할 유저영역 프로그램은
 // init 하나로 하드코딩")을 이 버퍼로 복사해 둔다. **왜 여기서 즉시
 // 복사하는가(QU-A7D8E49B 설계자 답변, 2026-09-15)**: PageFrameAllocator
 // 는 부트 모듈의 물리 범위를 예약 목록에 넣지 않아(kLowReservedEnd/
 // 커널 자신/start_info/memmap 배열 넷뿐, page_frame_allocator.cpp)
-// 그 프레임이 나중에 버디 할당기로 재할당돼 덮어써질 수 있다 - 이
+// 그 프레임이 나중에 버디 할당기로 재할당돼 덮어쓰일 수 있다 - 이
 // 버퍼가 커널 자신의 BSS 안에 있으므로(=kernelPhysStart..End 안에
 // 있으므로) 그 예약에 자동으로 포함돼 별도 처리가 필요 없다. 그래서
 // 실제로 다시 쓰기 전(PageFrameAllocator::init() 호출보다도 먼저,
-// kLogBootInfo가 호출되는 이 시점)에 필요한 바이트만 뽑아 두고,
+// kLogBootInfo가 호출되는 이 시점)에 필요한 바이트만 뿑아 두고,
 // 모듈의 원본 물리 페이지는 그 뒤로 일반 usable 메모리처럼 재활용돼도
 // 안전하다.
 constexpr kernel::uint64_t kMaxInitImageSize = 1UL * 1024UL * 1024UL;  // 1MiB v1 상한(실측 후 조정, RM-23F4B687 §4)
@@ -175,7 +176,7 @@ void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, kernel::uint32_t count)
     }
 }
 
-// usable 영역들의 최대 끝 주소 - Paging::init()이 direct map으로 덮어야
+// usable 영역들의 최대 끝 주소 - Paging::init()이 direct map으로 덤어야
 // 할 실제 설치 메모리 크기다(PN-4AA5425D, PageFrameAllocator::init()이
 // usable 타입만 프레임 풀에 넣는 것과 같은 기준으로 usable만 본다).
 kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap, kernel::uint32_t count) {
@@ -194,11 +195,11 @@ kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap,
 
 // 실제 첫 프로세스 기동(QA-26450C3E "유저랜드 준비", PN-16CA347D 6번
 // 마지막 조각, PN-DF4E626D) - gInitImageFound가 세팅돼 있으면(위
-// kLogCpioEntry가 이미 부팅 극초반에 채워 둠) 그 ELF를 파싱해 실제
+// kLogCpioEntry가 이미 부팅 극초반에 채워 둘) 그 ELF를 파싱해 실제
 // Process/UserThread로 ring3 진입시킨다(Process::execImage/kEnterRing3,
 // PN-55D24891). PageFrameAllocator/Scheduler/AsyncReactor가 전부 준비된
 // 뒤(=이 함수 호출 시점)에만 안전하다 - execImage가 유저 스택 페이지를
-// 확보하고 UserThread::init()이 커널 스택을 확보하기 때문.
+// 확보하고 UserThread::init()이 커널 스택을 확보하기 때문이다.
 elf::Image gInitImage;
 kernel::Process gInitProcess;
 kernel::UserThread gInitThread;
@@ -232,7 +233,7 @@ void kSpawnInitProcess() {
 // boot.S가 higher-half로 넘어온 뒤 호출한다. rdi = 부팅 정보 구조체
 // (PVH면 hvm_start_info, multiboot2면 그 정보 구조체)의 물리 주소,
 // rsi = 어느 프로토콜인지(kBootProtocolPvh/kBootProtocolMultiboot2,
-// EBX/EAX로 전달된 값을 boot.S가 저장해 뒀다가 넘김, PL-FC38956C).
+// EBX/EAX로 전달된 값을 boot.S가 저장해 듬다가 넘김, PL-FC38956C).
 // 이 함수 맨 위에서 프로토콜별로 memmap/rsdpPaddr를 같은 형태
 // (HvmMemmapEntry 배열 + 물리주소)로 통일하고 나면, 그 뒤부터는 완전히
 // 프로토콜 무관 공통 경로다. 이 시점에는 커널(ring 0)만 실행 중이다 -
@@ -387,6 +388,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Gdt::loadTssForThisCore();
     kernel::Serial::write("minicore: TSS/IST ready (core 0)\n");
 
+    // PN-124C105B("syscall 명령 경로") - Lapic::id()로 코어 인덱스를
+    // 찾으므로 Gdt::loadTssForThisCore()와 같은 이유로 Lapic::init()
+    // 이후에만 안전하다.
+    kernel::SyscallFastPath::initForThisCore();
+    kernel::Serial::write("minicore: syscall fast path (STAR/LSTAR/SFMASK) ready (core 0)\n");
+
     kernel::Scheduler::startTickOnThisCore();
     kernel::Serial::write("minicore: scheduler tick ready (LAPIC, ");
     kernel::Serial::writeHex(kernel::kSchedulerTickHz);
@@ -397,7 +404,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::AsyncReactor::initForThisCore();
     kernel::Serial::write("minicore: async reactor ready (core 0)\n");
 
-    // 전역 테이블 하나뿐이라 BSP에서 딱 한 번만 - AP(kApMain)는 이걸
+    // 전역 테이블 하나뿐이라 BSP에서 딜 한 번만 - AP(kApMain)는 이걸
     // 다시 부르지 않는다(SyscallRegistry::registerHandler가 이미 쓰인
     // 슬롯에 재등록을 거부하므로 안전장치는 있지만, 애초에 호출
     // 자체를 한 곳에만 둔다).

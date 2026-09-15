@@ -12,6 +12,7 @@
 #include "paging.h"
 #include "scheduler.h"
 #include "serial.h"
+#include "syscall_fastpath.h"
 #include "timer.h"
 
 namespace {
@@ -35,17 +36,17 @@ void kCopyApTrampolineToRuntimeAddress() {
 }
 
 // AP 하나당 스택 크기(4KiB << 3 = 32KiB) - 아직 스레드/프로세스가
-// 없어 idle 루프만 도는 수준이라 넉넉히 잡아도 충분하다.
+// 없어 idle 루프만 도는 수준이라 놀럽히 잡아도 충분하다.
 constexpr kernel::uint32_t kApStackOrder = 3;
 
 // Timer가 100Hz(10ms/틱)이므로 50틱 = 500ms - 실제 AP 기동은 보통
-// 수 ms면 끝나서 넉넉한 여유를 둔 값이다.
+// 수 ms면 끝나서 놀럽한 여유를 둔 값이다.
 constexpr kernel::uint64_t kApReadyTimeoutTicks = 50;
 
 kernel::AtomicU32 gApStartedCount;
 
 // ap_trampoline.S의 BSP-AP 핸드오프 스크래치 - Smp::startApCores가
-// SIPI를 보내기 직전에 채운다(순차 기동이라 공유해도 안전).
+// SIPI를 보내기 직전에 채운다(순차 기동이라 공유해도 안전하다).
 extern "C" kernel::uint64_t ap_boot_stack_top;
 extern "C" kernel::uint32_t ap_boot_index;
 
@@ -72,20 +73,24 @@ bool kWaitApReady(kernel::uint32_t expectedCount) {
 // ap_trampoline.S의 ap_long_mode_entry가 호출한다 - edi = 이 AP의
 // Acpi 코어 목록 인덱스(Smp::startApCores가 미리 기록해 둔 값).
 // kMain과 달리 IDT 재빌드/.bss 초기화/전역 서브시스템 재초기화를
-// 전혀 하지 않는다 - BSP가 이미 살아있는 커널 상태를 그대로 공유해서
+// 전혀 하지 않는다 - BSP가 이미 살아있는 커널 상태를 그대로 공유해
 // 쓴다. 이 함수는 절대 반환하지 않는다(ap_trampoline.S가 반환 시
 // hlt 루프로 방어하긴 하지만).
 extern "C" void kApMain(kernel::uint32_t apIndex) {
     kernel::Idt::reloadOnThisCore();
     // ap_trampoline.S가 boot.S의 예전 gdt64(TSS 디스크립터 없음)를
     // 그대로 쓴 채로 여기 도달하므로, BSP가 만들어 둔 새 GDT로 이
-    // 코어의 GDTR을 갈아 껴야 loadTssForThisCore가 쓸 TSS 디스크립터를
+    // 코어의 GDTR을 갈아 끼워야 loadTssForThisCore가 쓸 TSS 디스크립터를
     // 찾을 수 있다(gdt.h 참고).
     kernel::Gdt::reloadOnThisCore();
     kernel::Lapic::init();
     // Acpi::cpuApicId()/Lapic::id()로 자기 코어 인덱스를 찾아야 해서
     // 반드시 Lapic::init() 이후에 호출해야 한다.
     kernel::Gdt::loadTssForThisCore();
+    // PN-124C105B("syscall 명령 경로") - STAR/LSTAR/SFMASK/EFER.SCE/
+    // KERNEL_GS_BASE 전부 코어별 MSR이라 각 AP도 자기 몫을 스스로
+    // 설정해야 한다(BSP의 kMain()과 동일한 관례).
+    kernel::SyscallFastPath::initForThisCore();
 
     kernel::Serial::write("minicore: AP started, index=");
     kernel::Serial::writeHex(apIndex);
@@ -133,7 +138,7 @@ void Smp::startApCores() {
 
         // INIT-SIPI-SIPI(Intel MP 스펙 관례) - 어서트 -> 디어서트
         // 사이/SIPI 사이에 지연을 둔다. Timer 1틱(10ms)이 스펙 권장
-        // 값(10ms/200us)보다 넉넉해도 정확성엔 문제없다(그냥 더
+        // 값(10ms/200us)보다 놀럽해도 정확성엔 문제없다(그냥 더
         // 기다리는 것뿐).
         Lapic::sendInitIpi(apicId, true);
         kBusyWaitOneTick();

@@ -37,6 +37,19 @@ using SyscallEndpointId = uint32_t;
 // 트랩이 절대 ring3로 돌아가면 안 된다는 점이 일반 syscall과 다름).
 constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = 0;
 
+// int 0x80/`syscall` 명령 두 트랩 경로가 공유하는 공용 verb 디스패치
+// (PN-124C105B, QU-E7E51931/QU-CD6F68B7로 확정된 ABI 그대로) - RAX=verb
+// (0=submit/1=wait), RDI/RSI=verb별 인자, 반환값이 새 RAX가 된다.
+// **self-terminate(verb=submit + endpointId=kSyscallEndpointSelfTerminate)
+// 는 이 함수가 반환하지 않는다** - `kTaskOnFallingToEnd()` 호출 후
+// sti+hlt 루프로 영원히 대체되므로, 양쪽 트랩 스텁(idt.cpp의 int 0x80
+// 경로, syscall_fastpath.cpp의 `syscall` 경로) 모두 "이 함수가 반환하지
+// 않으면 그 뒤 ring3 복귀 코드(iretq/sysretq)도 실행되지 않는다"는
+// 계약에 이미 의존하고 있다 - 정의는 idt.cpp(기존 int 0x80 핸들러가
+// 있던 자리, kTaskOnFallingToEnd/Syscall::submit·wait 전부 이미
+// 그쪽에서 쓰고 있었음).
+uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1);
+
 // 유저 프로세스에 속한 스레드의 커널 쪽 표현(SP-04EE2A18, 설계자 지시
 // 2026-09-14 - "커널 Task와 쓰레드는 다른 개념이다... 내부적으로 Task를
 // 상속받아 유저 쓰레드를 구현해도 상관없다"). 이 이름 자체는 제안일

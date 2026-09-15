@@ -5,6 +5,7 @@
 add_library(minicore_libs_x86_64 OBJECT
     isr.S
     context_switch.S
+    syscall_entry.S
 )
 
 # "x86_64/io_port.h"처럼 아키텍처 이름을 포함한 경로로 include하게

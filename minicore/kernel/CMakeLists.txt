@@ -19,6 +19,7 @@ add_library(minicore_kernel OBJECT
     async_task.cpp
     wait_queue.cpp
     syscall.cpp
+    syscall_fastpath.cpp
     named_object.cpp
     channel.cpp
     process.cpp

@@ -48,13 +48,13 @@ constexpr kernel::uint8_t kInterruptGateTypeAttrDpl3 = 0xEE;  // present, DPL3, 
 // 가 채우는 TSS.ISTn을 가리킨다(DC-3D3212A4/QU-4E00C118, 설계자 후속
 // 지시 2026-09-14 - "#DF 외 다른 벡터(NMI/#MC/#DB)의 IST 배정도
 // 고려하라"). 이 네 벡터는 현재 RSP가 뭐든(설령 Task 커널 스택
-// 오버플로우로 고장나 있어도, 또는 애초에 임의 시점에 비동기로
+// 오버플로우로 고장 나 있어도, 또는 애초에 임의 시점에 비동기로
 // 들어와도) 항상 유효한 별도 스택에서 실행되게 강제한다:
 //   - #DF(8): #PF 등 다른 예외 전달 중 재폴트 시 격상된다 - IST 없이는
 //     그 재폴트가 다시 실패해 트리플 폴트(조용한 리셋)로 이어진다
 //     (실측으로 확인된 문제, gdt.h 참고).
-//   - NMI(2): 마스크 불가능(cli로도 못 막음) - 커널이 스핀락을 쥔
-//     채거나 컨텍스트 전환 도중처럼 RSP가 일시적으로 불안정한 어떤
+//   - NMI(2): 마스크 불가능(cli로도 못 막음) - 커널이 스핀락을 쥐거나
+//     컨텍스트 전환 도중처럼 RSP가 일시적으로 불안정한 어느
 //     순간에도 끼어들 수 있다.
 //   - #MC(18, Machine Check): 하드웨어 오류 - NMI와 같은 이유로 임의
 //     시점에 들어올 수 있다.
@@ -218,9 +218,9 @@ void kPanic(kernel::InterruptFrame* frame) {
     if (frame->vector < 32) {
         kernel::Serial::write(kExceptionNames[frame->vector]);
     } else {
-        // 33-254 대역인데 registerHandler로 등록된 콜백이 없는 채로
+        // 33-254 대역인데 registerHandler로 등록된 콜백이 없는 채
         // 인터럽트가 들어온 경우 - kExceptionNames는 CPU 예외(0-31)
-        // 전용이라 그대로 인덱싱하면 엉뚱한 이름이 찍힌다(예전에는
+        // 전용이라 그대로 인덱싱하면 엉녡한 이름이 찍힌다(예전에는
         // 이 경로 자체가 없어서 문제가 없었다 - PL-2D149D8F에서 범용
         // 벡터 디스패치를 추가하며 같이 고침).
         kernel::Serial::write("Unrouted hardware interrupt");
@@ -296,7 +296,7 @@ void kPanic(kernel::InterruptFrame* frame) {
     }
 }
 
-// 레거시 syscall 트랩(vector 0x80) 진입점 - PN-124C105B. SP-04EE2A18
+// 레거시 syscall 트랩(벡터 0x80) 진입점 - PN-124C105B. SP-04EE2A18
 // "유저랜드 ABI" 절이 "정확한 구현은 PL에서"로 남겨 둔 레지스터
 // ABI가 QU-E7E51931/QU-CD6F68B7(설계자 답변, 2026-09-15)로 확정됐다 -
 // RAX(진입 시)="verb" 코드로 제출/대기를 구분한다(System V/Linux
@@ -319,47 +319,62 @@ constexpr kernel::uint64_t kSyscallVerbWait = 1;
 // context_switch.S가 entry 함수의 자연 반환 시 호출하는 것과 같은
 // 함수(scheduler.cpp) - self-terminate 트랩 특별 취급(아래 참고)이
 // 재사용한다. 헤더 없이 extern "C" 링크만으로 직접 선언(scheduler.h의
-// 공개 API로 노출할 만큼 범용은 아님 - 이 파일과 context_switch.S,
-// 딱 두 호출부만 존재).
+// 공개 API로 노출할 만큼 범용은 아니다 - 이 파일과 context_switch.S,
+// 딜따 호출부만 존재).
 extern "C" void kTaskOnFallingToEnd();
 
-void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
-    switch (frame->rax) {
+}  // namespace
+
+namespace kernel {
+
+// syscall.h 선언 참고 - int 0x80(아래 kHandleSyscallTrap)과 `syscall`
+// 명령(syscall_fastpath.cpp의 kHandleSyscallFast) 양쪽이 공유하는 공용
+// 디스패치. **PN-124C105B("syscall 명령 경로") 신설 시 int 0x80
+// 핸들러 하나에만 있던 이 로직을 그대로 옥겨 온 것뿐** - 동작 자체는
+// 전혀 바뀌지 않았다.
+uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
+    switch (verb) {
         case kSyscallVerbSubmit: {
-            const auto endpointId = static_cast<kernel::SyscallEndpointId>(frame->rdi);
+            const auto endpointId = static_cast<SyscallEndpointId>(arg0);
             // **self-terminate는 다른 모든 syscall과 근본적으로 다르다**
-            // (PN-71C3D483, QU-D96B1DCE 설계자 답변 - "kHandleSyscallTrap
-            // 이 self-terminate를 특별 취급") - 이 UserThread는 이제
+            // (PN-71C3D483, QU-D96B1DCE 설계자 답변 - "syscall 디스패치가
+            // self-terminate를 특별 취급") - 이 UserThread는 이제
             // 끝났으므로 절대 ring3로(=이 트랩을 건 지점으로) 복귀하면
             // 안 된다. 정상적인 submit-and-return(아래 default 경로)
             // 대신, entry 함수가 자연 반환했을 때와 완전히 동일한 처리
             // (Zombie 표시 + Syscall::submitDetached - kTaskOnFallingToEnd
             // 재사용, scheduler.cpp 참고)를 한 뒤 **이 함수에서 반환하지
-            // 않고** sti+hlt 루프로 들어간다 - isr_common_stub의 레지스터
-            // 복원+iretq 자체가 실행되지 않으므로 ring3로 절대 안
-            // 돌아간다. 리액터가 나중에 비동기로 Scheduler::retireTask()
-            // 를 불러 이 커널 스택을 회수할 때까지, 이 hlt 루프가 그
-            // 자리를 지킨다(kTaskFallingToEndHalt와 동일한 역할).
-            if (endpointId == kernel::kSyscallEndpointSelfTerminate) {
+            // 않고** sti+hlt 루프로 들어간다 - 호출부(int 0x80의
+            // isr_common_stub 에필로그든 `syscall`의 sysretq 이전
+            // 코드든)가 전혀 실행되지 않으므로 ring3로 절대 안 돌아간다.
+            // 리액터가 나중에 비동기로 Scheduler::retireTask()를 불러
+            // 이 커널 스택을 회수할 때까지, 이 hlt 루프가 그 자리를
+            // 지킨다(kTaskFallingToEndHalt와 동일한 역할).
+            if (endpointId == kSyscallEndpointSelfTerminate) {
                 kTaskOnFallingToEnd();
                 asm volatile("sti");
                 for (;;) {
                     asm volatile("hlt");
                 }
             }
-            void* args = reinterpret_cast<void*>(frame->rsi);
-            frame->rax = static_cast<kernel::uint64_t>(kernel::Syscall::submit(endpointId, args));
-            break;
+            void* args = reinterpret_cast<void*>(arg1);
+            return static_cast<uint64_t>(Syscall::submit(endpointId, args));
         }
         case kSyscallVerbWait: {
-            const auto token = static_cast<kernel::AsyncTaskManageCode>(frame->rdi);
-            frame->rax = kernel::Syscall::wait(token) ? 1 : 0;
-            break;
+            const auto token = static_cast<AsyncTaskManageCode>(arg0);
+            return Syscall::wait(token) ? 1 : 0;
         }
         default:
-            frame->rax = 0;  // 알 수 없는 verb - 실패로 취급(v1, 새 DC 불필요 수준)
-            break;
+            return 0;  // 알 수 없는 verb - 실패로 취급(v1, 새 DC 불필요 수준)
     }
+}
+
+}  // namespace kernel
+
+namespace {
+
+void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
+    frame->rax = kernel::kDispatchSyscallVerb(frame->rax, frame->rdi, frame->rsi);
 }
 
 }  // namespace
@@ -372,17 +387,17 @@ void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
 //   독립된 코어별 LAPIC 타이머 - Scheduler::onTick이 Task 전환을
 //   할 수도 있어(kContextSwitch가 이 함수 호출 자체를 오래 "매달아
 //   둘" 수 있음) EOI를 일반 동적 핸들러 경로(핸들러 반환 후 EOI)에
-//   맡기지 않고 Scheduler::onTick 안에서 가장 먼저 직접 보낸다 -
+//   맡지 않고 Scheduler::onTick 안에서 가장 먼저 직접 보낸다 -
 //   kTimerVector와 같은 이유의 특례.
 // - 페이지 폴트(벡터 14): 먼저 Paging::kHandlePageFault로 "온디맨드
 //   매핑으로 해결 가능한 폴트인지" 확인한다 - 처리됐으면 그냥 반환해
 //   iretq가 폴트난 명령어를 재실행하게 둔다.
 // - 범용 하드웨어 인터럽트(33-254, PL-2D149D8F): Idt::registerHandler로
 //   등록된 콜백이 있으면 호출한 뒤 EOI를 보낸다 - 콜백이 없으면(라우팅
-//   설정은 됐는데 핸들러 등록을 깜빡한 버그) 조용히 무시하지 않고
-//   진단 로그를 남기고 멈춘다.
+//   설정은 됐는데 핸들러 등록을 깤박은 버그) 조용히 무시하지 않고
+//   진단 로그를 남기고 멈추다.
 // - 그 외(진짜 잘못된 접근, 다른 예외 전부)는 진단 로그를 남기고
-//   멈춘다.
+//   멈추다.
 extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     if (frame->vector == kernel::kTimerVector) {
         kernel::Timer::onTick();
