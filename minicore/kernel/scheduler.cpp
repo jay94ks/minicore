@@ -1,6 +1,7 @@
 #include "scheduler.h"
 
 #include "acpi.h"
+#include "gdt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
 #include "libkenv/spinlock.h"
@@ -101,6 +102,21 @@ Task* gCurrentTask[kMaxCores] = {};
 // 게이트라 같은 코어 안에서 재진입 없음, 다른 코어는 자기 배열만
 // 건드리므로 원자 연산이 필요 없다).
 uint32_t gPreemptDisableCount[kMaxCores] = {};
+
+// PN-AEA74E1B - 이 코어에서 next로 실제로 전환하기(kContextSwitch) 직전
+// 마다 부른다. next가 ring3 코드를 실행할 수 있는 UserThread면(v1은
+// isUserLevel==true가 정확히 이 뜻 - process.cpp의 kEnterRing3가 처음
+// 진입할 때만 세팅했었는데, 이제 매 디스패치마다 여기서 갱신해 "코어당
+// UserThread 하나" 전제를 없앤다) 이 코어의 TSS.RSP0을 그 Task 자신의
+// 커널 스택 top으로 맞춰 둔다 - 안 그러면 다른 UserThread가 트랩할 때
+// 엉뚱한(이전에 디스패치됐던 UserThread의) 커널 스택을 밟는다. 커널
+// 전용 Task는 애초에 ring3로 안 내려가 RSP0을 아무도 안 읽으므로 굳이
+// 갱신할 필요 없다(불필요한 쓰기 생략).
+void kSyncRsp0ForDispatch(Task* next) {
+    if (next->isUserLevel) {
+        Gdt::setRsp0ForThisCore(next->kernelStackTop);
+    }
+}
 
 }  // namespace
 
@@ -254,6 +270,7 @@ void Scheduler::onTick(InterruptFrame*) {
     enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
     gCurrentTask[coreIndex] = next;
     next->state = TaskState::Running;
+    kSyncRsp0ForDispatch(next);
     // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
@@ -297,6 +314,7 @@ void Scheduler::runLoop() {
         asm volatile("cli");
         gCurrentTask[coreIndex] = next;
         next->state = TaskState::Running;
+        kSyncRsp0ForDispatch(next);
         kContextSwitch(&gIdleSavedRsp[coreIndex], next->savedRsp);
         // yieldCurrent()로 되돌아온 경우에만 이 지점으로 온다(onTick의
         // Task-to-Task 전환은 이 프레임을 거치지 않는다) - 다음

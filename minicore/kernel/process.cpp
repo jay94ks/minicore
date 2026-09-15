@@ -4,7 +4,6 @@
 #include "libelf/elf.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
-#include "scheduler.h"
 #include "syscall.h"
 
 namespace {
@@ -42,17 +41,15 @@ Ring3EntryParams gRing3EntryParams;
 // 필요 없다).
 [[noreturn]] void kEnterRing3(void* argPtr) {
     auto* params = reinterpret_cast<Ring3EntryParams*>(argPtr);
-    auto* self = kernel::Scheduler::currentTask();
 
     // RSP0 - 이 UserThread가 ring3에서 트랩할 때마다 하드웨어가 자동
-    // 전환할 커널 스택. **v1 가정**: MINICORE_TASK_STACK_GUARD_PAGE가
-    // 꺼져 있어(기본값) 커널 스택이 direct map 위에 있다는 전제로
-    // 계산한다 - 켜져 있으면 이 계산식이 안 맞는다(가드 페이지 켠
-    // 빌드에서 ring3 진입을 함께 쓰는 조합은 아직 검증 대상 밖,
-    // 후속 과제).
-    const kernel::uint64_t kernelStackTop =
-        kernel::kPhysToVirt(self->kernelStackPhys) + self->kernelStackSize;
-    kernel::Gdt::setRsp0ForThisCore(kernelStackTop);
+    // 전환할 커널 스택. 이 함수에 도달하는 유일한 경로가
+    // Scheduler::runLoop()/onTick()의 디스패치(kContextSwitch 직전에
+    // kSyncRsp0ForDispatch(next)를 호출, PN-AEA74E1B)이므로, 이 시점엔
+    // 이미 이 코어의 TSS.RSP0이 이 Task 자신의 kernelStackTop으로
+    // 맞춰져 있다 - 여기서 다시 설정할 필요가 없다(예전 v1은 첫 진입
+    // 때만 여기서 직접 설정했었는데, 이제 스케줄러가 매 디스패치마다
+    // 갱신하므로 그 특별 취급이 필요 없어졌다).
 
     // 아래 인라인 asm은 리터럴 0x1b/0x23을 직접 쓴다(피연산자 제약
     // 안에서 이름 있는 상수를 쓰면 크기 불일치 등으로 더 위험할 수

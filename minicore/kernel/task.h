@@ -56,6 +56,14 @@ struct Task {
     uint64_t kernelStackPhys = 0;  // PageFrameAllocator가 준 물리주소(해제 시 필요)
     uint64_t kernelStackSize = 0;
 
+    // 이 Task의 커널 스택 top(가상주소) - Task::init()이 실제로 어느
+    // 방식(direct map 별칭 vs MINICORE_TASK_STACK_GUARD_PAGE 켰을 때의
+    // 전용 매핑)으로 스택을 마련했든 상관없이 항상 여기서 정확한 값을
+    // 얻을 수 있다(PN-AEA74E1B - 예전엔 kEnterRing3가 direct map 별칭
+    // 계산식을 직접 다시 만들어 썼는데, 가드 페이지 켠 빌드에서는 그
+    // 계산식 자체가 틀렸다 - 이 필드로 그 중복/오류 가능성을 없앤다).
+    uint64_t kernelStackTop = 0;
+
     TaskState state = TaskState::Ready;
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;

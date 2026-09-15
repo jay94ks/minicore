@@ -76,6 +76,7 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
 #else
     const uint64_t stackTop = kPhysToVirt(kernelStackPhys) + kernelStackSize;
 #endif
+    kernelStackTop = stackTop;
 
     // kContextSwitch가 기대하는 pop 순서(r15,r14,r13,r12,rbx,rbp,
     // popfq,ret)와 정확히 대응하도록, 스택을 높은 주소부터 채워
