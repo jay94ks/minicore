@@ -4,30 +4,65 @@
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "named_object.h"
+#include "page_frame_allocator.h"
+#include "paging.h"
 
 namespace kernel {
 
 bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** outB) {
-    if (useHugePage) {
-        return false;  // v1 정책(channel.h 상단 주석 참고) - 호출부가 HugePageUnsupported로 변환
-    }
-
     void* memA = GenericSlabAllocator::alloc(sizeof(BridgePipe));
     void* memB = memA ? GenericSlabAllocator::alloc(sizeof(BridgePipe)) : nullptr;
-    void* bufA = memB ? GenericSlabAllocator::alloc(kChannelRingBufferSize) : nullptr;
-    void* bufB = bufA ? GenericSlabAllocator::alloc(kChannelRingBufferSize) : nullptr;
-
-    if (!bufB) {
-        if (bufA) {
-            GenericSlabAllocator::free(bufA, kChannelRingBufferSize);
-        }
-        if (memB) {
-            GenericSlabAllocator::free(memB, sizeof(BridgePipe));
-        }
+    if (!memB) {
         if (memA) {
             GenericSlabAllocator::free(memA, sizeof(BridgePipe));
         }
         return false;
+    }
+
+    // huge page(PN-34B34DB4)면 물리적으로 연속인 2MiB 블록을
+    // PageFrameAllocator에서 직접 확보해 kPhysToVirt()로 커널
+    // 가상주소를 얻는다(channel.h 상단 주석 참고 - 유저 매핑이
+    // 없어 Paging을 거칠 필요가 없다) - 4KiB 폴백은 기존 그대로
+    // GenericSlabAllocator를 쓴다. outbound.physBase에는 나중에
+    // destroyPair가 올바른 해제 함수를 고르는 데 쓸 값(물리주소 또는
+    // slab 가상주소)을 그대로 담아 둔다(RingBuffer::physBase 필드
+    // 주석 참고).
+    uint8_t* dataA = nullptr;
+    uint8_t* dataB = nullptr;
+    uint64_t physBaseA = 0;
+    uint64_t physBaseB = 0;
+    uint64_t capacity = 0;
+
+    if (useHugePage) {
+        physBaseA = PageFrameAllocator::allocOrder(kHugeChannelRingBufferOrder);
+        physBaseB = physBaseA ? PageFrameAllocator::allocOrder(kHugeChannelRingBufferOrder) : 0;
+        if (!physBaseB) {
+            if (physBaseA) {
+                PageFrameAllocator::freeOrder(physBaseA, kHugeChannelRingBufferOrder);
+            }
+            GenericSlabAllocator::free(memB, sizeof(BridgePipe));
+            GenericSlabAllocator::free(memA, sizeof(BridgePipe));
+            return false;
+        }
+        dataA = reinterpret_cast<uint8_t*>(kPhysToVirt(physBaseA));
+        dataB = reinterpret_cast<uint8_t*>(kPhysToVirt(physBaseB));
+        capacity = kHugeChannelRingBufferSize;
+    } else {
+        void* bufA = GenericSlabAllocator::alloc(kChannelRingBufferSize);
+        void* bufB = bufA ? GenericSlabAllocator::alloc(kChannelRingBufferSize) : nullptr;
+        if (!bufB) {
+            if (bufA) {
+                GenericSlabAllocator::free(bufA, kChannelRingBufferSize);
+            }
+            GenericSlabAllocator::free(memB, sizeof(BridgePipe));
+            GenericSlabAllocator::free(memA, sizeof(BridgePipe));
+            return false;
+        }
+        dataA = reinterpret_cast<uint8_t*>(bufA);
+        dataB = reinterpret_cast<uint8_t*>(bufB);
+        physBaseA = reinterpret_cast<uint64_t>(bufA);
+        physBaseB = reinterpret_cast<uint64_t>(bufB);
+        capacity = kChannelRingBufferSize;
     }
 
     auto* a = reinterpret_cast<BridgePipe*>(memA);
@@ -36,12 +71,12 @@ bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** ou
     a->peer = b;
     a->closedLocal = false;
     a->blocking = false;
-    a->outbound.reset(reinterpret_cast<uint8_t*>(bufA), reinterpret_cast<uint64_t>(bufA), kChannelRingBufferSize);
+    a->outbound.reset(dataA, physBaseA, capacity);
 
     b->peer = a;
     b->closedLocal = false;
     b->blocking = false;
-    b->outbound.reset(reinterpret_cast<uint8_t*>(bufB), reinterpret_cast<uint64_t>(bufB), kChannelRingBufferSize);
+    b->outbound.reset(dataB, physBaseB, capacity);
 
     *outA = a;
     *outB = b;
@@ -49,8 +84,18 @@ bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** ou
 }
 
 void BridgePipe::destroyPair(BridgePipe* a, BridgePipe* b) {
-    GenericSlabAllocator::free(a->outbound.data, kChannelRingBufferSize);
-    GenericSlabAllocator::free(b->outbound.data, kChannelRingBufferSize);
+    // capacity로 huge/4K 경로를 구분한다(둘이 겹칠 수 없는 고정값 -
+    // 새 discriminator 필드 불필요).
+    if (a->outbound.capacity == kHugeChannelRingBufferSize) {
+        PageFrameAllocator::freeOrder(a->outbound.physBase, kHugeChannelRingBufferOrder);
+    } else {
+        GenericSlabAllocator::free(a->outbound.data, kChannelRingBufferSize);
+    }
+    if (b->outbound.capacity == kHugeChannelRingBufferSize) {
+        PageFrameAllocator::freeOrder(b->outbound.physBase, kHugeChannelRingBufferOrder);
+    } else {
+        GenericSlabAllocator::free(b->outbound.data, kChannelRingBufferSize);
+    }
     GenericSlabAllocator::free(a, sizeof(BridgePipe));
     GenericSlabAllocator::free(b, sizeof(BridgePipe));
 }
@@ -158,11 +203,8 @@ public:
             return;
         }
 
-        if (args->useHugePage) {
-            args->error = ChannelError::HugePageUnsupported;
-            return;
-        }
-
+        // useHugePage=true는 이제 BridgePipe::createPair()가 실제로
+        // 지원한다(PN-34B34DB4) - 더 이상 여기서 조기 거부하지 않는다.
         PendingConnectRequest req;
         req.task = task;
         req.useHugePage = args->useHugePage;

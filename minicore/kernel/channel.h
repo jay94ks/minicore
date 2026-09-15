@@ -35,7 +35,7 @@ enum class ChannelError : uint32_t {
     NotFound,              // 채널을 ID/이름으로도 못 찾음, 또는 그 사이 소멸됨
     InvalidHandle,         // BridgeHandle/채널 handle이 유효하지 않음
     ResourceExhausted,     // Slab/페이지 고갈
-    HugePageUnsupported,   // useHugePage=true인데 커널 정책상 금지(v1 - 항상 금지, 아래 참고)
+    HugePageUnsupported,   // 더 이상 이 경로에서 반환되지 않음(PN-34B34DB4) - API 호환을 위해 값만 유지
     BrokenPipe,            // 이 반쪽 또는 상대가 이미 닫힌 상태에서 read/write 시도
 };
 
@@ -46,15 +46,20 @@ enum class ChannelError : uint32_t {
 // 조정 가능하도록 하드코딩 대신 이 상수 하나로 노출).
 constexpr uint64_t kChannelRingBufferSize = 4096;
 
-// **v1 huge page 정책**: 항상 "커널 설정에 의해 금지"로 취급해
-// useHugePage=true 요청은 조용한 4K 폴백 없이 즉시
-// ChannelError::HugePageUnsupported를 반환한다(설계 문서가 명시한
-// 정상적인 실패 경로 - 새 DC 불필요). 실제로 물리적으로 연속인 2MiB
-// 블록을 2M PDE 하나로 매핑하는 기능이 Paging에 아직 없어서다
-// (`PageFrameAllocator::allocOrder(9)`로 블록 확보는 가능해도,
-// `Paging::mapPage`는 4KiB PTE 매핑만 지원 - 설계 문서 "링버퍼 크기
-// 정책" 절이 이미 예견한 상황). 이 기능이 필요해지면 Paging에 2M
-// 매핑 경로를 먼저 추가하는 별도 계획으로 이어간다.
+// **huge page 지원(PN-34B34DB4, 2026-09-16 구현)**: useHugePage=true면
+// PageFrameAllocator::allocOrder(kHugeChannelRingBufferOrder)로
+// 물리적으로 연속인 2MiB 블록을 확보해 링버퍼로 쓴다. 이 블록은 커널
+// 자신만(유저 주소공간에 매핑되지 않음) 접근하므로 Paging::mapPage/
+// mapRange를 거칠 필요가 없다 - kDirectMapBase 덕분에 이미 설치된
+// 모든 usable 물리 메모리가 커널 가상주소공간에 항상 매핑돼 있어
+// (paging.h kPhysToVirt 참고), allocOrder()가 돌려준 물리주소를 그
+// 함수 하나로 바로 커널 가상주소로 바꿔 쓰면 된다 - 새 페이지 테이블
+// 엔트리를 만들 필요가 전혀 없다(4K 폴백 경로가 GenericSlabAllocator의
+// 가상주소를 그대로 쓰는 것과 대칭). `ChannelError::HugePageUnsupported`
+// 는 이제 이 경로에서 반환되지 않는다(할당 실패는 다른 경로와 동일하게
+// ResourceExhausted) - enum 값 자체는 API 호환을 위해 남겨 둔다.
+constexpr uint64_t kHugeChannelRingBufferSize = 2 * 1024 * 1024;  // allocOrder(9)와 일치
+constexpr uint32_t kHugeChannelRingBufferOrder = 9;
 
 class Channel;
 struct BridgePipe;
@@ -161,13 +166,15 @@ struct BridgePipe {
     bool closedLocal = false;  // closeBridge()로 이 반쪽이 닫혔는지 - peer 쪽 상태는 peer->closedLocal을 직접 읽는다(별도 미러 필드 불필요, "양쪽 다 닫혀야 반납"이 보장하는 수명 덕분에 항상 안전하게 역참조 가능)
     bool blocking = false;  // 설계 문서의 blocking 옵션 - 커널 메커니즘 자체는 항상 비동기이고, 이 값은 향후 유저랜드 스텁이 "제출 후 자동으로 wait까지 할지"를 결정하는 데만 쓰인다(v1은 커널 내부 호출자가 직접 판단)
 
-    // Slab에서 BridgePipe 두 개 + 각자의 outbound 버퍼(kChannelRingBufferSize)
-    // 를 확보해 서로를 peer로 잇는다. useHugePage=true면 위 v1 정책대로
-    // 즉시 실패(호출부가 ChannelError::HugePageUnsupported로 변환).
+    // Slab에서 BridgePipe 두 개를 확보해 서로를 peer로 잇는다 - 각자의
+    // outbound 버퍼는 useHugePage에 따라 GenericSlabAllocator(4KiB) 또는
+    // PageFrameAllocator::allocOrder(9)(2MiB, PN-34B34DB4)에서 확보한다
+    // (위 kHugeChannelRingBufferSize 주석 참고).
     static bool createPair(bool useHugePage, BridgePipe** outA, BridgePipe** outB);
 
     // 양쪽 다 closedLocal이면 호출 - 두 BridgePipe와 그 outbound 버퍼
-    // 전부를 GenericSlabAllocator::free로 반납한다.
+    // 전부를 반납한다(버퍼는 만들 때 쓴 것과 같은 할당자로 - capacity로
+    // 구분, channel.cpp 참고).
     static void destroyPair(BridgePipe* a, BridgePipe* b);
 };
 
