@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-D868D9EC
-  status: approved
-  updatedAt: 2026-09-14T06:45:11.465Z
+  status: archived
+  updatedAt: 2026-09-15T05:47:11.419Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 ## 배경

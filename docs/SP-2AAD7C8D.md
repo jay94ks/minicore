@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
-  status: review
-  updatedAt: 2026-09-14T16:47:54.533Z
+  status: approved
+  updatedAt: 2026-09-15T13:40:44.368Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
@@ -72,6 +72,39 @@ SP-68182FBD)는 **PML4 인덱스 256-511(higher half)을 모든 프로세스가
                 메모리를 봐야" 하므로 프로세스별 락으로는 안 되고
                 시스템에 하나뿐인 락이어야 한다).
 ```
+
+### 2.1 `KernelAddressSpaceManager`의 PML4 최상위 엔트리 선점 (QU-4E9F1C36 답변 반영, 2026-09-15)
+
+**비판적 재검토로 발견된 잠복 버그**: `Paging::createAddressSpace()`
+(SP-68182FBD §1.1)는 프로세스 생성 "시점"의 현재 PML4에서 상위 절반
+(인덱스 256~511)을 엔트리째로 **한 번만** 스냅샷 복사한다 - 라이브
+공유가 아니다. 따라서 `kLazyZoneBase`가 속한 PML4 슬롯이 그 어떤
+프로세스보다도 먼저 present 상태가 아니면, `KernelAddressSpaceManager::
+mapRegion()`의 첫 실제 호출(현재는 소비자가 없어 미발현)이 하필 어떤
+유저 프로세스의 CR3 위에서 일어나는 순간 그 프로세스 하나의 PML4에만
+매핑이 생기고, 이미 존재하는 다른 프로세스/부팅 PML4(리액터가 쓰는
+`gBootPml4Phys`)는 그 매핑을 영원히 모르게 된다.
+
+**확정된 수정 방침(설계자 답변)**:
+
+1. **PML4E 사전 생성** - `KernelAddressSpaceManager::init()` 시점에
+   `kLazyZoneBase`가 속한 PML4 슬롯에 대해 미리 하위 페이징 구조체를
+   확보한다 - 더미 매핑(`Paging::mapPage`+`unmapPage` 왕복) 또는
+   `Paging`에 "PML4E→PDPT만 미리 할당하는" 경량 헬퍼를 두는 방식 모두
+   유효하다. `init()`은 이미 모든 프로세스 생성보다 먼저 실행됨이
+   보장돼 있다(`TlbShootdown::init()` 직후, 부팅 시퀀스). 이렇게 하면
+   이후 `createAddressSpace()`로 파생되는 모든 프로세스가 그 PDPT의
+   물리 주소를 스냅샷 시점부터 이미 공유한다.
+2. **`mapRegion()`의 타깃 PML4 명시(방어적 보강)** - 1번으로 PML4E가
+   선점되면 하위 테이블이 공유되므로 기능상으로는 `Paging::mapPage
+   (..., 0)`(현재 CR3)로도 정상 동작하지만, 커널 전역 가상공간을
+   관리하는 API가 "현재 활성 CR3"가 아니라 항상 마스터 PML4
+   (`gBootPml4Phys`)를 명시적으로 타깃팅하도록(또는 최소한 "이 호출이
+   모든 PML4가 공유하는 상위 레벨 테이블만 조작하고 있음"을 코드
+   레벨에서 보장하도록) 코드/주석을 보강한다 - 우연히 맞는 동작에
+   의존하지 않기 위한 방어적 설계.
+
+실제 구현은 PN-1EF2B3B3로 추적한다.
 
 ## 3. Maple Tree 자료구조 설계
 
@@ -334,15 +367,26 @@ struct BrkArgs {
 - Slab 할당자(SP-D7013B26, 이미 구현 완료) - 256B/32B 버킷 재사용.
 - `Spinlock`(`libkenv/spinlock.h`, 이미 구현 완료, PL-65C20380) -
   `KernelAddressSpaceManager`/`ProcessAddressSpaceManager` 동시성 보호.
-- **커널 영역 TLB 샷다운 IPI**(§6-2, 신규 - 아직 없음, 별도 계획 등록
-  필요) - `KernelAddressSpaceManager`의 매핑 해제/변경 기능 사용 전
-  필수.
-- 프로세스 모델(PN-16CA347D) - `ProcessAddressSpaceManager`가 매달릴
-  `Process` 구조체 자체.
+- **커널 영역 TLB 샷다운 IPI**(§6-2) - **[갱신, 2026-09-15] 완료됨**
+  (SP-DE19BB1C/PN-6D33BB03) - `KernelAddressSpaceManager::
+  unmapRegion()`이 이미 이 경로를 재사용해 실제로 동작 중이다.
+- 프로세스 모델(PN-16CA347D) - **[갱신, 2026-09-15] 완료됨** -
+  `ProcessAddressSpaceManager`가 매달릴 `Process` 구조체 자체가
+  이미 존재한다.
 - `Paging::mapPage`/`unmapPage`(이미 구현 완료) - 실제 페이지 테이블
   조작.
 - VFS 커널 서브시스템(SP-7CC5693A) - §9의 파일 API가 경로 해석에
-  재사용하는 `ResolvePathArgs`.
+  재사용하는 `ResolvePathArgs`(§9 자체는 MountKind::KernelDriver
+  분기 반영 필요, PN-ABD23ACE 참고 - §9 착수 시점에 처리).
+
+**[갱신, 2026-09-15] §2/§3(KernelAddressSpaceManager/
+ProcessAddressSpaceManager/Vma/VmaBacking, Maple Tree 멀티레벨
+분할/병합)은 PN-012E8C1A(1차 증분) + PN-38D17292(멀티레벨 노드
+분할)로 이미 구현 완료됐다** - 위 선행 조건 전부가 충족된 뒤 실제로
+착수돼 `minicore/kernel/address_space.h/.cpp`에 반영됐다. 이 §7이
+가리키던 "아직 없음" 상태는 더 이상 유효하지 않다 - 남은 건 §5(mmap
+syscall API)/§9(표준 파일 API, MountKind::KernelDriver 분기 필요)
+뿐이다.
 
 ## 8. RM-9B8CA541과의 관계
 
@@ -377,6 +421,19 @@ SP-39F18E30(DMA 버퍼 관리자) §3.2의 `ProcessVirtualAddressCursor`
 이 흐름은 PnP(SP-9DD4F3EA §3.1 "장치 열거 → IO 권한 요청")와 정확히
 같은 2단계 패턴("커널이 라우팅 정보만 알려주고, 실제 작업은 그 대상과
 직접 IPC")을 재사용한다.
+
+**[비판적 재검토로 발견한 공백, 2026-09-15]** 이 흐름은 `ResolvePathArgs`
+가 항상 유저랜드 fs 서비스의 `ownerChannelId`를 낸다고 전제하는데,
+SP-7CC5693A §2.4가 이후 `MountKind::KernelDriver`(livefs 등 커널
+자체 구현 마운트 - Channel/IPC가 아예 없음)를 추가하면서 이 전제가
+깨졌다. 그 마운트에 대한 `Open`은 2단계(IPC 전송)를 건너뛰고 커널이
+`KernelFsDriver::open()`을 그 자리에서 직접 호출해야 한다 - 아래
+§9.2의 `FileDescriptor`도 `ownerChannelId` 하나만으로는 "이 fd가
+Channel 소비자인지 커널 드라이버 소비자인지" 구분할 수 없어 필드
+확장이 필요하다(예: §2.1의 `MountKind`를 그대로 `FileDescriptor`에도
+싣기). §9 착수 시 SP-7CC5693A §2.4/§2.1과 함께 반영해야 한다 -
+아직 코드가 없는 설계 단계라 지금 확정하지 않고 착수 시점으로
+남겨 둔다(RM-23F4B687 §4 취지).
 
 ### 9.2 프로세스 파일 디스크립터 테이블
 

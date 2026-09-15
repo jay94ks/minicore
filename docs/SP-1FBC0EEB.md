@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-1FBC0EEB
   status: approved
-  updatedAt: 2026-09-14T11:50:09.906Z
+  updatedAt: 2026-09-15T13:06:37.419Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 ## 배경
@@ -253,14 +253,15 @@ struct BridgePipe {
   기능이고, 여기서 필요한 건 *처음부터* 물리적으로 연속인 2MiB
   블록을 확보해 페이지테이블에 2M PDE 하나로 매핑하는 것이다.
   `PageFrameAllocator::allocOrder(9)`(2^9×4KiB=2MiB, 버디 할당자가
-  이미 지원하는 order)로 물리 블록 확보 자체는 가능하지만, **그걸
-  실제로 2M PDE 하나로 매핑하는 기능은 `Paging`에 아직 없다**
-  (`Paging::mapPage`는 4KiB PTE 매핑만 지원, `Paging::init`의 1GiB
-  PS 매핑은 direct map 전용 특수 경로) - 이 기능이 없으면 huge page
-  플래그는 "물리적으로만 연속인 2MiB, 하지만 4KiB PTE 512개로
-  매핑"으로 축소 구현하거나(TLB 이득 없음), `Paging`에 2M 매핑
-  경로를 먼저 추가해야 한다(계획 PN-34B34DB4, PL-57CF86EF의 계획
-  PN-D28DD9F3과 인프라 공유 가능).
+  이미 지원하는 order)로 물리 블록 확보 자체는 가능하다.
+  [갱신, 2026-09-15] PN-D28DD9F3(PL-57CF86EF) 구현 완료로
+  `Paging::mapRange`가 2M 정렬+물리 연속+빈 슬롯 조건을 만족하면
+  실제로 2M PS 하나로 매핑하는 경로를 이미 제공한다 - "이 기능이
+  `Paging`에 아직 없다"는 더 이상 사실이 아니다. 다만 이 Channel
+  링버퍼 huge page 지원 자체(계획 PN-34B34DB4)는 그 인프라를 아직
+  실제로 연결하지 않은 `scheduled` 상태이므로, v1의 "huge page 요청은
+  항상 실패 코드 반환" 정책(아래 "링버퍼 크기 정책" 절)은 그대로
+  유효하다 - 남은 건 순수 배선 작업.
 
 ## Channel ID 전달 (범위 밖 - 교차 참조만, 계획 PN-6D497EB0)
 

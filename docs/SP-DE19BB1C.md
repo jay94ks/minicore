@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-DE19BB1C
   status: approved
-  updatedAt: 2026-09-15T03:24:53.221Z
+  updatedAt: 2026-09-15T11:09:02.785Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안
@@ -179,6 +179,18 @@ extern "C" void kTlbShootdownIsr() {
    필드는 이미 이 확장을 염두에 두고 설계했지만, "어느 코어가 지금
    이 프로세스를 실행 중인지" 추적하는 스케줄러 쪽 인프라
    (PL-2D3184BC)가 실측 가능한 수준으로 갖춰진 뒤에 실제로 연결.
+   **[비판적 재검토, 발견]** §2.1의 "요청 슬롯 1개로 충분"이라는
+   전제는 `KernelAddressSpaceManager`의 전역 Spinlock이 **유일한
+   호출 경로**라는 가정에 의존한다 - 이 확장이 실제로 연결되면
+   `ProcessAddressSpaceManager`(프로세스별, SP-2AAD7C8D §2)가 새로운
+   두 번째 호출 경로가 되는데, 이건 커널 영역 Spinlock과 무관한 락이라
+   서로 다른 프로세스의 유저 영역 매핑 변경이 서로 다른 코어에서
+   동시에 `kBroadcastTlbShootdown`을 부를 수 있다 - 그러면 단일
+   `g_tlbShootdownRequest` 슬롯이 두 요청 사이에서 경합해 깨진다.
+   착수 시점에 "요청 슬롯을 여러 개로 늘릴지" 또는 "모든 샷다운
+   호출 경로를 감싸는 별도의 전역 직렬화 락을 새로 둘지" 결정이
+   필요하다(v1 커널 전용 범위에서는 무관 - 이 확장이 실제로 시작될
+   때 재확인).
 2. **정확한 벡터 번호/인터럽트 우선순위 배정**: `idt.cpp`의 기존
    벡터 배치 관례를 따라 구현 착수 시점에 확정(숫자 튜닝, 별도 DC
    불필요).
