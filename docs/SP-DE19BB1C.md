@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-DE19BB1C
-  status: review
-  updatedAt: 2026-09-14T16:47:22.779Z
+  status: approved
+  updatedAt: 2026-09-15T03:24:53.221Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안
