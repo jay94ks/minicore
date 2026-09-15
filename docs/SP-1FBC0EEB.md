@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-1FBC0EEB
   status: approved
-  updatedAt: 2026-09-15T13:06:37.419Z
+  updatedAt: 2026-09-15T17:29:30.002Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 ## 배경
@@ -246,8 +246,12 @@ struct BridgePipe {
   정확한 소스는 구현 시 확정)이 상한이다.
 - `useHugePage=true`인데 커널 설정이 huge page를 금지했으면(예:
   해당 하드웨어/구성에서 비활성화) **그 자리에서 실패 코드를 반환**
-  한다 - 조용히 일반 페이지로 폴백하지 않는다. **v1은 항상 이 경로다
-  (계획 PN-34B34DB4로 huge page 실제 매핑 지원을 별도 등록)**.
+  한다 - 조용히 일반 페이지로 폴백하지 않는다. **[구현 완료,
+  2026-09-16, PN-34B34DB4]** huge page 실제 매핑 지원이 완료돼
+  더 이상 "v1은 항상 실패"가 아니다 - `PageFrameAllocator::
+  allocOrder(9)` + `kPhysToVirt()`로 2MiB 블록을 확보/사용한다(위
+  "PL-57CF86EF와는 다른 메커니즘" 절 참고). 할당 자체가 실패하는
+  경우(메모리 고갈 등)만 실패 코드(`ResourceExhausted`)를 반환한다.
 - **PL-57CF86EF와는 다른 메커니즘이다**: PL-57CF86EF는 *이미 4KiB
   단위로 흩어져 매핑된* 페이지들을 나중에 2MiB로 병합/재분할하는
   기능이고, 여기서 필요한 건 *처음부터* 물리적으로 연속인 2MiB
@@ -257,11 +261,16 @@ struct BridgePipe {
   [갱신, 2026-09-15] PN-D28DD9F3(PL-57CF86EF) 구현 완료로
   `Paging::mapRange`가 2M 정렬+물리 연속+빈 슬롯 조건을 만족하면
   실제로 2M PS 하나로 매핑하는 경로를 이미 제공한다 - "이 기능이
-  `Paging`에 아직 없다"는 더 이상 사실이 아니다. 다만 이 Channel
-  링버퍼 huge page 지원 자체(계획 PN-34B34DB4)는 그 인프라를 아직
-  실제로 연결하지 않은 `scheduled` 상태이므로, v1의 "huge page 요청은
-  항상 실패 코드 반환" 정책(아래 "링버퍼 크기 정책" 절)은 그대로
-  유효하다 - 남은 건 순수 배선 작업.
+  `Paging`에 아직 없다"는 더 이상 사실이 아니다. **[구현 완료,
+  2026-09-16, PN-34B34DB4, commit 2e183a7]** Channel 링버퍼 huge
+  page 지원 자체도 이제 실제로 연결됐다 - `useHugePage=true`는 더
+  이상 즉시 실패하지 않는다. 실제로는 `Paging::mapRange`조차 필요
+  없었다(이 링버퍼가 유저 주소공간에 매핑되지 않는 순수 커널 내부
+  메모리라, direct map 덕분에 `PageFrameAllocator::allocOrder(9)`가
+  돌려준 물리주소를 `kPhysToVirt()`로 바로 커널 가상주소로 쓸 수
+  있었다 - PN-34B34DB4 상세 참고). 아래 "링버퍼 크기 정책" 절의
+  "v1은 huge page 요청을 항상 실패시킨다"는 서술은 이제 과거형(v1
+  범위였던 것)으로 읽는다.
 
 ## Channel ID 전달 (범위 밖 - 교차 참조만, 계획 PN-6D497EB0)
 
