@@ -8,6 +8,12 @@ namespace kernel {
 
 class Waitable;  // 포인터로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2)
 
+// SP-0666DB3C §11 - 명시적(explicit) TLS 슬롯 개수. Task::tlsSlots의
+// 배열 크기이자 TlsRegistry::allocateSlot()(tls.h)의 발급 상한이라
+// 두 파일이 서로를 포함하지 않도록 이 값 자체를 Task와 같은 헤더에
+// 둔다(ThreadLocal<T>/TlsRegistry 전체 선언은 tls.h 참고).
+constexpr uint32_t kMaxTlsSlots = 16;  // 실측 후 조정(RM-23F4B687 §4 원칙)
+
 // 스케줄러의 최소 스케줄링 단위(PL-2D3184BC, 설계자 지시, QU-BA001D73,
 // 2026-09-14 - "커널 작업은 태스크(Task)라 명명하고, 이걸 사용한다.
 // 일반적인 프로세스는 다수의 쓰레드를 가질 수 있으며 각 쓰레드는
@@ -98,6 +104,13 @@ struct Task {
     // this)로 정확히 그 코어에서 재개시키는 데 쓴다(다른 코어로 옮겨
     // 깨우는 로드밸런싱은 v1 범위 밖, §5-1).
     uint32_t parkedCoreIndex = 0;
+
+    // 명시적(explicit) Thread Local Storage 슬롯 배열(SP-0666DB3C §11) -
+    // 진짜 컴파일러 thread_local이 아니라 TlsRegistry::allocateSlot()로
+    // 발급받은 인덱스를 ThreadLocal<T>가 그대로 이 배열에 꽂아 쓴다.
+    // 각 슬롯이 가리키는 실제 인스턴스의 생성/해제는 그 슬롯을 발급받은
+    // 서브시스템 책임 - Task 자신은 포인터 배열만 소유한다.
+    void* tlsSlots[kMaxTlsSlots] = {};
 
     // 커널 스택을 새로 할당하고, entry(arg)를 처음 실행할 준비가 된
     // 상태로 초기화한다(트램폴린 스택 프레임 구성) - 스케줄러 큐에
