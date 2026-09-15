@@ -55,6 +55,41 @@ void BridgePipe::destroyPair(BridgePipe* a, BridgePipe* b) {
     GenericSlabAllocator::free(b, sizeof(BridgePipe));
 }
 
+// 이 아래 익명 네임스페이스(핸들러 구현체들) 안에서도 호출해야 하므로
+// 그 바깥, kernel 네임스페이스 스코프에 정의한다 - channel.h의 선언과
+// 같은(외부) 링키지를 가져야 livefs.cpp에서도 호출 가능하다(익명
+// 네임스페이스 안에 두면 내부 링키지 버전이 새로 생겨 헤더 선언과
+// 모호해진다).
+Channel* kCreateNamedChannel(const char* name, uint64_t nameLength, ChannelError* outError) {
+    void* mem = GenericSlabAllocator::alloc(sizeof(Channel));
+    if (!mem) {
+        *outError = ChannelError::ResourceExhausted;
+        return nullptr;
+    }
+    auto* channel = reinterpret_cast<Channel*>(mem);
+    channel->init();
+
+    if (nameLength > 0) {
+        if (nameLength > kMaxNamedObjectNameLength) {
+            GenericSlabAllocator::free(mem, sizeof(Channel));
+            *outError = ChannelError::NameInUse;  // 길이 초과도 "사용 불가"로 뭉뚱그림 - 세분화 불필요
+            return nullptr;
+        }
+        if (!NamedObjectTable::reserve(name, nameLength, NamedObjectKind::Channel,
+                                        reinterpret_cast<uint64_t>(channel))) {
+            GenericSlabAllocator::free(mem, sizeof(Channel));
+            *outError = ChannelError::NameInUse;
+            return nullptr;
+        }
+        channel->hasName = true;
+        channel->nameLength = nameLength;
+        memcpy(channel->name, name, nameLength);
+    }
+
+    *outError = ChannelError::None;
+    return channel;
+}
+
 namespace {
 
 // closeBridge()가 이 반쪽을 닫을 때 상대 쪽에서 깨워야 할 대기자를
@@ -90,32 +125,10 @@ class OpenChannelHandler : public AsyncTaskHandler {
 public:
     void onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<OpenChannelArgs*>(argsRaw);
-        void* mem = GenericSlabAllocator::alloc(sizeof(Channel));
-        if (!mem) {
-            args->error = ChannelError::ResourceExhausted;
+        Channel* channel = kCreateNamedChannel(args->name, args->nameLength, &args->error);
+        if (!channel) {
             return;
         }
-        auto* channel = reinterpret_cast<Channel*>(mem);
-        channel->init();
-
-        if (args->nameLength > 0) {
-            if (args->nameLength > kMaxNamedObjectNameLength) {
-                GenericSlabAllocator::free(mem, sizeof(Channel));
-                args->error = ChannelError::NameInUse;  // 길이 초과도 "사용 불가"로 뭉뚱그림 - 세분화 불필요
-                return;
-            }
-            if (!NamedObjectTable::reserve(args->name, args->nameLength, NamedObjectKind::Channel,
-                                            reinterpret_cast<uint64_t>(channel))) {
-                GenericSlabAllocator::free(mem, sizeof(Channel));
-                args->error = ChannelError::NameInUse;
-                return;
-            }
-            channel->hasName = true;
-            channel->nameLength = args->nameLength;
-            memcpy(channel->name, args->name, args->nameLength);
-        }
-
-        args->error = ChannelError::None;
         args->channelId = reinterpret_cast<uint64_t>(channel);
         args->channelHandle = args->channelId;
     }

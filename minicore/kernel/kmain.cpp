@@ -12,6 +12,7 @@
 #include "libkenv/types.h"
 #include "ioapic.h"
 #include "lapic.h"
+#include "livefs.h"
 #include "multiboot2.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
@@ -336,6 +337,15 @@ void kSpawnServiceProcesses() {
         kernel::Serial::write(", entry=");
         kernel::Serial::writeHex(gServiceImage[i].entryPoint());
         kernel::Serial::write("\n");
+
+        // Tier A/B 예약(SP-00CA7175 §2.0, PN-7AC01E6E 항목 4) - 이
+        // 서비스가 나중에 livefs를 통해 `/sys/live/kernel/<name>`을 열면
+        // (아직 livefs 자체 미구현 - PN-71C2B857) 이 자리를 받아간다.
+        if (!kernel::KernelReservedTable::reserveForKernelService(svc.name, svc.nameLength)) {
+            kernel::Serial::write("minicore: kernel-reserved slot allocation FAILED (non-fatal): ");
+            kernel::Serial::write(svc.name);
+            kernel::Serial::write("\n");
+        }
     }
 }
 
@@ -521,6 +531,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 자체를 한 곳에만 둔다).
     kernel::Channel::registerSyscallEndpoints();
     kernel::Serial::write("minicore: channel IPC syscall endpoints registered\n");
+
+    // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
+    // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에
+    // 예약을 걸기 전에 초기화돼 있어야 한다.
+    kernel::KernelReservedTable::init();
+    kernel::Serial::write("minicore: kernel-reserved table ready\n");
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).

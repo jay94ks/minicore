@@ -59,6 +59,14 @@ constexpr uint64_t kChannelRingBufferSize = 4096;
 class Channel;
 struct BridgePipe;
 
+// Channel 생성 로직 팩터링(SP-00CA7175 §2.0a) - alloc+init+
+// (있으면)NamedObjectTable::reserve까지 한 번에 한다. openChannel
+// syscall 핸들러(name은 유저 제공, nullptr/길이 0이면 이름 없이)와
+// KernelReservedTable::reserveForKernelService(name=nullptr로 호출 -
+// NamedObjectTable에 등록하지 않아야 하는 이유는 livefs.h 참고) 양쪽이
+// 공유한다 - 순수 리팩터링, openChannel의 기존 동작은 무변경.
+Channel* kCreateNamedChannel(const char* name, uint64_t nameLength, ChannelError* outError);
+
 // AsyncTask 여러 개를 FIFO로 대기시키는 침습적 큐 - AsyncTask::next를
 // 재사용한다(파킹돼 있는 동안엔 AsyncReactor 실행 큐에 없어 비어
 // 있음 - kernel::Task가 WaitQueue에서 Task::next를 재사용하는 것과
@@ -172,6 +180,14 @@ public:
     uint64_t nameLength = 0;
     char name[kMaxNamedObjectNameLength] = {};
 
+    // Tier B(SP-00CA7175 §2.2, "ExclusivePreemptiveChannel") - true면
+    // 이 Channel의 accept/read/write에서 파생된 AsyncTask가 그 코어의
+    // AsyncReactor 실행 큐에서 일반 우선순위보다 앞서 처리돼야 한다.
+    // 기본값 false(기존 Channel 동작 무변경) - kCreateNamedChannel()로
+    // 만든 뒤 KernelReservedTable::reserveForKernelService()만 명시적으로
+    // true로 설정한다(§2.0a).
+    bool exclusivePreemptive = false;
+
     // connectChannel이 채워 넣고 acceptFromChannel이 꺼내가는 FIFO -
     // lock으로 이미 보호되므로 침습적 포인터에 원자 연산이 필요 없다.
     PendingConnectRequest* pendingHead = nullptr;
@@ -192,6 +208,7 @@ public:
         destroyed = false;
         hasName = false;
         nameLength = 0;
+        exclusivePreemptive = false;
         pendingHead = nullptr;
         pendingTail = nullptr;
         pendingAccepters.head = nullptr;
