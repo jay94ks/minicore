@@ -180,11 +180,44 @@ namespace {
 Spinlock gKernelAddressSpaceLock;
 MapleTree gKernelAddressSpaceTree;
 
+// SP-2AAD7C8D §2.1(QU-4E9F1C36 설계자 답변, 2026-09-15) - 이 관리자가
+// 조작하는 건 항상 "모든 PML4가 공유하는 상위 레벨 테이블"이어야
+// 한다는 걸 코드 레벨에서 보장하기 위해, "현재 CR3"가 아니라 이
+// 마스터 PML4를 명시적으로 타깃팅한다. `init()`은 `TlbShootdown::
+// init()` 직후, 어떤 프로세스도 생성되기 전에 BSP에서 한 번만
+// 호출됨이 부팅 시퀀스로 보장돼 있으므로(kmain.cpp), 이 시점의
+// `Paging::currentPml4Phys()`는 항상 부팅 PML4다(scheduler.cpp가
+// `gBootPml4Phys`를 캡처하는 것과 정확히 같은 논리 - 그 전역을 이
+// 파일에서 직접 참조할 순 없어 여기서 독립적으로 한 번 더 캡처한다).
+uint64_t gKernelMasterPml4Phys = 0;
+
 }  // namespace
 
 void KernelAddressSpaceManager::init() {
     gKernelAddressSpaceTree.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
     gKernelAddressSpaceTree.init();
+
+    gKernelMasterPml4Phys = Paging::currentPml4Phys();
+
+    // **비판적 재검토로 발견된 잠복 버그의 수정(QU-4E9F1C36, SP-2AAD7C8D
+    // §2.1)**: `Paging::createAddressSpace()`는 프로세스 생성 "시점"의
+    // PML4 상위 절반(256~511)을 엔트리째로 한 번만 스냅샷 복사한다 -
+    // `kLazyZoneBase`가 속한 PML4 슬롯이 그 어떤 프로세스보다도 먼저
+    // present 상태가 아니면, `mapRegion()`의 첫 실제 호출이 하필 어떤
+    // 유저 프로세스의 CR3 위에서 일어나는 순간 그 프로세스 하나의
+    // PML4에만 매핑이 생기고 이미 존재하는 다른 프로세스/부팅 PML4는
+    // 그 매핑을 영원히 모르게 된다. 그래서 여기서 더미 매핑+즉시 해제
+    // 왕복으로 PML4E(및 그 아래 PDPT/PD/PT 체인)를 미리 만들어 둔다 -
+    // `unmapPage()`는 leaf PTE만 지우고 중간 테이블 자체는 그대로
+    // 남기므로(kRollbackMapped와 동일한 전제), 이후 어떤
+    // `createAddressSpace()`가 이 슬롯을 스냅샷해 가도 이미 유효한
+    // PDPT를 공유하게 된다.
+    const uint64_t dummyPhys = PageFrameAllocator::allocPage();
+    if (dummyPhys) {
+        Paging::mapPage(kLazyZoneBase, dummyPhys, PAGE_WRITABLE, gKernelMasterPml4Phys);
+        Paging::unmapPage(kLazyZoneBase, gKernelMasterPml4Phys);
+        PageFrameAllocator::freePage(dummyPhys);
+    }
 }
 
 bool KernelAddressSpaceManager::mapRegion(uint64_t length, uint64_t flags, uint64_t* outAddr) {
@@ -210,27 +243,29 @@ bool KernelAddressSpaceManager::mapRegion(uint64_t length, uint64_t flags, uint6
     vma->prot = flags;
     vma->backing = VmaBacking::Anonymous;
 
-    // 커널 영역은 모든 PML4가 higher-half를 공유하므로(Paging::
-    // createAddressSpace) pml4Phys=0(현재 CR3)으로 매핑해도 다른 모든
-    // 프로세스 주소공간에서 즉시 같은 매핑이 보인다 - 어느 프로세스
-    // 컨텍스트에서 이 함수를 부르든 상관없다.
+    // **`gKernelMasterPml4Phys`를 명시적으로 타깃팅한다**(SP-2AAD7C8D
+    // §2.1 - QU-4E9F1C36 방어적 보강) - `init()`이 이미 이 PML4 슬롯의
+    // PDPT를 선점해 둬서(위 주석 참고) 어차피 모든 PML4가 이 슬롯을
+    // 공유하므로 "현재 CR3"에 매핑해도 기능상으로는 동일하지만,
+    // "이 호출은 항상 공유 상위 테이블만 조작한다"를 우연한 동작이
+    // 아니라 코드 레벨에서 보장하기 위해 매번 이 값을 명시한다.
     uint64_t mappedBytes = 0;
     for (; mappedBytes < lengthAligned; mappedBytes += kPageSize4K) {
         const uint64_t physAddr = PageFrameAllocator::allocPage();
         if (!physAddr) {
             break;
         }
-        Paging::mapPage(start + mappedBytes, physAddr, flags, 0);
+        Paging::mapPage(start + mappedBytes, physAddr, flags, gKernelMasterPml4Phys);
     }
 
     if (mappedBytes < lengthAligned) {
-        kRollbackMapped(0, start, mappedBytes, VmaBacking::Anonymous);
+        kRollbackMapped(gKernelMasterPml4Phys, start, mappedBytes, VmaBacking::Anonymous);
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
 
     if (!gKernelAddressSpaceTree.store(vma->start, vma->end, vma)) {
-        kRollbackMapped(0, start, lengthAligned, VmaBacking::Anonymous);
+        kRollbackMapped(gKernelMasterPml4Phys, start, lengthAligned, VmaBacking::Anonymous);
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
@@ -256,7 +291,7 @@ bool KernelAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
     }
     auto* vma = static_cast<Vma*>(value);
 
-    kRollbackMapped(0, alignedAddr, lengthAligned, vma->backing);
+    kRollbackMapped(gKernelMasterPml4Phys, alignedAddr, lengthAligned, vma->backing);
     gKernelAddressSpaceTree.erase(rangeStart, rangeEnd);
     GenericSlabAllocator::free(vma, sizeof(Vma));
 
