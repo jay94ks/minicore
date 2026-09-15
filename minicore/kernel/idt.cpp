@@ -6,6 +6,7 @@
 #include "paging.h"
 #include "scheduler.h"
 #include "serial.h"
+#include "syscall.h"
 #include "timer.h"
 
 namespace {
@@ -247,21 +248,45 @@ void kPanic(kernel::InterruptFrame* frame) {
     }
 }
 
-// 레거시 syscall 트랩(vector 0x80) 진입점 - PN-124C105B. 게이트 자체
-// (DPL=3, Idt::init() 참고)는 이미 동작하지만, 실제 endpointId/args
-// 레지스터 배치와 syscall(제출)/waitForSyscall(대기) 두 동작을 어떻게
-// 구분할지는 아직 설계자 확정 대기 중이다(QU-E7E51931, SP-04EE2A18
-// "유저랜드 ABI" 절 - "정확한 구현은 PL에서"로 남겨진 부분). 지금은
-// 아무도 이 벡터를 실제로 트리거할 ring3 코드가 없어(프로세스
-// 생성/exec, PN-16CA347D 6번 미착수) 이 경로 자체가 호출될 일이
-// 없다 - 답변이 오는 대로, 그리고 실제로 실행할 ring3 코드가 생기는
-// 대로(6번과 함께) 여기서 Syscall::submit/wait로 이어붙인다.
+// 레거시 syscall 트랩(vector 0x80) 진입점 - PN-124C105B. SP-04EE2A18
+// "유저랜드 ABI" 절이 "정확한 구현은 PL에서"로 남겨 둔 레지스터
+// ABI가 QU-E7E51931/QU-CD6F68B7(설계자 답변, 2026-09-15)로 확정됐다 -
+// RAX(진입 시)="verb" 코드로 제출/대기를 구분한다(System V/Linux
+// syscall 관례 그대로 - RAX가 최초엔 syscall 번호, 반환 시 결과값
+// 으로 재사용되는 패턴을 그대로 적용한 것이지 SyscallEndpointId/
+// RM-48E1E610 표와는 별개의 작은 내부 상수다):
+//   0(submit) - RDI=endpointId(SyscallEndpointId), RSI=args(void*)
+//               반환: RAX=token(AsyncTaskManageCode, 실패 시 0)
+//   1(wait)   - RDI=token(AsyncTaskManageCode)
+//               반환: RAX=result(1=성공/Completed, 0=실패·무효)
+// waitForMultipleSyscall/waitAnyForMultipleSyscall용 verb 번호와 그쪽
+// 레지스터 배치는 이 답변 범위 밖(QU-CD6F68B7 본문 참고) - 필요해지면
+// 별도로 확정한다.
+//
+// **여전히 실행될 수 없는 경로다**: `Syscall::submit`/`wait`는 반드시
+// UserThread 컨텍스트에서만 호출 가능한데(syscall.h 참고), 이 벡터를
+// 실제로 트리거할 ring3 코드/프로세스 모델이 아직 없다(PN-16CA347D
+// 6번 미착수) - ABI 자체는 여기서 확정 반영해 두고, 실제 실행 검증은
+// 6번(프로세스 생성/exec)과 함께 진행한다.
+constexpr kernel::uint64_t kSyscallVerbSubmit = 0;
+constexpr kernel::uint64_t kSyscallVerbWait = 1;
+
 void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
-    kernel::Serial::write("\nminicore: PANIC - syscall trap(int 0x80) fired but ABI not yet wired (QU-E7E51931)\n  rip=");
-    kernel::Serial::writeHex(frame->rip);
-    kernel::Serial::write("\n");
-    for (;;) {
-        asm volatile("cli; hlt");
+    switch (frame->rax) {
+        case kSyscallVerbSubmit: {
+            const auto endpointId = static_cast<kernel::SyscallEndpointId>(frame->rdi);
+            void* args = reinterpret_cast<void*>(frame->rsi);
+            frame->rax = static_cast<kernel::uint64_t>(kernel::Syscall::submit(endpointId, args));
+            break;
+        }
+        case kSyscallVerbWait: {
+            const auto token = static_cast<kernel::AsyncTaskManageCode>(frame->rdi);
+            frame->rax = kernel::Syscall::wait(token) ? 1 : 0;
+            break;
+        }
+        default:
+            frame->rax = 0;  // 알 수 없는 verb - 실패로 취급(v1, 새 DC 불필요 수준)
+            break;
     }
 }
 
