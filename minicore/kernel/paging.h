@@ -76,6 +76,29 @@ public:
     // 전혀 건드리지 않아 더 안전하다(SP-8B6B8D25 §5).
     static void mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags, uint64_t pml4Phys = 0);
 
+    // [PL-57CF86EF 병합 경로 (a): 매핑 시점 즉시 대형 페이지] virtualAddr/
+    // physicalAddr/sizeBytes로 지정된 범위를 매핑한다 - 결과(각 4KiB
+    // 주소가 가리키는 물리 프레임)는 mapPage()를 sizeBytes/4096번
+    // 반복 호출하는 것과 완전히 동일하지만, 2MiB로 정렬된(가상/물리
+    // 둘 다) 부분 구간이면서 그 PD 슬롯이 아직 완전히 비어 있는
+    // 경우에 한해 그 구간만 PD 레벨 PS 비트로 즉시 2MiB 페이지 하나로
+    // 매핑한다(페이지 테이블 엔트리 개수만 줄어듦 - 이미 그 자리에
+    // 뭔가 매핑돼 있으면 기존 내용을 잃어버리지 않도록 안전하게 4KiB
+    // 단위로 물러난다). 나머지(정렬에서 벗어난 자투리, 이미 뭔가
+    // 있는 슬롯)는 그대로 mapPage()로 4KiB씩 처리한다.
+    static void mapRange(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t sizeBytes, uint64_t flags, uint64_t pml4Phys = 0);
+
+    // [PL-57CF86EF 병합 경로 (c): 명시적 API 호출] [virtualAddr,
+    // virtualAddr+sizeBytes) 범위를 2MiB 정렬 구간 단위로 훑어, 이미
+    // 4KiB 단위로 매핑돼 있으면서 병합 불변 조건(512개 엔트리 전부
+    // present + 물리주소 연속 + PAGE_WRITABLE/PAGE_USER/
+    // PAGE_CACHE_DISABLE 전부 동일)을 만족하는 구간을 그 자리에서
+    // 2MiB PS 엔트리로 합친다 - 남는 PT 프레임만 반납하고(가리키던
+    // 물리 리프 페이지는 그대로 유지) 실제 매핑 내용은 바뀌지 않는다.
+    // 조건을 만족하지 않는 구간(재배치가 필요한 경우 - 병합 경로 (b)
+    // 몫)은 건드리지 않고 그대로 둔다. 하나 이상 병합했으면 true.
+    static bool mergeRange(uint64_t virtualAddr, uint64_t sizeBytes, uint64_t pml4Phys = 0);
+
     // 매핑을 해제한다(TLB도 무효화) - 매핑돼 있지 않으면 아무 일도
     // 안 한다. pml4Phys 의미는 mapPage와 동일(생략 시 현재 CR3).
     static void unmapPage(uint64_t virtualAddr, uint64_t pml4Phys = 0);

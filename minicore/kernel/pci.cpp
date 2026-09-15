@@ -148,10 +148,14 @@ void Pci::init() {
         return;  // bus 0이 이 세그먼트에 없음 - 레거시로만 동작(드문 구성, 관계도에 기록)
     }
     gMcfgBusOffset = Acpi::mcfgBaseAddress();
-    Paging::mapPage(kMmconfigBus0VirtBase, gMcfgBusOffset, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
-    for (uint64_t off = kMmconfigPerFunctionSize; off < kMmconfigBus0Size; off += kMmconfigPerFunctionSize) {
-        Paging::mapPage(kMmconfigBus0VirtBase + off, gMcfgBusOffset + off, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
-    }
+    // PL-57CF86EF - 예전엔 4KiB씩 256번 mapPage()를 불렀다. 지금은
+    // Paging::mapRange()가 그 판단(2M 정렬+연속이면 즉시 대형 페이지,
+    // 아니면 4K 폴백)을 대신한다 - kMmconfigBus0Size(1MiB)는 2MiB보다
+    // 작아 이 호출 자체는 항상 4K 폴백만 타지만(가상/물리 어느 쪽이든
+    // 2M 정렬을 만족해도 remaining>=2MiB 조건 미달), 결과는 이전과
+    // 완전히 동일하고 향후 이 창이 넓어지면(다중 세그먼트/버스 지원)
+    // 별도 수정 없이 자동으로 대형 페이지 이득을 본다.
+    Paging::mapRange(kMmconfigBus0VirtBase, gMcfgBusOffset, kMmconfigBus0Size, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
     gUseMmconfigBus0 = true;
 }
 
