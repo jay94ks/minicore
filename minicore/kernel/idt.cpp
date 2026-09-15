@@ -243,6 +243,54 @@ void kPanic(kernel::InterruptFrame* frame) {
         kernel::Serial::write("\n");
     }
 
+    // PN-63BCFE45 진단 강화 - rip/cs/rflags/cr2만으로는 이번 멀티
+    // 프로세스 크래시(특히 #DB/TF처럼 보이는 증상)가 진짜 레지스터
+    // 상태인지 스택/프레임 손상의 2차 증상인지 구분이 안 돼서, 이미
+    // InterruptFrame에 있는 전체 GPR + rsp/rbp + 그 순간의 CR3까지
+    // 함께 덤프하도록 넓혔다 - 앞으로의 크래시 진단에도 일반적으로
+    // 유용하다.
+    kernel::Serial::write("  rax=");
+    kernel::Serial::writeHex(frame->rax);
+    kernel::Serial::write(" rbx=");
+    kernel::Serial::writeHex(frame->rbx);
+    kernel::Serial::write(" rcx=");
+    kernel::Serial::writeHex(frame->rcx);
+    kernel::Serial::write(" rdx=");
+    kernel::Serial::writeHex(frame->rdx);
+    kernel::Serial::write("\n  rsi=");
+    kernel::Serial::writeHex(frame->rsi);
+    kernel::Serial::write(" rdi=");
+    kernel::Serial::writeHex(frame->rdi);
+    kernel::Serial::write(" rbp=");
+    kernel::Serial::writeHex(frame->rbp);
+    kernel::Serial::write(" rspOld=");
+    kernel::Serial::writeHex(frame->rspOld);
+    kernel::Serial::write("\n  ssOld=");
+    kernel::Serial::writeHex(frame->ssOld);
+    kernel::Serial::write(" r8=");
+    kernel::Serial::writeHex(frame->r8);
+    kernel::Serial::write(" r9=");
+    kernel::Serial::writeHex(frame->r9);
+    kernel::Serial::write(" r10=");
+    kernel::Serial::writeHex(frame->r10);
+    kernel::Serial::write("\n  r11=");
+    kernel::Serial::writeHex(frame->r11);
+    kernel::Serial::write(" r12=");
+    kernel::Serial::writeHex(frame->r12);
+    kernel::Serial::write(" r13=");
+    kernel::Serial::writeHex(frame->r13);
+    kernel::Serial::write(" r14=");
+    kernel::Serial::writeHex(frame->r14);
+    kernel::Serial::write("\n  r15=");
+    kernel::Serial::writeHex(frame->r15);
+    {
+        kernel::uint64_t cr3;
+        asm volatile("mov %%cr3, %0" : "=r"(cr3));
+        kernel::Serial::write(" cr3=");
+        kernel::Serial::writeHex(cr3);
+    }
+    kernel::Serial::write("\n");
+
     for (;;) {
         asm volatile("cli; hlt");
     }
