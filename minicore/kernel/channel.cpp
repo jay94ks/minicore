@@ -178,7 +178,10 @@ public:
             accepter = channel->pendingAccepters.popFront();
         }
         if (accepter) {
-            AsyncReactor::submitCompletion(accepter);
+            // 이 completion은 connectChannel/acceptFromChannel 핸드셰이크
+            // 자체(§2.2 "acceptFromChannel 등에서 파생된 것")라 channel이
+            // 스코프에 있다 - exclusivePreemptive를 그대로 전달.
+            AsyncReactor::submitCompletion(accepter, channel->exclusivePreemptive);
         }
 
         while (!req.done) {
@@ -226,14 +229,14 @@ public:
             if (!BridgePipe::createPair(req->useHugePage, &serverSide, &clientSide)) {
                 req->rejected = true;
                 req->done = true;
-                AsyncReactor::submitCompletion(req->task);
+                AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
                 return;
             }
 
             req->resultBridge = clientSide;
             req->done = true;
-            AsyncReactor::submitCompletion(req->task);
+            AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
 
             args->bridge = reinterpret_cast<uint64_t>(serverSide);
             args->error = ChannelError::None;
@@ -276,6 +279,10 @@ public:
                 }
             }
             if (wakeWriter) {
+                // BridgePipe에는 원본 Channel로의 역참조가 없어 여기서는
+                // exclusivePreemptive를 판단할 수 없다(async_task.h의
+                // submitCompletion 주석/PN-7AC01E6E 항목 6 참고) - 기본값
+                // (false)으로 남긴다.
                 AsyncReactor::submitCompletion(wakeWriter);
             }
             if (done) {
@@ -321,6 +328,8 @@ public:
                 }
             }
             if (wakeReader) {
+                // wakeWriter와 같은 이유(위 ChannelReadHandler 참고) -
+                // BridgePipe 단계라 exclusivePreemptive 판단 불가, 기본값.
                 AsyncReactor::submitCompletion(wakeReader);
             }
             if (done) {
@@ -389,7 +398,7 @@ public:
         // PN-C9625015)를 깨운다 - 각자 다시 락을 잡고 channel->destroyed
         // 를 확인해 NotFound로 반환한다.
         for (AsyncTask* t = accepters.popFront(); t; t = accepters.popFront()) {
-            AsyncReactor::submitCompletion(t);
+            AsyncReactor::submitCompletion(t, channel->exclusivePreemptive);
         }
         // 대기 중이던 connectChannel 호출들을 전부 실패로 깨운다
         // (설계 문서 destroyChannel 절 그대로).
@@ -397,7 +406,7 @@ public:
             PendingConnectRequest* next = req->next;
             req->rejected = true;
             req->done = true;
-            AsyncReactor::submitCompletion(req->task);
+            AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
             req = next;
         }
 

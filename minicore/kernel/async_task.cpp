@@ -72,6 +72,13 @@ private:
 
 AsyncTaskQueue gExecQueues[kMaxCores];
 
+// 선점 큐(SP-00CA7175 §2.2, PN-7AC01E6E 항목 6) - exclusivePreemptive
+// Channel의 connectChannel/acceptFromChannel 핸드셰이크 완료에서만
+// 채워진다(async_task.h의 submitCompletion 주석 참고). reactorTaskEntry가
+// 매 루프마다 이 큐를 gExecQueues보다 먼저 비운다 - 그 외에는 완전히
+// 동일한 큐 구현을 재사용.
+AsyncTaskQueue gPreemptiveQueues[kMaxCores];
+
 // 이 코어에서 지금 실행/재개 중인 AsyncTask - reactorTaskEntry만
 // 갱신한다. nullptr이면 리액터가 popFront()/parkCurrent() 사이 어딘가.
 kernel::AsyncTask* gCurrentAsyncTask[kMaxCores] = {};
@@ -232,7 +239,11 @@ void AsyncReactor::initForThisCore() {
 void AsyncReactor::reactorTaskEntry(void*) {
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
     for (;;) {
-        AsyncTask* task = gExecQueues[coreIndex].popFront();
+        // 선점 큐(§2.2)를 항상 먼저 확인한다 - 비어 있으면 일반 큐로.
+        AsyncTask* task = gPreemptiveQueues[coreIndex].popFront();
+        if (!task) {
+            task = gExecQueues[coreIndex].popFront();
+        }
         if (!task) {
             // gReactorParked를 "진짜로 블로킹되는" 이 순간에만 true로
             // 세운다 - cli로 이 대입과 parkCurrent()의 실제 전환 사이를
@@ -310,9 +321,13 @@ void AsyncReactor::reactorTaskEntry(void*) {
     }
 }
 
-void AsyncReactor::submitCompletion(AsyncTask* task) {
+void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
-    gExecQueues[coreIndex].pushBack(task);
+    if (preemptive) {
+        gPreemptiveQueues[coreIndex].pushBack(task);
+    } else {
+        gExecQueues[coreIndex].pushBack(task);
+    }
     // 실측으로 발견한 경쟁(2026-09-14, Channel IPC 스트레스 테스트):
     // 원래 여기서는 Scheduler::currentTask() != &gReactorTasks[coreIndex]
     // 로 "리액터가 지금 안 돌고 있다"를 판단했는데, 스케줄러 틱이

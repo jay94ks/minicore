@@ -139,7 +139,21 @@ public:
     // AsyncTask를 이 코어의 실행 큐에 push하고, 리액터가 파킹돼 있으면
     // Scheduler::scheduleImmediate로 즉시 깨운다(이미 실행 중이면 다음
     // 자기 루프에서 자연히 집어가므로 다시 깨울 필요가 없다).
-    static void submitCompletion(AsyncTask* task);
+    //
+    // preemptive=true(SP-00CA7175 §2.2, PN-7AC01E6E 항목 6)면 일반 큐가
+    // 아니라 선점 큐에 넣는다 - reactorTaskEntry가 매 루프마다 선점 큐를
+    // 먼저 비운다. 호출부가 그 자리에서 "이 완료가 exclusivePreemptive
+    // Channel에서 파생된 것인지" 판단할 수 있을 때만(channel.cpp의
+    // connectChannel/acceptFromChannel 핸드셰이크 완료 지점 - Channel*가
+    // 직접 스코프에 있는 곳) true로 넘긴다. ChannelRead/Write는 연결
+    // 이후의 BridgePipe(Channel과 무관한 별개 구조체)에서만 동작해
+    // 여기서 판단할 방법이 없어 기본값(false)으로 남는다 - 설계자 답변
+    // (QU-1D44FA84)은 read/write도 선점 대상이어야 한다고 했으나, 그걸
+    // 위해서는 BridgePipe에 새 필드가 필요해 그 답변의 "새 필드 불필요"
+    // 부분과 충돌한다 - 실제 Tier B 소비자가 생겨 이 간극이 실제로
+    // 문제가 될 때 재확인한다(지금은 어떤 devmgr/fs/net/tty도 구현돼
+    // 있지 않아 read/write 우선순위 차이가 실측될 수 없다).
+    static void submitCompletion(AsyncTask* task, bool preemptive = false);
 };
 
 }  // namespace kernel
