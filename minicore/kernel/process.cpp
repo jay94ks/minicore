@@ -2,10 +2,12 @@
 
 #include "gdt.h"
 #include "libelf/elf.h"
+#include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "scheduler.h"
 #include "syscall.h"
+#include "waitable.h"
 
 namespace {
 
@@ -163,6 +165,28 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
     thread->init(kEnterRing3, nullptr);
     mainThread = thread;
     return thread;
+}
+
+bool Process::raiseSignal(SignalNumber number) {
+    if (number == SignalNumber::None) {
+        return false;
+    }
+    pendingSignals.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+    PendingSignal sig;
+    sig.number = number;
+    sig.used = true;
+    if (!pendingSignals.insert(sig)) {
+        return false;  // 자원 고갈 - 다른 ChunkedList 소비자와 동일한 정책
+    }
+    // §9.5 - 대기 중이면 그 자리에서 즉시 강제로 깨운다. cancel()의
+    // 반환값(성공/실패)은 여기서 참고하지 않는다 - 실패는 "이미
+    // 정상적으로 깨어난 뒤"라는 뜻이라 어차피 체크포인트 쪽에서 이
+    // pendingSignals를 나중에 발견하면 되고, 이 함수 자신은 "기록은
+    // 됐다"만 보장하면 된다.
+    if (mainThread && mainThread->blockedOn) {
+        mainThread->blockedOn->cancel(mainThread, WaitCancelReason::Signal);
+    }
+    return true;
 }
 
 }  // namespace kernel

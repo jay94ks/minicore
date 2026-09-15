@@ -148,6 +148,16 @@ public:
     // - 프로세스당 스레드 하나 전제(위 클래스 주석과 동일) - thread는
     //   호출부가 소유(동적 할당/해제는 이번 범위 밖, PN-40E976F2).
     UserThread* execImage(const elf::Image& image, UserThread* thread);
+
+    // Signal 전달(SP-0666DB3C §4.4, PN-71E50394 항목 2) - number를
+    // pendingSignals에 기록하고, mainThread가 지금 대기 중이면
+    // (blockedOn != nullptr) 그 자리에서 즉시 강제로 깨운다(§9.5,
+    // Waitable::cancel 경유). mainThread가 실행 중/비대기 상태면 여기서는
+    // 아무 것도 더 하지 않는다 - 체크포인트 방식(실행 중인 코드가 다음
+    // syscall 진입/ring3 재진입 시점에 pendingSignals를 확인하는 것)은
+    // 아직 어디에도 배선돼 있지 않다(별도 후속 항목). 실패(자원 고갈)
+    // 시 false.
+    bool raiseSignal(SignalNumber number);
 };
 
 }  // namespace kernel
