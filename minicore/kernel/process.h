@@ -27,14 +27,18 @@ enum class ProcessRole : uint8_t {
 struct ProcessStartFlags {
     // true면 이 프로세스가 종료되는 즉시(별도 감시 Task/폴링 없이,
     // SelfTerminateHandler::onExec 안에서 같은 흐름으로) `respawn`을
-    // 호출해 재생성한다. backoff/최대 재시도 상한 없음(설계자 지시를
-    // 그대로 따름, §6.4).
+    // 호출해 재생성한다. **[개정, 설계자 지시, 2026-09-15]** 무제한이
+    // 아니다 - 연속 `kMaxResurrectAttempts`회에 도달하면 재스폰 대신
+    // 커널 패닉으로 멈추다(§6.4, `Process::resurrectCount` 참고).
     bool resurrect = false;
 
     // resurrect==true일 때만 유효 - 이 프로세스를 원래와 동일한
     // 방식으로 다시 스폰하는 함수(스폰 헤퍼 자신을 가리킨, §6.2 -
     // 모듈 버퍼/경로를 이미 들고 있는 고정 스폰 경로만 v1 대상).
-    void (*respawn)() = nullptr;
+    // 인자는 새로 만들 Process에 그대로 이어 담을 `resurrectCount`
+    // (§6.4 - 호출부가 상한 확인 후 넘겨준다, 스폰 헤퍼는 이 값을
+    // 새 Process::resurrectCount에 대입하기만 하면 된다).
+    void (*respawn)(uint32_t resurrectCount) = nullptr;
 };
 
 // 유저 프로세스의 커널 쪽 표현(SP-8B6B8D25 §2-B/§5, 유저랜드 준비
@@ -56,6 +60,11 @@ struct ProcessStartFlags {
 // 실측 검증할 방법이 정해지기 전까지는 별도로 이어간다.
 class Process {
 public:
+    // §6.4 크래시 루프 방지 - 연속 5회 제한 후 커널 패닉(설계자 지시,
+    // 2026-09-15: "백오프/최대 재시도 횟수 같은 안전장치는 연속 5회
+    // 까지만 시도하고, 이후는 커널 패닉으로... 커널 서비스 자체가
+    // 커널의 역할을 보조하여 노예로서 대행하는 서비스들이기 때문").
+    static constexpr uint32_t kMaxResurrectAttempts = 5;
     // 유저 모드 페이지 폴트 정보(§2-B "그 폴트 정보는 그 프로세스
     // 자신의 자료구조(PCB)에 매달아 둔다") - 폴트가 나면 커널을 멈추지
     // 않고 이 프로세스만 멈춘 뒤 여기 기록해 둔다.
@@ -84,6 +93,14 @@ public:
     ProcessRole role = ProcessRole::Normal;
     ProcessStartFlags startFlags;
 
+    // §6.4 - `role`/`startFlags`와 달리 살아있는 동안 불변인 값이
+    // **아니다**. 재스폰마다 이어지는 런타임 카운터라 별도 필드로
+    // 둔다 - 재스폰 트리거 지점(SelfTerminateHandler::onExec)이 옷
+    // Process의 이 값을 읽어 +1 한 값을 새 Process에 명시적으로
+    // 이어줘야만 "연속 횟수"가 유지된다(그러지 않으면 새 Process가
+    // 항상 0으로 시작해 상한 자체가 무의미해진다).
+    uint32_t resurrectCount = 0;
+
     // 이 프로세스가 소유한 VMA(코드/데이터/스택 - execImage()가 채움)의
     // 장부(PN-71C3D483 항목 3, SP-2AAD7C8D §2/§4) - destroy()가 이걸로
     // 실제 페이지를 찾아 반납한다. init()이 pml4Phys 확보 직후 초기화.
@@ -104,7 +121,7 @@ public:
     // destroyAddressSpace`는 PML4 프레임 자체만 반납하고, 그 하위에
     // 매달린 PDPT/PD/PT 중간 테이블 프레임은 건드리지 않는다(leaf
     // 데이터 페이지만 이 함수가 회수 - 중간 테이블 프레임 회수는 이
-    // 항목의 스코프 밖, 별도로 추적한다).
+    // 항목의 스코프 밖, 별도로 추적한다.
     void destroy();
 
     // ELF 이미지를 이 프로세스 주소공간에 로드하고, thread(호출부가

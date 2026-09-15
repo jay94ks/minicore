@@ -8,6 +8,7 @@
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "panic.h"
 #include "process.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
@@ -261,13 +262,24 @@ public:
             // Resurrect(SP-EAB162FC §6) - destroy() 이후에도 Process
             // 객체 자체(캐스팅 근거: 정적/장기수명 인스턴스 - destroy()는
             // 주소공간만 반납할 뿐 이 구조체를 지우지 않는다)는 살아있어
-            // startFlags를 안전하게 읽을 수 있다. 재스폰은 옷 주소공간이
-            // 완전히 반납된 뒤에 한다(자원 회수 -> 재생성 순서).
+            // startFlags/resurrectCount를 안전하게 읽을 수 있다. 재스폰은
+            // 옷 주소공간이 완전히 반납된 뒤에 한다(자원 회수 -> 재생성
+            // 순서).
             Process* process = userThread->process;
             const ProcessStartFlags startFlags = process->startFlags;
+            const uint32_t newResurrectCount = process->resurrectCount + 1;
             process->destroy();
             if (startFlags.resurrect && startFlags.respawn) {
-                startFlags.respawn();
+                // §6.4 크래시 루프 방지 - 연속 kMaxResurrectAttempts회에
+                // 도달하면 재스폰을 아예 시도하지 않고 커널 전체를
+                // 멈추다("커널 서비스는 커널을 대행하는 존재라 반복
+                // 재크래시는 개별 프로세스 문제가 아니라 커널 자체가
+                // 정상 동작할 수 없는 상태" - 설계자 지시, silent
+                // degraded mode 금지).
+                if (newResurrectCount >= Process::kMaxResurrectAttempts) {
+                    kPanic("KernelService resurrect limit exceeded");
+                }
+                startFlags.respawn(newResurrectCount);
             }
         }
     }

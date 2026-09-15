@@ -3,6 +3,7 @@ add_library(minicore_kernel OBJECT
     kmain.cpp
     multiboot2.cpp
     serial.cpp
+    panic.cpp
     gdt.cpp
     idt.cpp
     page_frame_allocator.cpp

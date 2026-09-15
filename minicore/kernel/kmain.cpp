@@ -196,7 +196,7 @@ kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap,
 // 실제 첫 프로세스 기동(QA-26450C3E "유저랜드 준비", PN-16CA347D 6번
 // 마지막 조각, PN-DF4E626D) - gInitImageFound가 세팅돼 있으면(위
 // kLogCpioEntry가 이미 부팅 극초반에 채워 둘) 그 ELF를 파싱해 실제
-// Process/UserThread로 ring3 진입시키다(Process::execImage/kEnterRing3,
+// Process/UserThread로 ring3 진입시킨다(Process::execImage/kEnterRing3,
 // PN-55D24891). PageFrameAllocator/Scheduler/AsyncReactor가 전부 준비된
 // 뒤(=이 함수 호출 시점)에만 안전하다 - execImage가 유저 스택 페이지를
 // 확보하고 UserThread::init()이 커널 스택을 확보하기 때문이다.
