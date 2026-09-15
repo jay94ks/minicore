@@ -13,6 +13,7 @@
 #include "ioapic.h"
 #include "lapic.h"
 #include "livefs.h"
+#include "mount_table.h"
 #include "multiboot2.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
@@ -543,6 +544,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 예약을 걸기 전에 초기화돼 있어야 한다.
     kernel::KernelReservedTable::init();
     kernel::Serial::write("minicore: kernel-reserved table ready\n");
+
+    // VFS 마운트 테이블(SP-7CC5693A §2.1, PN-71C2B857) - 아직 실제
+    // 마운트를 거는 소비자(livefs 자체, fs 서비스의 Mount syscall)는
+    // 없다 - 테이블을 빈 상태로 준비만 해 둔다(§2.3 부팅 시퀀스가
+    // 요구하는 "MountTable::init() 직후" 시점 확보).
+    kernel::MountTable::init();
+    kernel::Serial::write("minicore: mount table ready\n");
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).
