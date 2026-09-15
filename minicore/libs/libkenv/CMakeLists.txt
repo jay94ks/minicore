@@ -2,6 +2,7 @@
 add_library(libkenv OBJECT
     mem.cpp
     cxxabi.cpp
+    maple_tree.cpp
 )
 
 # "libkenv/io_port.h"처럼 라이브러리 이름을 포함한 경로로 include하게
