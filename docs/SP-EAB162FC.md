@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-EAB162FC
   status: approved
-  updatedAt: 2026-09-15T16:12:26.501Z
+  updatedAt: 2026-09-15T16:53:41.001Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안
@@ -162,7 +162,13 @@ PnP(SP-9DD4F3EA) §3.3 `RequestIoPermission`과 인터럽트 구독
 
 ```cpp
 struct ProcessStartFlags {
-    bool resurrect = false;  // true면 이 프로세스가 종료되는 즉시 같은 스폰 파라미터로 재생성한다
+    bool resurrect = false;  // true면 이 프로세스가 종료됐을 때 §6.4의 지연/백오프 일정에 따라 재생성한다(더 이상 "즉시"가 아님 - §6.3/§6.4 개정 참고)
+    // [추가, 2026-09-15, 설계자 지시] 기존엔 "커널 서비스가 죽으면
+    // 커널이 정상동작하지 않는다"고 암묵적으로 전제했으나, 이제
+    // 그 전제를 명시적 플래그로 분리한다 - true(기본값, 기존 전제와
+    // 동일)면 이 프로세스가 죽었을 때 즉시 커널 패닉(§6.4). false면
+    // 패닉하지 않고 §6.4의 지연/백오프 일정으로만 재스폰을 시도한다.
+    bool essential = true;
 };
 ```
 
@@ -195,57 +201,71 @@ v1에서 실제로 `Resurrect`가 걸릴 대상은 §2.2의 두 고정 스폰
 성립하지 않는다. 그 syscall이 실제로 설계되는 시점에 이 플래그를
 그 API의 인자로 노출할지 함께 확정한다.
 
-### 6.3 트리거 지점
+### 6.3 트리거 지점 [개정, 2026-09-15, 설계자 지시 - "즉시" 전제 철회]
 
 `Scheduler::retireTask(target)`을 호출하는 지점(현재
 `SelfTerminateHandler::onExec`, scheduler.cpp) 직후 - 커널 스택
-회수/`Process::destroy()`가 끝난 뒤 `target->startFlags.resurrect`
-를 확인해, true면 §6.2의 재스폰 경로를 그대로 다시 호출해 새
-`Process`+`UserThread`를 만들어 `Scheduler::enqueue()`한다. **"즉시"**
-의 의미: 이 재스폰 자체가 별도 감시 Task/폴링 루프를 기다리지 않고
-같은 정리 흐름 안에서 곧바로 일어난다는 뜻이지, 다음 스케줄러 틱을
-기다리는 게 아니다.
+회수/`Process::destroy()`가 끝난 뒤 분기한다:
 
-### 6.4 크래시 루프 방지 - 연속 5회 제한 후 커널 패닉 [개정,
-설계자 지시, 2026-09-15]
+1. **`target->startFlags.essential == true`**: §6.2의 재스폰 경로를
+   시도하지 않고 그 자리에서 곧바로 `kPanic("Essential service
+   died: <프로세스명>")`류로 커널 패닉 - "커널 서비스가 죽으면
+   커널이 정상동작하지 않는다"는 원래 전제가 `essential=true`인
+   프로세스에는 여전히 그대로 적용된다(재시도해 봐야 소용없다고
+   간주 - resurrect 플래그 값과 무관하게 우선한다).
+2. **`target->startFlags.essential == false` && `resurrect == true`**:
+   더 이상 "즉시" 재스폰하지 않는다 - §6.4의 지연/백오프 일정에
+   따라 재스폰을 예약한다. 패닉하지 않는다(몇 번을 실패하든).
+3. 그 외(`resurrect == false`): 기존과 동일하게 그냥 종료(재스폰
+   없음, 패닉 없음).
 
-**변경 배경**: 이전 초안은 backoff/재시도 상한을 아예 두지 않는
-무제한 즉시 재시작을 v1으로 채택했었으나, 설계자가 직접 상한을
-지시했다: "백오프/최대 재시도 횟수 같은 안전장치는 연속 5회까지만
-시도하고, 이후는 커널 패닉으로, 커널 전체를 멈추게 만들어야 한다.
-왜냐하면 커널 서비스 자체가 커널의 역할을 보조하여 노예로서 대행하는
-서비스들이기 때문이다." - 즉 `KernelService`(devmgr/fs/net/tty/PnP
-드라이버)가 5회 연속 즉시 재크래시하면 더 이상 개별 프로세스 문제가
-아니라 커널 자체가 정상 동작할 수 없는 상태로 간주해 시스템 전체를
-멈춘다(silent degraded mode 금지).
+### 6.4 비필수 서비스 재스폰 지연/백오프 [개정, 2026-09-15, 설계자
+지시 - 무제한 즉시 재시작 폐기, 커널 패닉 조건이 §6.3의 "필수
+서비스"로 이전됨]
 
-**카운터 배치**: `Process`(§2.1 `role`과 별개 - 이건 살아있는 동안
-불변인 `ProcessStartFlags`가 아니라 **재스폰마다 이어지는 런타임
-카운터**이므로 `Process`에 직접 둔다)에 `uint32_t resurrectCount = 0`
-을 추가한다. §6.3의 재스폰 로직이 옛 `Process`(죽은 쪽, 아직
-`Process::destroy()`만 됐고 객체 자체는 살아있음 - §6.3 검증 참고)의
-`resurrectCount`를 읽어 `+1` 한 값을 새로 만드는 `Process`의
-`resurrectCount`에 그대로 넘겨준다(각 재스폰마다 새 `Process`
-인스턴스가 생기므로, 옛 인스턴스에서 새 인스턴스로 명시적으로
-이어받아야만 "연속 횟수"가 유지된다).
+**변경 배경**: 이전 초안(연속 5회까지 즉시 재시작 후 초과 시 커널
+패닉)을 설계자가 다시 정정했다: "기존에 커널 서비스가 죽으면
+커널이 정상동작 하지 않는다고 가정한다고 했었어. 그런데, 그걸
+명시적인 플래그로 `필수 서비스`가 아님을 주고, 그걸 되살리는
+간격을 조정할 수 있도록 만들며, `필수 서비스`가 죽었을 때만 `커널
+패닉`하도록 변경해야해. 그걸 되살리는 간격의 기본값은 1분이고,
+5회 실패시마다 1분씩 늘려서 최대 10분까지로 하자." - 커널 패닉의
+방아쇠는 이제 "재시도 횟수 초과"가 아니라 §6.3의 "필수 서비스
+여부" 하나뿐이다. `essential=false`인 서비스는 **패닉 없이
+무한정** 재시도하되, 재시도 간격을 실패가 누적될수록 늦춘다(자원을
+덜 태우면서 회복 가능성은 계속 열어 둠).
+
+**카운터 배치**: `Process`(§2.1 `role`과 별개, 재스폰마다 이어지는
+런타임 카운터라 `Process`에 직접 둔다)에 `uint32_t
+consecutiveFailures = 0`(기존 `resurrectCount`에서 개명 - 더 이상
+"패닉까지 남은 횟수"가 아니라 "백오프 계산용 연속 실패 횟수"이므로
+이름을 그 의미에 맞춘다)을 추가한다. 재스폰 성공 시 옛 `Process`의
+값을 그대로 이어받아 `+1`(§6.3의 옛 코드와 동일한 승계 방식).
 
 ```cpp
-constexpr uint32_t kMaxResurrectAttempts = 5;
+constexpr uint32_t kResurrectBaseIntervalMinutes = 1;    // 기본 간격
+constexpr uint32_t kResurrectBackoffStepMinutes = 1;     // 5회마다 늘어나는 폭
+constexpr uint32_t kResurrectBackoffEveryNFailures = 5;  // 이 실패 횟수마다 1단계씩
+constexpr uint32_t kResurrectMaxIntervalMinutes = 10;    // 상한
+
+uint32_t kResurrectIntervalMinutes(uint32_t consecutiveFailures) {
+    uint32_t steps = consecutiveFailures / kResurrectBackoffEveryNFailures;
+    uint32_t interval = kResurrectBaseIntervalMinutes + steps * kResurrectBackoffStepMinutes;
+    return interval < kResurrectMaxIntervalMinutes ? interval : kResurrectMaxIntervalMinutes;
+}
 ```
 
-§6.3 트리거 지점에서: `newCount = target->process->resurrectCount + 1;`
-→ `newCount >= kMaxResurrectAttempts`이면 재스폰을 아예 시도하지
-않고 `kPanic("KernelService resurrect limit exceeded: <프로세스명>")`
-류로 즉시 커널 패닉(커널 전체 정지) - 그렇지 않으면 평소대로 재스폰
-하되 새 `Process::resurrectCount = newCount`로 설정.
+예: 실패 0~4회 → 1분 간격, 5~9회 → 2분, 10~14회 → 3분, ...,
+45회 이상 → 10분(상한 고정, 그 이후로는 더 늘지 않고 영원히
+10분 간격으로 계속 시도).
 
-**"연속"의 의미(v1 단순화, RM-23F4B687 §4 취지 - 실측 후 재검토
-여지로 명시)**: 이 카운터는 현재는 리셋 조건이 없는 단조 증가
-카운터다 - "그 프로세스가 충분히 오래 살아남으면 카운터를 0으로
-되돌린다" 같은 생존 판정 인프라가 이 프로젝트에 아직 없기 때문이다.
-v1에서 `Resurrect`가 걸리는 유일한 트리거는 죽음(self-terminate
-syscall)뿐이므로, 이 단순화 아래에서는 "5회 연속 재크래시"와 "생애
-전체 5번째 재스폰 시도"가 실질적으로 같은 의미가 된다. 더 정교한
-"연속" 판정(예: N초 이상 생존하면 리셋)이 필요해지면 별도 DC로
-확장한다.
+**[열린 설계 영역, 착수 시 확정 필요]** "1분 뒤에 재스폰을 실행"할
+**지연 실행(타이머) 메커니즘 자체가 이 프로젝트에 아직 없다** -
+지금까지 스케줄러는 "즉시 재큐잉"만 다뤄 왔고, 임의 시간 뒤에
+콜백을 실행하는 범용 타이머/알람 인프라가 설계된 적이 없다(RM-32D06563
+어디에도 없음, 확인됨). PIT/APIC 타이머 틱을 세는 방식으로 직접
+구현할지, 다른 지연 실행이 필요한 곳(예: §5.3의 idle wake IPI류)과
+공유할 범용 메커니즘으로 설계할지는 이 문서 범위 밖 - **별도 SP
+필요**(PN-BEC8FB65로 후속 설계 과제 등록, CLAUDE.md 규칙 4 - 명시
+안 된 설계는 임의로 채우지 않음).
 
