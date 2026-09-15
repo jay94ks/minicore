@@ -126,7 +126,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     // (placement new 없음) - 기본 멤버 초기화식은 실행되지 않으므로
     // 여기서 전부 명시적으로 리셋해야 한다. 특히 waitingTask를 안
     // 지우면 슬랩 재사용으로 이전 점유자의 낡은 포인터가 남아, 리액터가
-    // 완료 시 엉녡한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
+    // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
     waitingTask = nullptr;
     ownerTask = nullptr;
     autoFree = true;
@@ -149,7 +149,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     *(--sp) = 0x202;                                            // RFLAGS: IF=1
     *(--sp) = 0;                                                // rbp
     *(--sp) = reinterpret_cast<uint64_t>(&kAsyncTaskEntryWrapper);  // rbx -> 트램폴린이 call
-    *(--sp) = reinterpret_cast<uint64_t>(this);                 // r12 -> 트램폴린이 rdi로 옥김
+    *(--sp) = reinterpret_cast<uint64_t>(this);                 // r12 -> 트램폴린이 rdi로 옮김
     *(--sp) = 0;                                                // r13
     *(--sp) = 0;                                                // r14
     *(--sp) = 0;                                                // r15
@@ -176,7 +176,7 @@ void AsyncTask::yield() {
     // submitCompletion은 이 AsyncTask 자체를 currentTask 여부로 분기하지
     // 않고 그냥 큐에 넣기만 하므로 이중 스케줄링 경로가 없다.
     kContextSwitch(&self->savedRsp, gReactorSavedRsp[coreIndex]);
-    // 리액터가 이 AsyncTask를 다시 뿑아 재개하면 이 지점으로 돌아온다.
+    // 리액터가 이 AsyncTask를 다시 뽑아 재개하면 이 지점으로 돌아온다.
 }
 
 AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
@@ -197,7 +197,7 @@ AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCo
     // 수 있다(경쟁).
     task->autoFree = autoFree;
     // [PN-40E976F2] 이 AsyncTask의 실제 소유자는 지금 이 호출을 하고
-    // 있는 코어의 리액터다 - submit()이 항상 그 코어에서 곷바로
+    // 있는 코어의 리액터다 - submit()이 항상 그 코어에서 곧바로
     // submitCompletion()을 부르므로(아래) 코어가 갈릴 일이 없다.
     task->ownerTask = &gReactorTasks[Scheduler::currentCoreIndex()];
     AsyncReactor::submitCompletion(task);
@@ -225,7 +225,7 @@ void AsyncReactor::initForThisCore() {
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
     gReactorTasks[coreIndex].init(reactorTaskEntry, nullptr);
     // 최초 1회는 일반 큐에 넣어 실행되게 한다 - 실행되자마자 할 일이
-    // 없으면 곷장 parkCurrent()로 잔든다.
+    // 없으면 곧장 parkCurrent()로 잠든다.
     Scheduler::enqueue(coreIndex, &gReactorTasks[coreIndex]);
 }
 
@@ -249,7 +249,7 @@ void AsyncReactor::reactorTaskEntry(void*) {
         if (task->state == AsyncTaskState::Cancelled) {
             // [PN-40E976F2] 이 AsyncTask를 기다리던 UserThread가 이미
             // 죽어(scheduler.cpp의 SelfTerminateHandler::onExec) 결과를
-            // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곳장
+            // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곧장
             // onCancel만 부른 뒤 자원을 반납한다. autoFree는 취소
             // 시점에 이미 강제로 true가 돼 있다(그 시점 이후로는 아무도
             // wait()로 직접 반납할 수 없으므로).
@@ -331,7 +331,7 @@ void AsyncReactor::submitCompletion(AsyncTask* task) {
     // 상관없이 "진짜로 명시적 wake가 필요한가"만 정확히 반영한다.
     // 이 함수는 인터럽트 컨텍스트에서도 호출 가능하다고 문서화돼
     // 있어(async_task.h) 무조건 sti로 끝내면 안 된다 - 원래 RFLAGS.IF
-    // 값을 저장해 둠다가 그 값이었을 때만 되돌린다(호출 전 인터럽트가
+    // 값을 저장해 뒀다가 그 값이었을 때만 되돌린다(호출 전 인터럽트가
     // 꺼져 있던 컨텍스트라면 계속 꺼진 채로 반환).
     uint64_t rflags;
     asm volatile("pushfq; pop %0; cli" : "=r"(rflags));

@@ -95,7 +95,7 @@ bool gBspCoreIndexKnown = false;
 // (runLoop()이 처음 Task로 전환하기 직전의 자기 자신 RSP)가 정확히
 // 이 부팅 스택을 가리키므로, 리액터가 자기 할 일을 마치고 다시
 // `parkCurrent()`로 그 idle 컨텍스트로 되돌아가려 할 때(자기 자신의
-// 안전한 스택 위에서 실행 중이므로 CR3를 바꾸어도 안전하다 - kEnterRing3
+// 안전한 스택 위에서 실행 중이므로 CR3를 바꿔도 안전하다 - kEnterRing3
 // 와 동일한 안전 논리) CR3가 여전히 UserThread의 것으로 남아 있으면
 // 그 자리에서 즉시 Double Fault가 난다(실측으로 발견 - `pop r15`가
 // 저지대 스택에서 폴트, 그 #GP 전달 자체도 같은 이유로 실패해 #DF로
@@ -128,9 +128,9 @@ Task* gCurrentTask[kMaxCores] = {};
 
 // 이 코어의 하드웨어 FPU/SSE 레지스터가 지금 어느 Task의 상태를 담고
 // 있는지(SP-83A07867 §8, PN-F258698E) - kSyncFpu/Scheduler::handleFpuTrap
-// 만 갱신한다. nullptr이면 아직 아무도 이 코어에서 FPU/SSE를 쓔 적이
+// 만 갱신한다. nullptr이면 아직 아무도 이 코어에서 FPU/SSE를 쓴 적이
 // 없다는 뜻(부팅 직후 기본값). kSyncCr3의 gBootPml4Phys와 달리 "부팅
-// 전용 기본 소유자" 개념이 없다 - idle 컨텍스트 자체는 FPU를 절대 쓐지
+// 전용 기본 소유자" 개념이 없다 - idle 컨텍스트 자체는 FPU를 절대 쓰지
 // 않으므로 nullptr을 그대로 "소유자 없음"으로 취급해도 충분하다.
 Task* gFpuOwner[kMaxCores] = {};
 
@@ -143,17 +143,17 @@ uint32_t gPreemptDisableCount[kMaxCores] = {};
 // (PN-AEA74E1B). next가 ring3 코드를 실행할 수 있는 UserThread면(v1은
 // isUserLevel==true가 정확히 이 뜻) 이 코어의 TSS.RSP0을 그 Task 자신의
 // 커널 스택 top으로 맞춰 둔다 - 안 맞추면 다른 UserThread가 트랩할 때
-// 엉녡한(이전에 디스패치됐던 UserThread의) 커널 스택을 밟는다.
+// 엉뚱한(이전에 디스패치됐던 UserThread의) 커널 스택을 밟는다.
 //
 // **PN-124C105B("syscall 명령 경로") 추가** - `SyscallFastPath::
 // setKernelRspForThisCore()`도 같은 값으로 반드시 같이 갱신해야 한다.
 // `syscall` 명령은 TSS.RSP0을 안 쓰고 GS 기반 스크래치를 직접
 // 읽으므로(syscall_fastpath.h 참고), 이 두 값이 어긋나면 int 0x80과
-// `syscall` 두 경로가 서로 다른 커널 스택을 쓐게 되는 심각한 버그가
-// 된다 - 이 함수 하나에서 항상 같이 갱신해 그럴 여지를 없앀다.
+// `syscall` 두 경로가 서로 다른 커널 스택을 쓰게 되는 심각한 버그가
+// 된다 - 이 함수 하나에서 항상 같이 갱신해 그럴 여지를 없앤다.
 //
 // **`Scheduler::runLoop()`/`onTick()` 둘 다에서 안전하게 부를 수 있다**
-// - TSS/스크래치 구조체에 값을 쓐는 것뿐이라 지금 어떤 스택 위에서
+// - TSS/스크래치 구조체에 값을 쓰는 것뿐이라 지금 어떤 스택 위에서
 // 실행 중이든(이 함수를 호출하는 시점엔 아직 next의 스택으로 넘어가기
 // 전이다) 무해하다. CR3 복원은 이것과 달리 **runLoop()에서는 안전하지
 // 않다** - 아래 kSyncCr3ForDispatch 참고.
@@ -174,7 +174,7 @@ void kSyncRsp0ForDispatch(Task* next) {
 // 바꾸어 놓은 뒤) 아무도 CR3를 되돌리지 않아 잘못된 주소공간으로 실행을
 // 재개하는 버그가 있었다(서로 다른 프로세스가 우연히 완전히 같은
 // 코드/스택 레이아웃이 아닌 한 반드시 크래시 - 코드가 우연히 동일한
-// 스레드끼리는 겟보기엔 멀지해 한동안 발견되지 않았다).
+// 스레드끼리는 문제없이 도는 것처럼 보여 한동안 발견되지 않았다).
 //
 // **왜 onTick()에서만 안전한가**: `mov cr3`는 그 자리에서 즉시 전체
 // TLB를 무효화하고 이후 모든 메모리 접근을 새 주소공간 기준으로 해석시킨다
@@ -218,12 +218,12 @@ void kSyncCr3(Task* task) {
 // kSyncCr3와 정확히 같은 세 지점(§3.2 갈래①/②)에서 같은 이유로 호출된다
 // (SP-83A07867 §8 - "FPU 상태 관리는 별도의 새 디스패치 훅을 파지 않고
 // §3.2의 공용 진입점에 CR0.TS 제어 로직을 삽입하는 방식으로 구현할
-// 것"). kSyncCr3와 달리 실제로 레지스터 내용을 옥기지 않는다(FXSAVE/
+// 것"). kSyncCr3와 달리 실제로 레지스터 내용을 옮기지 않는다(FXSAVE/
 // FXRSTOR는 비싸므로 여기서 미리 하지 않고, #NM 트랩이 실제로 필요한
-// 순간에만 하도록 미루다 - lazy 전략의 핵심) - 이 함수가 하는 일은
+// 순간에만 하도록 미룬다 - lazy 전략의 핵심) - 이 함수가 하는 일은
 // 오직 "이 Task가 이미 이 코어 하드웨어의 현재 소유자인가"만 보고
 // CR0.TS를 세우거나(다르면, 다음 FPU/SSE 명령에서 #NM 유도) 지우는
-// 것뿐이다(같으면, 트랩 없이 바로 쓐게 허용 - 예를 들어 짧은 시간 안에
+// 것뿐이다(같으면, 트랩 없이 바로 쓰게 허용 - 예를 들어 짧은 시간 안에
 // 같은 Task가 반복 디스패치되는 경우 불필요한 트랩 반복을 피한다).
 void kSyncFpu(Task* task, uint32_t coreIndex) {
     if (gFpuOwner[coreIndex] == task) {
@@ -240,16 +240,16 @@ void kSyncFpu(Task* task, uint32_t coreIndex) {
 // UserThread 자신(Task*)이다. **이 onExec이 실행되고 있다는 사실 자체가
 // target이 이미 이 코어에서 실행 중이 아님을 증명한다**(한 코어에서는
 // 항상 하나의 Task만 실행되고, 지금은 리액터가 실행 중이므로) -
-// target은 kTaskOnFallingToEnd에서 이미 스스로를 Zombie로 표시해 둡
+// target은 kTaskOnFallingToEnd에서 이미 스스로를 Zombie로 표시해 둠
 // (그래서 `Scheduler::onTick()`이 그 이후로 다시는 재삽입하지 않았다),
 // Scheduler::retireTask() 문서 주석 참고.
 //
 // **항목 3(Process 자원 회수, PN-71C3D483) 완료** - 커널 스택 회수
-// (retireTask)만으로는 이 UserThread가 쓐던 유저 주소공간이 그대로
+// (retireTask)만으로는 이 UserThread가 쓰던 유저 주소공간이 그대로
 // 남는다. self-terminate는 항상 isUserLevel Task에서만 제출되므로
 // (kTaskOnFallingToEnd의 분기 참고) target을 UserThread로 안전하게
 // 캐스팅할 수 있다 - v1은 프로세스당 스레드 하나뿐이라(process.h
-// 클래스 문서) 이 스레드가 끝나는 순간이 곳 그 Process 전체가 끝나는
+// 클래스 문서) 이 스레드가 끝나는 순간이 곧 그 Process 전체가 끝나는
 // 순간과 같다. `process` 필드는 execImage()가 항상 채워 두지만
 // (process.cpp의 `thread->process = this;`) 방어적으로 null 확인한다.
 class SelfTerminateHandler : public AsyncTaskHandler {
@@ -264,12 +264,12 @@ public:
         // 그 결과를 가져갈 사람이 영원히 없다. pendingSyscalls 자체가
         // 설계자가 말한 "사망 전파 목록"이다(이미 있는 자료구조를
         // 그대로 재사용 - ChunkedList::clear() 문서 주석이 애초에 이
-        // 용도를 예정해 둠다).
+        // 용도를 예정해 뒀다).
         userThread->pendingSyscalls.forEach([](UserThread::PendingSyscall& pending, auto*) {
             auto* asyncTask = reinterpret_cast<AsyncTask*>(pending.token);
             if (asyncTask->state == AsyncTaskState::Completed || asyncTask->state == AsyncTaskState::Failed) {
                 // 이미 끝났지만 아무도 wait()로 가져가지 않은 결과 -
-                // 리액터는 autoFree=false라 이미 손을 떼 상태이므로
+                // 리액터는 autoFree=false라 이미 손을 뗀 상태이므로
                 // 여기서 대신 반납한다.
                 GenericSlabAllocator::free(reinterpret_cast<void*>(asyncTask->stackBase), kAsyncTaskStackSize);
                 GenericSlabAllocator::free(asyncTask, sizeof(AsyncTask));
@@ -308,7 +308,7 @@ public:
             if (startFlags.resurrect && startFlags.respawn) {
                 // §6.4 크래시 루프 방지 - 연속 kMaxResurrectAttempts회에
                 // 도달하면 재스폰을 아예 시도하지 않고 커널 전체를
-                // 멈추다("커널 서비스는 커널을 대행하는 존재라 반복
+                // 멈춘다("커널 서비스는 커널을 대행하는 존재라 반복
                 // 재크래시는 개별 프로세스 문제가 아니라 커널 자체가
                 // 정상 동작할 수 없는 상태" - 설계자 지시, silent
                 // degraded mode 금지).
@@ -372,7 +372,7 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
     // 막은 지점들 참고)은 원리상 스케줄러 틱이 "이 Task는 아직 안
     // 자고 있으니 그냥 라운드로빈으로 넘어간다"고 판단할 수 있는 모든
     // 지점에서 잠재적으로 생길 수 있어 하나하나 찾아 막는 방식만으로는
-    // 끝이 없다 - 이미 어느 큐에가 들어 있는 Task를 다시 넣지 않는
+    // 끝이 없다 - 이미 어느 큐에 들어 있는 Task를 다시 넣지 않는
     // 것으로 근본 클래스 자체를 막는다. **state(Ready/Running/...)는
     // 이 용도로 사용할 수 없다** - Task::init() 직후에도 이미 state=Ready라
     // "아직 한 번도 큐에 들어간 적 없음"과 "이미 큐에 있음"을 구분하지
@@ -486,10 +486,10 @@ void Scheduler::onTick(InterruptFrame*) {
     }
 
     // Zombie면(PN-71C3D483 - kTaskOnFallingToEnd가 self-terminate 제출
-    // 직전 스스로 표시해 둔 상태) 재삽입하지 않는다 - 곷 리액터의
+    // 직전 스스로 표시해 둔 상태) 재삽입하지 않는다 - 곧 리액터의
     // SelfTerminateHandler가 Scheduler::retireTask(current)로 정리
     // 큐에 등록한다. 그 전까지 이 Task는 어느 큐에도 없는 채로 그냥
-    // "스위칭되어 나간" 상태로만 남는다(다시 뿑힐 걱정 없음).
+    // "스위칭되어 나간" 상태로만 남는다(다시 뽑힐 걱정 없음).
     if (current->state != TaskState::Zombie) {
         enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
     }
@@ -571,11 +571,11 @@ void Scheduler::yieldCurrent() {
     // Task 실행 흐름은 보통 IF=1(인터럽트 허용) 상태다 - gCurrentTask를
     // 지우기 전에 큐에 먼저 넣으면, 그 사이 끼어든 스케줄러 틱이
     // "지금 실행 중인 Task"와 "막 큐에 들어온 Task"를 같은 것으로
-    // 보고 pickNext()로 자기 자신을 다시 뿑아버릴 수 있다 - 침습적
+    // 보고 pickNext()로 자기 자신을 다시 뽑아버릴 수 있다 - 침습적
     // next 포인터가 자기 자신을 가리키며 큐가 깨지고, 아직 완성되지
     // 않은 이 kContextSwitch 준비 상태 위에서 또 다른 kContextSwitch가
-    // 격여 실행되며 스택이 망가진다(실측으로 발견). runLoop()의 같은
-    // 종류 경쟁과 동일한 이유로 cli를 쓔다.
+    // 겹쳐 실행되며 스택이 망가진다(실측으로 발견). runLoop()의 같은
+    // 종류 경쟁과 동일한 이유로 cli를 사용한다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
     Task* current = gCurrentTask[coreIndex];
@@ -606,9 +606,9 @@ void Scheduler::yieldCurrent() {
     // 그 뒤로는 매번 IF=0으로 재개되고, runLoop()이 "정말 대기할
     // 때"(sti;hlt)에 도달하기 전까지는 이 코어의 인터럽트(스케줄러
     // 틱 포함)이 아예 걸리지 않게 된다 - 부하가 계속 이어져 그
-    // hlt 분기에 도달하지 못하면 사실상 영구히 멈추다(Channel IPC처럼
-    // 여러 Task가 끚임없이 서로를 깨우는 워크로드에서 실측 발견).
-    // 그래서 재개 직후 여기서 명시적으로 다시 켜다 - 정상적으로
+    // hlt 분기에 도달하지 못하면 사실상 영구히 멈춘다(Channel IPC처럼
+    // 여러 Task가 끊임없이 서로를 깨우는 워크로드에서 실측 발견).
+    // 그래서 재개 직후 여기서 명시적으로 다시 켠다 - 정상적으로
     // 실행 중인 Task는 항상 IF=1이어야 한다는 불변조건을 저장된 값에
     // 기대지 않고 직접 강제한다.
     asm volatile("sti");
@@ -619,7 +619,7 @@ void Scheduler::parkCurrent() {
     // 상태만 Blocked로 바꾸면, 그 사이 끼인 스케줄러 틱이 이 Task를
     // "아직 실행 중"으로 보고 pickNext()가 (큐에 없으니 이 Task 본인은
     // 아니지만) 다른 전환을 시도하다가 gCurrentTask가 가리키는 대상과
-    // 어긋난 상태로 kContextSwitch를 부를 위험을 없앀다.
+    // 어긋난 상태로 kContextSwitch를 부를 위험을 없앤다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
     Task* current = gCurrentTask[coreIndex];
@@ -677,7 +677,7 @@ void Scheduler::retireCurrentTask() {
     gCleanupQueues[coreIndex].pushBack(current);
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
     // 이 지점으로 다시는 돌아오지 않는다(current는 이미 Zombie로
-    // 어느 스케줄 큐에도 없어 다시 뿑힐 수 없다) - kAsyncTaskEntryWrapper
+    // 어느 스케줄 큐에도 없어 다시 뽑힐 수 없다) - kAsyncTaskEntryWrapper
     // 와 동일한 패턴의 방어적 무한 루프.
     for (;;) {
     }
@@ -743,7 +743,7 @@ void Scheduler::handleFpuTrap() {
 // context_switch.S의 kTaskStartTrampoline이 entry 콜백(`call rbx`)을
 // 부르기 직전에 호출한다 - SP-83A07867 §3.2 갈래②의 세 지점 중
 // "Task가 태어나서 처음 실행되는 지점". 이미 이 Task 자신의(이제 막
-// kContextSwitch로 넘어온) 스택 위에서 실행 중이라 CR3를 바꾸어도
+// kContextSwitch로 넘어온) 스택 위에서 실행 중이라 CR3를 바꿔도
 // 안전하다(kEnterRing3가 예전엔 UserThread 한정으로 직접 하던 일 -
 // 이제 모든 Task의 첫 실행에 동일하게 적용된다, kEnterRing3 자신의
 // 수동 CR3 설정은 이 함수로 대체되어 제거됨). r12(entry arg)/
@@ -779,8 +779,8 @@ extern "C" void kTaskOnFallingToEnd() {
         // 실제 정리 경로까지 완성됨) - **반드시 제출 전에** 스스로를
         // Zombie로 표시해야 한다(QU-84E5B3D5 - Scheduler::retireTask()
         // 문서 주석 참고) - 그래야 잠시 뒤 이 Task가 스위칭되어 나갈
-        // 때 `Scheduler::onTick()`이 라운드로빈 재삽입을 건너뒤어, 다시는
-        // 이 Task가 pickNext에 뿑히지 않는다는 보장이 성립한다.
+        // 때 `Scheduler::onTick()`이 라운드로빈 재삽입을 건너뛰어, 다시는
+        // 이 Task가 pickNext에 뽑히지 않는다는 보장이 성립한다.
         // 자기종료 syscall은 wait 없이 제출만 하고(Syscall::
         // submitDetached - autoFree라 결과를 아무도 안 봐도 리액터가
         // 알아서 정리한다) 반환한다 - 리액터가 나중에 비동기적으로

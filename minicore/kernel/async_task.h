@@ -76,7 +76,7 @@ struct AsyncTask {
 
     // 현재 실행 중인 AsyncTask 자신이 호출 - 리액터 컨텍스트로 복귀해
     // 다음 AsyncTask를 처리하게 한다. 나중에 리액터가 이 AsyncTask를
-    // 다시 큐에서 뿑아 재개시키면 이 호출 지점부터 이어진다.
+    // 다시 큐에서 뽑아 재개시키면 이 호출 지점부터 이어진다.
     static void yield();
 
     // AsyncTask/AsyncCallbackRegistry가 내부적으로 새 AsyncTask를 만들어
