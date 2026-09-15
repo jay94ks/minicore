@@ -8,7 +8,7 @@ namespace {
 constexpr kernel::uint64_t kPageSize4K = 0x1000;
 constexpr kernel::uint64_t kPageSize2M = 0x200000UL;
 constexpr kernel::uint64_t kPageSize1G = 0x40000000UL;
-constexpr kernel::uint64_t kAddrMask = 0x000FFFFFFFFFF000UL;  // 엔트리에서 플래그 비트 뻔 물리주소
+constexpr kernel::uint64_t kAddrMask = 0x000FFFFFFFFFF000UL;  // 엔트리에서 플래그 비트를 제외한 물리주소
 constexpr kernel::uint64_t kPageSizeBit = 1UL << 7;           // PS(PDPT/PD 레벨 대형 페이지)
 constexpr kernel::uint32_t kEntriesPerTable = 512;            // x86_64 4단계 페이징의 모든 테이블(PML4/PDPT/PD/PT)은 512엔트리 고정
 
@@ -55,7 +55,7 @@ kernel::uint64_t kCurrentPml4Phys() {
     return cr3 & kAddrMask;
 }
 
-// Paging::init() 자신이 direct map을 만들기 전에 딜 한 번(자기 자신의
+// Paging::init() 자신이 direct map을 만들기 전에 정확히 한 번(자기 자신의
 // PML4를 읽으려고) 쓴다 - 그 시점엔 kPhysToVirt를 아직 못 쓴다(direct
 // map이 없으니까). boot.S가 PML4를 항상 저지대 identity map 구간에
 // 두기 때문에 안전하다. **이 함수는 Paging::init() 밖에서 쓰면 안
@@ -178,7 +178,7 @@ void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags
     pt[kPtIndex(virtualAddr)] = physicalAddr | PAGE_PRESENT | flags;
     // 지금 실행 중인 주소공간(현재 CR3)에 대한 변경일 때만 TLB를
     // 무효화한다 - pml4Phys가 아직 CR3에 설치되지 않은 다른 주소공간을
-    // 가리키면 이 코어의 TLB엔 애초에 그 매핑이 캐싱돼 있을 수 없다
+    // 가리키면 이 코어의 TLB엔 애초에 그 매핑이 캐시돼 있을 수 없다
     // (invlpg는 항상 "지금 이 코어가 보고 있는 주소공간" 기준으로만
     // 의미가 있다).
     if (pml4Phys == kCurrentPml4Phys()) {
@@ -208,7 +208,7 @@ void Paging::mapRange(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t size
             if (!(pd[pdIndex] & PAGE_PRESENT)) {
                 // [PL-57CF86EF 병합 경로 (a)] 이 2M 슬롯이 완전히
                 // 비어 있을 때만 즉시 대형 페이지로 매핑한다 - 이미
-                // 분가 있으면(2M이든 부분적으로 채워진 4K PT든) 기존
+                // 뭔가 있으면(2M이든 부분적으로 채워진 4K PT든) 기존
                 // 매핑을 잃어버리지 않도록 안전하게 4K 경로로 물러난다
                 // (아래 else 분기 없이 그냥 밑으로 흘러 mapPage() 호출).
                 pd[pdIndex] = pa | PAGE_PRESENT | kPageSizeBit | flags;
@@ -267,7 +267,7 @@ bool Paging::mergeRange(uint64_t virtualAddr, uint64_t sizeBytes, uint64_t pml4P
             }
         }
         if (!qualifies) {
-            continue;  // 병합 불변 조건 불만족 - 재배치(경로 b)는 이번 범위 밖, 그대로 둘
+            continue;  // 병합 불변 조건 불만족 - 재배치(경로 b)는 이번 범위 밖, 그대로 둔다
         }
 
         const uint64_t ptPhys = pdEntry & kAddrMask;
