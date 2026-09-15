@@ -515,6 +515,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::SyscallFastPath::initForThisCore();
     kernel::Serial::write("minicore: syscall fast path (STAR/LSTAR/SFMASK) ready (core 0)\n");
 
+    // SP-0666DB3C §12.4-1(PN-25587A7D) - RDTSCP 지원 시 이 코어의 진짜
+    // 인덱스를 IA32_TSC_AUX에 심어 Scheduler::currentCoreIndex()가
+    // 이후 O(1)로 조회하게 한다. Gdt::loadTssForThisCore()와 같은 이유로
+    // Lapic::init() 이후에만 안전.
+    kernel::Scheduler::initCoreIndexForThisCore();
+
     kernel::Scheduler::startTickOnThisCore();
     kernel::Serial::write("minicore: scheduler tick ready (LAPIC, ");
     kernel::Serial::writeHex(kernel::kSchedulerTickHz);

@@ -348,7 +348,17 @@ void Scheduler::init() {
     SyscallRegistry::registerHandler(kSyscallEndpointSelfTerminate, &gSelfTerminateHandler);
 }
 
-uint32_t Scheduler::currentCoreIndex() {
+namespace {
+
+// IA32_TSC_AUX(SP-0666DB3C §12.4-1) - RDTSCP가 이 MSR의 값을 ECX로
+// 그대로 돌려주므로, 코어별로 자기 논리 인덱스를 한 번 심어 두면
+// 이후 매번 메모리 접근 없는 순수 명령어 하나로 O(1) 조회가 된다.
+constexpr uint32_t kMsrTscAux = 0xC0000103;
+
+// 기존 O(코어 수) 선형 스캔 - RDTSCP 미지원 CPU의 런타임 폴백이자,
+// RDTSCP 지원 CPU에서도 이 코어의 진짜 인덱스를 최초 한 번 계산할
+// 때(initCoreIndexForThisCore) 재사용한다.
+uint32_t kScanCoreIndexByApicId() {
     const uint32_t apicId = Lapic::id();
     const uint32_t cpuCount = Acpi::cpuCount();
     for (uint32_t i = 0; i < cpuCount; ++i) {
@@ -357,6 +367,44 @@ uint32_t Scheduler::currentCoreIndex() {
         }
     }
     return 0;
+}
+
+// 전체 머신에 동일하게 적용되는 CPU 기능이라 코어별로 다시 검사할
+// 필요가 없다 - BSP가 가장 먼저 initCoreIndexForThisCore()를 호출할
+// 때 한 번 계산해 두면, AP는 순차 기동(PL-65C20380 v1)이라 그 이후에만
+// 자기 차례가 오므로 경쟁 없이 그대로 읽기만 한다.
+bool gRdtscpChecked = false;
+bool gRdtscpSupported = false;
+
+bool kCheckRdtscpSupport() {
+    uint32_t eax = 0x80000001, ebx = 0, ecx = 0, edx = 0;
+    asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(eax));
+    return (edx & (1u << 27)) != 0;
+}
+
+}  // namespace
+
+void Scheduler::initCoreIndexForThisCore() {
+    if (!gRdtscpChecked) {
+        gRdtscpSupported = kCheckRdtscpSupport();
+        gRdtscpChecked = true;
+    }
+    if (!gRdtscpSupported) {
+        return;  // 폴백 - currentCoreIndex()가 계속 선형 스캔을 쓴다
+    }
+    const uint32_t coreIndex = kScanCoreIndexByApicId();
+    const uint32_t low = coreIndex;
+    const uint32_t high = 0;
+    asm volatile("wrmsr" : : "c"(kMsrTscAux), "a"(low), "d"(high));
+}
+
+uint32_t Scheduler::currentCoreIndex() {
+    if (gRdtscpSupported) {
+        uint32_t aux;
+        asm volatile("rdtscp" : "=c"(aux) : : "rax", "rdx");
+        return aux;
+    }
+    return kScanCoreIndexByApicId();
 }
 
 void Scheduler::enqueue(uint32_t coreIndex, Task* task) {

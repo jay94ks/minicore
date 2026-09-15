@@ -91,6 +91,8 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     // KERNEL_GS_BASE 전부 코어별 MSR이라 각 AP도 자기 몫을 스스로
     // 설정해야 한다(BSP의 kMain()과 동일한 관례).
     kernel::SyscallFastPath::initForThisCore();
+    // SP-0666DB3C §12.4-1(PN-25587A7D) - BSP의 kMain()과 동일한 자리.
+    kernel::Scheduler::initCoreIndexForThisCore();
 
     kernel::Serial::write("minicore: AP started, index=");
     kernel::Serial::writeHex(apIndex);

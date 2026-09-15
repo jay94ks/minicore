@@ -71,8 +71,19 @@ public:
     // RT 큐 -> 일반 큐 순) - 셋 다 비어 있으면 nullptr.
     static Task* pickNext(uint32_t coreIndex);
 
-    // 이 코어의 Acpi 인덱스 - Lapic::id()를 Acpi::cpuApicId(i)와
-    // 대조해 역산한다(gdt.cpp의 loadTssForThisCore와 같은 패턴).
+    // BSP/AP 각자 자기 코어에서 한 번씩 호출한다(SP-0666DB3C §12.4-1,
+    // PN-25587A7D) - Gdt::loadTssForThisCore()/SyscallFastPath::
+    // initForThisCore()와 같은 자리(kmain.cpp/smp.cpp). RDTSCP를
+    // 지원하면(CPUID.80000001H:EDX[27]) 이 코어의 진짜 인덱스를
+    // IA32_TSC_AUX에 심어 currentCoreIndex()가 이후 그 MSR을 rdtscp로
+    // 즉시 읽기만 하면 되게 한다 - 미지원 CPU에서는 아무 것도 하지
+    // 않고 currentCoreIndex()가 계속 기존 선형 스캔으로 동작한다.
+    static void initCoreIndexForThisCore();
+
+    // 이 코어의 Acpi 인덱스. RDTSCP 지원 시(initCoreIndexForThisCore가
+    // 감지) IA32_TSC_AUX를 rdtscp로 읽는 O(1) 경로, 아니면 Lapic::id()를
+    // Acpi::cpuApicId(i)와 대조해 역산하는 기존 O(코어 수) 선형 스캔
+    // 폴백(gdt.cpp의 loadTssForThisCore와 같은 패턴). 어느 경로든
     // Acpi::init()/Lapic::init() 이후에만 호출 가능.
     static uint32_t currentCoreIndex();
 
