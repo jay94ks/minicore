@@ -84,6 +84,20 @@ struct Task {
     // CR3가 안 맞을 수 있다 - PN-63BCFE45 참고.
     uint64_t userPml4Phys = 0;
 
+    // 이 Task가 ring3 첫 진입(process.cpp의 kEnterRing3) 때 점프할
+    // 목표 주소/유저 스택 top(PN-D0ED9611) - `isUserLevel`인 Task만
+    // 의미가 있다. **왜 여기 있는가**: 예전엔 이 두 값을 `Task::init()`
+    // 의 단일 void* arg 슬롯에 실어 넘기려고 전역 인스턴스
+    // (process.cpp의 `gRing3EntryParams`) 하나를 공유했는데, 이러면
+    // `Process::execImage()`를 첫 번째 프로세스의 값이 아직 소비되기
+    // 전(=그 UserThread가 실제로 kEnterRing3까지 실행하기 전)에 두
+    // 번째 프로세스 생성을 위해 또 부르면 첫 번째 값이 조용히
+    // 덮어써지는 결함이 있었다(실측으로 발견, PN-63BCFE45 조사 중
+    // 별도 확인) - userPml4Phys와 똑같은 이유로 이 Task 자신에게
+    // 옮겨 담아 프로세스 개수와 무관하게 안전하게 만든다.
+    uint64_t ring3EntryPoint = 0;
+    uint64_t ring3UserStackTop = 0;
+
     TaskState state = TaskState::Ready;
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;

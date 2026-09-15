@@ -17,34 +17,23 @@ namespace {
 constexpr kernel::uint64_t kUserStackTop = 0x00007FFFFFFFF000UL;
 constexpr kernel::uint64_t kUserStackSize = 16UL * 4096UL;  // 64KiB
 
-// Task::init()의 단일 void* arg 슬롯으로 kEnterRing3에 넘길 값들 -
-// v1은 프로세스가 하나뿐이라 전역 인스턴스 하나로 충분하다(여러
-// 프로세스를 동시에 exec()하게 되면 UserThread 자신에 이 값을 옮겨
-// 담는 확장이 필요하다 - 후속 과제, PN-63BCFE45 참고). pml4Phys는
-// 여기 없다 - `Task::userPml4Phys`(PN-63BCFE45)에 저장해 두고
-// kEnterRing3(첫 진입)와 scheduler.cpp의 kSyncCr3ForDispatch(이후
-// 재디스패치, onTick 전용)가 각자 안전한 지점에서 그 필드를 직접
-// 읽어 CR3를 맞춘다.
-struct Ring3EntryParams {
-    kernel::uint64_t entryPoint = 0;
-    kernel::uint64_t userStackTop = 0;
-};
-
-Ring3EntryParams gRing3EntryParams;
-
 // PN-124C105B/PN-16CA347D 6번 - UserThread가 ring3으로 "처음" 진입하는
-// 자리. Task::init()의 entry(arg)로 등록되어 kTaskStartTrampoline이
-// 평범한 ring0 함수처럼 호출하지만(`call rbx`, context_switch.S), 이
-// 함수는 절대 돌아오지 않는다 - iretq가 특권 레벨 자체를 바꿔 버리기
-// 때문이다. 이후 이 UserThread가 다시 ring0으로 오는 유일한 경로는
-// 트랩/인터럽트뿐이고(아래 RSP0 설정이 그 경로의 스택을 마련해 둔다),
+// 자리. Task::init()의 entry로 등록되어 kTaskStartTrampoline이 평범한
+// ring0 함수처럼 호출하지만(`call rbx`, context_switch.S), 이 함수는
+// 절대 돌아오지 않는다 - iretq가 특권 레벨 자체를 바꿔 버리기 때문이다.
+// 이후 이 UserThread가 다시 ring0으로 오는 유일한 경로는 트랩/
+// 인터럽트뿐이고(아래 RSP0 설정이 그 경로의 스택을 마련해 둔다),
 // 스케줄러가 이 Task를 선점했다 재개하는 경우도 그 트랩의 iretq를
 // 통해서만 ring3로 되돌아간다 - 기존 Task 컨텍스트 스위칭
 // 메커니즘(kContextSwitch)이 이미 일반적으로 지원한다(InterruptFrame의
 // iretq가 특권 레벨 전환까지 그대로 복원하므로 이 부분에 별도 코드가
-// 필요 없다).
-[[noreturn]] void kEnterRing3(void* argPtr) {
-    auto* params = reinterpret_cast<Ring3EntryParams*>(argPtr);
+// 필요 없다). 진입 파라미터(entryPoint/userStackTop)는 Task::init()의
+// void* arg 슬롯이 아니라 이 Task 자신의 `ring3EntryPoint`/
+// `ring3UserStackTop` 필드에서 직접 읽는다(PN-D0ED9611 - 예전엔 전역
+// 인스턴스 하나를 공유해 두 번째 프로세스 exec() 시 첫 번째 값이
+// 덮어써지는 결함이 있었다) - CR3를 `self->userPml4Phys`에서 읽는
+// 것과 완전히 같은 패턴.
+[[noreturn]] void kEnterRing3(void*) {
     auto* self = kernel::Scheduler::currentTask();
 
     // RSP0은 이 함수에 도달하기 전에 이미 스케줄러가 맞춰 둔다
@@ -80,8 +69,8 @@ Ring3EntryParams gRing3EntryParams;
     static_assert(kernel::kGdtUserDataSelector == 0x1b, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
     static_assert(kernel::kGdtUserCodeSelector == 0x23, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
 
-    const kernel::uint64_t entryPoint = params->entryPoint;
-    const kernel::uint64_t userStackTop = params->userStackTop;
+    const kernel::uint64_t entryPoint = self->ring3EntryPoint;
+    const kernel::uint64_t userStackTop = self->ring3UserStackTop;
 
     // 세그먼트 레지스터는 유저 데이터 셀렉터로 미리 맞춰 두고(SS
     // 자체는 iretq 프레임이 담당), iretq 프레임(SS/RSP/RFLAGS/CS/RIP)
@@ -140,13 +129,12 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
         Paging::mapPage(kUserStackTop - kUserStackSize + off, phys, PAGE_WRITABLE | PAGE_USER, pml4Phys);
     }
 
-    gRing3EntryParams.entryPoint = image.entryPoint();
-    gRing3EntryParams.userStackTop = kUserStackTop;
-
     thread->process = this;
     thread->isUserLevel = true;
     thread->userPml4Phys = pml4Phys;
-    thread->init(kEnterRing3, &gRing3EntryParams);
+    thread->ring3EntryPoint = image.entryPoint();
+    thread->ring3UserStackTop = kUserStackTop;
+    thread->init(kEnterRing3, nullptr);
     mainThread = thread;
     return thread;
 }
