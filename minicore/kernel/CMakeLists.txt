@@ -17,6 +17,7 @@ add_library(minicore_kernel OBJECT
     task.cpp
     scheduler.cpp
     async_task.cpp
+    wait_queue.cpp
     syscall.cpp
     named_object.cpp
     channel.cpp

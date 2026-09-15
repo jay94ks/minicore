@@ -6,6 +6,8 @@
 
 namespace kernel {
 
+class Waitable;  // 포인터로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2)
+
 // 스케줄러의 최소 스케줄링 단위(PL-2D3184BC, 설계자 지시, QU-BA001D73,
 // 2026-09-14 - "커널 작업은 태스크(Task)라 명명하고, 이걸 사용한다.
 // 일반적인 프로세스는 다수의 쓰레드를 가질 수 있으며 각 쓰레드는
@@ -81,6 +83,21 @@ struct Task {
     // 코어별 큐(폴백/lock-free 공용, PL-2D3184BC 4단계)가 쓰는 침습적
     // (intrusive) 다음-포인터 - 이 Task가 큐에 들어있을 때만 유효.
     AtomicPtr<Task> next;
+
+    // 이 Task가 지금 무엇에 막혀 파킹돼 있는지(SP-0666DB3C §9.2, 임의
+    // 대기 상태를 강제로 끄집어내는 범용 훅) - 파킹 시작 시 그 대기
+    // 구조체 자신(WaitQueue 등)이 설정하고, 깨울 때(정상 wakeOne()이든
+    // 강제 cancel()이든) 같은 대기 구조체가 자신의 락 아래에서 다시
+    // nullptr로 되돌린다(§9.6-1 - 정상 웨이크업과 강제 취소 두 경로가
+    // 경쟁해도 정확히 한쪽만 성공하도록, 이 필드 정리 자체를 그 락으로
+    // 직렬화한다). 대기 중이 아니거나 실행 중이면 nullptr.
+    Waitable* blockedOn = nullptr;
+
+    // WaitQueue(SP-0666DB3C §1/§5-1)가 이 Task를 파킹시킨 코어 - 나중에
+    // wakeOne()/cancel()이 Scheduler::scheduleImmediate(parkedCoreIndex,
+    // this)로 정확히 그 코어에서 재개시키는 데 쓴다(다른 코어로 옮겨
+    // 깨우는 로드밸런싱은 v1 범위 밖, §5-1).
+    uint32_t parkedCoreIndex = 0;
 
     // 커널 스택을 새로 할당하고, entry(arg)를 처음 실행할 준비가 된
     // 상태로 초기화한다(트램폴린 스택 프레임 구성) - 스케줄러 큐에
