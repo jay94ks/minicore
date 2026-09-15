@@ -58,23 +58,28 @@ void BridgePipe::destroyPair(BridgePipe* a, BridgePipe* b) {
 namespace {
 
 // closeBridge()가 이 반쪽을 닫을 때 상대 쪽에서 깨워야 할 대기자를
-// 찾아 반환한다(락 스코프 밖에서 AsyncReactor::submitCompletion을
+// 전부 모아 반환한다(락 스코프 밖에서 AsyncReactor::submitCompletion을
 // 부르기 위해 분리) - 이 반쪽이 닫히면: (1) 상대가 "이 반쪽의
-// outbound"를 읽으려 기다리던 pendingReader, (2) 상대의 outbound가
-// 꽉 차서 상대 자신이 쓰기를 기다리던 pendingWriter, 둘 다 이제
-// BrokenPipe로 깨어나야 한다.
-void kWakeForClose(BridgePipe* closed, AsyncTask** outReader, AsyncTask** outWriter) {
+// outbound"를 읽으려 기다리던 pendingReaders 전부, (2) 상대의
+// outbound가 꽉 차서 상대 자신이 쓰기를 기다리던 pendingWriters 전부,
+// 모두 이제 BrokenPipe로 깨어나야 한다 - 대기자가 여럿일 수 있으므로
+// (PN-C9625015) 하나만 깨우면 나머지가 영구히 못 깨어난다.
+AsyncTaskWaitQueue kWakeForClose(BridgePipe* closed) {
+    AsyncTaskWaitQueue woken;
     {
         SpinlockGuard guard(closed->outbound.lock);
-        *outReader = closed->outbound.pendingReader;
-        closed->outbound.pendingReader = nullptr;
+        for (AsyncTask* t = closed->outbound.pendingReaders.popFront(); t; t = closed->outbound.pendingReaders.popFront()) {
+            woken.pushBack(t);
+        }
     }
     BridgePipe* peer = closed->peer;
     {
         SpinlockGuard guard(peer->outbound.lock);
-        *outWriter = peer->outbound.pendingWriter;
-        peer->outbound.pendingWriter = nullptr;
+        for (AsyncTask* t = peer->outbound.pendingWriters.popFront(); t; t = peer->outbound.pendingWriters.popFront()) {
+            woken.pushBack(t);
+        }
     }
+    return woken;
 }
 
 bool kIsBridgeBroken(BridgePipe* bridge) {
@@ -157,8 +162,7 @@ public:
                 return;
             }
             channel->pushPendingConnect(&req);
-            accepter = channel->pendingAccepter;
-            channel->pendingAccepter = nullptr;
+            accepter = channel->pendingAccepters.popFront();
         }
         if (accepter) {
             AsyncReactor::submitCompletion(accepter);
@@ -195,7 +199,7 @@ public:
                 }
                 req = channel->popPendingConnect();
                 if (!req) {
-                    channel->pendingAccepter = task;
+                    channel->pendingAccepters.pushBack(task);
                 }
             }
 
@@ -249,14 +253,13 @@ public:
                     ring.used -= n;
                     args->bytesRead = n;
                     args->error = ChannelError::None;
-                    wakeWriter = ring.pendingWriter;
-                    ring.pendingWriter = nullptr;
+                    wakeWriter = ring.pendingWriters.popFront();
                     done = true;
                 } else if (kIsBridgeBroken(bridge)) {
                     args->error = ChannelError::BrokenPipe;
                     done = true;
                 } else {
-                    ring.pendingReader = task;
+                    ring.pendingReaders.pushBack(task);
                 }
             }
             if (wakeWriter) {
@@ -298,11 +301,10 @@ public:
                     ring.used += n;
                     args->bytesWritten = n;
                     args->error = ChannelError::None;
-                    wakeReader = ring.pendingReader;
-                    ring.pendingReader = nullptr;
+                    wakeReader = ring.pendingReaders.popFront();
                     done = true;
                 } else {
-                    ring.pendingWriter = task;
+                    ring.pendingWriters.pushBack(task);
                 }
             }
             if (wakeReader) {
@@ -330,14 +332,9 @@ public:
         }
         bridge->closedLocal = true;
 
-        AsyncTask* reader = nullptr;
-        AsyncTask* writer = nullptr;
-        kWakeForClose(bridge, &reader, &writer);
-        if (reader) {
-            AsyncReactor::submitCompletion(reader);
-        }
-        if (writer) {
-            AsyncReactor::submitCompletion(writer);
+        AsyncTaskWaitQueue woken = kWakeForClose(bridge);
+        for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
+            AsyncReactor::submitCompletion(t);
         }
 
         if (bridge->peer->closedLocal) {
@@ -358,7 +355,7 @@ public:
         auto* args = static_cast<DestroyChannelArgs*>(argsRaw);
         auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
 
-        AsyncTask* accepter = nullptr;
+        AsyncTaskWaitQueue accepters;
         PendingConnectRequest* rejectedHead = nullptr;
         {
             SpinlockGuard guard(channel->lock);
@@ -367,15 +364,19 @@ public:
                 return;
             }
             channel->destroyed = true;
-            accepter = channel->pendingAccepter;
-            channel->pendingAccepter = nullptr;
+            for (AsyncTask* t = channel->pendingAccepters.popFront(); t; t = channel->pendingAccepters.popFront()) {
+                accepters.pushBack(t);
+            }
             rejectedHead = channel->pendingHead;
             channel->pendingHead = nullptr;
             channel->pendingTail = nullptr;
         }
 
-        if (accepter) {
-            AsyncReactor::submitCompletion(accepter);
+        // 대기 중이던 acceptFromChannel 전부(여럿일 수 있음,
+        // PN-C9625015)를 깨운다 - 각자 다시 락을 잡고 channel->destroyed
+        // 를 확인해 NotFound로 반환한다.
+        for (AsyncTask* t = accepters.popFront(); t; t = accepters.popFront()) {
+            AsyncReactor::submitCompletion(t);
         }
         // 대기 중이던 connectChannel 호출들을 전부 실패로 깨운다
         // (설계 문서 destroyChannel 절 그대로).

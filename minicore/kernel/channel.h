@@ -59,6 +59,39 @@ constexpr uint64_t kChannelRingBufferSize = 4096;
 class Channel;
 struct BridgePipe;
 
+// AsyncTask 여러 개를 FIFO로 대기시키는 침습적 큐 - AsyncTask::next를
+// 재사용한다(파킹돼 있는 동안엔 AsyncReactor 실행 큐에 없어 비어
+// 있음 - kernel::Task가 WaitQueue에서 Task::next를 재사용하는 것과
+// 같은 패턴). 호출부가 이미 잡고 있는 락(RingBuffer::lock/
+// Channel::lock) 아래에서만 push/pop 해야 한다 - 자체 동기화는 없다
+// (PN-C9625015 - 기존 "대기자 슬롯 하나" 필드들을 이 큐로 교체해
+// 동시 다중 accepter/reader/writer를 지원한다).
+struct AsyncTaskWaitQueue {
+    AsyncTask* head = nullptr;
+    AsyncTask* tail = nullptr;
+
+    void pushBack(AsyncTask* task) {
+        task->next.store(nullptr);
+        if (tail) {
+            tail->next.store(task);
+        } else {
+            head = task;
+        }
+        tail = task;
+    }
+
+    AsyncTask* popFront() {
+        AsyncTask* task = head;
+        if (task) {
+            head = task->next.load();
+            if (!head) {
+                tail = nullptr;
+            }
+        }
+        return task;
+    }
+};
+
 // 코어당이 아니라 채널 전역 - connectChannel이 채워 넣고
 // acceptFromChannel이 꺼내 간다. Channel::lock으로 보호되는 단순
 // 침습적 단일 연결 리스트(FIFO)라 별도 락/원자 연산이 필요 없다.
@@ -86,11 +119,11 @@ struct RingBuffer {
     uint64_t used = 0;       // readPos/writePos로부터 매번 모듈로 계산하지 않고 직접 추적(가득참/빔 판정 단순화)
 
     // 이 버퍼가 비어서(read) 또는 가득 차서(write) 대기 중인 AsyncTask
-    // - 한 방향당 최대 하나만 지원한다(v1 제약 - 같은 BridgePipe
-    // 핸들로 동시에 여러 read 또는 여러 write를 동시에 submit하지
-    // 않는다는 전제, PN-C9625015로 확장 여지를 남겨 둠).
-    AsyncTask* pendingReader = nullptr;
-    AsyncTask* pendingWriter = nullptr;
+    // 전부(FIFO) - 방향당 동시에 여러 read 또는 여러 write가 submit돼도
+    // 전부 큐에 쌓였다가 순서대로 깨어난다(PN-C9625015, 예전엔 슬롯
+    // 하나뿐이라 두 번째부터는 영구히 못 깨어나는 결함이 있었다).
+    AsyncTaskWaitQueue pendingReaders;
+    AsyncTaskWaitQueue pendingWriters;
 
     // data/physBase/capacity를 raw slab 메모리 위에 세팅하고 나머지
     // 필드를 명시적으로 리셋한다(AsyncTask::init()과 동일한 이유 -
@@ -106,8 +139,10 @@ struct RingBuffer {
         readPos = 0;
         writePos = 0;
         used = 0;
-        pendingReader = nullptr;
-        pendingWriter = nullptr;
+        pendingReaders.head = nullptr;
+        pendingReaders.tail = nullptr;
+        pendingWriters.head = nullptr;
+        pendingWriters.tail = nullptr;
     }
 };
 
@@ -143,11 +178,10 @@ public:
     PendingConnectRequest* pendingTail = nullptr;
 
     // acceptFromChannel이 꺼낼 요청이 없을 때 자기 자신을 등록해 두는
-    // 슬롯 - connectChannel이 새 요청을 넣을 때 이 슬롯을 확인해
-    // 깨운다. v1 제약: 동시에 이 채널에 대해 진행 중인
-    // acceptFromChannel 호출은 하나만 지원한다(위 RingBuffer와 같은
-    // 성격의 단순화).
-    AsyncTask* pendingAccepter = nullptr;
+    // 큐(FIFO) - connectChannel이 새 요청을 넣을 때 이 큐에서 하나를
+    // 꺼내 깨운다. 동시에 이 채널에 대해 여러 acceptFromChannel이
+    // 진행 중이어도 전부 순서대로 대기/처리된다(PN-C9625015).
+    AsyncTaskWaitQueue pendingAccepters;
 
     // Channel도 raw slab 메모리 위에 reinterpret_cast로 앉혀지므로
     // (AsyncTask/RingBuffer와 동일한 이유로 기본 멤버 초기화식이
@@ -160,7 +194,8 @@ public:
         nameLength = 0;
         pendingHead = nullptr;
         pendingTail = nullptr;
-        pendingAccepter = nullptr;
+        pendingAccepters.head = nullptr;
+        pendingAccepters.tail = nullptr;
     }
 
     void pushPendingConnect(PendingConnectRequest* req) {
