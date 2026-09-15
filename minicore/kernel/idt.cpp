@@ -311,18 +311,42 @@ void kPanic(kernel::InterruptFrame* frame) {
 // 레지스터 배치는 이 답변 범위 밖(QU-CD6F68B7 본문 참고) - 필요해지면
 // 별도로 확정한다.
 //
-// **여전히 실행될 수 없는 경로다**: `Syscall::submit`/`wait`는 반드시
-// UserThread 컨텍스트에서만 호출 가능한데(syscall.h 참고), 이 벡터를
-// 실제로 트리거할 ring3 코드/프로세스 모델이 아직 없다(PN-16CA347D
-// 6번 미착수) - ABI 자체는 여기서 확정 반영해 두고, 실제 실행 검증은
-// 6번(프로세스 생성/exec)과 함께 진행한다.
+// PN-16CA347D(프로세스 모델)/PN-55D24891(ring3 진입) 완료로 이 벡터는
+// 이제 실제 UserThread 컨텍스트에서 실행 가능하다.
 constexpr kernel::uint64_t kSyscallVerbSubmit = 0;
 constexpr kernel::uint64_t kSyscallVerbWait = 1;
+
+// context_switch.S가 entry 함수의 자연 반환 시 호출하는 것과 같은
+// 함수(scheduler.cpp) - self-terminate 트랩 특별 취급(아래 참고)이
+// 재사용한다. 헤더 없이 extern "C" 링크만으로 직접 선언(scheduler.h의
+// 공개 API로 노출할 만큼 범용은 아님 - 이 파일과 context_switch.S,
+// 딱 두 호출부만 존재).
+extern "C" void kTaskOnFallingToEnd();
 
 void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
     switch (frame->rax) {
         case kSyscallVerbSubmit: {
             const auto endpointId = static_cast<kernel::SyscallEndpointId>(frame->rdi);
+            // **self-terminate는 다른 모든 syscall과 근본적으로 다르다**
+            // (PN-71C3D483, QU-D96B1DCE 설계자 답변 - "kHandleSyscallTrap
+            // 이 self-terminate를 특별 취급") - 이 UserThread는 이제
+            // 끝났으므로 절대 ring3로(=이 트랩을 건 지점으로) 복귀하면
+            // 안 된다. 정상적인 submit-and-return(아래 default 경로)
+            // 대신, entry 함수가 자연 반환했을 때와 완전히 동일한 처리
+            // (Zombie 표시 + Syscall::submitDetached - kTaskOnFallingToEnd
+            // 재사용, scheduler.cpp 참고)를 한 뒤 **이 함수에서 반환하지
+            // 않고** sti+hlt 루프로 들어간다 - isr_common_stub의 레지스터
+            // 복원+iretq 자체가 실행되지 않으므로 ring3로 절대 안
+            // 돌아간다. 리액터가 나중에 비동기로 Scheduler::retireTask()
+            // 를 불러 이 커널 스택을 회수할 때까지, 이 hlt 루프가 그
+            // 자리를 지킨다(kTaskFallingToEndHalt와 동일한 역할).
+            if (endpointId == kernel::kSyscallEndpointSelfTerminate) {
+                kTaskOnFallingToEnd();
+                asm volatile("sti");
+                for (;;) {
+                    asm volatile("hlt");
+                }
+            }
             void* args = reinterpret_cast<void*>(frame->rsi);
             frame->rax = static_cast<kernel::uint64_t>(kernel::Syscall::submit(endpointId, args));
             break;

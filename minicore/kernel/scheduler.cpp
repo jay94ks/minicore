@@ -7,6 +7,7 @@
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
+#include "paging.h"
 #include "syscall.h"
 #include "timer.h"
 
@@ -74,6 +75,29 @@ TaskQueue gCleanupQueues[kMaxCores];
 // Smp::startApCores()가 순차 기동)에서 한 번만 확정한다.
 uint32_t gBspCoreIndex = 0;
 bool gBspCoreIndexKnown = false;
+
+// 부팅 시점(어떤 프로세스도 아직 없어 CR3가 여전히 Paging::init()이
+// 만든 커널 전용 PML4인 시점)의 CR3 - `Scheduler::init()`에서 한 번만
+// 확정한다(PN-63BCFE45 후속 발견, 2026-09-15 실측). **왜 필요한가**:
+// `kSyncCr3ForDispatch`가 UserThread로 디스패치할 땐 그 프로세스의
+// `userPml4Phys`를 싣지만, 예전엔 커널 전용 Task(리액터 등)로
+// 디스패치할 땐 CR3를 아예 안 건드렸다 - 그러면 그 직전에 실행 중이던
+// UserThread의 CR3가 그대로 남는다. 커널 higher-half(direct map/커널
+// 이미지)는 모든 프로세스 PML4에 공유돼 있어 대개는 문제가 없지만,
+// **부팅 초기 스택(BSP의 kMain()/AP의 kApMain()이 쓰던, 저지대
+// identity map 스택 - PN-58501EAA "중요 발견")만은 예외**다 - 이
+// 스택은 어느 프로세스의 PML4에도 안 들어있는 lower-half 주소라,
+// UserThread의 CR3 아래에서는 접근 자체가 불가능하다. `gIdleSavedRsp`
+// (runLoop()이 처음 Task로 전환하기 직전의 자기 자신 RSP)가 정확히
+// 이 부팅 스택을 가리키므로, 리액터가 자기 할 일을 마치고 다시
+// `parkCurrent()`로 그 idle 컨텍스트로 되돌아가려 할 때(자기 자신의
+// 안전한 스택 위에서 실행 중이므로 CR3를 바꿔도 안전하다 - kEnterRing3
+// 와 동일한 안전 논리) CR3가 여전히 UserThread의 것으로 남아 있으면
+// 그 자리에서 즉시 Double Fault가 난다(실측으로 발견 - `pop r15`가
+// 저지대 스택에서 폴트, 그 #GP 전달 자체도 같은 이유로 실패해 #DF로
+// 격상). 그래서 커널 전용 Task로 디스패치할 땐 이 필드로 CR3를
+// 명시적으로 되돌린다.
+uint64_t gBootPml4Phys = 0;
 
 // task.cpp의 kOrderForStackSize와 동일한 계산 - kernelStackSize(항상
 // 4KiB의 배수)를 되돌려 PageFrameAllocator::freeOrder에 넘길 order를
@@ -144,10 +168,18 @@ void kSyncRsp0ForDispatch(Task* next) {
 // "첫 진입" CR3 설정은 이 함수가 아니라(runLoop()이 호출하는 자리라)
 // kEnterRing3 자신이(이미 그 Task 고유의 안전한 스택으로 넘어온 뒤)
 // 맡는다.
+//
+// **next가 커널 전용 Task일 땐 `gBootPml4Phys`로 되돌린다**(PN-63BCFE45
+// 후속 발견, 2026-09-15 실측) - 예전엔 이 분기가 없어(if만 있고 else
+// 없음) UserThread에서 커널 Task(리액터 등)로 전환할 때 CR3가 직전
+// UserThread의 것으로 계속 남았다. 커널 higher-half는 공유돼 있어
+// 대개는 무해하지만, `gBootPml4Phys` 문서 주석이 설명하는 부팅 스택
+// (`gIdleSavedRsp`가 가리키는 곳)만은 예외라 실제로 Double Fault를
+// 유발했다(리액터가 자기 일을 마치고 parkCurrent()로 idle 컨텍스트에
+// 되돌아가려는 순간 실측 발견).
 void kSyncCr3ForDispatch(Task* next) {
-    if (next->isUserLevel) {
-        asm volatile("mov %0, %%cr3" : : "r"(next->userPml4Phys) : "memory");
-    }
+    const uint64_t targetPml4 = next->isUserLevel ? next->userPml4Phys : gBootPml4Phys;
+    asm volatile("mov %0, %%cr3" : : "r"(targetPml4) : "memory");
 }
 
 // kSyscallEndpointSelfTerminate(PN-71C3D483)의 실제 핸들러 - args는
@@ -177,6 +209,11 @@ void Scheduler::init() {
     if (gCoreCount > kMaxCores) {
         gCoreCount = kMaxCores;
     }
+    // 이 시점엔 아직 어떤 프로세스도 없어(kSpawnInitProcess()는 이보다
+    // 한참 뒤) CR3가 여전히 Paging::init()이 만든 커널 전용 PML4다 -
+    // gBootPml4Phys 문서 주석 참고. BSP에서 한 번만 호출된다(이 함수
+    // 자체가 kmain.cpp에서 한 번만 불림).
+    gBootPml4Phys = Paging::currentPml4Phys();
     // BSP에서 한 번만(다른 registerSyscallEndpoints류 호출과 같은 이유
     // - 이미 쓰인 슬롯에 재등록하면 SyscallRegistry::registerHandler가
     // 거부한다) - kSyscallEndpointSelfTerminate(값 0)는 syscall.h가
