@@ -41,7 +41,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review |
-| [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | review |
+| [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | deprecated |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved |
@@ -49,8 +49,8 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved |
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | review |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | review |
-| [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | review |
-| [SP-677210E6](./SP-677210E6.md) | TSS/IST 예외 스택 서브시스템 — 설계 제안 | review |
+| [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved |
+| [SP-677210E6](./SP-677210E6.md) | TSS/IST 예외 스택 서브시스템 — 설계 제안 | approved |
 | [SP-68182FBD](./SP-68182FBD.md) | 프로세스 모델(Process/AddressSpace) — 설계 제안 및 1차 구현 | review |
 | [SP-7CC5693A](./SP-7CC5693A.md) | VFS 커널 서브시스템 — 설계 제안 | review |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | review |
@@ -58,6 +58,6 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | pending |
 | [SP-C2670F69](./SP-C2670F69.md) | AHCI(SATA 스토리지 컨트롤러) 드라이버 — 설계 제안 | review |
 | [SP-D7013B26](./SP-D7013B26.md) | Slab 할당자(libkmm) — 설계 제안 | approved |
-| [SP-DE19BB1C](./SP-DE19BB1C.md) | 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안 | review |
+| [SP-DE19BB1C](./SP-DE19BB1C.md) | 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안 | approved |
 | [SP-E35FD36C](./SP-E35FD36C.md) | USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안 | review |
 | [SP-F682B889](./SP-F682B889.md) | 커널 전용 비동기 프레임워크(Task 기반) — 설계 제안 | approved |
