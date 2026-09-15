@@ -10,7 +10,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 |---|---|---|
 | [DC-01434F82](./DC-01434F82.md) | 비동기 프레임워크(SP-F682B889) 세부 결정 미정 | archived |
 | [DC-0CC88ABB](./DC-0CC88ABB.md) | HPET 없는 환경에서 스케줄러 LAPIC 틱과 Timer 전역 틱의 하드웨어 소유권 충돌 | archived |
-| [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | review |
+| [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived |
 | [DC-427BB6B2](./DC-427BB6B2.md) | 부트 경로 구현 착수 순서 및 부트로더 구현 방식 미정 | approved |
@@ -54,6 +54,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved |
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved |
+| [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | review |
 | [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved |
 | [SP-677210E6](./SP-677210E6.md) | TSS/IST 예외 스택 서브시스템 — 설계 제안 | approved |
 | [SP-68182FBD](./SP-68182FBD.md) | 프로세스 모델(Process/AddressSpace) — 설계 제안 및 1차 구현 | approved |
