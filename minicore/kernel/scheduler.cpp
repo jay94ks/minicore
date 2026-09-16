@@ -328,6 +328,34 @@ uint32_t kFindMostLoadedCore(uint32_t excludeCore) {
     return best;
 }
 
+// [신규, PN-9DDFB774, SP-9525C4C0 §2.3] Pull(훔쳐오는 idle 코어
+// 자신)이 자기 노드를 기준으로 같은 노드 중 가장 바쁜 코어를 먼저
+// 찾는다 - Push와 달리 "그 노드 안에 훔칠 만한 게(bestLen>0) 있는지"
+// 로 폴백을 가른다(단순히 "다른 코어가 없다"가 아니라 "같은 노드가
+// 전부 유휴라 훔칠 게 없다"도 폴백 대상 - kFindMostLoadedCore 원안의
+// "bestLen==0이면 못 찾음" 관례를 그대로 재사용). 같은 노드에서 못
+// 찾으면 전체 스캔(kFindMostLoadedCore)으로 폴백해 유휴 코어가 다른
+// 바쁜 노드의 부하를 놓치지 않게 한다.
+uint32_t kFindMostLoadedCoreNumaAware(uint32_t excludeCore) {
+    const uint32_t myNode = Acpi::cpuNumaNode(excludeCore);
+    uint32_t best = excludeCore;
+    uint32_t bestLen = 0;
+    for (uint32_t i = 0; i < gCoreCount; ++i) {
+        if (i == excludeCore || Acpi::cpuNumaNode(i) != myNode) {
+            continue;
+        }
+        const uint32_t len = gNormalQueues[i].approxLength();
+        if (len > bestLen) {
+            bestLen = len;
+            best = i;
+        }
+    }
+    if (bestLen > 0) {
+        return best;
+    }
+    return kFindMostLoadedCore(excludeCore);
+}
+
 // kFindMostLoadedCore와 정확히 대칭 - Push(§2)가 "밀어 넣을 대상"을
 // 찾는 데 쓴다. 다른 모든 코어가 이미 excludeCore만큼(또는 그 이상)
 // 차 있으면(bestLen이 초기값에서 갱신되지 않으면) excludeCore 자신을
@@ -346,6 +374,37 @@ uint32_t kFindLeastLoadedCore(uint32_t excludeCore) {
         }
     }
     return best;
+}
+
+// [신규, PN-9DDFB774, SP-9525C4C0 §2.3, QU-759C9C1C 답변 "(A) 참고함"]
+// Push가 이관하려는 Task의 numaNode와 같은 노드의 코어들만 먼저
+// 스캔해 그중 가장 한가한 코어를 고른다 - "필터로 배제"가 아니라
+// "우선순위 2단계"라, 그 노드에 excludeCore 말고 다른 코어가 아예
+// 없을 때만(foundCandidate == false) 원안(kFindLeastLoadedCore, 전체
+// 스캔)으로 폴백한다 - 같은 노드 후보가 있으면 설령 어느 정도 차
+// 있어도(폴백 기준은 "없음"이지 "바쁨"이 아님) 그 노드 안에서만
+// 고른다(로컬리티 우선 원칙). SRAT 없는 환경(모든 코어가 노드 0)
+// 에서는 이 필터가 사실상 전체 스캔과 같아져 원안과 동일하게
+// 동작한다.
+uint32_t kFindLeastLoadedCoreNumaAware(uint32_t excludeCore, uint32_t taskNumaNode) {
+    uint32_t best = excludeCore;
+    uint32_t bestLen = 0xFFFFFFFFU;
+    bool foundCandidate = false;
+    for (uint32_t i = 0; i < gCoreCount; ++i) {
+        if (i == excludeCore || Acpi::cpuNumaNode(i) != taskNumaNode) {
+            continue;
+        }
+        foundCandidate = true;
+        const uint32_t len = gNormalQueues[i].approxLength();
+        if (len < bestLen) {
+            bestLen = len;
+            best = i;
+        }
+    }
+    if (foundCandidate) {
+        return best;
+    }
+    return kFindLeastLoadedCore(excludeCore);
 }
 
 // SP-9525C4C0 §2 Push 임계치의 "최대 길이" - QU-9325BD40 설계자 답변
@@ -777,7 +836,7 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
         uint32_t targetCore = coreIndex;
         if (task->affinityMask == kTaskAffinityAllCores &&
             gNormalQueues[coreIndex].approxLength() > kPushThresholdLength()) {
-            targetCore = kFindLeastLoadedCore(coreIndex);
+            targetCore = kFindLeastLoadedCoreNumaAware(coreIndex, task->numaNode);
         }
         gNormalQueues[targetCore].pushBack(task);
         if (targetCore != coreIndex) {
@@ -1031,7 +1090,7 @@ void Scheduler::runLoop() {
             // (PL-2D3184BC 원안)은 설계 단계에서 불필요한 복잡도로
             // 판단해 v1은 채택하지 않았다(매 idle 진입마다 즉시
             // 시도 - O(코어 수) 스캔 한 번뿐이라 비용이 낮다).
-            const uint32_t victimCore = kFindMostLoadedCore(coreIndex);
+            const uint32_t victimCore = kFindMostLoadedCoreNumaAware(coreIndex);
             if (victimCore != coreIndex) {
                 Task* stolen = gNormalQueues[victimCore].popFront();
                 if (stolen) {
