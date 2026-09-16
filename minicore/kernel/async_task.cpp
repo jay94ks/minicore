@@ -143,6 +143,8 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     waitingTask = nullptr;
     autoFree = true;
     cancelSource = AsyncTokenSource{};
+    homeCoreIndex = Scheduler::currentCoreIndex();
+    allowCoreMigration = false;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
@@ -417,24 +419,33 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
 }
 
 void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
-    const uint32_t coreIndex = Scheduler::currentCoreIndex();
+    // [수정, 2026-09-16, PN-622BA93C/QU-FDB32CCE] 큐잉 대상은 호출자
+    // 자신의 현재 코어가 아니라 이 task의 홈 코어다(allowCoreMigration
+    // 옵트인 시에만 예외) - async_task.h의 submitCompletion 주석 참고.
+    // 이전에는 항상 호출자 자신의 코어에 큐잉해, 서로 다른 코어에서
+    // 실행 중인 두 AsyncTask가 completion을 주고받는 협조적 패턴
+    // (channel.cpp의 accepter/connector 핸드셰이크 등)에서 target을
+    // 엉뚱한 코어의 큐에 넣어버리는 실측 버그가 있었다.
+    const uint32_t targetCore = task->allowCoreMigration ? Scheduler::currentCoreIndex() : task->homeCoreIndex;
     if (preemptive) {
-        gPreemptiveQueues[coreIndex].pushBack(task);
+        gPreemptiveQueues[targetCore].pushBack(task);
     } else {
-        gExecQueues[coreIndex].pushBack(task);
+        gExecQueues[targetCore].pushBack(task);
     }
     // [재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]
     // 리액터가 더 이상 Task가 아니므로(async_task.h 주석 참고) "파킹돼
     // 있으면 강제 스케줄링" 판단 자체가 사라졌다 - preemptive==false
-    // (A)는 조치 없이 그냥 반환(다음 idle 분기에서 자연히 처리),
-    // preemptive==true(C)만 이 코어 자신에게 kAsyncDrainVector IPI를
-    // 보내 인터럽트가 다시 켜지는 즉시 drainOnce()가 반복 호출되게
-    // 한다. 이 함수는 인터럽트 컨텍스트에서도 호출 가능하다고
-    // 문서화돼 있어(async_task.h) self-IPI 발사 자체는 안전하다 -
-    // Lapic::sendFixedIpi()는 그저 ICR에 쓰는 것뿐이라 재진입 문제가
-    // 없다.
+    // (A)는 조치 없이 그냥 반환(그 코어가 다음 idle 분기에서 자연히
+    // 처리), preemptive==true(C)만 targetCore에게 kAsyncDrainVector
+    // IPI를 보내 그 코어의 인터럽트가 다시 켜지는 즉시 drainOnce()가
+    // 반복 호출되게 한다. 이 함수는 인터럽트 컨텍스트에서도 호출
+    // 가능하다고 문서화돼 있어(async_task.h) IPI 발사 자체는 안전하다
+    // (targetCore가 호출자 자신이 아닐 수도 있게 된 뒤에도 여전히
+    // 안전 - Lapic::sendFixedIpi()는 그저 ICR에 쓰는 것뿐이고, 다른
+    // 코어를 깨우는 이 패턴 자체는 scheduler.cpp의 Push/Pull
+    // 로드밸런싱 kWakeCoreIfIdle이 이미 같은 방식으로 쓰고 있다).
     if (preemptive) {
-        Lapic::sendFixedIpi(Acpi::cpuApicId(coreIndex), static_cast<uint8_t>(kAsyncDrainVector));
+        Lapic::sendFixedIpi(Acpi::cpuApicId(targetCore), static_cast<uint8_t>(kAsyncDrainVector));
     }
 }
 

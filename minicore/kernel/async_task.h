@@ -105,6 +105,23 @@ struct AsyncTask {
     // 정리)라 기존 submit() 호출부의 동작은 그대로 유지된다.
     bool autoFree = true;
 
+    // [PN-622BA93C/QU-FDB32CCE, 설계자 답변 2026-09-16] 이 AsyncTask가
+    // 처음 제출된(init()이 호출된) 코어 - AsyncReactor::submitCompletion()
+    // 이 호출자 자신의 현재 코어가 아니라 **이 필드**를 기준으로 큐잉
+    // 대상 코어를 정한다("v1 - 코어 간 이관 없음" 불변식을 실제로
+    // 강제하는 자리). init()이 Scheduler::currentCoreIndex()로 채운다.
+    uint32_t homeCoreIndex = 0;
+
+    // 기본값 false면 submitCompletion()이 항상 homeCoreIndex로
+    // 라우팅한다(엄격한 "코어 간 이관 없음"). true로 설정하면 이
+    // AsyncTask는 어느 코어에서 재개되든 상관없다는 뜻이라
+    // submitCompletion()이 호출자 자신의 현재 코어에 그대로 큐잉한다
+    // (설계자 답변 옵션 2 - 코어 친화성이 필요 없는 AsyncTask를 위한
+    // 옵트인 완화). 호출부가 이 AsyncTask의 코드가 실제로 코어
+    // 로컬 상태(gCurrentAsyncTask[coreIndex] 등)에 의존하지 않음을
+    // 스스로 보장해야 한다.
+    bool allowCoreMigration = false;
+
     // §8 협조적 취소 채널 - onExec/코루틴 몸체가 cancelSource.token()
     // 으로 얻은 AsyncToken을 원하는 지점마다 확인한다. 트리거 지점은
     // §8.3 - (1) 소유자(UserThread) 조기 종료(scheduler.cpp의
@@ -262,24 +279,39 @@ public:
     static bool drainOnce(uint32_t coreIndex);
 
     // 인터럽트 컨텍스트에서 호출 가능 - 완료(또는 새로 생성)된
-    // AsyncTask를 이 코어의 실행 큐에 push한다.
+    // AsyncTask를 **그 task의 큐잉 대상 코어**(아래 참고)의 실행
+    // 큐에 push한다.
     //
     // **[재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]**
     // 리액터가 더 이상 Task가 아니므로 "파킹돼 있으면 강제 스케줄링"
     // 개념 자체가 사라졌다 - 대신:
-    // - **preemptive=false → (A)**: 그냥 큐에 넣기만 한다. 이 코어가
+    // - **preemptive=false → (A)**: 그냥 큐에 넣기만 한다. 그 코어가
     //   다음에 idle 분기(pickNext()==nullptr)에 도달하는 순간 자연히
     //   처리된다(그 사이 다른 Task가 실행 중이었다면 그 Task가 곧
     //   블로킹되거나 스스로 끝나 idle로 돌아오는 게 일반적인 패턴 -
     //   실측 근거: `Syscall::submit()`이 유일한 "다른 Task 실행 중"
     //   실사용처이고, 그 직후 관례상 `Syscall::wait()`로 곧 자기
     //   자신을 파킹한다).
-    // - **preemptive=true → (C)**: 선점 큐에 넣은 뒤 이 코어 자신에게
+    // - **preemptive=true → (C)**: 선점 큐에 넣은 뒤 그 코어에게
     //   `kAsyncDrainVector` IPI를 보낸다(async_task.cpp) - 인터럽트가
-    //   다시 켜지는 즉시(대개 이 함수의 호출부가 반환하는 시점) 그
-    //   ISR이 `drainOnce()`를 큐가 빌 때까지 반복 호출해 즉시 처리를
-    //   보장한다. exclusivePreemptive Channel(SP-00CA7175 Tier B)
-    //   핸드셰이크 완료 등 지연시간이 중요한 경로가 이 값을 넘긴다.
+    //   다시 켜지는 즉시 그 ISR이 `drainOnce()`를 큐가 빌 때까지
+    //   반복 호출해 즉시 처리를 보장한다. exclusivePreemptive
+    //   Channel(SP-00CA7175 Tier B) 핸드셰이크 완료 등 지연시간이
+    //   중요한 경로가 이 값을 넘긴다.
+    //
+    // **[수정, 2026-09-16, PN-622BA93C/QU-FDB32CCE]** 큐잉 대상 코어는
+    // 더 이상 항상 "호출자 자신의 현재 코어"가 아니다 - `task->
+    // allowCoreMigration`이 false(기본값)면 `task->homeCoreIndex`로
+    // 라우팅한다(호출자와 다른 코어면 그 코어에 IPI를 보낸다 - 이
+    // 함수 자신이 이미 인터럽트 컨텍스트에서도 안전하다고 문서화돼
+    // 있어 cross-core self-IPI가 아닌 일반 IPI를 보내는 것도 안전,
+    // Push/Pull 로드밸런싱의 kWakeCoreIfIdle과 같은 패턴). true면
+    // (설계자 답변 옵션 2 - 코어 친화성 불필요를 스스로 보장하는
+    // AsyncTask) 그냥 호출자 자신의 현재 코어에 큐잉한다(기존 동작).
+    // 채널 핸드셰이크(channel.cpp)처럼 서로 다른 코어의 AsyncTask가
+    // 서로에게 completion을 보내는 협조적 패턴이 바로 이 라우팅이
+    // 필요했던 실측 사례(PN-622BA93C, Push/Pull 로드밸런싱으로
+    // accepter/connector가 다른 코어에 배치되며 처음 드러남).
     static void submitCompletion(AsyncTask* task, bool preemptive = false);
 };
 
