@@ -186,6 +186,11 @@ bool Process::init() {
     for (uint32_t i = 0; i < kSignalCount; ++i) {
         dispositions[i] = SignalDisposition::Default;
     }
+    // 프로세스 디버깅(SP-9A6D579F §3.1, PN-87D6B615) - pendingSignals와
+    // 동일한 이유로 매번 리셋(Resurrect §6.2가 같은 정적 Process를
+    // 재사용할 수 있으므로 이전 생애의 디버그 세션이 새 생애로 새어
+    // 들어가면 안 된다).
+    debugSession = DebugSession();
     // Brk(PN-012E8C1A §5) - 힙 VMA를 최소 크기(kMinHeapLength)로 지금
     // 즉시 만들어 heapStart/heapBrk를 처음부터 유효한 절대 주소로
     // 확정해 둔다. brk(newBrk)가 POSIX처럼 newBrk를 항상 "절대 주소"로

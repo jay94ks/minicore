@@ -3,6 +3,7 @@
 #include "async_task.h"
 #include "boot_info.h"
 #include "channel.h"
+#include "debug_session.h"
 #include "delayed_exec.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
@@ -558,6 +559,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // syscall은 후속 증분).
     kernel::PnpService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: pnp EnumerateDevices syscall endpoint registered");
+
+    // SP-9A6D579F §3.2/§3.3 - 위와 같은 이유(BSP에서 한 번만). 이번
+    // 증분은 DebugAttach/Detach만(부모->직계자식 권한 모델) - 브레이크
+    // 포인트/싱글스텝/#DB ISR 등 하드웨어 디버그 레지스터를 건드리는
+    // 나머지는 PN-87D6B615의 후속 증분.
+    kernel::DebugSessionService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: debug attach/detach syscall endpoints registered");
 
     // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
     // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에

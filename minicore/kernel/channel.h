@@ -41,6 +41,8 @@ enum class ChannelError : uint32_t {
     InvalidPointer,        // [신규, PN-B552E75F] buffer/data가 호출자 자신의 유저 주소공간에 속하지 않음(Paging::isUserRangeValid 실패)
     InvalidArgument,       // [신규, PN-71E50394] 인자 자체가 유효 범위 밖(예: 정의 안 된 SignalNumber, Kill/Stop을 Ignore로 설정 시도)
     NotSupported,          // [신규, PN-71E50394] 유효한 요청이지만 아직 구현되지 않은 기능(예: SignalDisposition::Handler - §4.4/PN-124C105B 전까지)
+    PermissionDenied,      // [신규, PN-87D6B615] 호출자가 이 작업을 수행할 자격이 없음(예: DebugAttach - 대상의 직계 부모가 아님, SP-9A6D579F §3.2)
+    AlreadyExists,         // [신규, PN-87D6B615] 이미 같은 자원/상태가 존재해 요청이 무의미함(예: DebugAttach - 이 대상에 이미 다른 디버거의 세션이 있음, SP-9A6D579F §7 영구 불변조건)
 };
 
 // 링버퍼 크기 정책(설계 문서 "링버퍼 크기 정책") - 호출부는 정확한

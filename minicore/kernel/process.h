@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_PROCESS_H
 
 #include "address_space.h"
+#include "debug_session.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
 #include "signal.h"
@@ -241,6 +242,14 @@ public:
     // 새 생애로 새어 들어가면 안 된다.
     ChunkedList<PendingSignal, kPendingSignalChunkCapacity> pendingSignals;
     SignalDisposition dispositions[kSignalCount];
+
+    // 프로세스 디버깅(SP-9A6D579F §3.1, PN-87D6B615) - 이 프로세스가
+    // "디버기"일 때만 의미가 있다(`active==true`) - 디버기 자신이
+    // 소유하는 세션이라 debug_session.h의 문서 주석 참고대로 원
+    // 설계의 전역 고정 배열 대신 이 필드로 직접 대체했다. init()에서
+    // 명시적으로 리셋(Resurrect §6.2 재사용 대비, pendingSignals와
+    // 동일한 이유).
+    DebugSession debugSession;
 
     // Brk(RM-48E1E610 19번, SP-2AAD7C8D §5, PN-012E8C1A) - init()이
     // 최소 크기(kMinHeapLength)의 힙 VMA를 즉시 만들어 둘 값들 -

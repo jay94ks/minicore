@@ -32,6 +32,7 @@ add_library(minicore_kernel OBJECT
     livefs.cpp
     mount_table.cpp
     process.cpp
+    debug_session.cpp
     address_space.cpp
     tlb_shootdown.cpp
     tls.cpp
