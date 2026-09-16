@@ -5,6 +5,7 @@
 #include "idt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
+#include "libkenv/mem.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
@@ -346,6 +347,26 @@ AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCo
     if (!mem) {
         return nullptr;
     }
+    // [수정, 2026-09-17, PN-9CC66142 실측 중 발견] `submitterTask`
+    // (WeakPtr<Task>) 추가 후 실제 QEMU 실행에서 처음 잡힌 실측 버그 -
+    // 이 슬랩 메모리는 GenericSlabAllocator의 프리리스트 칸으로 쓰인
+    // 적이 있어(고전적인 침습적 프리리스트 - 빈 슬롯 자신의 메모리에
+    // "다음 빈 슬롯" 포인터를 저장) `init()`이 부르기 전엔 내용이
+    // 전혀 0이라는 보장이 없다. `AsyncTask::init()`의 `waitingTask =
+    // WeakPtr<Task>();`/`submitterTask = WeakPtr<Task>();`는 대입
+    // 연산자라 **먼저 옛 `_block`을 읽어(0이 아니면 releaseWeak()까지
+    // 호출)** 그 값이 진짜 있던 값인 척 처리한다 - 프리리스트 잔여
+    // 포인터를 컨트롤 블록 포인터로 오인해 그대로 역참조하면 그 값이
+    // 비정규(non-canonical) 주소일 때 즉시 #GP로 죽는다(실측: 첫
+    // AsyncTask::submit() 호출 - 아직 어떤 AsyncTask도 반납된 적 없는
+    // "완전히 새 슬롯"인데도 재현됨 - 슬랩이 미리 여러 빈 슬롯을 한
+    // 청크로 확보해 두면서 그 프리리스트 사슬을 미리 깔아 두기
+    // 때문으로 보인다). `UserThread::allocate()`/`Process::allocate()`
+    // 가 이미 쓰고 있는 것과 정확히 같은 해법(memset(0) 먼저) - `init()`
+    // 자신은 그 뒤 모든 필드를 무조건 덮어쓰므로 이 메모리는 memset
+    // 직후에도 여전히 "raw"일 뿐이고, 그 상태에서 WeakPtr 대입이
+    // `_block==nullptr`을 보고 안전하게 스킵하게 만드는 게 목적이다.
+    memset(mem, 0, sizeof(AsyncTask));
     auto* task = reinterpret_cast<AsyncTask*>(mem);
     task->init(subjectCode, manageCode, args);
     if (!task->stackBase) {

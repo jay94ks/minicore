@@ -6,6 +6,7 @@
 #include "named_object.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "process.h"
 
 namespace kernel {
 
@@ -20,7 +21,7 @@ void RingBufferDeleter::operator()(uint8_t* ptr) const {
     }
 }
 
-bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** outB) {
+bool BridgePipe::createPair(bool useHugePage, SharedPtr<BridgePipe>* outA, SharedPtr<BridgePipe>* outB) {
     void* memA = GenericSlabAllocator::alloc(sizeof(BridgePipe));
     void* memB = memA ? GenericSlabAllocator::alloc(sizeof(BridgePipe)) : nullptr;
     if (!memB) {
@@ -76,36 +77,66 @@ bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** ou
         capacity = kChannelRingBufferSize;
     }
 
+    // [수정, 2026-09-17, PN-9CC66142 실측 중 발견] `peer`가 raw
+    // BridgePipe*에서 `WeakPtr<BridgePipe>`로 바뀌면서, 이 슬랩
+    // 메모리를 memset 없이 그대로 reinterpret_cast하면 `peer`의
+    // `_block`/`_ptr` 필드가 이전 프리리스트 점유자의 쓰레기 값을
+    // 그대로 담고 있다 - 아래에서 `spA->peer = WeakPtr<BridgePipe>(spB);`
+    // (대입 연산자)를 실행하는 순간 그 쓰레기 `_block`을 진짜 컨트롤
+    // 블록 포인터로 오인해 역참조한다(async_task.cpp의 AsyncTask::
+    // submit() memset 수정과 완전히 동일한 버그, 같은 실측 세션에서
+    // 발견 - "NSDMI가 이미 빈 값"이라는 가정은 실제 생성자를 거치지
+    // 않는 raw 슬랩 메모리엔 적용되지 않는다). `UserThread::allocate()`
+    // /`Process::allocate()`와 동일한 해법(memset(0) 먼저).
+    memset(memA, 0, sizeof(BridgePipe));
+    memset(memB, 0, sizeof(BridgePipe));
     auto* a = reinterpret_cast<BridgePipe*>(memA);
     auto* b = reinterpret_cast<BridgePipe*>(memB);
 
-    a->peer = b;
     a->closedLocal = false;
     a->blocking = false;
     a->outbound.reset(dataA, physBaseA, capacity);
 
-    b->peer = a;
     b->closedLocal = false;
     b->blocking = false;
     b->outbound.reset(dataB, physBaseB, capacity);
 
-    *outA = a;
-    *outB = b;
+    SharedPtr<BridgePipe> spA = kMakeShared<BridgePipe>(a);
+    SharedPtr<BridgePipe> spB = spA ? kMakeShared<BridgePipe>(b) : SharedPtr<BridgePipe>();
+    if (!spA || !spB) {
+        // 컨트롤 블록 슬랩 할당 실패(극히 드묾) - kMakeShared는 실패
+        // 시 넘겨준 preConstructed(a/b)를 건드리지 않으므로, 여기서
+        // 수동으로 되돌린다(위 alloc 실패 분기들과 동일한 롤백 관례).
+        // spA가 성공했다면 그 SharedPtr이 스코프를 벗어나며 자기
+        // outbound/자기 슬랩을 스스로 반납한다(destroy() 참고) - a를
+        // 이중으로 반납하지 않도록 spA 성공 여부로 분기한다.
+        if (!spA) {
+            a->outbound.data.reset();
+            GenericSlabAllocator::free(a, sizeof(BridgePipe));
+        }
+        b->outbound.data.reset();
+        GenericSlabAllocator::free(b, sizeof(BridgePipe));
+        return false;
+    }
+
+    spA->peer = WeakPtr<BridgePipe>(spB);
+    spB->peer = WeakPtr<BridgePipe>(spA);
+
+    *outA = spA;
+    *outB = spB;
     return true;
 }
 
-void BridgePipe::destroyPair(BridgePipe* a, BridgePipe* b) {
-    // [수정, 2026-09-17, PN-21C2D4E9] huge/4K 분기는 이제 RingBufferDeleter
-    // 안으로 옮겨 갔다 - `data.reset()`이 그 삭제자를 그대로 부른다.
-    // **BridgePipe 자신을 슬랩에 반납하기 전에 반드시 먼저 불러야
-    // 한다** - 이 프로젝트는 placement new/실제 소멸자를 안 쓰므로
-    // (그래서 아래 GenericSlabAllocator::free(a, ...)가 ~RingBuffer()를
-    // 자동으로 불러 주지 않는다) 이 명시적 호출이 없으면 outbound
-    // 버퍼 자체가 그대로 샌다.
-    a->outbound.data.reset();
-    b->outbound.data.reset();
-    GenericSlabAllocator::free(a, sizeof(BridgePipe));
-    GenericSlabAllocator::free(b, sizeof(BridgePipe));
+void BridgePipe::destroy() {
+    // [수정, 2026-09-17, PN-9CC66142] huge/4K 분기는 RingBufferDeleter
+    // 안에 있다 - `data.reset()`이 그 삭제자를 그대로 부른다. 이
+    // 프로젝트는 placement new/실제 소멸자를 안 쓰므로(그래서 이
+    // 슬랩을 반납해도 ~RingBuffer()가 자동으로 안 불린다) 이 명시적
+    // 호출이 없으면 outbound 버퍼 자체가 그대로 샌다. BridgePipe
+    // 구조체 자신의 슬랩 메모리 반납은 kMakeShared의 기본 삭제자
+    // (`kDestroyAndFree<BridgePipe>`)가 이 함수 호출 직후 이어서
+    // 처리한다(Process::destroy()와 동일한 역할 분리).
+    outbound.data.reset();
 }
 
 // 이 아래 익명 네임스페이스(핸들러 구현체들) 안에서도 호출해야 하므로
@@ -160,8 +191,12 @@ AsyncTaskWaitQueue kWakeForClose(BridgePipe* closed) {
             woken.pushBack(t);
         }
     }
-    BridgePipe* peer = closed->peer;
-    {
+    // [수정, 2026-09-17, PN-9CC66142] peer가 이제 WeakPtr - 상대가
+    // 이미 자기 프로세스의 openBridges에서 빠져 반납됐으면(프로세스
+    // 종료 등) lock()이 빈 값을 반환한다, 그러면 깨울 대상 자체가
+    // 없으므로 조용히 건너뛴다.
+    SharedPtr<BridgePipe> peer = closed->peer.lock();
+    if (peer) {
         SpinlockGuard guard(peer->outbound.lock);
         for (AsyncTask* t = peer->outbound.pendingWriters.popFront(); t; t = peer->outbound.pendingWriters.popFront()) {
             woken.pushBack(t);
@@ -170,8 +205,55 @@ AsyncTaskWaitQueue kWakeForClose(BridgePipe* closed) {
     return woken;
 }
 
+// [수정, 2026-09-17, PN-9CC66142] peer.lock()이 실패하면(상대가 이미
+// 자기 프로세스 종료 등으로 반납됨) 그 자체로 broken - closedLocal을
+// 명시적으로 안 불렀어도 더 이상 상대에게 도달할 방법이 없다는 뜻은
+// 같다.
 bool kIsBridgeBroken(BridgePipe* bridge) {
-    return bridge->closedLocal || bridge->peer->closedLocal;
+    if (bridge->closedLocal) {
+        return true;
+    }
+    SharedPtr<BridgePipe> peer = bridge->peer.lock();
+    return !peer || peer->closedLocal;
+}
+
+// [신규, 2026-09-17, PN-9CC66142] "이 AsyncTask를 제출한 UserThread가
+// 속한 Process"를 얻는 공용 체이닝 - AcceptFromChannelHandler가 accept
+// 완료 시 양쪽(client/acceptor) Process에 BridgePipe 강한 참조를
+// 나눠 주는 데 쓴다. `submitterTask`는 `Syscall::submit()`만 채우고
+// (syscall.cpp) 그 계약 자체가 "반드시 UserThread 실행 흐름에서만
+// 호출"이므로(syscall.h), `static_cast<UserThread*>`는 그 기존 계약을
+// 그대로 재사용하는 것뿐이다(Syscall::submit 자신도 동일한 캐스트를
+// 이미 쓴다). 제출자가 이미 죽었거나(WeakPtr 만료) Process가 이미
+// 종료됐으면 빈 SharedPtr.
+SharedPtr<Process> kProcessFromSubmitter(AsyncTask* task) {
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    if (!submitter) {
+        return SharedPtr<Process>();
+    }
+    auto* thread = static_cast<UserThread*>(submitter.get());
+    return thread->process.lock();
+}
+
+// [신규, 2026-09-17, PN-9CC66142] `BridgeHandle`(유저가 syscall마다
+// 넘기는 raw 값)을 호출자 자신의 `openBridges`에서 실제로 찾아
+// 검증한다 - 예전처럼 아무 64비트 값이나 `reinterpret_cast`해 그대로
+// 역참조하지 않는다(임의 포인터 역참조 보안 공백, DC-21647E46 로드맵
+// 조사 중 발견). 찾으면 그 슬롯이 쥔 `SharedPtr<BridgePipe>`(=계속
+// 살아있음을 보장)를, 못 찾으면(위조된 핸들, 남의 핸들, 이미 닫혀
+// 목록에서 빠진 핸들) 빈 값을 반환한다.
+SharedPtr<BridgePipe> kResolveOwnedBridge(AsyncTask* task, BridgeHandle handle) {
+    SharedPtr<Process> process = kProcessFromSubmitter(task);
+    if (!process) {
+        return SharedPtr<BridgePipe>();
+    }
+    auto* rawTarget = reinterpret_cast<BridgePipe*>(handle);
+    auto* slot = process->openBridges.find(
+        [rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
+    if (!slot) {
+        return SharedPtr<BridgePipe>();
+    }
+    return slot->value;
 }
 
 class OpenChannelHandler : public AsyncTaskHandler {
@@ -276,8 +358,8 @@ public:
                 continue;
             }
 
-            BridgePipe* serverSide = nullptr;
-            BridgePipe* clientSide = nullptr;
+            SharedPtr<BridgePipe> serverSide;
+            SharedPtr<BridgePipe> clientSide;
             if (!BridgePipe::createPair(req->useHugePage, &serverSide, &clientSide)) {
                 req->rejected = true;
                 req->done = true;
@@ -286,11 +368,57 @@ public:
                 co_return;
             }
 
-            req->resultBridge = clientSide;
+            // [신규, 2026-09-17, PN-9CC66142] "이용자 객체가 양쪽에
+            // 매달려야 한다"는 설계자 답변 그대로 - client 쪽은
+            // `req->task`(ConnectChannel을 제출한 AsyncTask, submitterTask
+            // 를 이미 들고 있음)로, acceptor 쪽은 이 accept 핸들러 자신의
+            // `task`로 각각 제출자 Process를 얻는다. 어느 한쪽이라도
+            // 못 얻으면(제출자가 이미 죽었거나 커널 서비스처럼 Process가
+            // 없는 호출자 - §6, 아직 실사용처 없음) 거절한다 -
+            // serverSide/clientSide는 지역 SharedPtr이라 그냥 스코프를
+            // 벗어나면서 스스로 정리된다(별도 롤백 코드 불필요).
+            SharedPtr<Process> clientProcess = kProcessFromSubmitter(req->task);
+            SharedPtr<Process> acceptorProcess = kProcessFromSubmitter(task);
+            if (!clientProcess || !acceptorProcess) {
+                req->rejected = true;
+                req->done = true;
+                AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
+                args->error = ChannelError::ResourceExhausted;
+                co_return;
+            }
+
+            clientProcess->openBridges.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+            acceptorProcess->openBridges.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+            auto* clientSlot = clientProcess->openBridges.insert(clientSide);
+            if (!clientSlot) {
+                // 극히 드문 목록 슬랩 고갈 - serverSide/clientSide 지역
+                // SharedPtr이 스코프 종료 시 스스로 정리된다(아직 어느
+                // 프로세스의 openBridges에도 안 들어갔으므로 되돌릴 것도
+                // 없다).
+                req->rejected = true;
+                req->done = true;
+                AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
+                args->error = ChannelError::ResourceExhausted;
+                co_return;
+            }
+            if (!acceptorProcess->openBridges.insert(serverSide)) {
+                // client 쪽엔 이미 넣었으니 반드시 되돌린다 - 안 그러면
+                // 이 실패한 accept로 client 프로세스에만 "고아
+                // BridgePipe"(아무도 handle을 모르는 채로 강한 참조만
+                // 살아있는) 한 짐이 남는다.
+                clientProcess->openBridges.erase(clientSlot);
+                req->rejected = true;
+                req->done = true;
+                AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
+                args->error = ChannelError::ResourceExhausted;
+                co_return;
+            }
+
+            req->resultBridge = clientSide.get();
             req->done = true;
             AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
 
-            args->bridge = reinterpret_cast<uint64_t>(serverSide);
+            args->bridge = reinterpret_cast<uint64_t>(serverSide.get());
             args->error = ChannelError::None;
             co_return;
         }
@@ -303,8 +431,20 @@ class ChannelReadHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ChannelReadArgs*>(argsRaw);
-        auto* bridge = reinterpret_cast<BridgePipe*>(args->bridge);
-        RingBuffer& ring = bridge->peer->outbound;  // 내가 읽는 대상 = 상대가 쓰는 곳
+        // [수정, 2026-09-17, PN-9CC66142] args->bridge를 그대로
+        // reinterpret_cast하지 않는다 - 호출자 자신의 openBridges에서
+        // 실제로 찾아야만 유효하다(임의 포인터 역참조 보안 공백 방지).
+        SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
+        if (!bridge) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        SharedPtr<BridgePipe> peer = bridge->peer.lock();
+        if (!peer) {
+            args->error = ChannelError::BrokenPipe;  // 상대가 이미 반납됨(프로세스 종료 등) - closedLocal 여부와 무관하게 broken
+            co_return;
+        }
+        RingBuffer& ring = peer->outbound;  // 내가 읽는 대상 = 상대가 쓰는 곳
 
         for (;;) {
             AsyncTask* wakeWriter = nullptr;
@@ -323,7 +463,7 @@ public:
                     args->error = ChannelError::None;
                     wakeWriter = ring.pendingWriters.popFront();
                     done = true;
-                } else if (kIsBridgeBroken(bridge)) {
+                } else if (kIsBridgeBroken(bridge.get())) {
                     args->error = ChannelError::BrokenPipe;
                     done = true;
                 } else {
@@ -351,7 +491,13 @@ class ChannelWriteHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ChannelWriteArgs*>(argsRaw);
-        auto* bridge = reinterpret_cast<BridgePipe*>(args->bridge);
+        // [수정, 2026-09-17, PN-9CC66142] ChannelReadHandler와 동일한
+        // 이유(위 참고) - 호출자의 openBridges에서 검증된 핸들만 쓴다.
+        SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
+        if (!bridge) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
         RingBuffer& ring = bridge->outbound;  // 내가 쓰는 대상 = 상대가 읽는 곳
 
         for (;;) {
@@ -360,7 +506,7 @@ public:
             {
                 SpinlockGuard guard(ring.lock);
                 const uint64_t space = ring.capacity - ring.used;
-                if (kIsBridgeBroken(bridge)) {
+                if (kIsBridgeBroken(bridge.get())) {
                     args->error = ChannelError::BrokenPipe;
                     done = true;
                 } else if (space > 0) {
@@ -396,26 +542,42 @@ public:
 
 class CloseBridgeHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<CloseBridgeArgs*>(argsRaw);
-        auto* bridge = reinterpret_cast<BridgePipe*>(args->bridge);
-
-        if (bridge->closedLocal) {
-            args->error = ChannelError::None;  // 이미 닫힘 - 멱등 처리
+        // [수정, 2026-09-17, PN-9CC66142] 다른 핸들러와 동일한 이유로
+        // 호출자의 openBridges에서 검증한다. 이미 닫혀 목록에서 빠진
+        // 핸들로 다시 closeBridge를 부르면 여기서 InvalidHandle이
+        // 나온다 - 예전의 "closedLocal==true면 멱등 처리" 분기는
+        // 이제 도달 불가능해졌다(같은 핸들이 살아있는 채로 closedLocal
+        // 만 true인 상태가 없다 - 아래에서 closedLocal을 세우는 것과
+        // openBridges에서 빼는 것을 같은 호출 안에서 함께 하므로).
+        SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
+        if (!bridge) {
+            args->error = ChannelError::InvalidHandle;
             co_return;
         }
         bridge->closedLocal = true;
 
-        AsyncTaskWaitQueue woken = kWakeForClose(bridge);
+        AsyncTaskWaitQueue woken = kWakeForClose(bridge.get());
         for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
             AsyncReactor::submitCompletion(t);
         }
 
-        if (bridge->peer->closedLocal) {
-            // 양쪽 다 닫힘 - 이제 안전하게 반납(더 이상 아무도 이
-            // 두 BridgePipe를 참조하지 않는다 - 둘 다 소유자가 이미
-            // closeBridge를 불렀다는 뜻이므로).
-            BridgePipe::destroyPair(bridge, bridge->peer);
+        // [수정, 2026-09-17, PN-9CC66142] 반납은 이제 참조 카운팅이
+        // 담당한다 - "양쪽 다 closedLocal"을 기다리지 않는다. 호출자
+        // 자신의 openBridges에서 이 슬롯을 지워 자기 몫의 강한 참조를
+        // 내려놓으면, 상대(peer) 쪽이 아직 자기 몫을 들고 있는 한
+        // BridgePipe 객체는 안전하게 살아있다(peer.lock() 계속 유효) -
+        // 상대도 이미 닫아 자기 몫을 내려놨다면 두 객체 다 자연히
+        // destroy()까지 끝난다. 별도 destroyPair() 호출이 필요 없다.
+        SharedPtr<Process> process = kProcessFromSubmitter(task);
+        if (process) {
+            auto* rawTarget = bridge.get();
+            auto* slot =
+                process->openBridges.find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
+            if (slot) {
+                process->openBridges.erase(slot);
+            }
         }
         args->error = ChannelError::None;
         co_return;

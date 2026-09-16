@@ -198,22 +198,39 @@ struct RingBuffer {
 };
 
 // handshake 완료 후 양쪽이 하나씩 갖는 연결된 반쪽(설계 문서 그대로).
+//
+// [수정, 2026-09-17, PN-9CC66142, DC-21647E46 로드맵 Phase 4] 이제
+// 각 반쪽이 독립적으로 `kMakeShared<BridgePipe>()`로 만들어지고
+// (Process::openBridges가 실제 강한 소유자), `peer`는 그 상대를
+// 관찰만 하는 `WeakPtr<BridgePipe>`다 - 표준 shared_ptr 관례와 동일
+// (별도 컨트롤 블록 별칭이 필요 없다, BridgePipe 자신이 이미 최상위
+// 독립 할당 객체이므로). **`closedLocal`은 메모리 수명과는 이제
+// 무관하다** - 반납은 순수하게 `Process::openBridges`에서 이
+// `SharedPtr<BridgePipe>`가 빠지는 시점(참조 카운트 0)에 자동으로
+// 일어난다. `closedLocal`은 여전히 "이 반쪽이 앞으로 새 데이터를
+// write()하지 않겠다"는 신호 전용으로 남는다(read()가 `kIsBridgeBroken`
+// 으로 확인하는 대상 - 상대가 이미 write를 멈췄다는 뜻이지, 그
+// BridgePipe 객체 자체가 아직 살아있는지와는 별개 질문이다. 객체
+// 생존 여부는 항상 `peer.lock()`으로 따로 확인한다).
 struct BridgePipe {
-    BridgePipe* peer = nullptr;
+    WeakPtr<BridgePipe> peer;
     RingBuffer outbound;  // 이 반쪽이 write()로 채우는 방향 - peer가 read()로 읽는다
-    bool closedLocal = false;  // closeBridge()로 이 반쪽이 닫혔는지 - peer 쪽 상태는 peer->closedLocal을 직접 읽는다(별도 미러 필드 불필요, "양쪽 다 닫혀야 반납"이 보장하는 수명 덕분에 항상 안전하게 역참조 가능)
+    bool closedLocal = false;  // closeBridge()로 이 반쪽이 "더 이상 안 쓴다"고 선언했는지(순수 신호 - 메모리 수명과 무관, 위 클래스 주석 참고)
     bool blocking = false;  // 설계 문서의 blocking 옵션 - 커널 메커니즘 자체는 항상 비동기이고, 이 값은 향후 유저랜드 스텁이 "제출 후 자동으로 wait까지 할지"를 결정하는 데만 쓰인다(v1은 커널 내부 호출자가 직접 판단)
 
-    // Slab에서 BridgePipe 두 개를 확보해 서로를 peer로 잇는다 - 각자의
-    // outbound 버퍼는 useHugePage에 따라 GenericSlabAllocator(4KiB) 또는
+    // Slab에서 BridgePipe 두 개를 확보해 각각 kMakeShared로 감싸고
+    // 서로를 peer(WeakPtr)로 잇는다 - 각자의 outbound 버퍼는
+    // useHugePage에 따라 GenericSlabAllocator(4KiB) 또는
     // PageFrameAllocator::allocOrder(9)(2MiB, PN-34B34DB4)에서 확보한다
-    // (위 kHugeChannelRingBufferSize 주석 참고).
-    static bool createPair(bool useHugePage, BridgePipe** outA, BridgePipe** outB);
+    // (위 kHugeChannelRingBufferSize 주석 참고). 실패 시 부분적으로
+    // 확보된 자원까지 전부 롤백한다(channel.cpp 참고).
+    static bool createPair(bool useHugePage, SharedPtr<BridgePipe>* outA, SharedPtr<BridgePipe>* outB);
 
-    // 양쪽 다 closedLocal이면 호출 - 두 BridgePipe와 그 outbound 버퍼
-    // 전부를 반납한다(버퍼는 만들 때 쓴 것과 같은 할당자로 - capacity로
-    // 구분, channel.cpp 참고).
-    static void destroyPair(BridgePipe* a, BridgePipe* b);
+    // kMakeShared의 기본 삭제자(`kDestroyAndFree<T>`)가 마지막 강한
+    // 참조 해제 시 호출 - outbound 버퍼만 반납한다(BridgePipe 구조체
+    // 자신의 슬랩 메모리 반납은 그 삭제자가 이어서 처리, Process::
+    // destroy()와 동일한 역할 분리 관례).
+    void destroy();
 };
 
 // 랑데부 지점(설계 문서 그대로) - openChannel이 만든다.

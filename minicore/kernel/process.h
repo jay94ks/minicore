@@ -14,6 +14,7 @@ class Image;  // 전방 선언(minicore/libs/libelf/elf.h) - Process::execImage 
 namespace kernel {
 
 class UserThread;
+struct BridgePipe;  // 포인터로만 참조(Process::openBridges) - 전체 정의는 channel.h(PN-9CC66142)
 
 // 프로세스 신원 - 이 프로세스가 신뢰할 수 있는 커널 서비스인지를
 // syscall 레벨에서 판정하는 불변 속성(SP-EAB162FC §2.1). 생성
@@ -164,6 +165,26 @@ public:
     // 참고).
     static constexpr uint32_t kMaxChildrenChunkCapacity = 8;
     ChunkedList<SharedPtr<Process>, kMaxChildrenChunkCapacity> children;
+
+    // [신규, 2026-09-17, PN-9CC66142, DC-21647E46 로드맵 Phase 4,
+    // 설계자 답변("BridgePipe가 그걸 이용하는 이용자 객체 양쪽에
+    // 매달려야 하는게 맞는거야")] 이 프로세스가 열어 둔 Channel IPC
+    // 반쪽(BridgePipe)들의 진짜(유일한) 강한 소유자 - `children`과
+    // 완전히 같은 패턴(청크 기반 SharedPtr 컨테이너). `AcceptFrom
+    // ChannelHandler::onExec()`(channel.cpp)이 accept 완료 시 양쪽
+    // Process(제출자는 `AsyncTask::submitterTask.lock()` 체이닝으로
+    // 얻음, PN-DB5153B6)의 이 목록에 각자의 `SharedPtr<BridgePipe>`를
+    // 하나씩 넣는다 - `BridgeHandle`(유저에게 돌려주는 raw 포인터
+    // 값)은 이후 read/write/close syscall이 "호출자 자신의 이
+    // 목록에서" 실제로 찾아야만 유효하다(임의의 64비트 값을 그냥
+    // reinterpret_cast하던 기존 방식의 보안 공백을 이 검증이 막는다).
+    // `BridgePipe::peer`는 이제 `WeakPtr<BridgePipe>`라 상대 쪽이
+    // 자기 프로세스의 이 목록에서 빠지면(닫힘/프로세스 종료)
+    // `peer.lock()`이 자연히 빈 값을 반환한다 - 예전 `closedLocal`
+    // 두 플래그 프로토콜이 하던 "양쪽 다 닫혀야 반납"을 참조 카운팅이
+    // 대신한다.
+    static constexpr uint32_t kMaxOpenBridgesChunkCapacity = 8;
+    ChunkedList<SharedPtr<BridgePipe>, kMaxOpenBridgesChunkCapacity> openBridges;
 
     // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
     // 좀비 상태 - self-terminate 시(SelfTerminateHandler::onExec)

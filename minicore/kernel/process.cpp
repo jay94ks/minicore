@@ -169,6 +169,11 @@ bool Process::init() {
     // 않았다.
     parent = WeakPtr<Process>();
     children.clear();
+    // [신규, 2026-09-17, PN-9CC66142] children.clear()와 동일한 이유로
+    // 매번 리셋 - Resurrect가 같은 정적 Process를 재사용할 수 있으므로
+    // 이전 생애에 열려 있던 BridgePipe 강한 참조가 새 생애로 새어
+    // 들어가면 안 된다.
+    openBridges.clear();
     // 좀비 상태(§6, PN-543C0CE9 착수 5번째 증분(2/2)) - parent/children과
     // 동일한 이유(Resurrect가 같은 정적 Process를 재사용)로 매번 리셋.
     isZombie = false;
