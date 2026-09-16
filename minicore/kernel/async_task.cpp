@@ -24,7 +24,18 @@ void kAsyncTaskEntryWrapper(void* arg) {
     auto* task = static_cast<kernel::AsyncTask*>(arg);
     kernel::AsyncTaskHandler* handler = kernel::AsyncCallbackRegistry::resolve(task->subjectCode);
     if (handler) {
-        handler->onExec(task, task->args);
+        // [PN-C62F7908, 1/5 -> 2/5] onExec이 이제 AsyncExecCoro를
+        // 반환한다(§7.3) - final_suspend=SuspendAlways라 자동으로
+        // 정리되지 않으므로 명시적으로 destroy()해야 프레임이 새지
+        // 않는다. **지금은 실제로 co_await하는 핸들러가 하나도 없어
+        // (전부 co_return만 씀) result.done()은 항상 true다** - "아직
+        // suspend된 채 남아있는" 경우(coroHandle을 task에 저장해 뒀다가
+        // AsyncReactor::drainOnce()가 나중에 resume()하는 §7.3의 재개
+        // 드라이버)는 이 프레임워크의 별도 증분에서 다룬다(아직 실제
+        // 소비자가 없어 지금 섣불리 만들지 않는다 - CLAUDE.md 규칙 4
+        // 취지, "쓰이지 않는 경로를 먼저 만들지 않는다").
+        kernel::AsyncExecCoro result = handler->onExec(task, task->args);
+        result.destroy();
         task->state = kernel::AsyncTaskState::Completed;
     } else {
         // 등록되지 않은 subjectCode로 제출된 경우 - 설계/구현 오류지만

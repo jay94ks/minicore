@@ -234,7 +234,14 @@ struct AsyncTask {
 class AsyncTaskHandler {
 public:
     virtual ~AsyncTaskHandler() = default;
-    virtual void onExec(AsyncTask* task, void* args) = 0;
+    // [PN-C62F7908, SP-F682B889 §7.3, 설계자 지시 2026-09-16 - "C++
+    // 코루틴은 가상함수를 지원하는 걸로 알고 있는데, 가상함수 정의를
+    // 코루틴으로 바꿔"] 코루틴 전용 별도 가상 메서드를 두지 않고
+    // onExec 자신의 반환 타입을 `AsyncExecCoro`로 바꿨다 - 본문에
+    // `co_await`/`co_return`을 안 쓰면 그냥 즉시 완료되는 평범한
+    // 함수처럼 동작한다(단, `co_return;`은 반드시 있어야 한다 -
+    // 그래야 컴파일러가 이 함수를 코루틴으로 변환한다, C++20 규칙).
+    virtual AsyncExecCoro onExec(AsyncTask* task, void* args) = 0;
     // Slab 할당 실패(nullptr) 등 프레임워크 내부 사유를 포함해
     // 실행 자체가 불가능했을 때 호출된다 - 재시도 여부도 이 처리기가
     // 결정한다(예: 여기서 다시 submit).

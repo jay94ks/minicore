@@ -386,19 +386,20 @@ namespace {
 // 호출자 정보가 필요 없어 이 문제를 겪지 않았을 뿐이다).
 class MmapHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<MmapArgs*>(argsRaw);
         if (args->length == 0 || !args->process) {
             args->error = AddressSpaceError::InvalidArgument;
-            return;
+            co_return;
         }
         uint64_t outAddr = 0;
         if (!args->process->addressSpace.mapRegion(args->length, args->prot, VmaBacking::Anonymous, 0,
                                                      &outAddr)) {
             args->error = AddressSpaceError::OutOfMemory;
-            return;
+            co_return;
         }
         args->addr = outAddr;
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
@@ -406,15 +407,16 @@ public:
 
 class MunmapHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<MunmapArgs*>(argsRaw);
         if (args->length == 0 || !args->process) {
             args->error = AddressSpaceError::InvalidArgument;
-            return;
+            co_return;
         }
         if (!args->process->addressSpace.unmapRegion(args->addr, args->length)) {
             args->error = AddressSpaceError::NotMapped;
         }
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
@@ -430,21 +432,21 @@ public:
 // 그걸 다시 만들 방법이 없다 - v1 제약, clamp로 처리).
 class BrkHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<BrkArgs*>(argsRaw);
         Process* process = args->process;
         if (!process) {
             args->error = AddressSpaceError::InvalidArgument;
-            return;
+            co_return;
         }
 
         if (args->newBrk == 0) {
             args->currentBrk = process->heapBrk;
-            return;
+            co_return;
         }
         if (args->newBrk < process->heapStart) {
             args->error = AddressSpaceError::InvalidArgument;
-            return;
+            co_return;
         }
 
         const uint64_t oldLength = process->heapBrk - process->heapStart;
@@ -454,10 +456,11 @@ public:
         }
         if (!process->addressSpace.resizeAnonymousRegion(process->heapStart, oldLength, newLength)) {
             args->error = AddressSpaceError::OutOfMemory;
-            return;
+            co_return;
         }
         process->heapBrk = process->heapStart + newLength;
         args->currentBrk = process->heapBrk;
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}

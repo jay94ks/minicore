@@ -458,7 +458,7 @@ void kResurrectSpawnTrampoline(void* arg) {
 
 class SelfTerminateHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* args) override {
+    AsyncExecCoro onExec(AsyncTask*, void* args) override {
         auto* target = static_cast<Task*>(args);
         Scheduler::retireTask(target);
         auto* userThread = static_cast<UserThread*>(target);
@@ -555,6 +555,7 @@ public:
             // 그 외(resurrect==false): 기존과 동일하게 그냥 종료(재스폰
             // 없음, 패닉 없음) - §6.3 3번.
         }
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}

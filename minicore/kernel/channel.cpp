@@ -168,14 +168,15 @@ bool kIsBridgeBroken(BridgePipe* bridge) {
 
 class OpenChannelHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<OpenChannelArgs*>(argsRaw);
         Channel* channel = kCreateNamedChannel(args->name, args->nameLength, &args->error);
         if (!channel) {
-            return;
+            co_return;
         }
         args->channelId = reinterpret_cast<uint64_t>(channel);
         args->channelHandle = args->channelId;
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
@@ -183,7 +184,7 @@ public:
 
 class ConnectChannelHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask* task, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ConnectChannelArgs*>(argsRaw);
 
         Channel* channel = nullptr;
@@ -195,12 +196,12 @@ public:
             if (!NamedObjectTable::resolve(args->name, args->nameLength, &kind, &objectId) ||
                 kind != NamedObjectKind::Channel) {
                 args->error = ChannelError::NotFound;  // 종류가 달라도 그냥 "못 찾음"(종류 은닉)
-                return;
+                co_return;
             }
             channel = reinterpret_cast<Channel*>(objectId);
         } else {
             args->error = ChannelError::NotFound;
-            return;
+            co_return;
         }
 
         // useHugePage=true는 이제 BridgePipe::createPair()가 실제로
@@ -214,7 +215,7 @@ public:
             SpinlockGuard guard(channel->lock);
             if (channel->destroyed) {
                 args->error = ChannelError::NotFound;
-                return;
+                co_return;
             }
             channel->pushPendingConnect(&req);
             accepter = channel->pendingAccepters.popFront();
@@ -232,10 +233,11 @@ public:
 
         if (req.rejected) {
             args->error = ChannelError::NotFound;
-            return;
+            co_return;
         }
         args->bridge = reinterpret_cast<uint64_t>(req.resultBridge);
         args->error = ChannelError::None;
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
@@ -243,7 +245,7 @@ public:
 
 class AcceptFromChannelHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask* task, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<AcceptFromChannelArgs*>(argsRaw);
         auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
 
@@ -253,7 +255,7 @@ public:
                 SpinlockGuard guard(channel->lock);
                 if (channel->destroyed) {
                     args->error = ChannelError::NotFound;
-                    return;
+                    co_return;
                 }
                 req = channel->popPendingConnect();
                 if (!req) {
@@ -273,7 +275,7 @@ public:
                 req->done = true;
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
-                return;
+                co_return;
             }
 
             req->resultBridge = clientSide;
@@ -282,7 +284,7 @@ public:
 
             args->bridge = reinterpret_cast<uint64_t>(serverSide);
             args->error = ChannelError::None;
-            return;
+            co_return;
         }
     }
     void onFailure(AsyncTask*) override {}
@@ -291,7 +293,7 @@ public:
 
 class ChannelReadHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask* task, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ChannelReadArgs*>(argsRaw);
         auto* bridge = reinterpret_cast<BridgePipe*>(args->bridge);
         RingBuffer& ring = bridge->peer->outbound;  // 내가 읽는 대상 = 상대가 쓰는 곳
@@ -328,7 +330,7 @@ public:
                 AsyncReactor::submitCompletion(wakeWriter);
             }
             if (done) {
-                return;
+                co_return;
             }
             AsyncTask::yield();
         }
@@ -339,7 +341,7 @@ public:
 
 class ChannelWriteHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask* task, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ChannelWriteArgs*>(argsRaw);
         auto* bridge = reinterpret_cast<BridgePipe*>(args->bridge);
         RingBuffer& ring = bridge->outbound;  // 내가 쓰는 대상 = 상대가 읽는 곳
@@ -375,7 +377,7 @@ public:
                 AsyncReactor::submitCompletion(wakeReader);
             }
             if (done) {
-                return;
+                co_return;
             }
             AsyncTask::yield();
         }
@@ -386,13 +388,13 @@ public:
 
 class CloseBridgeHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<CloseBridgeArgs*>(argsRaw);
         auto* bridge = reinterpret_cast<BridgePipe*>(args->bridge);
 
         if (bridge->closedLocal) {
             args->error = ChannelError::None;  // 이미 닫힘 - 멱등 처리
-            return;
+            co_return;
         }
         bridge->closedLocal = true;
 
@@ -408,6 +410,7 @@ public:
             BridgePipe::destroyPair(bridge, bridge->peer);
         }
         args->error = ChannelError::None;
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
@@ -415,7 +418,7 @@ public:
 
 class DestroyChannelHandler : public AsyncTaskHandler {
 public:
-    void onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<DestroyChannelArgs*>(argsRaw);
         auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
 
@@ -425,7 +428,7 @@ public:
             SpinlockGuard guard(channel->lock);
             if (channel->destroyed) {
                 args->error = ChannelError::None;  // 멱등 처리
-                return;
+                co_return;
             }
             channel->destroyed = true;
             for (AsyncTask* t = channel->pendingAccepters.popFront(); t; t = channel->pendingAccepters.popFront()) {
@@ -457,6 +460,7 @@ public:
         }
         GenericSlabAllocator::free(channel, sizeof(Channel));
         args->error = ChannelError::None;
+        co_return;
     }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
