@@ -1,9 +1,11 @@
 #ifndef MINICORE_KERNEL_SEMAPHORE_CORE_H
 #define MINICORE_KERNEL_SEMAPHORE_CORE_H
 
+#include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "mutex_core.h"  // ParkingPolicy/YieldingPolicy 재사용(§13 - "MutexCore와 거의 동형")
+#include "waitable.h"
 
 namespace kernel {
 
@@ -48,13 +50,27 @@ private:
     uint32_t _count = 0;
 };
 
+// [수정, 2026-09-17, PN-B41D8C0E] mutex_core.h의 BasicMutex와 완전히
+// 동일한 이유/계약으로 EnableSharedFromThis를 상속한다 - 자세한 근거는
+// BasicMutex 선언부 주석 참고(kMakeShared<Semaphore>()로 만들어야
+// Task::blockedOn 강제 cancel()이 성립한다는 제약도 동일).
 template <typename Policy>
-class BasicSemaphore {
+class BasicSemaphore : public EnableSharedFromThis<BasicSemaphore<Policy>> {
 public:
-    void init(uint32_t initialCount) { _core.init(initialCount); }
+    // [수정, 2026-09-17, PN-B41D8C0E, SP-1DB13F61] mutex_core.h의
+    // BasicMutex::BasicMutex()와 동일한 이유(자세한 근거는 그쪽 주석
+    // 참고) - `kMakeSharedNew<Semaphore>(initialCount)`로 실제 생성자를
+    // 거쳐야 `_policy`의 vtable이 설치된다. `initialCount`는 인스턴스마다
+    // 달라 NSDMI로 못 주므로(Mutex와 달리 인자 있는 생성자) 여기서 직접
+    // 받는다.
+    explicit BasicSemaphore(uint32_t initialCount) { _core.init(initialCount); }
 
     void acquire() {
-        _core.acquire([this](Spinlock& guard) { _policy.onContended(guard); });
+        _core.acquire([this](Spinlock& guard) {
+            Waitable* w = _policy.waitable();
+            WeakPtr<Waitable> self = w ? WeakPtr<Waitable>(this->sharedFromThis(), w) : WeakPtr<Waitable>();
+            _policy.onContended(guard, self);
+        });
     }
     void release() {
         _core.release([this] { _policy.onRelease(); });

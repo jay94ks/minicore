@@ -6,6 +6,23 @@
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 
+// [신규, 2026-09-17, PN-B41D8C0E, SP-1DB13F61] 표준 배치(placement)
+// `operator new` - 보통 `<new>`가 선언해 주지만 이 프로젝트의
+// freestanding 타겟(x86_64-unknown-none-elf)엔 `<new>` 자체가 없다
+// (실측 확인: `#include <new>`만 컴파일 시도해도 "file not found" -
+// `<type_traits>`/`<coroutine>` 부재와 같은 종류의 제약, RM-23F4B687
+// "표준 헤더는 실제 #include 확인 전까지 가정하지 않는다"). 이 선언이
+// 없으면 아래 `kMakeSharedNew`의 `new (rawMem) T(...)` 구문 자체가
+// 컴파일되지 않는다 - 실제로 메모리를 할당하지 않고 넘겨받은 포인터를
+// 그대로 돌려주기만 하는(표준이 보장하는 배치 new의 정확한 의미)
+// 자명한 구현이라 cxxabi.cpp의 `operator delete`/`__cxa_atexit`
+// 스텁과 같은 성격 - 호출부(new 표현식)에서 보여야 하므로 여기
+// 헤더에 inline으로 둔다(그 둘은 정의만 있으면 되는 링크 타임
+// 심볼이라 .cpp에 둔 것과 차이).
+inline void* operator new(kernel::uint64_t, void* ptr) noexcept {
+    return ptr;
+}
+
 // libkenv: 커널용 lock-free 공유/약한/배타적 소유 포인터 템플릿
 // (SP-201238BB, PN-68871BC9 착수 2번째 증분, PN-5FC484DF 2차 재설계) -
 // 설계자 지시("lock-free 기반으로 커널용 공유 포인터 템플릿들을
@@ -31,12 +48,22 @@
 // 완전히 동일해야 한다는 게 이 재설계의 제약이었다(PN-68871BC9
 // 2번째 증분에서 이미 검증한 8개 항목 전부 재검증 필요).
 //
-// **소멸 관례**: 이 커널은 placement new/실제 소멸자 호출을 쓰지
-// 않고(chunked_list.h 등 기존 관례) 명시적 init()/destroy() 메서드
-// 쌍을 쓴다 - kDestroyAndFree<T>의 기본 구현이 이 관례를 그대로
-// 가정한다(T::destroy() 호출 후 슬랩 반납). 이 관례를 안 따르는 T가
-// 있다면 kMakeShared/kMakeUnique에 커스텀 deleter를 넘기면 된다
-// (템플릿 파라미터라 기본값을 오버라이드하는 게 자연스러운 확장점).
+// **소멸 관례**: 이 커널은 절대다수의 T에 대해 placement new/실제
+// 소멸자 호출을 쓰지 않고(chunked_list.h 등 기존 관례) 명시적
+// init()/destroy() 메서드 쌍을 쓴다 - kDestroyAndFree<T>의 기본
+// 구현이 이 관례를 그대로 가정한다(T::destroy() 호출 후 슬랩 반납).
+// 이 관례를 안 따르는 T가 있다면 kMakeShared/kMakeUnique에 커스텀
+// deleter를 넘기면 된다(템플릿 파라미터라 기본값을 오버라이드하는
+// 게 자연스러운 확장점).
+//
+// **[예외, 2026-09-17, PN-B41D8C0E, SP-1DB13F61] 가상 함수(vtable)가
+// 있는 T는 이 관례를 따를 수 없다** - memset(0)만으로는 vtable
+// 포인터가 설치되지 않아(Mutex/Semaphore 안의 WaitQueue가 최초
+// 사례, QU-1D089097 실측 발견) 가상 호출이 즉시 크래시한다. 이런
+// T는 위 kDestroyAndFree 기본 경로 대신 아래 kMakeSharedNew(실제
+// placement new + ~T() 소멸)를 쓴다 - 두 관례가 공존하며, 어느 쪽을
+// 쓸지는 T가 가상 함수를 갖는지로 결정된다(대부분의 T는 여전히
+// 기존 관례 그대로).
 
 namespace kernel {
 
@@ -368,6 +395,39 @@ SharedPtr<T, Deleter> kMakeShared(T* preConstructed, Deleter deleter = &kDestroy
         preConstructed->_weakThis = WeakPtr<T>(result);
     }
     return result;
+}
+
+// [신규, 2026-09-17, PN-B41D8C0E, SP-1DB13F61 §3] `kDestroyAndFree<T>`
+// (명시적 destroy()/init() 관례 전용)와 짝을 이루는 `kMakeSharedNew`
+// 전용 삭제자 - `kMakeSharedNew`가 placement new로 만든 T는 실제
+// 소멸자(`~T()`)로 반납해야 한다(생성자를 실제로 거쳤으므로 - RAII
+// 하위 객체가 있다면 그 소멸자 체인도 여기서 자동으로 실행된다).
+template <typename T>
+void kDestroyCtorAndFree(T* ptr) {
+    ptr->~T();
+    GenericSlabAllocator::free(ptr, sizeof(T));
+}
+
+// [신규, 2026-09-17, PN-B41D8C0E, SP-1DB13F61] 가상 함수(vtable)가
+// 있는(또는 그런 타입을 서브오브젝트로 임베디드하는) T 전용 대안
+// 팩토리 - `kMakeShared(preConstructed, deleter)`의 기존 관례("이미
+// memset(0)+init()으로 준비된 포인터를 받는다, 실제 생성자는 안 거침")
+// 로는 T(또는 그 서브오브젝트)의 vtable 포인터가 영원히 설치되지
+// 않는다(QU-1D089097 실측 발견 - Mutex/Semaphore 안의 WaitQueue가
+// 최초 사례). `GenericSlabAllocator`에서 받은 원시 메모리 위에 실제
+// placement new로 생성자를 돌린 뒤, 나머지(컨트롤 블록 초기화/
+// `EnableSharedFromThis` 자동 배선)는 기존 `kMakeShared`에 그대로
+// 위임한다 - 바뀌는 건 "T*를 어떻게 준비했는가"와 "소멸 시 무엇을
+// 부르는가"(`~T()` vs `destroy()`) 두 가지뿐이다. T가 가상 함수가
+// 없는 절대다수 타입(Process/RingBuffer/Task 등)이면 이 함수를 쓸
+// 이유가 없다 - 그 타입들은 기존 `kMakeShared(preConstructed, deleter)`
+// 경로를 그대로 쓴다(변경 없음).
+template <typename T, typename... Args>
+SharedPtr<T, void (*)(T*)> kMakeSharedNew(Args&&... args) {
+    void* rawMem = GenericSlabAllocator::alloc(sizeof(T));
+    if (!rawMem) return SharedPtr<T, void (*)(T*)>();  // 할당 실패 - 빈 SharedPtr(예외 없음, 이 프로젝트 관례)
+    T* target = new (rawMem) T(kForward<Args>(args)...);
+    return kMakeShared<T>(target, &kDestroyCtorAndFree<T>);
 }
 
 // [SP-201238BB §2-A] 배타적 소유 - move-only, 원자 연산/컨트롤

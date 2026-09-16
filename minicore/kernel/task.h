@@ -1,13 +1,14 @@
 #ifndef MINICORE_KERNEL_TASK_H
 #define MINICORE_KERNEL_TASK_H
 
+#include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "waitable.h"
 
 namespace kernel {
 
-class Waitable;  // 포인터로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
+class Waitable;  // WeakPtr<Waitable>로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
 
 // SP-0666DB3C §11 - 명시적(explicit) TLS 슬롯 개수. Task::tlsSlots의
 // 배열 크기이자 TlsRegistry::allocateSlot()(tls.h)의 발급 상한이라
@@ -139,10 +140,23 @@ struct Task {
     // 대기 상태를 강제로 끄집어내는 범용 훅) - 파킹 시작 시 그 대기
     // 구조체 자신(WaitQueue 등)이 설정하고, 깨울 때(정상 wakeOne()이든
     // 강제 cancel()이든) 같은 대기 구조체가 자신의 락 아래에서 다시
-    // nullptr로 되돌린다(§9.6-1 - 정상 웨이크업과 강제 취소 두 경로가
+    // 빈 값으로 되돌린다(§9.6-1 - 정상 웨이크업과 강제 취소 두 경로가
     // 경쟁해도 정확히 한쪽만 성공하도록, 이 필드 정리 자체를 그 락으로
-    // 직렬화한다). 대기 중이 아니거나 실행 중이면 nullptr.
-    Waitable* blockedOn = nullptr;
+    // 직렬화한다). 대기 중이 아니거나 실행 중이면 빈 WeakPtr.
+    //
+    // [수정, 2026-09-17, PN-B41D8C0E, DC-21647E46/QU-4E449C65 답변("(B)
+    // SharedPtr 별칭 생성자 추가")] 실제 Waitable 구현체(WaitQueue)는
+    // Mutex/Semaphore에 임베디드라 자기 컨트롤 블록이 없다 - 그래서 이
+    // WeakPtr은 항상 그 WaitQueue를 담고 있는 Mutex/Semaphore의 컨트롤
+    // 블록을 별칭(aliasing)으로 공유한다(WeakPtr(SharedPtr<Mutex>,
+    // Waitable*) 생성자, shared_ptr.h). **주의**: 그 Mutex/Semaphore가
+    // kMakeShared로 만들어지지 않았으면(스택/정적 인스턴스) 별칭을 만들
+    // 컨트롤 블록 자체가 없어 이 필드가 항상 빈 WeakPtr로 남는다 - 그래도
+    // 파킹/wakeOne/wakeAll 자체는 정상 동작하지만(그건 이 필드가 아니라
+    // WaitQueue 내부 연결 리스트로 처리됨), 이 필드를 통한 강제
+    // cancel()(§9.5, 시그널 전달)만 조용히 무력화된다 - 시그널로 즉시
+    // 깨워야 하는 Mutex/Semaphore는 반드시 kMakeShared로 만들어야 한다.
+    WeakPtr<Waitable> blockedOn;
 
     // WaitQueue(SP-0666DB3C §1/§5-1)가 이 Task를 파킹시킨 코어 - 나중에
     // wakeOne()/cancel()이 Scheduler::scheduleImmediate(parkedCoreIndex,

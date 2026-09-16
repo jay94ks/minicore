@@ -4,7 +4,7 @@
 
 namespace kernel {
 
-void WaitQueue::parkCurrentAndUnlock(Spinlock& guard) {
+void WaitQueue::parkCurrentAndUnlock(Spinlock& guard, const WeakPtr<Waitable>& selfAsWaitable) {
     Task* self = Scheduler::currentTask();
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
 
@@ -16,7 +16,7 @@ void WaitQueue::parkCurrentAndUnlock(Spinlock& guard) {
         _head = self;
     }
     _tail = self;
-    self->blockedOn = this;
+    self->blockedOn = selfAsWaitable;
     self->parkedCoreIndex = coreIndex;
     // §9.6-3 - 이번 파킹을 새로 시작하는 시점에 리셋한다(지난 번
     // 파킹에서 취소됐던 낡은 값이 이번 파킹에도 남아 있으면 안 됨) -
@@ -40,7 +40,7 @@ void WaitQueue::wakeOne() {
             _tail = nullptr;
         }
         task->next.store(nullptr);
-        task->blockedOn = nullptr;
+        task->blockedOn = WeakPtr<Waitable>();
     }
     _lock.unlock();
 
@@ -66,7 +66,7 @@ void WaitQueue::wakeAll() {
     while (task) {
         Task* next = task->next.load();
         task->next.store(nullptr);
-        task->blockedOn = nullptr;
+        task->blockedOn = WeakPtr<Waitable>();
         Scheduler::scheduleImmediate(task->parkedCoreIndex, task);
         task = next;
     }
@@ -99,7 +99,7 @@ bool WaitQueue::cancel(Task* task, WaitCancelReason reason) {
         _tail = prev;
     }
     cur->next.store(nullptr);
-    cur->blockedOn = nullptr;
+    cur->blockedOn = WeakPtr<Waitable>();
     // §9.6-3(설계 문서 pseudocode, 지금까지 미구현이었음) - 재개된
     // 코드가 "정상 웨이크업"과 "강제로 끌려나옴"을 구분할 수 있게.
     cur->lastCancelReason = reason;

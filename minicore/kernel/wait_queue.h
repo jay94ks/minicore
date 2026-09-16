@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_WAIT_QUEUE_H
 #define MINICORE_KERNEL_WAIT_QUEUE_H
 
+#include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "task.h"
@@ -24,7 +25,16 @@ public:
     // 이유: 그 사이에 unlock()/release()가 끼어들면 아직 큐에 없는
     // 우리를 못 보고 지나가 버리는 잃어버린 웨이크업이 된다(채널 IPC
     // 다중 waiter 수정, PN-C9625015에서 겪은 것과 같은 종류의 경쟁).
-    void parkCurrentAndUnlock(Spinlock& guard);
+    //
+    // [수정, 2026-09-17, PN-B41D8C0E] `selfAsWaitable`은 호출자(Mutex/
+    // Semaphore)가 자기 자신의 컨트롤 블록을 별칭(aliasing)해 만든,
+    // 이 WaitQueue 인스턴스를 가리키는 WeakPtr<Waitable> - 그대로
+    // Task::blockedOn에 심어 강제 cancel()(§9.5)이 대상을 찾을 수
+    // 있게 한다. 호출자가 kMakeShared로 안 만들어졌으면(컨트롤 블록
+    // 없음) 빈 WeakPtr을 넘겨도 안전하다(task.h의 blockedOn 주석 참고
+    // - 파킹 자체는 이 필드와 무관하게 정상 동작, 강제 cancel()만
+    // 무력화됨).
+    void parkCurrentAndUnlock(Spinlock& guard, const WeakPtr<Waitable>& selfAsWaitable);
 
     // 큐 머리에서 하나 꺼내 즉시 재개시킨다(Scheduler::scheduleImmediate
     // 재사용 - 파킹된 Task는 이중 스케줄링 걱정이 없다고 이미 문서화돼

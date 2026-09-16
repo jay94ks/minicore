@@ -80,6 +80,33 @@ struct IsBaseOf : IntegralConstant<bool, detail::IsBaseOfImpl<Base, Derived>::va
 template <typename Base, typename Derived>
 constexpr bool kIsBaseOf = detail::IsBaseOfImpl<Base, Derived>::value;
 
+// [신규, 2026-09-17, PN-B41D8C0E, SP-1DB13F61] `std::remove_reference`/
+// `std::forward` 대체 - `<utility>`도 이 프로젝트의 freestanding 제약
+// 대상이라(위 문서 주석과 동일한 이유) `kMakeSharedNew<T>(Args&&...)`
+// (shared_ptr.h)의 완벽 전달(perfect forwarding)에 필요한 최소한만
+// 옮겨 왔다 - 표준 구현과 동일한 관용구(참조 축소 규칙 그대로).
+template <typename T>
+struct RemoveReference {
+    using Type = T;
+};
+template <typename T>
+struct RemoveReference<T&> {
+    using Type = T;
+};
+template <typename T>
+struct RemoveReference<T&&> {
+    using Type = T;
+};
+
+template <typename T>
+constexpr T&& kForward(typename RemoveReference<T>::Type& arg) noexcept {
+    return static_cast<T&&>(arg);
+}
+template <typename T>
+constexpr T&& kForward(typename RemoveReference<T>::Type&& arg) noexcept {
+    return static_cast<T&&>(arg);
+}
+
 }  // namespace kernel
 
 #endif  // MINICORE_LIBS_LIBKENV_TYPE_TRAITS_H

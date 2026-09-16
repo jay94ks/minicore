@@ -273,8 +273,14 @@ bool Process::raiseSignal(SignalNumber number) {
     // 정상적으로 깨어난 뒤"라는 뜻이라 어차피 체크포인트 쪽에서 이
     // pendingSignals를 나중에 발견하면 되고, 이 함수 자신은 "기록은
     // 됐다"만 보장하면 된다.
-    if (mainThread && mainThread->blockedOn) {
-        mainThread->blockedOn->cancel(mainThread, WaitCancelReason::Signal);
+    // [수정, 2026-09-17, PN-B41D8C0E] `blockedOn`이 이제 `WeakPtr<Waitable>`
+    // 이라 `.lock()`으로 유효성을 확인해야 한다 - 대상 Mutex/Semaphore가
+    // kMakeShared로 안 만들어졌으면 빈 값이라 이 강제 웨이크업만
+    // 조용히 스킵된다(task.h의 blockedOn 주석 참고).
+    if (mainThread) {
+        if (SharedPtr<Waitable> waitable = mainThread->blockedOn.lock()) {
+            waitable->cancel(mainThread, WaitCancelReason::Signal);
+        }
     }
     return true;
 }
