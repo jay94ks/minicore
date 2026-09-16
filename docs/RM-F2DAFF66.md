@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T20:14:50.932Z
+  updatedAt: 2026-09-16T20:28:39.735Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -223,6 +223,14 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **`SP-9DD4F3EA` §3.3a → `PN-BD9AAE2F` 항목4**: `DeviceOwnerTable`
   ↔ `PN-71C3D483`(Process Teardown Hook) 연동을 명시적 하위 항목으로
   추가(2026-09-17) - 자세한 내용은 §2의 해당 항목 참고.
+  **[효과 확인, 2026-09-17]** minicore-88이 항목4(`RequestIoPermission`,
+  commit e869786)를 구현하며 teardown hook 정식 연동을 지금 당장
+  하지 않고 **`PN-7528A406`으로 명시적으로 분리 등록**했다 -
+  `owner.lock()` 지연(lazy) GC로 임시 대체 중임과 "§3.3a가 공식
+  요구사항으로 명시"했다는 사실까지 그 계획 본문에 그대로 인용해
+  적어 뒀다. 예방 조치를 걸어 두지 않았다면 그냥 조용히 빠졌을
+  가능성이 있는 항목이 **이번엔 미착수 상태로나마 openly 추적**된
+  사례 - 이 문서(§4)의 목적이 실제로 작동함을 확인.
 
 ## §5. 기록 규칙
 
