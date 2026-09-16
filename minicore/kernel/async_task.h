@@ -2,8 +2,10 @@
 #define MINICORE_KERNEL_ASYNC_TASK_H
 
 #include "libkenv/chunked_list.h"
+#include "libkenv/coroutine.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "libkmm/slab.h"
 
 namespace kernel {
 
@@ -74,6 +76,68 @@ inline AsyncToken AsyncTokenSource::token() const {
     return AsyncToken(this);
 }
 
+// [PN-C62F7908, SP-F682B889 §7.3] AsyncTaskHandler::onExec의 코루틴
+// 반환 타입 - 설계자 답변("C++ 코루틴은 가상함수를 지원... 가상함수
+// 정의를 코루틴으로 바꿔")대로 onExec 자신의 시그니처 자체를 이
+// 타입으로 바꾼다(코루틴 전용 별도 가상 메서드를 새로 두지 않음).
+// `co_await`를 전혀 안 쓰는 본문도 이 반환 타입으로 그냥 컴파일되고
+// (C++20 코루틴 변환은 본문의 `co_*` 사용 여부만으로 결정, 반환
+// 타입 자체와는 무관) 첫 실행에서 곧바로 완료 상태로 끝난다 -
+// "코루틴 대신 평범한 함수" 취지는 그대로 유지된다.
+//
+// **initial_suspend=SuspendNever**: onExec 호출 즉시 본문 실행을
+// 시작한다(호출부가 이 반환값을 받기 전에 첫 co_await 지점까지, 또는
+// 끝까지 동기적으로 실행됨) - kAsyncTaskEntryWrapper가 "onExec을
+// 호출하면 그 자리에서 실행이 시작된다"고 기대하는 기존 관례와 일치.
+//
+// **final_suspend=SuspendAlways**: 완료 직후 자동으로 프레임을 정리
+// (destroy)하지 않고 그대로 suspend 상태로 남긴다 - 호출부
+// (kAsyncTaskEntryWrapper/AsyncReactor::drainOnce())가 `done()`으로
+// "이번에 완료됐는지"를 확인한 뒤 필요한 정리(예: coroHandle을 비움)
+// 를 할 기회를 갖기 위함이다. 코루틴 프레임 자체의 실제 해제는
+// AsyncTask 프레임워크가 그 AsyncTask 구조체/스택을 반납하는 시점에
+// 맞춰 명시적으로 처리한다(§3.1 "생성/해제 전부 처리기 책임"과 같은
+// 정신 - 프레임워크가 자동으로 뒤에서 해제하지 않음).
+class AsyncExecCoro {
+public:
+    struct promise_type {
+        AsyncExecCoro get_return_object() {
+            return AsyncExecCoro{std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        SuspendNever initial_suspend() noexcept { return {}; }
+        SuspendAlways final_suspend() noexcept { return {}; }
+        void return_void() noexcept {}
+        // freestanding - C++ 예외를 안 쓴다(RM-23F4B687). 컴파일러
+        // 프로토콜상 이 메서드 자체는 있어야 하지만 호출될 일이 없다.
+        void unhandled_exception() noexcept {}
+
+        static void* operator new(size_t size) { return GenericSlabAllocator::alloc(size); }
+        static void operator delete(void* ptr, size_t size) { GenericSlabAllocator::free(ptr, size); }
+    };
+
+    AsyncExecCoro() = default;
+    explicit AsyncExecCoro(std::coroutine_handle<promise_type> handle) : _handle(handle) {}
+
+    // 지금 이 시점에 완료됐는지(co_await 없이 끝까지 실행됐거나,
+    // 이전에 suspend된 코루틴이 이번 resume()으로 끝까지 도달함).
+    bool done() const { return !_handle || _handle.done(); }
+
+    std::coroutine_handle<> handle() const { return _handle; }
+
+    // final_suspend=SuspendAlways라 자동 정리되지 않으므로, 호출부가
+    // done()==true를 확인한 뒤 직접 불러야 한다 - 두 번 부르면
+    // 안 된다(호출부가 coroHandle을 비워 재호출을 막을 책임을 진다).
+    void destroy() {
+        if (_handle) {
+            _handle.destroy();
+            _handle = nullptr;
+        }
+    }
+
+private:
+    std::coroutine_handle<promise_type> _handle;
+};
+
 struct AsyncTask {
     // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이
     // 오프셋(항상 첫 필드)을 그대로 참조한다 - task.h의 Task와 동일한
@@ -82,6 +146,17 @@ struct AsyncTask {
 
     uint64_t stackBase = 0;  // GenericSlabAllocator가 준 가상주소(해제 시 필요)
     AsyncTaskState state = AsyncTaskState::Ready;
+
+    // [PN-C62F7908, SP-F682B889 §3.2/§7.3] 코루틴 모드 전용 - onExec()가
+    // 코루틴으로 구현돼 co_await로 suspend된 경우에만 값이 채워진다
+    // (스택풀 모드 또는 co_await 없이 끝까지 실행된 코루틴은 비어
+    // 있음, `AsyncExecCoro::done()`이 이미 true이므로 저장할 필요가
+    // 없다 - stackBase/savedRsp가 스택풀 모드 전용이듯 이 필드는
+    // 정확히 "코루틴이 아직 끝나지 않고 남아 있을 때"만 유효하다).
+    // `AsyncReactor::drainOnce()`가 이 필드로 재개 방식을 고른다 -
+    // 비어 있으면 기존 `kContextSwitch`(스택풀), 채워져 있으면
+    // `coroHandle.resume()`(코루틴, kContextSwitch 없이 직접 호출).
+    std::coroutine_handle<> coroHandle;
 
     AsyncTaskSubjectCode subjectCode = 0;
     AsyncTaskManageCode manageCode = 0;

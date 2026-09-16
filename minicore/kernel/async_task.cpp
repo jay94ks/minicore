@@ -145,6 +145,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     cancelSource = AsyncTokenSource{};
     homeCoreIndex = Scheduler::currentCoreIndex();
     allowCoreMigration = false;
+    coroHandle = nullptr;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
