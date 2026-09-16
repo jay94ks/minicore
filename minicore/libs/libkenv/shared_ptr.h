@@ -2,6 +2,7 @@
 #define MINICORE_LIBS_LIBKENV_SHARED_PTR_H
 
 #include "libkenv/spinlock.h"
+#include "libkenv/type_traits.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 
@@ -23,48 +24,12 @@
 
 namespace kernel {
 
-namespace detail {
-
-// [freestanding 대체, PN-68871BC9] `std::is_base_of`가 필요했으나
-// `<type_traits>`가 이 프로젝트의 베어메탈 타겟(x86_64-unknown-none-elf)
-// 에 없다 - 실측 확인(clang++로 `#include <type_traits>`만 컴파일
-// 시도 시 "file not found") - `libkenv/coroutine.h`가 `<coroutine>`에
-// 대해 이미 남겨 둔 것과 정확히 같은 종류의 제약이다. SP-201238BB
-// 원안은 `std::is_base_of_v`를 그대로 쓰는 것으로 적혀 있었으나 이
-// 플랫폼에서는 컴파일 자체가 안 되므로, kMakeShared가 필요로 하는
-// 딱 그 판정(EnableSharedFromThis<T> 상속 여부)만 최소로 대체한다 -
-// C++11 이전부터 널리 쓰인 표준 SFINAE 관용구(Loki/Boost 등)를 그대로
-// 옮겼다: "..." 오버로드는 언어 규칙상 다른 모든 표준 변환보다 항상
-// 순위가 낮으므로, Derived*가 Base*로 실제로 암시적 변환 가능할
-// 때만(=Derived가 Base의 public이고 명확한 파생 클래스일 때만) 첫
-// 번째 오버로드가 선택된다. sizeof는 피연산자를 실행하지 않으므로
-// 두 오버로드 모두 실제로 호출되지 않는다(선언만 필요, 정의 불필요).
-// **주의(실측으로 발견한 초안의 버그)**: 이 두 오버로드를 자유
-// 함수 템플릿으로 두고 호출부에서 `kIsBaseOfProbe<Base>(...)`처럼
-// 명시적 템플릿 인자를 주면, 그 호출은 "명시적 인자가 붙을 수 있는"
-// 템플릿 오버로드 하나만 고려 대상에 넣고 비템플릿 "..." 오버로드는
-// 애초에 후보에서 빠진다(명시적 템플릿 인자 목록은 비템플릿 함수에
-// 적용할 수 없다는 언어 규칙) - 그러면 상속 관계가 아닐 때 대체
-// 후보가 하나도 안 남아 컴파일 자체가 깨진다. 그래서 반드시 클래스
-// 템플릿의 정적 멤버 함수 두 개로 만들어야 한다 - `Base`/`Derived`가
-// 이미 클래스 인스턴스화 시점에 고정된 구체 타입이 되므로, `value`를
-// 계산하는 호출은 명시적 템플릿 인자 없이 평범한 오버로드 해석만으로
-// 두 후보(`test(const volatile Base*)`/`test(const volatile void*)`)
-// 중 하나를 고른다. `Derived*`가 `Base*`로 실제 변환 가능하면(=Derived
-// 가 Base의 public이고 명확한 파생 클래스) 표준이 "B*->A*는 B*->void*
-// 보다 우선"이라고 명시적으로 규정해 둔 tie-break 규칙에 따라 첫
-// 번째가 선택된다 - 그 외에는 항상 두 번째로 떨어진다.
-template <typename Base, typename Derived>
-struct KIsBaseOfImpl {
-    static char test(const volatile Base*);
-    static long test(const volatile void*);
-    static constexpr bool value = sizeof(test(static_cast<Derived*>(nullptr))) == sizeof(char);
-};
-
-}  // namespace detail
-
-template <typename Base, typename Derived>
-constexpr bool kIsBaseOf = detail::KIsBaseOfImpl<Base, Derived>::value;
+// kIsBaseOf(EnableSharedFromThis<T> 상속 여부 판정) - 원래 이 파일에
+// 1회성으로 박아 뒀으나(PN-68871BC9 착수 2번째 증분), <type_traits>
+// 부재가 이 프로젝트 전체의 제약이라는 사실이 확인되면서 다른 설계도
+// 재사용할 수 있게 libkenv/type_traits.h로 이설했다(PN-3F2D88FF,
+// 순수 코드 이동 - 동작 동일). 배경/구현 근거 문서 주석은 그 헤더
+// 참고.
 
 // 기본 삭제자 - 이 프로젝트의 init()/destroy() 명시적 초기화 관례를
 // 따르는 T를 반납한다(placement new를 안 쓰므로 실제 소멸자 대신
