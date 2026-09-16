@@ -113,6 +113,16 @@ public:
     // 이 코어에서 지금 실행 중인 Task - 없으면(idle) nullptr.
     static Task* currentTask();
 
+    // [PN-D132A1E9/QU-DE2828A1] 임의의 다른 코어에서 지금 실행 중인
+    // Task를 조회한다(없으면 nullptr) - currentTask()는 호출자 자신의
+    // 코어만 보므로, "이 프로세스를 지금 실제로 실행 중인 코어들"을
+    // 찾으려는 호출부(TLB 샷다운의 Active CPU Mask 스캔 등)를 위한
+    // 읽기 전용 접근자. 다른 코어가 이 순간 Task를 전환 중이면 살짝
+    // 낡은 값을 볼 수 있다(스냅샷) - 그 코어 자신의 스케줄링 판단에는
+    // 영향 없음, 이 값을 근거로 "그 코어에 IPI를 보낼지" 정도의
+    // 휴리스틱 판단에만 쓸 것.
+    static Task* taskOnCore(uint32_t coreIndex);
+
     // 협조적 양보 - 현재 Task를 Ready로 다시 큐에 넣고 이 코어의 다음
     // Task(또는 idle)로 전환한다. 호출 시점엔 인터럽트 컨텍스트가
     // 아니어야 한다(일반 Task 실행 흐름에서만 호출).

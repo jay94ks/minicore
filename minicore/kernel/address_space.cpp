@@ -119,6 +119,13 @@ bool ProcessAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
     kRollbackMapped(_pml4Phys, alignedAddr, lengthAligned, vma->backing);
     _tree.erase(rangeStart, rangeEnd);
     GenericSlabAllocator::free(vma, sizeof(Vma));
+
+    // [PN-D132A1E9/QU-DE2828A1] 이 락을 쥔 채로 broadcast - 다른
+    // 코어가 이 프로세스를 지금 실행 중이면 방금 해제한 페이지의
+    // 스테일 TLB 엔트리를 그대로 들고 있을 수 있다. targetPml4Phys를
+    // 넘기면 Active CPU Mask(이 pml4를 실제로 실행 중인 코어만)로
+    // 좁혀서 브로드캐스트한다 - 커널 영역 전체 브로드캐스트가 아니다.
+    TlbShootdown::broadcast(alignedAddr, alignedAddr + lengthAligned, _pml4Phys);
     return true;
 }
 
@@ -185,6 +192,11 @@ bool ProcessAddressSpaceManager::resizeAnonymousRegion(uint64_t start, uint64_t 
         }
     } else {
         kRollbackMapped(_pml4Phys, start + newLenAligned, oldLenAligned - newLenAligned, VmaBacking::Anonymous);
+        // [PN-D132A1E9/QU-DE2828A1] 힙 축소(Brk 감소)로 실제로
+        // 언맵된 범위만 - 성장 경로는 이전에 없던 주소에 새로 매핑할
+        // 뿐이라 다른 코어가 그 주소의 stale 매핑을 들고 있을 수
+        // 없으므로 shootdown이 필요 없다.
+        TlbShootdown::broadcast(start + newLenAligned, start + oldLenAligned, _pml4Phys);
     }
 
     _tree.erase(rangeStart, rangeEnd);

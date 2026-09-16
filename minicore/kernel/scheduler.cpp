@@ -886,6 +886,10 @@ Task* Scheduler::currentTask() {
     return gCurrentTask[currentCoreIndex()];
 }
 
+Task* Scheduler::taskOnCore(uint32_t coreIndex) {
+    return gCurrentTask[coreIndex];
+}
+
 void Scheduler::yieldCurrent() {
     // Task 실행 흐름은 보통 IF=1(인터럽트 허용) 상태다 - gCurrentTask를
     // 지우기 전에 큐에 먼저 넣으면, 그 사이 끼어든 스케줄러 틱이

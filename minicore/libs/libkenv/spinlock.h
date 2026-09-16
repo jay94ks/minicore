@@ -75,6 +75,17 @@ public:
         return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
 
+    // 비트마스크 자료구조(PN-D132A1E9의 수신자별 Target Pending Mask
+    // 등)가 락 없이 비트를 세우고/지우는 데 쓴다 - 반환값은 연산 전
+    // 값(호출부가 "이번 호출로 실제로 바뀐 비트"를 알고 싶을 때 유용).
+    uint32_t fetchOr(uint32_t bits) {
+        return __atomic_fetch_or(&_value, bits, __ATOMIC_ACQ_REL);
+    }
+
+    uint32_t fetchAnd(uint32_t bits) {
+        return __atomic_fetch_and(&_value, bits, __ATOMIC_ACQ_REL);
+    }
+
 private:
     uint32_t _value = 0;
 };
