@@ -141,6 +141,23 @@ public:
     // 리프 노드를 재귀적으로 반납 - 재사용 전 반드시 호출.
     void init();
 
+    // [신규, 2026-09-16, PN-7FF5DA89 QA 중 발견] `init()`과 달리 기존
+    // 루트를 반납한 뒤 **새 루트를 다시 할당하지 않는다** - 이 트리
+    // 소유자(예: `Process`) 자체가 영구히 사라지는 경우 전용. `init()`
+    // 은 "항상 루트가 존재해야 한다"는 불변조건(2026-09-15 개정) 때문에
+    // 반납 직후 즉시 재할당하는데, `ProcessAddressSpaceManager::
+    // unmapAll()`(Process::destroy()의 유일한 호출부)이 이 재할당된
+    // 빈 루트를 그대로 남겨 뒀었다 - Resurrect(Process::init() 재호출)
+    // 로 실제로 재사용되면 그 init()이 다시 `_tree.init()`을 불러
+    // 안전하게 정리/재할당하지만, Resurrect 없이 `Process::release()`로
+    // 영구 반납되면 이 마지막 빈 루트 노드 하나가 매번 새는 잠재
+    // 버그였다(PN-7FF5DA89 QA의 "좀비 누적 방지" 검증 중 `PageFrameAllocator::
+    // freePageCount()`가 반복마다 조금씩 줄어드는 것으로 실측 발견 -
+    // 슬랩 캐시 워밍업 비용과 구분하기 위해 워밍업 한 사이클을 먼저
+    // 돌리고서야 순수 누수임을 확인). `_root==nullptr`이면 아무 일도
+    // 안 한다(멱등).
+    void destroy();
+
     // [start, end](양 끝 포함) 범위에 value를 등록한다. 이미 값이
     // 있는 범위와 조금이라도 겹치면 실패(false) - 호출부가 먼저
     // findGap 등으로 빈 공간을 확인했다는 전제(§3.3). value는

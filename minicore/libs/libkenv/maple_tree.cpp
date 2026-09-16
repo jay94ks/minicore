@@ -83,6 +83,13 @@ void MapleTree::init() {
     rebuildNode(_root, initial, 1, true);
 }
 
+void MapleTree::destroy() {
+    if (_root) {
+        freeSubtree(_root);
+        _root = nullptr;
+    }
+}
+
 uint32_t MapleTree::decomposeNode(const MapleArangeNode* node, uint64_t lower, uint64_t upper, Span* outSpans) const {
     if (!node) {
         return 0;

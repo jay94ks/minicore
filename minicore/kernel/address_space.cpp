@@ -242,7 +242,18 @@ void ProcessAddressSpaceManager::unmapAll() {
         kRollbackMapped(_pml4Phys, entries[i].start, entries[i].end - entries[i].start + 1, entries[i].vma->backing);
         GenericSlabAllocator::free(entries[i].vma, sizeof(Vma));
     }
-    _tree.init();  // 루트 자체를 반납해 빈 상태로 되돌린다(재사용 대비)
+    // [수정, 2026-09-16, PN-7FF5DA89 QA 중 발견] 예전엔 `_tree.init()`을
+    // 불러 루트를 반납과 동시에 새로 하나 재할당했다 - `unmapAll()`의
+    // 유일한 호출부(`Process::destroy()`)가 그 뒤로 Resurrect(`Process::
+    // init()`이 `addressSpace.init()`->`_tree.init()`을 다시 불러 안전
+    // 하게 정리/재할당)되지 않고 그대로 `Process::release()`로 영구
+    // 반납되면, 이 마지막 빈 루트 노드 하나가 매번 새는 잠재 버그였다
+    // (`MapleTree::destroy()` 문서 주석 참고 - 실제로 QEMU 반복 실행
+    // 중 `PageFrameAllocator::freePageCount()`가 조금씩 줄어드는 것으로
+    // 발견). `destroy()`는 반납만 하고 재할당하지 않는다 - Resurrect
+    // 경로는 다음 `init()`이 `_root==nullptr`을 보고 알아서 새로
+    // 할당하므로 동작 변화 없음.
+    _tree.destroy();
 }
 
 namespace {
