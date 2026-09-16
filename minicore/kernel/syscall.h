@@ -3,6 +3,7 @@
 
 #include "async_task.h"
 #include "libkenv/chunked_list.h"
+#include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
 #include "task.h"
 
@@ -84,9 +85,23 @@ public:
     // 이 유저 스레드가 속한 프로세스(SP-8B6B8D25 §2-B, 유저 모드 페이지
     // 폴트를 그 프로세스의 PCB에 매다는 데 필요) - process.h가
     // UserThread를 참조하는 반대 방향 관계라 순환 include를 피하려고
-    // 여기서는 전방 선언 포인터로만 갖는다(async_task.h의 `struct
-    // Task;`와 동일한 관례).
-    Process* process = nullptr;
+    // 여기서는 전방 선언 타입으로만 갖는다(async_task.h의 `struct
+    // Task;`와 동일한 관례 - `WeakPtr<Process>`는 `T*`/`ControlBlockBase*`
+    // 두 포인터만 저장하므로 `Process`가 불완전 타입이어도 멤버로 둘
+    // 수 있다, `T`가 완전해야 하는 연산은 이 필드를 실제로 쓰는
+    // process.cpp/scheduler.cpp 등에서만 인스턴스화된다).
+    //
+    // [수정, 2026-09-17, PN-E2A114C1] `Process*`(관찰 포인터)에서
+    // `WeakPtr<Process>`로 전환 - 이 스레드는 자신이 속한 프로세스의
+    // 소유자가 아니다(진짜 소유자는 `Process::children`, DC-21647E46/
+    // QU-76409699 "(B) 포함으로 읽자"). 사용부는 항상 `.lock()`으로
+    // 유효성을 확인한 뒤 그 결과(`SharedPtr<Process>`)를 지역 변수로
+    // 붙들고 쓴다 - 매번 다시 `.lock()`하면 그 사이 대상이 파괴될 수
+    // 있다는 착시를 주지만, 실제로는 다시 lock한 결과도 여전히 같은
+    // 대상을 가리킨다(대상이 살아있는 한) - 중요한 건 "이 스레드 자체가
+    // 대상을 강제로 살려 두지 않는다"는 계약이지 매번 다른 결과가
+    // 나온다는 뜻이 아니다.
+    WeakPtr<Process> process;
 
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든

@@ -324,6 +324,16 @@ protected:
     // 관례상 "실패를 나타내는 빈 값 반환"이 일관된 선택).
     SharedPtr<T> sharedFromThis() { return _weakThis.lock(); }
 
+    // [신규, 2026-09-17, PN-E2A114C1] `sharedFromThis()`의 WeakPtr
+    // 버전(표준 C++17 `enable_shared_from_this::weak_from_this()`와
+    // 같은 역할) - `this`를 강하게 붙잡지 않고 관찰만 하고 싶은
+    // 멤버 함수용(예: `Process::execImage()`가 `UserThread::process`
+    // 에 심을 값을 만들 때 - 그 필드 자체가 WeakPtr이므로 굳이
+    // `sharedFromThis().lock()`을 거쳐 강한 참조를 잠깐 만들었다
+    // 버릴 이유가 없다). `sharedFromThis()`와 동일한 전제(kMakeShared로
+    // 만들어지지 않았으면 빈 WeakPtr).
+    WeakPtr<T> weakFromThis() { return _weakThis; }
+
 private:
     template <typename U, typename D>
     friend SharedPtr<U, D> kMakeShared(U*, D);

@@ -166,7 +166,10 @@ OpenResult LiveFs::open(const char* relPath, uint32_t relPathLen, uint32_t /*fla
         // UserThread 실행 흐름에서만 호출된다"는 전제를 호출부 책임으로
         // 강제한다.
         auto* callerThread = static_cast<UserThread*>(Scheduler::currentTask());
-        Process* callerProcess = callerThread->process;
+        // [수정, 2026-09-17, PN-E2A114C1] `UserThread::process`가 이제
+        // `WeakPtr<Process>`라 `.lock()`으로 유효성을 확인해야 한다 -
+        // 이 지역 `SharedPtr<Process>`가 아래 검사 내내 대상을 살려 둔다.
+        SharedPtr<Process> callerProcess = callerThread->process.lock();
         if (!callerProcess || callerProcess->role != ProcessRole::KernelService ||
             callerProcess->spawnNameLen != nameLen || memcmp(callerProcess->spawnName, name, nameLen) != 0) {
             return OpenResult{FileHandle{}, false, VfsError::PermissionDenied};

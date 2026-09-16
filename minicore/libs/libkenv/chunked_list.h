@@ -80,7 +80,22 @@ public:
     // insert()가 반환한 슬롯을 비운다 - 청크 자체는 즉시 반납하지
     // 않는다(다른 슬롯이 여전히 쓰이고 있을 수 있음). 완전히 빈 청크가
     // 쌓이는 게 걱정되면 compact()를 별도로 부른다.
+    //
+    // [수정, 2026-09-17, PN-E2A114C1 실측 중 발견] `value = T{}`를
+    // 먼저 대입해 옛 값을 명시적으로 정리한 뒤에야 `used`를 끈다 -
+    // 이 컨테이너는 지금까지 전부 POD/raw 포인터 T로만 쓰여서
+    // "옛 값을 그냥 내버려 둬도 무해하다"는 전제가 성립했지만,
+    // `T=SharedPtr<Process>`처럼 실제 소유권을 쥔 값을 담으면 옛
+    // 값을 안 지우고 `used=false`만 하는 건 그 슬롯이 들고 있던 강한
+    // 참조를 영원히 누수시킨다(erase가 "이 슬롯은 이제 안 쓴다"는
+    // 뜻이지 "값이 사라진다"는 뜻이 아니었으므로) - `T{}` 대입이 그
+    // 값의 `operator=`(SharedPtr라면 기존 참조를 내려놓고 스스로도
+    // 빈 상태가 됨)를 거치게 해 해결한다. 기존 POD/raw 포인터
+    // 소비자는 관찰 가능한 차이 없음(어차피 `used=false`인 슬롯의
+    // 값은 아무도 다시 안 읽음 - 그 값을 0/nullptr로 되돌리는 대입
+    // 자체가 부작용이 없다).
     void erase(Slot* slot) {
+        slot->value = T{};
         slot->used = false;
     }
 
@@ -131,10 +146,25 @@ public:
 
     // 모든 청크를 무조건 반납한다(소유자 자체가 사라질 때 - 예: 프로세스/
     // UserThread 종료 절차, PN-40E976F2가 이어받을 부분).
+    //
+    // [수정, 2026-09-17, PN-E2A114C1 실측 중 발견] 청크 메모리를 그냥
+    // `_free()`로 반납하기 전에, 아직 `used`인 슬롯의 값을 먼저
+    // `T{}`로 되돌린다 - erase()와 동일한 이유(비POD T의 소유권 해제).
+    // 이 프로젝트는 placement new/실제 소멸자를 안 쓰는 관례라 이
+    // 대입이 유일하게 "값의 정리 로직을 실행시키는" 지점이다 - 이
+    // 루프 없이 그냥 Chunk 메모리를 반납하면 `T=SharedPtr<Process>`
+    // 같은 경우 그 안에 살아있던 강한 참조가 (가리키던 컨트롤 블록
+    // 자체는 계속 존재하는 채로) 조용히 누수된다.
     void clear() {
         Chunk* chunk = _head;
         while (chunk != nullptr) {
             Chunk* next = chunk->next;
+            for (uint32_t i = 0; i < ChunkCapacity; ++i) {
+                if (chunk->slots[i].used) {
+                    chunk->slots[i].value = T{};
+                    chunk->slots[i].used = false;
+                }
+            }
             _free(chunk, sizeof(Chunk));
             chunk = next;
         }

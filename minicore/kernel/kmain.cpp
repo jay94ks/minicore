@@ -236,7 +236,11 @@ kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap,
 // 뒤(=이 함수 호출 시점)에만 안전하다 - execImage가 유저 스택 페이지를
 // 확보하고 UserThread::init()이 커널 스택을 확보하기 때문이다.
 elf::Image gInitImage;
-kernel::Process gInitProcess;
+// [수정, 2026-09-17, PN-E2A114C1, DC-21647E46/QU-76409699 "(B) 포함으로
+// 읽자"] 진짜 정적 전역 `Process`에서 `SharedPtr<Process>`로 전환 -
+// 이제 다른 모든 Process 인스턴스와 동일하게 `Process::allocate()`
+// (슬랩 할당 + memset(0)) 위에서 `kMakeShared`로 감싼다.
+kernel::SharedPtr<kernel::Process> gInitProcess;
 kernel::UserThread gInitThread;
 
 void kSpawnInitProcess() {
@@ -248,24 +252,48 @@ void kSpawnInitProcess() {
         kernel::Logger::error("minicore: init image ELF parse FAILED");
         return;
     }
-    if (!gInitProcess.init()) {
+    kernel::Process* raw = kernel::Process::allocate();
+    if (!raw) {
+        kernel::Logger::error("minicore: init process allocation FAILED");
+        return;
+    }
+    if (!raw->init()) {
+        kernel::Process::release(raw);
         kernel::Logger::error("minicore: init process address space allocation FAILED");
         return;
     }
+    // [실측/코드 추적으로 발견한 잠재 회귀, 2026-09-17, PN-E2A114C1]
+    // `gInitProcess`가 진짜 정적 전역이던 시절엔 `ProcessStartFlags::
+    // essential`의 NSDMI(`true`)가 실제 C++ 정적 초기화로 적용됐다 -
+    // "커널 서비스가 죽으면 패닉"이라는 안전장치가 그 암묵적 보장
+    // 하나에 의존하고 있었다는 뜻. 이제 `Process::allocate()`의
+    // `memset(0)` 경로를 타면서(다른 모든 동적 Process와 동일) 그
+    // 암묵적 `true`가 조용히 `false`로 뒤집힐 뻔했다 - 명시적으로
+    // 다시 세팅해 기존 동작을 그대로 보존한다.
+    raw->startFlags.essential = true;
+    kernel::SharedPtr<kernel::Process> proc = kernel::kMakeShared<kernel::Process>(raw);
+    if (!proc) {
+        kernel::Logger::error("minicore: init process control block allocation FAILED");
+        raw->destroy();
+        kernel::Process::release(raw);
+        return;
+    }
+    gInitProcess = proc;
     // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
     // gInitProcess를 고아 입양 대상(orphan root)으로 등록 - init()이
     // 성공해 pml4Phys/addressSpace가 진짜로 유효해진 직후, 하지만
     // execImage()가 유저 스택/ELF 로드를 시도하기 전에 먼저 해 둔다
-    // (이 등록 자체는 그 이후 단계들의 성패와 무관 - "이 Process 포인터가
+    // (이 등록 자체는 그 이후 단계들의 성패와 무관 - "이 Process가
     // 유효한 좀비 트리 루트다"라는 사실만 필요하다).
-    kernel::Process::setOrphanRoot(&gInitProcess);
+    kernel::Process::setOrphanRoot(gInitProcess);
     // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - role/startFlags와 같은
     // 관례로 init() 직후 호출부가 직접 채운다.
-    memcpy(gInitProcess.spawnName, "init", 4);
-    gInitProcess.spawnNameLen = 4;
-    kernel::UserThread* thread = gInitProcess.execImage(gInitImage, &gInitThread);
+    memcpy(gInitProcess->spawnName, "init", 4);
+    gInitProcess->spawnNameLen = 4;
+    kernel::UserThread* thread = gInitProcess->execImage(gInitImage, &gInitThread);
     if (!thread) {
         kernel::Logger::error("minicore: init process execImage FAILED");
+        gInitProcess.reset();
         return;
     }
     kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
@@ -278,7 +306,9 @@ void kSpawnInitProcess() {
 // 남기고 계속 진행 - 이 넷은 아직 실제 구현이 하나도 없으므로
 // initrd에 없는 게 v1의 정상 상태다).
 elf::Image gServiceImage[kServiceManifestCount];
-kernel::Process gServiceProcess[kServiceManifestCount];
+// [수정, 2026-09-17, PN-E2A114C1] gInitProcess와 동일한 이유로
+// SharedPtr<Process> 배열로 전환.
+kernel::SharedPtr<kernel::Process> gServiceProcess[kServiceManifestCount];
 kernel::UserThread gServiceThread[kServiceManifestCount];
 
 void kSpawnServiceProcesses() {
@@ -293,21 +323,40 @@ void kSpawnServiceProcesses() {
             kernel::Logger::error("minicore: service image ELF parse FAILED: %s", svc.name);
             continue;
         }
-        if (!gServiceProcess[i].init()) {
+        kernel::Process* raw = kernel::Process::allocate();
+        if (!raw) {
+            kernel::Logger::error("minicore: service process allocation FAILED: %s", svc.name);
+            continue;
+        }
+        if (!raw->init()) {
+            kernel::Process::release(raw);
             kernel::Logger::error("minicore: service process address space allocation FAILED: %s", svc.name);
             continue;
         }
         // role은 스폰 시점에 고정(SP-EAB162FC §1/§2.2 - 이후 바꾸는
         // API를 두지 않는다는 원칙 그대로, execImage 이전에 채운다).
-        gServiceProcess[i].role = kernel::ProcessRole::KernelService;
+        raw->role = kernel::ProcessRole::KernelService;
+        // [실측/코드 추적으로 발견한 잠재 회귀, 2026-09-17, PN-E2A114C1]
+        // kSpawnInitProcess()와 동일한 이유 - 진짜 정적 전역이던 시절의
+        // 암묵적 `essential=true`를 명시적으로 복원한다.
+        raw->startFlags.essential = true;
         // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - LiveFs::open(
         // "kernel/<name>")이 호출자가 정말 그 이름의 서비스 자신인지
         // 검사하는 데 쓴다(role과 같은 관례).
-        memcpy(gServiceProcess[i].spawnName, svc.name, svc.nameLength);
-        gServiceProcess[i].spawnNameLen = svc.nameLength;
-        kernel::UserThread* thread = gServiceProcess[i].execImage(gServiceImage[i], &gServiceThread[i]);
+        memcpy(raw->spawnName, svc.name, svc.nameLength);
+        raw->spawnNameLen = svc.nameLength;
+        kernel::SharedPtr<kernel::Process> proc = kernel::kMakeShared<kernel::Process>(raw);
+        if (!proc) {
+            kernel::Logger::error("minicore: service process control block allocation FAILED: %s", svc.name);
+            raw->destroy();
+            kernel::Process::release(raw);
+            continue;
+        }
+        gServiceProcess[i] = proc;
+        kernel::UserThread* thread = gServiceProcess[i]->execImage(gServiceImage[i], &gServiceThread[i]);
         if (!thread) {
             kernel::Logger::error("minicore: service process execImage FAILED: %s", svc.name);
+            gServiceProcess[i].reset();
             continue;
         }
         kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);

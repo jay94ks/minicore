@@ -13,3 +13,25 @@
 // 링크만 통과시키는 용도이고, 실제로 호출될 일은 없다.
 void operator delete(void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
+
+// [신규, 2026-09-17, PN-E2A114C1 실측 링크 중 발견] `__cxa_atexit` -
+// 비trivial 소멸자를 가진 전역/정적 변수를 하나라도 정의하면(예:
+// kmain.cpp의 `SharedPtr<Process> gInitProcess`), 컴파일러가 프로그램
+// 종료/공유 라이브러리 언로드 시 그 소멸자를 불러 달라고 이 Itanium
+// C++ ABI 함수에 등록하는 코드를 자동으로 끼워 넣는다(`__cxx_global_
+// var_init`) - 실제로 그 등록을 써먹을 일이 있든 없든 링크 타임에는
+// 이 심볼이 존재해야 한다. 이 커널은 "프로그램 종료"라는 개념 자체가
+// 없어(전원이 꺼지거나 재부팅될 뿐, 정상적으로 return하는 kMain이
+// 없음 - 항상 hlt 루프) 이 등록된 소멸자가 실행될 일이 영원히 없다 -
+// `operator delete`와 정확히 같은 이유로, 링크만 통과시키는 순수
+// no-op을 둔다(실제로 소멸자를 호출/기억할 필요가 없다 - "그 등록
+// 자체를 그냥 잊어버리는" 게 이 환경에서 올바른 동작).
+extern "C" int __cxa_atexit(void (*)(void*), void*, void*) {
+    return 0;
+}
+
+// 위 `__cxa_atexit`의 세 번째 인자(dso_handle)로 컴파일러가 이 심볼의
+// 주소를 그대로 넘긴다 - 링커가 "어느 공유 객체가 등록했는지" 구분하는
+// 용도인데, 이 커널엔 애초에 "공유 객체"라는 개념이 없다(단일 정적
+// 링크 이미지) - 그래도 심볼 자체는 존재해야 링크가 통과한다.
+extern "C" void* __dso_handle = nullptr;

@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_PROCESS_H
 
 #include "address_space.h"
+#include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
 #include "signal.h"
 #include "syscall.h"
@@ -89,7 +90,15 @@ inline uint32_t kResurrectIntervalMinutes(uint32_t consecutiveFailures) {
 // QU-7043EA6D 답변으로 확정 완료) 자체는 준비되었지만, **QU-FF3F0CAA
 // ("첫 프로세스"의 정체/유저랜드 빌드 체계) 답변이 아직 없어** 실제로
 // 실측 검증할 방법이 정해지기 전까지는 별도로 이어간다.
-class Process {
+// [신규, 2026-09-17, PN-E2A114C1, DC-21647E46/QU-76409699 "(B) 포함으로
+// 읽자"] `EnableSharedFromThis<Process>` 상속 - `Process`의 모든
+// 인스턴스가 이제 `kMakeShared<Process>(...)`로 감싸져 관리되므로(아래
+// `parent`/`children` 필드 및 `UserThread::process`가 그 컨트롤 블록을
+// 공유하려면), `Process` 자신의 멤버 함수(`execImage()`)가 `this`를
+// 가리키는 `WeakPtr<Process>`를 스스로 재구성할 방법(`weakFromThis()`)
+// 이 필요하다 - `Process::allocate()`가 내주는 raw 포인터만으로는
+// 그 컨트롤 블록에 접근할 방법이 없기 때문(shared_ptr.h 참고).
+class Process : public EnableSharedFromThis<Process> {
 public:
     // 유저 모드 페이지 폴트 정보(§2-B "그 폴트 정보는 그 프로세스
     // 자신의 자료구조(PCB)에 매달아 둔다") - 폴트가 나면 커널을 멈추지
@@ -116,22 +125,45 @@ public:
 
     // [확정, 2026-09-16, QU-52253384 답변] 프로세스 트리(SP-6BEAE0C1
     // §6) - 이 프로세스를 만든 부모(SpawnProcess 호출자). 최초
-    // 프로세스(init, kSpawnInitProcess)는 부모가 없는 루트라 nullptr
-    // 그대로 남는다 - kSpawnServiceProcesses가 만드는 고정 스폰
+    // 프로세스(init, kSpawnInitProcess)는 부모가 없는 루트라 비어
+    // 있는 채로 남는다 - kSpawnServiceProcesses가 만드는 고정 스폰
     // KernelService들도 SpawnProcess syscall 경로를 타지 않으므로
-    // 마찬가지로 nullptr(이 트리는 SpawnProcess로 만들어진 프로세스의
+    // 마찬가지로 비어 있음(이 트리는 SpawnProcess로 만들어진 프로세스의
     // 부모-자식 관계만 표현한다 - 고정 스폰 서비스들의 생명주기는
     // 이미 별도의 resurrect/essential 메커니즘(§6.3/§6.4)이 관리).
-    Process* parent = nullptr;
+    //
+    // [수정, 2026-09-17, PN-E2A114C1] `Process*`에서 `WeakPtr<Process>`
+    // 로 전환 - 자식이 부모의 생사에 영향을 주면 안 된다(부모가 먼저
+    // 죽는 고아 시나리오가 이미 §6에 구현돼 있어 이 방향과 자연히
+    // 맞는다). 부모의 진짜 소유자는 `children`(아래, 조부모 또는
+    // `gInitProcess`/`gServiceProcess[]`)이지 자식이 아니다 - 자식이
+    // 강한 참조까지 쥐면 부모<->자식 순환 참조가 생겨 서로 절대
+    // 해제되지 않는다.
+    WeakPtr<Process> parent;
 
     // 이 프로세스가 SpawnProcess로 만든 자식들의 목록 - `wait()`가
-    // 좀비(§6, 다음 증분에서 배선)를 찾을 때, 프로세스 종료 시 고아를
-    // init에게 입양시킬 때 쓴다. 청크 용량 8은 프로세스당 자식 수가
-    // 보통 많지 않을 거라는 가정의 순수 구현 세부(실측 후 조정 가능,
-    // RM-23F4B687 §4) - `pendingSignals`와 달리 하드웨어 버킷 크기에
-    // 맞출 이유가 없어 그냥 작게 시작한다.
+    // 좀비(§6)를 찾을 때, 프로세스 종료 시 고아를 init에게 입양시킬
+    // 때 쓴다. 청크 용량 8은 프로세스당 자식 수가 보통 많지 않을
+    // 거라는 가정의 순수 구현 세부(실측 후 조정 가능, RM-23F4B687
+    // §4) - `pendingSignals`와 달리 하드웨어 버킷 크기에 맞출 이유가
+    // 없어 그냥 작게 시작한다.
+    //
+    // [수정, 2026-09-17, PN-E2A114C1] `ChunkedList<Process*, 8>`에서
+    // `ChunkedList<SharedPtr<Process>, 8>`로 전환 - **부모가 자식의
+    // 진짜(유일한) 강한 소유자다.** 이 결정은 SP-6BEAE0C1 §6/QU-76409699
+    // 가 이미 확정해 둔 기존 동작(부모가 `children`에 자식을 넣어 두고
+    // `wait()`로 회수하기 전까지 아무도 그 Process 구조체를 반납하지
+    // 않는다)을 SharedPtr 어휘로 그대로 옮긴 것뿐이다(순수 매핑, 새
+    // 정책 아님) - "누가 강한 참조를 쥐는가"라는 질문 자체가 §6이
+    // 이미 답해 뒀다. 위 `parent`가 WeakPtr인 것과 대칭(소유는 항상
+    // 위→아래로만 흐른다 - 부모가 자식을 소유, 자식은 부모를 관찰만).
+    // 고아 입양(reparent)은 이 SharedPtr을 옛 부모의 `children`에서
+    // 복사해 `orphanRoot()`의 `children`에 넣는 것으로 자연히
+    // 처리된다(옛 슬롯은 곧 `clear()`로 비워짐 - ChunkedList::clear()/
+    // erase()가 이제 슬롯 값을 실제로 반납한다는 전제, chunked_list.h
+    // 참고).
     static constexpr uint32_t kMaxChildrenChunkCapacity = 8;
-    ChunkedList<Process*, kMaxChildrenChunkCapacity> children;
+    ChunkedList<SharedPtr<Process>, kMaxChildrenChunkCapacity> children;
 
     // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
     // 좀비 상태 - self-terminate 시(SelfTerminateHandler::onExec)
@@ -273,20 +305,26 @@ public:
     static void registerSyscallEndpoints();
 
     // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
-    // 고아 입양 대상(init 프로세스)을 가리키는 전역 포인터 - kmain.cpp가
-    // `kSpawnInitProcess()`에서 `gInitProcess.init()`이 성공한 직후 딱
-    // 한 번 등록한다. self-terminate 시 이 프로세스에게 살아있는 자식이
-    // 있었다면(자신도 부모였던 경우) 그 자식들을 전부 이 루트로
-    // reparent한다(§6 "고아는 init이 입양"). init 자체가 아직 스폰되지
-    // 않았거나(gInitImageFound==false) 실패했다면 nullptr로 남아
-    // 있을 수 있다 - 그 경우 orphan reparent 단계는 방어적으로 그냥
-    // 건너뛴다(고아가 root 없는 상태로 남는 건 이번 증분 스코프 밖의
-    // 부팅 실패 시나리오 - 커널이 정상 부팅했다면 항상 세팅돼 있다).
-    static void setOrphanRoot(Process* root) { gOrphanRoot = root; }
-    static Process* orphanRoot() { return gOrphanRoot; }
+    // 고아 입양 대상(init 프로세스)을 가리키는 전역 - kmain.cpp가
+    // `kSpawnInitProcess()`에서 `gInitProcess`를 `kMakeShared`로 감싼
+    // 직후 딱 한 번 등록한다. self-terminate 시 이 프로세스에게 살아있는
+    // 자식이 있었다면(자신도 부모였던 경우) 그 자식들을 전부 이
+    // 루트로 reparent한다(§6 "고아는 init이 입양"). init 자체가 아직
+    // 스폰되지 않았거나(gInitImageFound==false) 실패했다면 빈 상태로
+    // 남아 있을 수 있다 - 그 경우 orphan reparent 단계는 방어적으로
+    // 그냥 건너뛴다(고아가 root 없는 상태로 남는 건 이번 증분 스코프
+    // 밖의 부팅 실패 시나리오 - 커널이 정상 부팅했다면 항상 세팅돼
+    // 있다).
+    //
+    // [수정, 2026-09-17, PN-E2A114C1] `Process*`에서 `WeakPtr<Process>`
+    // 로 전환 - 이 정적 전역이 `gInitProcess`(이제 `SharedPtr<Process>`)
+    // 를 향한 또 다른 강한 참조가 될 이유가 없다(`gInitProcess` 자신이
+    // 이미 영구 소유자). 호출부는 `orphanRoot().lock()`으로 사용한다.
+    static void setOrphanRoot(const SharedPtr<Process>& root) { gOrphanRoot = WeakPtr<Process>(root); }
+    static WeakPtr<Process> orphanRoot() { return gOrphanRoot; }
 
 private:
-    static Process* gOrphanRoot;
+    static WeakPtr<Process> gOrphanRoot;
 };
 
 // RM-48E1E610 59번 - SpawnProcess.

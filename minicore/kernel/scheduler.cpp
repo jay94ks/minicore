@@ -526,7 +526,17 @@ public:
         });
         userThread->pendingSyscalls.clear();
 
-        if (userThread->process) {
+        // [수정, 2026-09-17, PN-E2A114C1] `userThread->process`가 이제
+        // `WeakPtr<Process>`라 진위(truthiness) 검사가 아니라 `.lock()`
+        // 으로 유효성을 확인해야 한다 - 그 결과(`process`, 지역
+        // `SharedPtr<Process>`)를 이 블록이 끝날 때까지 붙들고 쓴다.
+        // 이 지역 변수는 "진짜 소유자"가 아니라 임시 강한 참조일 뿐이다
+        // (진짜 소유자는 트리 멤버면 부모의 `children` 슬롯, 루트면
+        // `gInitProcess`/`gServiceProcess[]` 전역 - kmain.cpp) - 이
+        // 함수가 끝나며 스코프를 벗어나도 그 진짜 소유자가 여전히
+        // 살아있는 한 아무 문제 없다.
+        SharedPtr<Process> process = userThread->process.lock();
+        if (process) {
             // Resurrect(SP-EAB162FC §6, 2026-09-16 §6.3/§6.4 개정 반영) -
             // destroy() 이후에도 Process 객체 자체(캐스팅 근거: 정적/
             // 장기수명 인스턴스 - destroy()는 주소공간만 반납할 뿐 이
@@ -534,14 +544,13 @@ public:
             // consecutiveFailures를 안전하게 읽을 수 있다. 재스폰은
             // 기존 주소공간이 완전히 반납된 뒤에 한다(자원 회수 -> 재생성
             // 순서).
-            Process* process = userThread->process;
             const ProcessStartFlags startFlags = process->startFlags;
             const uint32_t newConsecutiveFailures = process->consecutiveFailures + 1;
             process->destroy();
 
             // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째
             // 증분(2/2)] 고아 입양 - 이 프로세스 자신이 SpawnProcess로
-            // 자식을 만들어 뒀다면(parent==nullptr인 고정 스폰
+            // 자식을 만들어 뒀다면(parent가 비어 있는 고정 스폰
             // KernelService라도 스스로 SpawnProcess를 부를 수 있다 -
             // devmgr가 PnP 드라이버 자식을 만드는 경우 등), 그 자식들은
             // 이제 부모를 잃는다. §6 "고아는 init이 입양"에 따라
@@ -551,13 +560,20 @@ public:
             // 시점에 자동으로 회수하지 않는다 - §11-2 참고, "init이
             // 실제로 wait()를 자동 반복 호출하는지"는 커널이 강제할
             // 정책이 아니라 유저랜드 init 구현의 몫).
-            Process* const orphanRoot = Process::orphanRoot();
-            if (orphanRoot && orphanRoot != process) {
-                process->children.forEach([&](Process*& child, auto*) {
+            //
+            // [수정, 2026-09-17, PN-E2A114C1] `children`이 이제 자식의
+            // 유일한 강한 소유자다 - `orphanRoot->children.insert(child)`
+            // 가 그 소유권을 그대로 이어받고(SharedPtr 복사, 강한 참조
+            // +1), 뒤이은 `process->children.clear()`가 옛 소유자
+            // 쪽 몫을 내려놓는다(chunked_list.h 수정 참고) - net
+            // 참조 카운트는 그대로, 소유자만 바뀐다.
+            SharedPtr<Process> orphanRoot = Process::orphanRoot().lock();
+            if (orphanRoot && orphanRoot.get() != process.get()) {
+                process->children.forEach([&](SharedPtr<Process>& child, auto*) {
                     if (!child) {
                         return;
                     }
-                    child->parent = orphanRoot;
+                    child->parent = WeakPtr<Process>(orphanRoot);
                     orphanRoot->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
                     // 실패(슬랩 고갈)해도 그냥 넘어간다 - child->parent는
                     // 이미 orphanRoot로 바뀌었으니 그 자식이 나중에 종료할
@@ -573,12 +589,14 @@ public:
             // 부모가 있으면(SpawnProcess로 만들어진 트리 멤버) 좀비로
             // 남겨 부모의 wait()(RM-48E1E610 35번)를 기다린다 - Process
             // 구조체/mainThread 반납은 WaitHandler(process.cpp)가 회수
-            // 시점에 담당한다. 부모가 없으면(고정 스폰 KernelService,
-            // 또는 SpawnProcessHandler 주석의 이론상 도달 불가 경로) 기존과
-            // 완전히 동일하게 아무도 회수하지 않는 상태로 그냥 남는다 -
-            // 이번 증분 이전에도 이 함수가 Process::release()를 부른 적은
-            // 없었다(정적 전역 Process는 애초에 release() 대상이 아님).
-            if (process->parent) {
+            // 시점에 담당한다(이제 SharedPtr 마지막 강한 참조 소멸을
+            // 통해서 - process.cpp WaitHandler 참고). 부모가 없으면
+            // (고정 스폰 KernelService, 또는 SpawnProcessHandler 주석의
+            // 이론상 도달 불가 경로) 기존과 완전히 동일하게 아무도
+            // 회수하지 않는 상태로 그냥 남는다 - `gInitProcess`/
+            // `gServiceProcess[]` 전역이 계속 강하게 붙들고 있으므로
+            // 이 지역 변수 `process`가 스코프를 벗어나도 파괴되지 않는다.
+            if (process->parent.lock()) {
                 process->isZombie = true;
                 // exitCode(§6) - SelfTerminate syscall 자체가 아직 종료
                 // 코드를 인자로 받지 않는다(kSyscallEndpointSelfTerminate

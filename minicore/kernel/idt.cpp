@@ -541,8 +541,12 @@ void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
 // 해", 2026-09-16).
 void kTerminateFaultingUserTask(kernel::SignalNumber signal) {
     auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
-    if (thread && thread->process) {
-        thread->process->raiseSignal(signal);
+    // [수정, 2026-09-17, PN-E2A114C1] `thread->process`가 이제
+    // `WeakPtr<Process>`라 `.lock()`으로 유효성을 확인해야 한다.
+    if (thread) {
+        if (kernel::SharedPtr<kernel::Process> proc = thread->process.lock()) {
+            proc->raiseSignal(signal);
+        }
     }
     kTaskOnFallingToEnd();
     asm volatile("sti");

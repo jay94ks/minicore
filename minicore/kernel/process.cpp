@@ -140,7 +140,7 @@ void Process::release(Process* proc) {
 
 // [신규, 2026-09-16, PN-543C0CE9 착수 5번째 증분(2/2)] Process::
 // setOrphanRoot() 문서 주석 참고 - kmain.cpp가 부팅 중 딱 한 번만 채운다.
-Process* Process::gOrphanRoot = nullptr;
+WeakPtr<Process> Process::gOrphanRoot;
 
 bool Process::init() {
     pml4Phys = Paging::createAddressSpace();
@@ -153,9 +153,21 @@ bool Process::init() {
     // 재사용할 수 있으므로, 이전 생애의 부모/자식 관계가 새 생애로
     // 새어 들어가지 않도록 매번 명시적으로 리셋한다(아래 pendingSignals
     // 와 동일한 이유). parent는 이 시점엔 아직 누가 부모인지 모르므로
-    // nullptr로만 리셋해 두고, 실제 부모-자식 연결은 스폰 경로(예:
+    // 빈 WeakPtr로만 리셋해 두고, 실제 부모-자식 연결은 스폰 경로(예:
     // SpawnProcessHandler)가 init() 이후 직접 채운다.
-    parent = nullptr;
+    //
+    // [수정, 2026-09-17, PN-E2A114C1] `parent = nullptr;`(raw 포인터
+    // 대입)는 이제 `parent = WeakPtr<Process>();`(진짜 대입 연산자)가
+    // 돼야 한다 - 옛 `parent`가 실제로 뭔가를 가리키고 있었다면(이론상
+    // Resurrect 재사용 경로에서만, §6.3/§6.4 고정 스폰 프로세스는
+    // 애초에 parent를 안 씀) 그 대상의 weakCount를 제대로 내려놔야
+    // 하기 때문(단순 대입이면 옛 `_block`을 그냥 덮어써 weakCount가
+    // 영원히 하나 새는 것과 같은 문제 - `children.clear()`가 이미
+    // 겪은 것과 동일한 종류의 함정, chunked_list.h 수정 참고).
+    // `children.clear()`도 같은 이유로 이제 슬롯의 SharedPtr을 실제로
+    // 반납한다(ChunkedList::clear() 수정 참고) - 이 호출 자체는 바뀌지
+    // 않았다.
+    parent = WeakPtr<Process>();
     children.clear();
     // 좀비 상태(§6, PN-543C0CE9 착수 5번째 증분(2/2)) - parent/children과
     // 동일한 이유(Resurrect가 같은 정적 Process를 재사용)로 매번 리셋.
@@ -228,7 +240,14 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
         return nullptr;
     }
 
-    thread->process = this;
+    // [수정, 2026-09-17, PN-E2A114C1] `thread->process = this;`(raw
+    // 포인터)에서 `weakFromThis()`로 전환 - 호출부(SpawnProcessHandler/
+    // kSpawnInitProcess/kSpawnServiceProcesses)가 execImage()를 부르기
+    // 전에 이미 `kMakeShared<Process>(this)`로 이 인스턴스를 감싸 뒀다는
+    // 전제(그래야 `_weakThis`가 채워져 있어 `weakFromThis()`가 빈
+    // WeakPtr이 아닌 진짜 값을 돌려준다) - 세 호출부 전부 그 순서를
+    // 지키도록 갱신했다.
+    thread->process = weakFromThis();
     thread->isUserLevel = true;
     thread->userPml4Phys = pml4Phys;
     thread->ring3EntryPoint = image.entryPoint();
@@ -327,19 +346,37 @@ public:
             co_return;
         }
 
+        // [신규, 2026-09-17, PN-E2A114C1] init() 직후, execImage() 이전에
+        // 이 Process를 kMakeShared로 감싼다 - execImage()가 내부에서
+        // `weakFromThis()`를 부르므로(thread->process 세팅) 그보다
+        // 먼저 `_weakThis`가 채워져 있어야 한다. 이 시점부터 `procShared`
+        // 가 이 Process의 유일한 강한 소유자다 - 실패 시 `procShared`를
+        // `reset()`하면 `proc->destroy()`+슬랩 반납이 자동으로 일어난다
+        // (기본 삭제자 `kDestroyAndFree<Process>`, `destroy()`는
+        // pml4Phys==0이면 아무 일도 안 하는 멱등 함수라 이미 destroy()를
+        // 부른 뒤 다시 불러도 안전 - process.h `destroy()` 문서 참고).
+        SharedPtr<Process> procShared = kMakeShared<Process>(proc);
+        if (!procShared) {
+            UserThread::release(thread);
+            proc->destroy();
+            Process::release(proc);
+            GenericSlabAllocator::free(kernelImage, args->imageSize);
+            args->error = SpawnProcessError::OutOfMemory;
+            co_return;
+        }
+
         // 4단계 - kEnterInitProcess/kSpawnServiceProcesses와 동일한
         // execImage 경로. **elf::Image는 원본 버퍼를 복사하지 않고
         // 그대로 가리키므로(elf.h 문서 주석) kernelImage는 execImage가
         // 끝난 뒤에만 반납한다** - loadIntoAddressSpace가 이 버퍼에서
         // 새 주소공간으로 실제 페이지 복사를 끝내는 지점이 execImage
         // 안이다.
-        UserThread* started = proc->execImage(image, thread);
+        UserThread* started = procShared->execImage(image, thread);
         GenericSlabAllocator::free(kernelImage, args->imageSize);
 
         if (!started) {
             UserThread::release(thread);
-            proc->destroy();
-            Process::release(proc);
+            procShared.reset();  // destroy()+슬랩 반납(위 주석 참고)
             args->error = SpawnProcessError::ExecImageFailed;
             co_return;
         }
@@ -350,29 +387,46 @@ public:
         // 고갈)하면 이미 시작된 스레드를 스케줄러에 올리기 전에 안전하게
         // 되돌릴 수 있는 마지막 지점이기 때문이다(엔큐 이후엔 이미
         // 실행 중일 수 있어 되돌릴 수 없다).
+        //
+        // [수정, 2026-09-17, PN-E2A114C1] `Process::children`이 이제
+        // 자식의 유일한 강한 소유자다(process.h 문서 참고) - `caller->
+        // process.lock()`으로 얻은 부모가 `procShared`를 자기
+        // `children`에 복사해 넣는 순간부터가 진짜 소유의 시작이고,
+        // 이 함수 끝에서 지역 변수 `procShared`가 스코프를 벗어나도
+        // (강한 참조 하나 감소) 그 슬롯의 몫이 남아 있어 안전하다.
         auto* caller = static_cast<UserThread*>(Scheduler::currentTask());
-        Process* parentProc = caller ? caller->process : nullptr;
+        SharedPtr<Process> parentProc = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!parentProc) {
+            // 이론상 도달 불가(SpawnProcess는 항상 실제 UserThread
+            // 실행 흐름에서만 온다, Syscall 클래스 문서 주석과 동일한
+            // 전제) - 방어적으로만, 진짜 부모가 없으면 orphanRoot(init)
+            // 를 대신 소유자로 삼는다(기존에도 "고아처럼 취급"이라고
+            // 문서화돼 있던 그 상태를 SharedPtr 세계에서 실제로 안전하게
+            // 구현한 것 - 소유자가 전혀 없으면 이 함수가 끝나는 순간
+            // `procShared`가 스코프를 벗어나며 막 시작한 프로세스가
+            // 그대로 파괴되는 use-after-free가 된다).
+            parentProc = Process::orphanRoot().lock();
+        }
         if (parentProc) {
             parentProc->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
-            if (!parentProc->children.insert(proc)) {
+            if (!parentProc->children.insert(procShared)) {
                 UserThread::release(thread);
-                proc->destroy();
-                Process::release(proc);
+                procShared.reset();
                 args->error = SpawnProcessError::OutOfMemory;
                 co_return;
             }
-            proc->parent = parentProc;
+            procShared->parent = WeakPtr<Process>(parentProc);
         }
-        // parentProc==nullptr(이론상 도달 불가 - SpawnProcess는 항상
-        // 실제 UserThread 실행 흐름에서만 온다, Syscall 클래스 문서
-        // 주석과 동일한 전제)이면 방어적으로 트리에 편입하지 않고
-        // 계속 진행한다 - 새 프로세스 자체는 정상 동작하되 고아처럼
-        // 취급된다.
+        // parentProc이 이 시점에도 비어 있으면(진짜 root조차 없는 -
+        // init도 아직 스폰 안 된 부팅 극초반) 정말 아무도 소유할 수
+        // 없다 - 이 역시 이론상 도달 불가(SpawnProcess 자체가 유저
+        // 프로세스 실행 흐름에서만 오므로 이미 최소 init은 떠 있어야
+        // 함)라 더 방어하지 않는다.
 
         // argv/envp는 아직 실제로 전달하지 않는다(SpawnProcessArgs
         // 문서 주석 참고 - §4 전체가 미착수).
         Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
-        args->pid = reinterpret_cast<int64_t>(proc);
+        args->pid = reinterpret_cast<int64_t>(procShared.get());
         args->error = SpawnProcessError::None;
         co_return;
     }
@@ -395,22 +449,29 @@ public:
         args->hasAnyChild = false;
 
         // SpawnProcessHandler::onExec과 동일한 관례로 호출자 자신의
-        // Process를 얻는다 - 커널 Task(process==nullptr)가 이 syscall을
-        // 부를 일은 없다(SelfTerminateHandler와 동일한 전제), 방어적으로만
-        // null 확인.
+        // Process를 얻는다 - 커널 Task(process가 비어 있음)가 이
+        // syscall을 부를 일은 없다(SelfTerminateHandler와 동일한 전제),
+        // 방어적으로만 확인.
         auto* caller = static_cast<UserThread*>(Scheduler::currentTask());
-        Process* self = caller ? caller->process : nullptr;
+        SharedPtr<Process> self = caller ? caller->process.lock() : SharedPtr<Process>();
         if (!self) {
             co_return;
         }
 
-        Process* zombie = nullptr;
+        // [수정, 2026-09-17, PN-E2A114C1] `children`이 이제
+        // `ChunkedList<SharedPtr<Process>, 8>`이므로 `zombie`도
+        // `SharedPtr<Process>`(단순 복사 - 강한 참조 +1, 슬롯 자신의
+        // 몫과는 별개로 이 지역 변수가 하나 더 쥔다). `erase()`가
+        // 슬롯 몫을 내려놔도(chunked_list.h 수정 참고) 이 지역 변수가
+        // 함수 끝까지 살려 두므로 `zombie->exitCode` 등을 그 뒤에
+        // 읽어도 안전하다.
+        SharedPtr<Process> zombie;
         decltype(self->children)::Slot* zombieSlot = nullptr;
-        self->children.forEach([&](Process*& child, auto* slot) {
+        self->children.forEach([&](SharedPtr<Process>& child, auto* slot) {
             if (!child) {
                 return;
             }
-            if (args->targetPid != -1 && reinterpret_cast<int64_t>(child) != args->targetPid) {
+            if (args->targetPid != -1 && reinterpret_cast<int64_t>(child.get()) != args->targetPid) {
                 return;
             }
             args->hasAnyChild = true;
@@ -421,21 +482,25 @@ public:
         });
 
         if (zombie) {
-            self->children.erase(zombieSlot);
             args->hadZombieChild = true;
-            args->reapedPid = reinterpret_cast<int64_t>(zombie);
+            args->reapedPid = reinterpret_cast<int64_t>(zombie.get());
             args->exitCode = zombie->exitCode;
-            // reap = Process 구조체 자신 + (있다면) mainThread까지 완전히
-            // 반납한다 - self->children에 들어올 수 있는 Process는 전부
-            // SpawnProcessHandler::onExec이 Process::allocate()/
-            // UserThread::allocate()로 만든 것뿐이라(고정 스폰 static
-            // Process/UserThread는 절대 어떤 children 리스트에도 들어가지
-            // 않음 - process.h parent/children 문서 주석 참고) 여기서
-            // release()하는 게 항상 안전하다.
+            // mainThread는 아직 SharedPtr 관리 대상이 아니다(PN-B4987BF6
+            // 별도 계획, Task 자체를 SharedPtr로 옮기는 더 위험한 작업 -
+            // 이번 범위 밖) - 명시적으로 계속 반납해야 한다.
             if (zombie->mainThread) {
                 UserThread::release(zombie->mainThread);
             }
-            Process::release(zombie);
+            // [수정, 2026-09-17, PN-E2A114C1] `Process::release(zombie)`
+            // 를 더 이상 직접 부르지 않는다 - `erase()`가 슬롯의 강한
+            // 참조를 내려놓고(위 `zombie` 지역 변수가 아직 하나를 쥐고
+            // 있어 이 시점엔 파괴 안 됨), 이 함수 끝에서 `zombie` 자신이
+            // 스코프를 벗어나며 마지막 강한 참조를 내려놓는 순간 실제로
+            // 파괴된다(`kDestroyAndFree<Process>` - `destroy()`는
+            // self-terminate 시점에 이미 불려 멱등하게 아무 일도 안 하고,
+            // `GenericSlabAllocator::free`만 실제로 수행됨) - 여기서
+            // `Process::release()`를 또 부르면 이중 반납이 된다.
+            self->children.erase(zombieSlot);
         }
         co_return;
     }
