@@ -381,10 +381,11 @@ enum SpawnProcessFlags : uint32_t {
     kSpawnNone = 0,
     // SP-9A6D579F §3.3 - 디버깅 대상으로 스폰된 자식은 첫 명령어 실행
     // 전 정지 상태로 시작(TaskState::Blocked) - 디버거(부모)가 이
-    // 플래그를 세팅해 호출. **이 비트 자체의 실제 동작은 아직 미착수**
-    // (PN-A6E01B8A 항목4) - SP-9A6D579F 착수 시 함께 구현한다. 지금은
-    // 유효한 비트로만 인정되어 InvalidArgument를 피할 뿐, 세팅해도
-    // 아직 아무 효과가 없다.
+    // 플래그를 세팅해 호출. **[완료, PN-87D6B615 항목8]** 실제 동작은
+    // process.cpp SpawnProcessHandler::onExec 5단계 끝에서 소비한다 -
+    // Ready 큐에 넣는 대신 새 Task를 state=Blocked로 남긴다. 이 자체로
+    // DebugSession을 만들지는 않는다 - 디버거는 별도로 DebugAttach를
+    // 불러야 실제로 그 세션을 쥔다(§3.3 "Attach/Detach 동작은 유지").
     kSpawnDebugStart = 1u << 0,
     // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 1, ...).
 };
@@ -400,9 +401,9 @@ constexpr uint32_t kSpawnProcessFlagsMask = SpawnProcessFlags::kSpawnDebugStart;
 // `envp`는 아직 실제로 새 프로세스에 전달되지 않는다(§4 "인자/환경변수
 // 전달 규약"이 프로젝트 전체에서 아직 미착수 - execImage()가 지금은
 // 그런 스택 프레임을 구성하지 않는다, 이 syscall만의 제약이 아니다) -
-// ABI 자리만 미리 잡아 두고 §4가 준비되면 이어붙인다. `flags`도 마찬가지로
-// `kSpawnDebugStart` 비트의 실제 소비는 SP-9A6D579F 착수 시로 미룬다
-// (PN-A6E01B8A) - 지금은 유효성 검증(kSpawnProcessFlagsMask)까지만.
+// ABI 자리만 미리 잡아 두고 §4가 준비되면 이어붙인다. `flags`는
+// `kSpawnDebugStart` 비트까지 실제로 소비한다(PN-87D6B615 항목8) -
+// 유효성 검증(kSpawnProcessFlagsMask)과 실제 동작 둘 다 구현 완료.
 struct SpawnProcessArgs {
     const void* imageBuffer = nullptr;  // 유저 포인터 - ELF64 이미지 원본 바이트
     uint64_t imageSize = 0;

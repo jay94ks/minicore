@@ -365,8 +365,8 @@ public:
         // 안 된 비트가 하나라도 세팅되면 조용히 무시하지 않고 거부한다
         // (SP-6BEAE0C1 §3 "오타/버전 불일치를 바로 드러내기 위함" -
         // 표준 커널 syscall 관례). kSpawnDebugStart 비트 자체의 실제
-        // 동작(자식을 Blocked로 시작)은 아직 미착수 - SP-9A6D579F
-        // 착수 시 함께 구현(지금은 유효한 비트로만 인정될 뿐 효과 없음).
+        // 동작(자식을 Blocked로 시작)은 아래 5단계 끝에서 소비한다
+        // ([완료, PN-87D6B615 항목8, SP-9A6D579F §3.3]).
         if ((args->flags & ~kSpawnProcessFlagsMask) != 0) {
             args->error = SpawnProcessError::InvalidArgument;
             co_return;
@@ -506,7 +506,23 @@ public:
 
         // argv/envp는 아직 실제로 전달하지 않는다(SpawnProcessArgs
         // 문서 주석 참고 - §4 전체가 미착수).
-        Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
+        //
+        // [신규, PN-87D6B615 항목8, SP-9A6D579F §3.3] `kSpawnDebugStart`
+        // 비트가 세팅됐으면 이 자식은 첫 명령어를 실행하기 전에 정지
+        // 상태로 시작해야 한다(설계자 지시로 옵션이 아님) - Ready
+        // 큐에 아예 넣지 않고 `state`만 `Blocked`로 남겨 둔다.
+        // `Scheduler::parkCurrent()`(scheduler.cpp)가 파킹을 표현하는
+        // 것과 정확히 같은 방식(state=Blocked + 어느 큐에도 없음,
+        // `inRunQueue`는 애초에 한 번도 true가 된 적 없으므로 그대로
+        // false) - 새 `TaskState`를 추가하지 않는다(RM-23F4B687 §4,
+        // 과설계 방지). 나중에 `DebugContinue`(§3.5, 아직 미구현,
+        // PN-87D6B615 항목5)가 `Scheduler::enqueue()`로 명시적으로
+        // Ready에 올려야만 실행을 시작한다.
+        if (args->flags & SpawnProcessFlags::kSpawnDebugStart) {
+            started->state = TaskState::Blocked;
+        } else {
+            Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
+        }
         args->pid = reinterpret_cast<int64_t>(procShared.get());
         args->error = SpawnProcessError::None;
         co_return;
