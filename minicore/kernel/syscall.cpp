@@ -21,6 +21,14 @@ EndpointSlot gEndpointSlots[kMaxSyscallEndpoints];
 
 namespace kernel {
 
+// [신규, 2026-09-17, PN-B4987BF6] UserThread::_selfRef 전용 no-op
+// 삭제자 - `UserThread::release()`가 여전히 실제 반납(GenericSlabAllocator::
+// free)을 직접 담당한다는 기존 계약을 그대로 지키기 위해, `_selfRef`의
+// 강한 참조가 0이 되는 순간(release() 안의 reset())엔 아무 것도 하지
+// 않는다(syscall.h의 _selfRef 주석 참고 - operator delete/__cxa_atexit
+// 스텁과 같은 근거의 "이 훅이 실제로 할 일이 없다" no-op).
+void kNoOpReleaseUserThread(UserThread*) {}
+
 // [SP-6BEAE0C1 §5, PN-543C0CE9] Process::allocate()/release()(process.cpp)
 // 와 완전히 같은 근거 - UserThread의 모든 필드(Task 상속분 포함)가
 // 0/nullptr NSDMI라 memset한 raw 슬랩 메모리가 placement new 없이도
@@ -28,16 +36,35 @@ namespace kernel {
 // kernelStackPhys 등을 새로 채운다(기존 값을 읽지 않고 무조건 덮어쓰므로
 // 이 부분은 raw 메모리라도 원래 안전했다 - pendingSyscalls처럼 내부
 // 포인터를 먼저 걷는 필드만 이 memset이 실제로 막아 주는 대상).
+//
+// [수정, 2026-09-17, PN-B4987BF6] `_selfRef`를 no-op 삭제자로
+// `kMakeShared`해 컨트롤 블록만 곁다리로 붙인다(syscall.h의 `_selfRef`
+// 주석 참고) - `EnableSharedFromThis<UserThread>`가 필요로 하는
+// `_weakThis`가 이 호출로 채워진다(shared_ptr.h의 kMakeShared가
+// `if constexpr` 자동 처리). 실패 시(컨트롤 블록 슬랩 할당 실패)
+// UserThread 슬랩 자체도 되돌린다 - 부분 성공 상태를 남기지 않는다.
 UserThread* UserThread::allocate() {
     void* raw = GenericSlabAllocator::alloc(sizeof(UserThread));
     if (!raw) {
         return nullptr;
     }
     memset(raw, 0, sizeof(UserThread));
-    return reinterpret_cast<UserThread*>(raw);
+    auto* thread = reinterpret_cast<UserThread*>(raw);
+    thread->_selfRef = kMakeShared<UserThread>(thread, &kNoOpReleaseUserThread);
+    if (!thread->_selfRef) {
+        GenericSlabAllocator::free(raw, sizeof(UserThread));
+        return nullptr;
+    }
+    return thread;
 }
 
 void UserThread::release(UserThread* thread) {
+    // _selfRef.reset()은 강한 참조 카운트만 0으로 내릴 뿐(no-op
+    // 삭제자라 이 시점엔 아무 메모리도 안 건드림) - 실제 반납은 항상
+    // 이 함수의 GenericSlabAllocator::free()가 담당한다는 기존 계약
+    // 그대로다(syscall.h의 _selfRef 주석 참고). 순서가 중요하지 않다 -
+    // reset() 다음 줄에서 thread가 가리키는 메모리를 또 만지지 않는다.
+    thread->_selfRef.reset();
     GenericSlabAllocator::free(thread, sizeof(UserThread));
 }
 
@@ -168,7 +195,7 @@ Syscall::MultiWaitResult Syscall::waitForAnyOf(const AsyncTaskManageCode* tokens
                 for (uint32_t i = 0; i < count; ++i) {
                     auto* slot = self->pendingSyscalls.find(
                         [&](const UserThread::PendingSyscall& p) { return p.token == tokens[i]; });
-                    reinterpret_cast<AsyncTask*>(slot->value.token)->waitingTask = self;
+                    reinterpret_cast<AsyncTask*>(slot->value.token)->waitingTask = self->weakAsTask();
                 }
             }
         }

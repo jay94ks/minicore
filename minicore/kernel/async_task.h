@@ -3,6 +3,7 @@
 
 #include "libkenv/chunked_list.h"
 #include "libkenv/coroutine.h"
+#include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
@@ -198,7 +199,16 @@ struct AsyncTask {
     // 완료 시점의 코어(=이 AsyncTask를 실행한 그 코어)에서 깨우므로,
     // 대기하는 Task도 반드시 같은 코어에서 Scheduler::parkCurrent()로
     // 잠들어 있어야 한다(v1 범위 - 코어 간 이관 없음).
-    Task* waitingTask = nullptr;
+    //
+    // [수정, 2026-09-17, PN-B4987BF6, DC-21647E46 로드맵 Phase 3
+    // QU-D8FE566E 답변("진행 - 안전성이 우선")] `Task*`(관찰 포인터)에서
+    // `WeakPtr<Task>`로 전환 - 등록해 둔 대기자가 이 AsyncTask 완료
+    // 전에 강제 종료돼 UserThread 슬랩이 먼저 반납되는 경우(신호 기반
+    // 강제 종료 등, PN-40E976F2의 onCancel 경로) 이 필드가 그 사실을
+    // 모른 채 이미 해제된 메모리를 깨우려는 잠재적 UAF를 막는다 -
+    // `.lock()`이 실패하면(대상이 이미 release()됨) 조용히 깨우기를
+    // 건너뛴다.
+    WeakPtr<Task> waitingTask;
 
     // false면 완료(Completed/Failed) 후에도 리액터가 이 AsyncTask
     // 구조체/전용 스택을 자동으로 반납하지 않는다 - 결과를 나중에

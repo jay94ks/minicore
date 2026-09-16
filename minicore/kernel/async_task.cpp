@@ -283,7 +283,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     // 여기서 전부 명시적으로 리셋해야 한다. 특히 waitingTask를 안
     // 지우면 슬랩 재사용으로 이전 점유자의 낡은 포인터가 남아, 리액터가
     // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
-    waitingTask = nullptr;
+    waitingTask = WeakPtr<Task>();
     autoFree = true;
     cancelSource = AsyncTokenSource{};
     homeCoreIndex = Scheduler::currentCoreIndex();
@@ -572,8 +572,13 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         // 대기자도 반드시 같은 코어에서 파킹돼 있다(v1 - 코어 간
         // 이관 없음). 아래에서 task를 반납하기 전에 반드시 먼저
         // 읽어야 한다(반납 후에는 이 필드도 더 이상 유효하지 않음).
-        if (task->waitingTask) {
-            Scheduler::scheduleImmediate(coreIndex, task->waitingTask);
+        // [수정, 2026-09-17, PN-B4987BF6] `waitingTask`가 이제
+        // `WeakPtr<Task>`라 `.lock()`으로 유효성을 확인해야 한다 - 대상
+        // UserThread가 이 AsyncTask 완료 전에 강제 종료돼 이미
+        // release()됐으면 조용히 스킵한다(async_task.h의 waitingTask
+        // 주석 참고).
+        if (SharedPtr<Task> waiter = task->waitingTask.lock()) {
+            Scheduler::scheduleImmediate(coreIndex, waiter.get());
         }
         // args의 생성/반납은 처리기 책임(SP-F682B889 §3.1) - 여기서는
         // 프레임워크 소유물(AsyncTask 구조체 자신과 그 전용 스택)만,

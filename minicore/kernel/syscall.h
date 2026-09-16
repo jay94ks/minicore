@@ -56,8 +56,28 @@ uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1);
 // 상속받아 유저 쓰레드를 구현해도 상관없다"). 이 이름 자체는 제안일
 // 뿐 확정된 이름은 아니다 - 프로세스/스레드 모델을 실제로 설계할 때
 // 최종 확정한다.
-class UserThread : public Task {
+// [수정, 2026-09-17, PN-B4987BF6, DC-21647E46 로드맵 Phase 3
+// QU-D8FE566E 답변("진행 - 안전성이 우선")] `EnableSharedFromThis`를
+// 상속 - `AsyncTask::waitingTask`(WeakPtr<Task>)가 "이 UserThread가
+// 아직 살아있는지"를 `.lock()`으로 확인할 수 있으려면 이 객체가 자기
+// 컨트롤 블록을 가져야 한다. **강한 소유권 모델 자체는 안 바뀐다** -
+// `Process::mainThread`(raw UserThread*)가 여전히 유일한 진짜
+// 소유자이고 `UserThread::release()`가 여전히 그 시점에 실제로
+// 반납한다(아래 `_selfRef` 주석 참고 - 외부에서 관찰되는 lifecycle은
+// 100% 동일, `EnableSharedFromThis`는 순수하게 WeakPtr 관찰자 지원을
+// 위한 부가 기능일 뿐이다).
+class UserThread : public Task, public EnableSharedFromThis<UserThread> {
 public:
+    // [신규, 2026-09-17, PN-B4987BF6] `AsyncTask::waitingTask`를
+    // 설정하는 호출부(syscall.cpp의 Syscall::waitForAnyOf, UserThread의
+    // 멤버 함수가 아닌 외부 코드)는 `sharedFromThis()`(protected)에
+    // 접근할 수 없어 이 공개 래퍼가 필요하다 - `Task::blockedOn`이
+    // Mutex/Semaphore의 컨트롤 블록을 별칭(aliasing)하는 것과 정확히
+    // 같은 패턴을, "컨테이너"가 곧 "관찰 대상 자신"인 경우에 적용한
+    // 것뿐이다(별칭 대상이 `this`를 `Task*`로 업캐스트한 주소).
+    WeakPtr<Task> weakAsTask() { return WeakPtr<Task>(sharedFromThis(), static_cast<Task*>(this)); }
+
+
     // 대기 중(아직 wait()/waitForMultipleSyscall()/
     // waitAnyForMultipleSyscall()로 소비되지 않은) syscall 하나 -
     // endpoint/token만 담는다("소유권" 자체는 이 값이 pendingSyscalls에
@@ -108,8 +128,30 @@ public:
     // 필드가 0/nullptr NSDMI라 memset 결과가 실제 생성자 결과와 동일,
     // 정의는 syscall.cpp 참고). 반환값은 아직 Task::init()을 부르지
     // 않은 "빈 자리".
+    //
+    // [수정, 2026-09-17, PN-B4987BF6] **외부에서 관찰되는 계약은 전혀
+    // 안 바뀐다** - `allocate()`가 여전히 raw 포인터를 돌려주고,
+    // `Process::mainThread`가 여전히 그 유일한 진짜 소유자이며,
+    // `release()`가 여전히 그 소유자가 다 쓴 시점에 명시적으로 반납을
+    // 결정한다. 내부적으로만 `_selfRef`(아래)를 통해 `kMakeShared`의
+    // 컨트롤 블록을 곁다리로 붙여 `weakAsTask()`/`WeakPtr<Task>`
+    // 관찰자가 성립하게 한다.
     static UserThread* allocate();
     static void release(UserThread* thread);
+
+private:
+    // [신규, 2026-09-17, PN-B4987BF6] `allocate()`가 `kMakeShared`로
+    // 만든 강한 참조를 스스로 붙들고 있다가 `release()`가 명시적으로
+    // 놓는다 - "실제 소유자는 여전히 Process::mainThread(raw pointer)"
+    // 라는 기존 계약을 그대로 유지하면서, `EnableSharedFromThis`가
+    // 필요로 하는 컨트롤 블록만 곁다리로 살려 두는 최소 장치다(no-op
+    // 삭제자를 써서 `release()`가 `GenericSlabAllocator::free()`를
+    // 직접 부르는 지금 방식과 정확히 같은 타이밍에 실제 반납이
+    // 일어나게 한다 - `_selfRef.reset()`은 강한 참조 카운트만 0으로
+    // 내릴 뿐, 그 자체가 메모리를 반납하지 않는다). 이 필드가 없으면
+    // `EnableSharedFromThis::_weakThis`가 채워질 컨트롤 블록 자체가
+    // 존재하지 않아 `weakAsTask()`가 항상 빈 WeakPtr을 반환한다.
+    SharedPtr<UserThread> _selfRef;
 };
 
 // endpointId(공개 ABI, 고정 슬롯) <-> AsyncTaskHandler 매핑 - 내부적으로
