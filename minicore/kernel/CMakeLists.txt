@@ -27,6 +27,7 @@ add_library(minicore_kernel OBJECT
     syscall_fastpath.cpp
     named_object.cpp
     channel.cpp
+    interrupt_subscription.cpp
     livefs.cpp
     mount_table.cpp
     process.cpp

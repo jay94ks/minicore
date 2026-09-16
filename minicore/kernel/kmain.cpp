@@ -7,6 +7,7 @@
 #include "gdt.h"
 #include "hvm_start_info.h"
 #include "idt.h"
+#include "interrupt_subscription.h"
 #include "libcpio/cpio.h"
 #include "libelf/elf.h"
 #include "libkenv/mem.h"
@@ -538,6 +539,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 한 번만).
     kernel::Process::registerSyscallEndpoints();
     kernel::Logger::info("minicore: SpawnProcess syscall endpoint registered");
+
+    // SP-71DA77B3/PN-B3DD3D19 - 위 Channel/SpawnProcess 등록과 같은
+    // 이유(BSP에서 한 번만). ISR 등록 자체는 InterruptDelegation::allow()
+    // 가 벡터별로 지연 수행한다(여기서는 syscall endpoint 4개만 연다).
+    kernel::InterruptSubscriptionService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: interrupt subscription syscall endpoints registered");
 
     // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
     // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에
