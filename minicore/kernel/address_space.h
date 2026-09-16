@@ -4,6 +4,7 @@
 #include "libkenv/maple_tree.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "syscall.h"
 
 // SP-2AAD7C8D §2/§4 - mmap 서브시스템의 두 관리자(프로세스별/커널
 // 전용)와 그 값 타입(Vma). §1이 설명하는 대로 두 관리자는 자료구조는
@@ -118,6 +119,16 @@ public:
     // 것까지는 이 함수 책임 밖 - address_space.cpp의 호출부 참고).
     bool registerFixedRegion(uint64_t start, uint64_t length, uint64_t prot, VmaBacking backing);
 
+    // Brk(SP-2AAD7C8D §5, PN-012E8C1A) 전용 - mapRegion()으로 만든
+    // Anonymous VMA 하나의 끝점만 움직인다(start는 그대로). §5가 제안한
+    // "brk() 호출마다 erase+store로 끝점을 재조정"을 그대로 구현한다 -
+    // start부터 oldLength까지가 정확히 등록돼 있어야 하고(불일치 시
+    // false), Anonymous가 아니면 지원하지 않는다(false). 성장이면
+    // 델타 페이지를 새로 확보해 매핑하고, 축소면 델타 페이지를 해제
+    // 한다 - 어느 쪽이든 실패하면 이미 바뀐 페이지만 롤백하고 트리는
+    // 원래 범위 그대로 남겨 false를 반환한다.
+    bool resizeAnonymousRegion(uint64_t start, uint64_t oldLength, uint64_t newLength);
+
 private:
     uint64_t _pml4Phys = 0;
     uint64_t _regionFloor = 0;
@@ -158,6 +169,78 @@ public:
     // 요구사항 그대로).
     static bool unmapRegion(uint64_t addr, uint64_t length);
 };
+
+// SP-2AAD7C8D §5, RM-48E1E610(17-19번, 지금까지 "번호만 예약") -
+// Mmap/Munmap/Brk syscall. 각 syscall 패밀리가 자기 전용 에러 열거형을
+// 갖는 기존 관례(channel.h의 ChannelError와 같은 패턴)를 그대로
+// 따른다 - SP-2AAD7C8D §5 원문의 Args 스케치는 이 필드 타입을
+// "ChannelError"로 표기했지만, 그 값(OutOfMemory/InvalidArgument/
+// NotMapped)이 채널 IPC와 무관해 이 서브시스템 전용 열거형으로
+// 분리했다(채널 전용 값들과 섞이는 걸 피하는 순수 명명 선택 - 동작에
+// 영향 없음).
+enum class AddressSpaceError : uint32_t {
+    None = 0,
+    OutOfMemory,       // 물리 페이지 고갈 또는 v1 8-VMA 슬롯 포화
+    InvalidArgument,   // length==0, 호출자가 UserThread/Process가 아님, brk 범위 오류 등
+    NotMapped,         // Munmap 대상이 mapRegion()이 반환한 범위와 정확히 일치하지 않음
+};
+
+// Brk(§5) 힙의 최소 크기 - Process::init()이 이 크기로 힙 VMA를 즉시
+// 만들어 heapStart/heapBrk를 처음부터 유효한 절대 주소로 확정해
+// 둔다(POSIX brk(addr)처럼 newBrk를 항상 절대 주소로 다루려면, 첫
+// 호출 이전에도 이미 "현재 브레이크"가 존재해야 하기 때문 - mapRegion()
+// 은 특정 가상주소를 강제 지정할 방법이 없어 findGap이 고른 주소를
+// 그대로 heapStart로 받아들인다). brk()로 이 크기 밑으로는 축소할
+// 수 없다(원래 확보한 최소 영역 자체를 없애는 API가 없음, v1 제약).
+constexpr uint64_t kMinHeapLength = 4096;
+
+constexpr SyscallEndpointId kSyscallEndpointMmap = 17;
+constexpr SyscallEndpointId kSyscallEndpointMunmap = 18;
+constexpr SyscallEndpointId kSyscallEndpointBrk = 19;
+
+// **`process` 필드는 세 Args 구조체 전부에 공통** - onExec()이 실행되는
+// 시점의 `Scheduler::currentTask()`는 "이 syscall을 제출한 UserThread"가
+// 아니다(실측으로 발견, 2026-09-16 - PN-FEAAF154 이후 리액터가 idle
+// 컨텍스트(gCurrentTask==nullptr)에서 실행 큐를 드레인하므로, onExec
+// 안에서 새로 Scheduler::currentTask()를 부르면 null이거나 완전히
+// 엉뚱한 Task를 가리킨다 - channel.cpp의 기존 핸들러들이 이 문제를
+// 겪지 않은 건 그것들이 애초에 호출자 정보가 필요 없었기 때문이다).
+// 그래서 제출자 자신이(= submit() 호출 시점엔 아직 currentTask()가
+// 정확하다) 이 필드를 미리 채워야 한다 - 실제 ring3 syscall trap
+// 스텁이 생기면 그 스텁이 트랩 처리 시점(그때도 currentTask()가
+// 정확함)에 채우게 된다.
+struct MmapArgs {
+    Process* process = nullptr;  // in - 호출자가 채움(위 문서 주석 참고)
+    uint64_t hintAddr = 0;  // v1은 참고만 하고 무시 - findGap이 항상 위치를 정한다(§5 "Fixed 힌트 강제는 후속")
+    uint64_t length = 0;
+    uint32_t prot = 0;   // Paging::PAGE_* 조합(Vma::prot과 동일한 관례) - PAGE_USER는 핸들러가 자동으로 더함
+    uint32_t flags = 0;  // v1 미사용 예약(Anonymous 고정)
+    // out
+    uint64_t addr = 0;
+    AddressSpaceError error = AddressSpaceError::None;
+};
+
+struct MunmapArgs {
+    Process* process = nullptr;  // in - 위 MmapArgs 문서 주석 참고
+    uint64_t addr = 0;
+    uint64_t length = 0;
+    // out
+    AddressSpaceError error = AddressSpaceError::None;
+};
+
+struct BrkArgs {
+    Process* process = nullptr;  // in - 위 MmapArgs 문서 주석 참고
+    uint64_t newBrk = 0;  // 0이면 "현재 brk 조회"(성장/축소 없이 currentBrk만 채워 반환)
+    // out
+    uint64_t currentBrk = 0;
+    AddressSpaceError error = AddressSpaceError::None;
+};
+
+// 세 핸들러 등록을 한데 묶는다(channel.h의 Channel::registerSyscallEndpoints
+// 처럼 "이 syscall 패밀리의 등록은 한 곳에 모은다"는 관례는 그대로 -
+// 다만 Mmap/Munmap/Brk를 대표하는 단일 클래스가 없어(두 관리자
+// 클래스 중 어느 쪽도 아님) 자유 함수로 둔다).
+void registerAddressSpaceSyscallEndpoints();
 
 }  // namespace kernel
 

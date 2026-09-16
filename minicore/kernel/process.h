@@ -156,6 +156,23 @@ public:
     ChunkedList<PendingSignal, kPendingSignalChunkCapacity> pendingSignals;
     SignalDisposition dispositions[kSignalCount];
 
+    // Brk(RM-48E1E610 19번, SP-2AAD7C8D §5, PN-012E8C1A) - init()이
+    // 최소 크기(kMinHeapLength)의 힙 VMA를 즉시 만들어 둘 값들 -
+    // brk(newBrk)가 POSIX처럼 newBrk를 항상 절대 주소로 다루려면
+    // 첫 호출 이전에도 유효한 "현재 브레이크"가 있어야 하기 때문
+    // (mapRegion()이 특정 주소를 강제 지정할 방법이 없어 findGap이
+    // 고른 결과를 그대로 받아들인다). init()에서 매번 새로 만든다
+    // (Resurrect 재사용, 위 pendingSignals와 동일한 이유).
+    // **불변조건(실측으로 발견)**: `heapBrk - heapStart`는 항상 힙
+    // VMA의 실제 등록된(addressSpace의 Maple Tree에 store된) 길이와
+    // 정확히 같아야 한다 - `resizeAnonymousRegion()`이 그 값을 그대로
+    // `oldLength`로 넘겨 기존 범위를 찾는 데 쓰기 때문에, "논리적
+    // 브레이크가 실제 매핑보다 작을 수 있다"는 여유를 두면 그 즉시
+    // 범위 불일치로 실패한다. init() 직후에도 heapBrk는 반드시
+    // heapStart + kMinHeapLength(0이 아님)여야 한다.
+    uint64_t heapStart = 0;
+    uint64_t heapBrk = 0;
+
     // pml4Phys를 새로 확보하고 커널 상위 절반(higher-half)을 공유하는
     // 상태로 초기화한다(Paging::createAddressSpace 참고 - 하위 절반은
     // 전부 비어 있는 채로 시작, ELF 로더가 채울 자리). 실패(Slab/페이지

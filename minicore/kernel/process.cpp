@@ -118,6 +118,26 @@ bool Process::init() {
     for (uint32_t i = 0; i < kSignalCount; ++i) {
         dispositions[i] = SignalDisposition::Default;
     }
+    // Brk(PN-012E8C1A §5) - 힙 VMA를 최소 크기(kMinHeapLength)로 지금
+    // 즉시 만들어 heapStart/heapBrk를 처음부터 유효한 절대 주소로
+    // 확정해 둔다. brk(newBrk)가 POSIX처럼 newBrk를 항상 "절대 주소"로
+    // 다루려면(상대 크기가 아니라) 첫 호출 이전에도 이미 현재 브레이크
+    // 값이 존재해야 하는데, mapRegion()은 특정 가상주소를 강제 지정할
+    // 방법이 없어(findGap이 항상 고름) 그 결과를 그대로 heapStart로
+    // 받아들이는 수밖에 없다 - 그래서 "브레이크가 존재하는 시점"
+    // 자체를 Process::init()으로 앞당겼다. 실패하면(극히 드묾 - 방금
+    // 만든 새 주소공간에 페이지 1개도 못 넣을 정도의 메모리 고갈)
+    // 이 함수 자신도 실패로 보고한다(pml4Phys 확보 실패와 같은 급).
+    if (!addressSpace.mapRegion(kMinHeapLength, PAGE_WRITABLE, VmaBacking::Anonymous, 0, &heapStart)) {
+        return false;
+    }
+    // heapBrk - heapStart는 항상 힙 VMA의 실제 등록된 길이와 정확히
+    // 같아야 한다(resizeAnonymousRegion이 oldLength로 그 값을 그대로
+    // 받아 트리에서 기존 범위를 찾는 데 쓰므로) - 방금 mapRegion()이
+    // 실제로 매핑한 크기(kMinHeapLength)를 그대로 반영한다. "논리적
+    // 브레이크는 실제 매핑보다 작을 수 있다"는 여유를 두지 않는다 -
+    // 그 여유가 곧 이 둘의 불변조건을 깨는 원인이었다(실측으로 발견).
+    heapBrk = heapStart + kMinHeapLength;
     return true;
 }
 

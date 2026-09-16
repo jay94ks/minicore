@@ -3,6 +3,7 @@
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "process.h"
 #include "tlb_shootdown.h"
 
 namespace {
@@ -146,6 +147,63 @@ bool ProcessAddressSpaceManager::registerFixedRegion(uint64_t start, uint64_t le
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
+    return true;
+}
+
+bool ProcessAddressSpaceManager::resizeAnonymousRegion(uint64_t start, uint64_t oldLength, uint64_t newLength) {
+    const uint64_t oldLenAligned = kAlignUp4K(oldLength);
+    const uint64_t newLenAligned = kAlignUp4K(newLength);
+    if (oldLenAligned == newLenAligned) {
+        return true;  // 실질적 변화 없음
+    }
+
+    SpinlockGuard guard(_lock);
+
+    uint64_t rangeStart = 0;
+    uint64_t rangeEnd = 0;
+    void* value = _tree.find(start, &rangeStart, &rangeEnd);
+    if (!value || rangeStart != start || rangeEnd != start + oldLenAligned - 1) {
+        return false;  // 등록된 적 없거나 범위 불일치
+    }
+    auto* vma = static_cast<Vma*>(value);
+    if (vma->backing != VmaBacking::Anonymous) {
+        return false;  // v1은 Anonymous 힙만 지원
+    }
+
+    if (newLenAligned > oldLenAligned) {
+        uint64_t mappedDelta = 0;
+        for (; mappedDelta < newLenAligned - oldLenAligned; mappedDelta += kPageSize4K) {
+            const uint64_t physAddr = PageFrameAllocator::allocPage();
+            if (!physAddr) {
+                break;
+            }
+            Paging::mapPage(start + oldLenAligned + mappedDelta, physAddr, vma->prot | PAGE_USER, _pml4Phys);
+        }
+        if (mappedDelta < newLenAligned - oldLenAligned) {
+            kRollbackMapped(_pml4Phys, start + oldLenAligned, mappedDelta, VmaBacking::Anonymous);
+            return false;
+        }
+    } else {
+        kRollbackMapped(_pml4Phys, start + newLenAligned, oldLenAligned - newLenAligned, VmaBacking::Anonymous);
+    }
+
+    _tree.erase(rangeStart, rangeEnd);
+    if (!_tree.store(start, start + newLenAligned - 1, vma)) {
+        // 트리 갱신 실패(극히 드묾 - 엔트리 수는 그대로인 재삽입이라
+        // 포화 가능성은 낮지만 방어적으로 처리) - 실제로 바뀐 페이지
+        // 매핑까지 원래 상태로 되돌린 뒤(성장이었다면 방금 새로 매핑한
+        // 델타를 다시 해제, 축소였다면 이미 해제해 버린 페이지는
+        // 되살릴 수 없어 그대로 남긴다 - 이 경우 tree가 old 범위로
+        // 복구돼도 VMA 크기와 실제 매핑 상태가 어긋나는 잔여 위험이
+        // 있다, 실측된 적 없어 새 DC 없이 주석으로만 남김) 원래
+        // 범위로 재등록을 시도한다.
+        if (newLenAligned > oldLenAligned) {
+            kRollbackMapped(_pml4Phys, start + oldLenAligned, newLenAligned - oldLenAligned, VmaBacking::Anonymous);
+        }
+        _tree.store(rangeStart, rangeEnd, vma);
+        return false;
+    }
+    vma->end = start + newLenAligned - 1;
     return true;
 }
 
@@ -299,6 +357,110 @@ bool KernelAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
     // 그대로(§3, SP-DE19BB1C).
     TlbShootdown::broadcast(alignedAddr, alignedAddr + lengthAligned);
     return true;
+}
+
+namespace {
+
+// 세 핸들러 전부 channel.cpp의 OpenChannelHandler 관례를 그대로
+// 따른다 - 실제 대기가 필요 없는 순수 동기 작업(AsyncTask::yield()
+// 없이 onExec 안에서 즉시 끝남)이라 가장 단순한 형태다. **호출자
+// 식별은 반드시 args->process를 쓴다 - Scheduler::currentTask()가
+// 아니다**(실측으로 발견한 버그, 2026-09-16): onExec()이 실제로
+// 실행되는 시점은 리액터가 idle 컨텍스트(PN-FEAAF154 이후
+// gCurrentTask[coreIndex]==nullptr)에서 실행 큐를 드레인하는
+// 순간이라, 그 안에서 새로 Scheduler::currentTask()를 부르면
+// null이거나 완전히 엉뚱한 Task를 가리켜 GPF로 이어진다(address_space.h
+// 의 MmapArgs 문서 주석 참고 - channel.cpp의 기존 핸들러들은 애초에
+// 호출자 정보가 필요 없어 이 문제를 겪지 않았을 뿐이다).
+class MmapHandler : public AsyncTaskHandler {
+public:
+    void onExec(AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<MmapArgs*>(argsRaw);
+        if (args->length == 0 || !args->process) {
+            args->error = AddressSpaceError::InvalidArgument;
+            return;
+        }
+        uint64_t outAddr = 0;
+        if (!args->process->addressSpace.mapRegion(args->length, args->prot, VmaBacking::Anonymous, 0,
+                                                     &outAddr)) {
+            args->error = AddressSpaceError::OutOfMemory;
+            return;
+        }
+        args->addr = outAddr;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+class MunmapHandler : public AsyncTaskHandler {
+public:
+    void onExec(AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<MunmapArgs*>(argsRaw);
+        if (args->length == 0 || !args->process) {
+            args->error = AddressSpaceError::InvalidArgument;
+            return;
+        }
+        if (!args->process->addressSpace.unmapRegion(args->addr, args->length)) {
+            args->error = AddressSpaceError::NotMapped;
+        }
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+// SP-2AAD7C8D §5 "brk는 프로세스당 힙 VMA 하나를 미리 예약해 두고
+// 그 끝점만 움직이는 전통적 구현" - Process::init()이 이미
+// kMinHeapLength로 힙 VMA를 만들어 heapStart/heapBrk를 유효한 절대
+// 주소로 확정해 뒀으므로(process.h 문서 주석 참고), 이 핸들러는
+// POSIX brk(addr)와 동일하게 newBrk를 항상 절대 주소로 다룬다 -
+// "최초 성장" 같은 특수 분기가 필요 없다. kMinHeapLength 밑으로는
+// 축소할 수 없다(그 밑으로 내려가려면 최초 VMA 자체를 없애야 하는데
+// 그걸 다시 만들 방법이 없다 - v1 제약, clamp로 처리).
+class BrkHandler : public AsyncTaskHandler {
+public:
+    void onExec(AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<BrkArgs*>(argsRaw);
+        Process* process = args->process;
+        if (!process) {
+            args->error = AddressSpaceError::InvalidArgument;
+            return;
+        }
+
+        if (args->newBrk == 0) {
+            args->currentBrk = process->heapBrk;
+            return;
+        }
+        if (args->newBrk < process->heapStart) {
+            args->error = AddressSpaceError::InvalidArgument;
+            return;
+        }
+
+        const uint64_t oldLength = process->heapBrk - process->heapStart;
+        uint64_t newLength = args->newBrk - process->heapStart;
+        if (newLength < kMinHeapLength) {
+            newLength = kMinHeapLength;
+        }
+        if (!process->addressSpace.resizeAnonymousRegion(process->heapStart, oldLength, newLength)) {
+            args->error = AddressSpaceError::OutOfMemory;
+            return;
+        }
+        process->heapBrk = process->heapStart + newLength;
+        args->currentBrk = process->heapBrk;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+MmapHandler gMmapHandler;
+MunmapHandler gMunmapHandler;
+BrkHandler gBrkHandler;
+
+}  // namespace
+
+void registerAddressSpaceSyscallEndpoints() {
+    SyscallRegistry::registerHandler(kSyscallEndpointMmap, &gMmapHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointMunmap, &gMunmapHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointBrk, &gBrkHandler);
 }
 
 }  // namespace kernel
