@@ -218,6 +218,27 @@ void kSyncCr3(Task* task) {
     }
 }
 
+// SP-83A07867 §3.2 갈래②가 다룬 "Task가 자기 자신의 안전한 스택으로
+// 넘어온 뒤 kSyncCr3로 동기화"라는 원칙은 idle로 "돌아오는" 세 지점
+// (yieldCurrent/parkCurrent/retireCurrentTask)의 **재개** 지점에만
+// 적용됐고, 그 세 함수가 idle로 **떠나는** 순간 자체는 다루지 않은 채
+// 남아 있었다(PN-57CF48DB, 2026-09-16 QEMU -d int 트레이스 + gdb로
+// 실측 확인) - `kContextSwitch(&current->savedRsp, gIdleSavedRsp[...])`
+// 는 아직 current 자신의(안전한) 스택 위에서 RSP만 gIdleSavedRsp로
+// 바꾼 뒤 그 자리에서 즉시 pop을 시작하는데, current가 실제
+// UserThread면 CR3가 여전히 그 자신의 userPml4Phys라 gIdleSavedRsp
+// (부팅 스택, 어느 프로세스의 PML4에도 안 들어있음 - PN-58501EAA)에
+// 대한 이 최초 pop 자체가 스택 접근 Page Fault -> 그 폴트 전달마저
+// 같은 깨진 스택 위에서 실패해 Double Fault로 이어졌다. 이 함수는
+// current 자신의 스택(higher-half, 모든 프로세스가 공유)이 여전히
+// 매핑돼 있는 지금 이 시점에 미리 CR3를 gBootPml4Phys로 되돌려 그
+// 전제 자체를 없앤다 - kSyncCr3와 동일한 skip-if-same 최적화 패턴.
+void kSyncCr3ForIdleTransition() {
+    if (Paging::currentPml4Phys() != gBootPml4Phys) {
+        asm volatile("mov %0, %%cr3" : : "r"(gBootPml4Phys) : "memory");
+    }
+}
+
 // kSyncCr3와 정확히 같은 세 지점(§3.2 갈래①/②)에서 같은 이유로 호출된다
 // (SP-83A07867 §8 - "FPU 상태 관리는 별도의 새 디스패치 훅을 파지 않고
 // §3.2의 공용 진입점에 CR0.TS 제어 로직을 삽입하는 방식으로 구현할
@@ -686,6 +707,10 @@ void Scheduler::yieldCurrent() {
     }
     gCurrentTask[coreIndex] = nullptr;
     enqueue(coreIndex, current);
+    // PN-57CF48DB - idle로 떠나기 전, 아직 current 자신의 안전한
+    // 스택 위에 있을 때 CR3를 미리 gBootPml4Phys로 되돌린다(위
+    // kSyncCr3ForIdleTransition 문서 주석 참고).
+    kSyncCr3ForIdleTransition();
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
     // **SP-83A07867(QU-892AB38A 설계자 답변, 2026-09-15) - 이 재개
     // 지점이 바로 §3.2 갈래②의 세 곳 중 하나다.** 위 kContextSwitch가
@@ -734,6 +759,9 @@ void Scheduler::parkCurrent() {
     // 실행되려면 누군가 scheduleImmediate()/enqueue()로 명시적으로
     // 큐에 넣어야 한다(그 시점엔 이 Task가 어느 큐에도 없다는 게
     // 보장되므로 이중 스케줄링 걱정이 없다).
+    // PN-57CF48DB - yieldCurrent()와 같은 이유로 여기서도 idle로
+    // 떠나기 전에 CR3를 미리 gBootPml4Phys로 되돌린다.
+    kSyncCr3ForIdleTransition();
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
     // SP-83A07867 §3.2 갈래②의 나머지 한 곳 - yieldCurrent()의 재개
     // 지점과 완전히 동일한 이유로 여기서도 CR3를 동기화한다(위
@@ -776,6 +804,11 @@ void Scheduler::retireCurrentTask() {
     // 자체는 runLoop()이 idle 컨텍스트(다른 스택) 위에서 이 큐를
     // 드레인하며 나중에 처리한다.
     gCleanupQueues[coreIndex].pushBack(current);
+    // PN-57CF48DB - yieldCurrent()/parkCurrent()와 같은 이유로 여기서도
+    // idle로 떠나기 전에 CR3를 미리 gBootPml4Phys로 되돌린다 - 이
+    // 지점은 재개가 없어(zombie, 다시 뽑히지 않음) 도착 지점에서
+    // 뒤늦게 동기화할 기회 자체가 없다.
+    kSyncCr3ForIdleTransition();
     kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
     // 이 지점으로 다시는 돌아오지 않는다(current는 이미 Zombie로
     // 어느 스케줄 큐에도 없어 다시 뽑힐 수 없다) - kAsyncTaskEntryWrapper
