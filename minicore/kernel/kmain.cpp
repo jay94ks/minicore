@@ -14,6 +14,7 @@
 #include "ioapic.h"
 #include "lapic.h"
 #include "livefs.h"
+#include "logger.h"
 #include "mount_table.h"
 #include "multiboot2.h"
 #include "named_object.h"
@@ -40,21 +41,8 @@ namespace {
 constexpr kernel::uint32_t kBootProtocolMultiboot2 = 1;
 
 void kLogPciDevice(const kernel::Pci::Device& dev) {
-    kernel::Serial::write("  pci ");
-    kernel::Serial::writeHex(dev.bus);
-    kernel::Serial::write(":");
-    kernel::Serial::writeHex(dev.device);
-    kernel::Serial::write(".");
-    kernel::Serial::writeHex(dev.function);
-    kernel::Serial::write(" vendor=");
-    kernel::Serial::writeHex(dev.vendorId);
-    kernel::Serial::write(" device=");
-    kernel::Serial::writeHex(dev.deviceId);
-    kernel::Serial::write(" class=");
-    kernel::Serial::writeHex(dev.classCode);
-    kernel::Serial::write(" subclass=");
-    kernel::Serial::writeHex(dev.subclass);
-    kernel::Serial::write("\n");
+    kernel::Logger::info("  pci %x:%x.%x vendor=%x device=%x class=%x subclass=%x", dev.bus, dev.device, dev.function,
+                          dev.vendorId, dev.deviceId, dev.classCode, dev.subclass);
 }
 
 // linker.ld가 정의하는 커널 자신의 물리 범위 - usable 메모리에서
@@ -141,13 +129,7 @@ void kLogCpioEntry(const cpio::Entry& entry, void*) {
     // entry.name은 아카이브 안의 파일명 바이트를 그대로 가리킨다 -
     // nameSize(원본 필드)가 null 포함이라 name[nameLength]가 이미
     // '\0'이므로 별도 복사 없이 그대로 null-terminated 문자열이다.
-    kernel::Serial::write("    cpio: ");
-    kernel::Serial::write(entry.name);
-    kernel::Serial::write(" size=");
-    kernel::Serial::writeHex(entry.dataSize);
-    kernel::Serial::write(" mode=");
-    kernel::Serial::writeHex(entry.mode);
-    kernel::Serial::write("\n");
+    kernel::Logger::info("    cpio: %s size=%lx mode=%x", entry.name, entry.dataSize, entry.mode);
 
     if (!entry.data) {
         return;
@@ -156,7 +138,7 @@ void kLogCpioEntry(const cpio::Entry& entry, void*) {
     if (!gInitImageFound && entry.nameLength == 4 && entry.name[0] == 'i' && entry.name[1] == 'n' &&
         entry.name[2] == 'i' && entry.name[3] == 't') {
         if (entry.dataSize > kMaxInitImageSize) {
-            kernel::Serial::write("minicore: init image exceeds kMaxInitImageSize - skipping load\n");
+            kernel::Logger::warn("minicore: init image exceeds kMaxInitImageSize - skipping load");
             return;
         }
         memcpy(gInitImageBuffer, entry.data, entry.dataSize);
@@ -181,9 +163,7 @@ void kLogCpioEntry(const cpio::Entry& entry, void*) {
             continue;
         }
         if (entry.dataSize > kMaxInitImageSize) {
-            kernel::Serial::write("minicore: service image exceeds kMaxInitImageSize - skipping load: ");
-            kernel::Serial::write(svc.name);
-            kernel::Serial::write("\n");
+            kernel::Logger::warn("minicore: service image exceeds kMaxInitImageSize - skipping load: %s", svc.name);
             return;
         }
         memcpy(svc.buffer, entry.data, entry.dataSize);
@@ -194,28 +174,15 @@ void kLogCpioEntry(const cpio::Entry& entry, void*) {
 }
 
 void kLogBootInfo(const kernel::BootInfo& bootInfo) {
-    kernel::Serial::write("minicore: cmdline=");
-    kernel::Serial::write(bootInfo.cmdline ? bootInfo.cmdline : "(none)");
-    kernel::Serial::write("\n");
+    kernel::Logger::info("minicore: cmdline=%s", bootInfo.cmdline ? bootInfo.cmdline : "(none)");
     if (bootInfo.bootloaderName) {
-        kernel::Serial::write("minicore: bootloader=");
-        kernel::Serial::write(bootInfo.bootloaderName);
-        kernel::Serial::write("\n");
+        kernel::Logger::info("minicore: bootloader=%s", bootInfo.bootloaderName);
     }
-    kernel::Serial::write("minicore: modules=");
-    kernel::Serial::writeHex(bootInfo.moduleCount);
-    kernel::Serial::write("\n");
+    kernel::Logger::info("minicore: modules=%x", bootInfo.moduleCount);
     for (kernel::uint32_t i = 0; i < bootInfo.moduleCount; ++i) {
         const kernel::BootModule& mod = bootInfo.modules[i];
-        kernel::Serial::write("  module[");
-        kernel::Serial::writeHex(i);
-        kernel::Serial::write("] phys=");
-        kernel::Serial::writeHex(mod.physStart);
-        kernel::Serial::write("-");
-        kernel::Serial::writeHex(mod.physEnd);
-        kernel::Serial::write(" cmdline=");
-        kernel::Serial::write(mod.cmdline ? mod.cmdline : "(none)");
-        kernel::Serial::write("\n");
+        kernel::Logger::info("  module[%x] phys=%llx-%llx cmdline=%s", i, mod.physStart, mod.physEnd,
+                              mod.cmdline ? mod.cmdline : "(none)");
 
         // 모듈을 CPIO(newc) 아카이브로 시도해 본다 - 매직이 안 맞으면
         // forEachEntry가 즉시 0을 반환하므로 CPIO가 아닌 모듈(예: 커널
@@ -238,17 +205,9 @@ void kLogBootInfo(const kernel::BootInfo& bootInfo) {
 }
 
 void kLogMemoryMap(const kernel::HvmMemmapEntry* memmap, kernel::uint32_t count) {
-    kernel::Serial::write("minicore: memory map (");
-    kernel::Serial::writeHex(count);
-    kernel::Serial::write(" entries)\n");
+    kernel::Logger::info("minicore: memory map (%x entries)", count);
     for (kernel::uint32_t i = 0; i < count; ++i) {
-        kernel::Serial::write("  base=");
-        kernel::Serial::writeHex(memmap[i].addr);
-        kernel::Serial::write(" size=");
-        kernel::Serial::writeHex(memmap[i].size);
-        kernel::Serial::write(" type=");
-        kernel::Serial::writeHex(memmap[i].type);
-        kernel::Serial::write("\n");
+        kernel::Logger::info("  base=%llx size=%llx type=%x", memmap[i].addr, memmap[i].size, memmap[i].type);
     }
 }
 
@@ -282,15 +241,15 @@ kernel::UserThread gInitThread;
 
 void kSpawnInitProcess() {
     if (!gInitImageFound) {
-        kernel::Serial::write("minicore: no \"init\" entry found in initrd modules - skipping first process spawn\n");
+        kernel::Logger::info("minicore: no \"init\" entry found in initrd modules - skipping first process spawn");
         return;
     }
     if (elf::Image::parse(gInitImageBuffer, gInitImageSize, &gInitImage) != elf::Error::None) {
-        kernel::Serial::write("minicore: init image ELF parse FAILED\n");
+        kernel::Logger::error("minicore: init image ELF parse FAILED");
         return;
     }
     if (!gInitProcess.init()) {
-        kernel::Serial::write("minicore: init process address space allocation FAILED\n");
+        kernel::Logger::error("minicore: init process address space allocation FAILED");
         return;
     }
     // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - role/startFlags와 같은
@@ -299,13 +258,11 @@ void kSpawnInitProcess() {
     gInitProcess.spawnNameLen = 4;
     kernel::UserThread* thread = gInitProcess.execImage(gInitImage, &gInitThread);
     if (!thread) {
-        kernel::Serial::write("minicore: init process execImage FAILED\n");
+        kernel::Logger::error("minicore: init process execImage FAILED");
         return;
     }
     kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
-    kernel::Serial::write("minicore: init process spawned, entry=");
-    kernel::Serial::writeHex(gInitImage.entryPoint());
-    kernel::Serial::write("\n");
+    kernel::Logger::info("minicore: init process spawned, entry=%llx", gInitImage.entryPoint());
 }
 
 // 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - devmgr/fs/net/tty
@@ -321,21 +278,16 @@ void kSpawnServiceProcesses() {
     for (kernel::uint32_t i = 0; i < kServiceManifestCount; ++i) {
         const ServiceManifestEntry& svc = gServiceManifest[i];
         if (!svc.found) {
-            kernel::Serial::write("minicore: no \"");
-            kernel::Serial::write(svc.name);
-            kernel::Serial::write("\" entry found in initrd modules - skipping service spawn\n");
+            kernel::Logger::info("minicore: no \"%s\" entry found in initrd modules - skipping service spawn",
+                                  svc.name);
             continue;
         }
         if (elf::Image::parse(svc.buffer, svc.size, &gServiceImage[i]) != elf::Error::None) {
-            kernel::Serial::write("minicore: service image ELF parse FAILED: ");
-            kernel::Serial::write(svc.name);
-            kernel::Serial::write("\n");
+            kernel::Logger::error("minicore: service image ELF parse FAILED: %s", svc.name);
             continue;
         }
         if (!gServiceProcess[i].init()) {
-            kernel::Serial::write("minicore: service process address space allocation FAILED: ");
-            kernel::Serial::write(svc.name);
-            kernel::Serial::write("\n");
+            kernel::Logger::error("minicore: service process address space allocation FAILED: %s", svc.name);
             continue;
         }
         // role은 스폰 시점에 고정(SP-EAB162FC §1/§2.2 - 이후 바꾸는
@@ -348,25 +300,18 @@ void kSpawnServiceProcesses() {
         gServiceProcess[i].spawnNameLen = svc.nameLength;
         kernel::UserThread* thread = gServiceProcess[i].execImage(gServiceImage[i], &gServiceThread[i]);
         if (!thread) {
-            kernel::Serial::write("minicore: service process execImage FAILED: ");
-            kernel::Serial::write(svc.name);
-            kernel::Serial::write("\n");
+            kernel::Logger::error("minicore: service process execImage FAILED: %s", svc.name);
             continue;
         }
         kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
-        kernel::Serial::write("minicore: service process spawned (KernelService): ");
-        kernel::Serial::write(svc.name);
-        kernel::Serial::write(", entry=");
-        kernel::Serial::writeHex(gServiceImage[i].entryPoint());
-        kernel::Serial::write("\n");
+        kernel::Logger::info("minicore: service process spawned (KernelService): %s, entry=%llx", svc.name,
+                              gServiceImage[i].entryPoint());
 
         // Tier A/B 예약(SP-00CA7175 §2.0, PN-7AC01E6E 항목 4) - 이
         // 서비스가 나중에 livefs를 통해 `/sys/live/kernel/<name>`을 열면
         // (아직 livefs 자체 미구현 - PN-71C2B857) 이 자리를 받아간다.
         if (!kernel::KernelReservedTable::reserveForKernelService(svc.name, svc.nameLength)) {
-            kernel::Serial::write("minicore: kernel-reserved slot allocation FAILED (non-fatal): ");
-            kernel::Serial::write(svc.name);
-            kernel::Serial::write("\n");
+            kernel::Logger::warn("minicore: kernel-reserved slot allocation FAILED (non-fatal): %s", svc.name);
         }
     }
 }
@@ -383,6 +328,7 @@ void kSpawnServiceProcesses() {
 // devmgr 등 "커널 서비스"는 아직 존재하지 않는다(SP-8B6B8D25 §2-A).
 extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProtocol) {
     kernel::Serial::init();
+    kernel::Logger::init();
 
     static kernel::HvmMemmapEntry gMb2MemmapBuffer[kernel::kMultiboot2MaxMemmapEntries];
     const kernel::HvmMemmapEntry* memmap = nullptr;
@@ -392,7 +338,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::BootInfo bootInfo{};
 
     if (bootProtocol == kBootProtocolMultiboot2) {
-        kernel::Serial::write("minicore: booted via multiboot2 (GRUB, higher-half, long mode)\n");
+        kernel::Logger::info("minicore: booted via multiboot2 (GRUB, higher-half, long mode)");
         kernel::uint32_t mb2TotalSize = 0;
         kernel::Multiboot2Info::parse(static_cast<kernel::uint64_t>(startInfoAddr), gMb2MemmapBuffer,
                                        kernel::kMultiboot2MaxMemmapEntries, &memmapEntries, &rsdpPaddr, &mb2TotalSize,
@@ -400,12 +346,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         memmap = gMb2MemmapBuffer;
         startInfoSize = mb2TotalSize;
     } else {
-        kernel::Serial::write("minicore: booted via Xen PVH (higher-half, long mode)\n");
+        kernel::Logger::info("minicore: booted via Xen PVH (higher-half, long mode)");
         const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<kernel::uint64_t>(startInfoAddr));
         if (startInfo->magic == kernel::kHvmStartInfoMagic) {
-            kernel::Serial::write("minicore: hvm_start_info magic OK\n");
+            kernel::Logger::info("minicore: hvm_start_info magic OK");
         } else {
-            kernel::Serial::write("minicore: hvm_start_info magic MISMATCH\n");
+            kernel::Logger::error("minicore: hvm_start_info magic MISMATCH");
         }
         memmap = reinterpret_cast<const kernel::HvmMemmapEntry*>(startInfo->memmapPaddr);
         memmapEntries = startInfo->memmapEntries;
@@ -436,15 +382,15 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     }
 
     kernel::Gdt::init();
-    kernel::Serial::write("minicore: GDT ready\n");
+    kernel::Logger::info("minicore: GDT ready");
 
     kernel::Idt::init();
-    kernel::Serial::write("minicore: IDT ready\n");
+    kernel::Logger::info("minicore: IDT ready");
 
     kLogBootInfo(bootInfo);
     if (kCmdlineHasFlag(bootInfo.cmdline, "--disable-x2apic")) {
         kernel::Lapic::setX2ApicDisabled(true);
-        kernel::Serial::write("minicore: --disable-x2apic requested, x2APIC will be forced off\n");
+        kernel::Logger::info("minicore: --disable-x2apic requested, x2APIC will be forced off");
     }
 
     kLogMemoryMap(memmap, memmapEntries);
@@ -456,42 +402,23 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 않도록 Lapic::isReady()로 방어돼 있음, 2026-09-14 실측으로
     // 발견한 초기화 순서 문제).
     kernel::Paging::init(kComputeMaxUsablePhysAddr(memmap, memmapEntries));
-    kernel::Serial::write("minicore: direct physical map ready\n");
+    kernel::Logger::info("minicore: direct physical map ready");
 
     if (kernel::Acpi::init(rsdpPaddr)) {
-        kernel::Serial::write("minicore: ACPI MADT/SRAT parsed, cpu_count=");
-        kernel::Serial::writeHex(kernel::Acpi::cpuCount());
-        kernel::Serial::write(" numa_nodes=");
-        kernel::Serial::writeHex(kernel::Acpi::numaNodeCount());
-        kernel::Serial::write(" local_apic_addr=");
-        kernel::Serial::writeHex(kernel::Acpi::localApicAddress());
-        kernel::Serial::write(" ioapic_count=");
-        kernel::Serial::writeHex(kernel::Acpi::ioApicCount());
-        kernel::Serial::write(" hpet=");
-        kernel::Serial::write(kernel::Acpi::hasHpet() ? "yes" : "no");
-        kernel::Serial::write("\n");
+        kernel::Logger::info(
+            "minicore: ACPI MADT/SRAT parsed, cpu_count=%x numa_nodes=%x local_apic_addr=%llx ioapic_count=%x hpet=%s",
+            kernel::Acpi::cpuCount(), kernel::Acpi::numaNodeCount(), kernel::Acpi::localApicAddress(),
+            kernel::Acpi::ioApicCount(), kernel::Acpi::hasHpet() ? "yes" : "no");
         for (kernel::uint32_t i = 0; i < kernel::Acpi::cpuCount(); ++i) {
-            kernel::Serial::write("  cpu[");
-            kernel::Serial::writeHex(i);
-            kernel::Serial::write("] apic_id=");
-            kernel::Serial::writeHex(kernel::Acpi::cpuApicId(i));
-            kernel::Serial::write(" numa_node=");
-            kernel::Serial::writeHex(kernel::Acpi::cpuNumaNode(i));
-            kernel::Serial::write("\n");
+            kernel::Logger::info("  cpu[%x] apic_id=%x numa_node=%x", i, kernel::Acpi::cpuApicId(i),
+                                  kernel::Acpi::cpuNumaNode(i));
         }
         for (kernel::uint32_t i = 0; i < kernel::Acpi::ioApicCount(); ++i) {
-            kernel::Serial::write("  ioapic[");
-            kernel::Serial::writeHex(i);
-            kernel::Serial::write("] id=");
-            kernel::Serial::writeHex(kernel::Acpi::ioApicId(i));
-            kernel::Serial::write(" addr=");
-            kernel::Serial::writeHex(kernel::Acpi::ioApicAddress(i));
-            kernel::Serial::write(" gsi_base=");
-            kernel::Serial::writeHex(kernel::Acpi::ioApicGsiBase(i));
-            kernel::Serial::write("\n");
+            kernel::Logger::info("  ioapic[%x] id=%x addr=%x gsi_base=%x", i, kernel::Acpi::ioApicId(i),
+                                  kernel::Acpi::ioApicAddress(i), kernel::Acpi::ioApicGsiBase(i));
         }
     } else {
-        kernel::Serial::write("minicore: ACPI MADT parse FAILED\n");
+        kernel::Logger::error("minicore: ACPI MADT parse FAILED");
     }
 
     // Acpi::cpuCount()만 있으면 되므로 여기서 바로 초기화한다(코어별
@@ -505,37 +432,31 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         reinterpret_cast<kernel::uint64_t>(kernel_phys_end),
         static_cast<kernel::uint64_t>(startInfoAddr), startInfoSize);
 
-    kernel::Serial::write("minicore: page frame allocator ready, nodes=");
-    kernel::Serial::writeHex(kernel::PageFrameAllocator::numaNodeCount());
-    kernel::Serial::write(" free_pages=");
-    kernel::Serial::writeHex(kernel::PageFrameAllocator::freePageCount());
-    kernel::Serial::write("\n");
+    kernel::Logger::info("minicore: page frame allocator ready, nodes=%x free_pages=%llx",
+                          kernel::PageFrameAllocator::numaNodeCount(), kernel::PageFrameAllocator::freePageCount());
 
     // PageFrameAllocator 이후, Scheduler::currentCoreIndex()/
     // PreemptionGuard를 실제로 쓰는 첫 alloc()/free() 호출(Lapic::init()
     // 이후) 전이면 아무때나 무방하다 - init() 자체는 정적 구조만
     // 채운다(SP-D7013B26).
     kernel::GenericSlabAllocator::init();
-    kernel::Serial::write("minicore: slab allocator ready (libkmm)\n");
+    kernel::Logger::info("minicore: slab allocator ready (libkmm)");
 
     kernel::Lapic::init();
-    kernel::Serial::write("minicore: LAPIC ready, mode=");
-    kernel::Serial::write(kernel::Lapic::usesX2Apic() ? "x2apic" : "xapic");
-    kernel::Serial::write(" id=");
-    kernel::Serial::writeHex(kernel::Lapic::id());
-    kernel::Serial::write("\n");
+    kernel::Logger::info("minicore: LAPIC ready, mode=%s id=%x", kernel::Lapic::usesX2Apic() ? "x2apic" : "xapic",
+                          kernel::Lapic::id());
 
     // Acpi::cpuApicId()/Lapic::id()로 자기 코어 인덱스를 찾아야 해서
     // 반드시 이 둘 이후에 호출해야 한다(gdt.h 참고 - IST1을 #DF
     // 전용으로 채우고 ltr).
     kernel::Gdt::loadTssForThisCore();
-    kernel::Serial::write("minicore: TSS/IST ready (core 0)\n");
+    kernel::Logger::info("minicore: TSS/IST ready (core 0)");
 
     // PN-124C105B("syscall 명령 경로") - Lapic::id()로 코어 인덱스를
     // 찾으므로 Gdt::loadTssForThisCore()와 같은 이유로 Lapic::init()
     // 이후에만 안전하다.
     kernel::SyscallFastPath::initForThisCore();
-    kernel::Serial::write("minicore: syscall fast path (STAR/LSTAR/SFMASK) ready (core 0)\n");
+    kernel::Logger::info("minicore: syscall fast path (STAR/LSTAR/SFMASK) ready (core 0)");
 
     // SP-0666DB3C §12.4-1(PN-25587A7D) - RDTSCP 지원 시 이 코어의 진짜
     // 인덱스를 IA32_TSC_AUX에 심어 Scheduler::currentCoreIndex()가
@@ -544,34 +465,31 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Scheduler::initCoreIndexForThisCore();
 
     kernel::Scheduler::startTickOnThisCore();
-    kernel::Serial::write("minicore: scheduler tick ready (LAPIC, ");
-    kernel::Serial::writeHex(kernel::kSchedulerTickHz);
-    kernel::Serial::write("Hz, vector=");
-    kernel::Serial::writeHex(kernel::kSchedulerTickVector);
-    kernel::Serial::write(")\n");
+    kernel::Logger::info("minicore: scheduler tick ready (LAPIC, %xHz, vector=%x)", kernel::kSchedulerTickHz,
+                          kernel::kSchedulerTickVector);
 
     kernel::AsyncReactor::initForThisCore();
-    kernel::Serial::write("minicore: async reactor ready (core 0)\n");
+    kernel::Logger::info("minicore: async reactor ready (core 0)");
 
     // 전역 테이블 하나뿐이라 BSP에서 딜 한 번만 - AP(kApMain)는 이걸
     // 다시 부르지 않는다(SyscallRegistry::registerHandler가 이미 쓰인
     // 슬롯에 재등록을 거부하므로 안전장치는 있지만, 애초에 호출
     // 자체를 한 곳에만 둔다).
     kernel::Channel::registerSyscallEndpoints();
-    kernel::Serial::write("minicore: channel IPC syscall endpoints registered\n");
+    kernel::Logger::info("minicore: channel IPC syscall endpoints registered");
 
     // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
     // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에
     // 예약을 걸기 전에 초기화돼 있어야 한다.
     kernel::KernelReservedTable::init();
-    kernel::Serial::write("minicore: kernel-reserved table ready\n");
+    kernel::Logger::info("minicore: kernel-reserved table ready");
 
     // VFS 마운트 테이블(SP-7CC5693A §2.1, PN-71C2B857) - 아직 실제
     // 마운트를 거는 소비자(livefs 자체, fs 서비스의 Mount syscall)는
     // 없다 - 테이블을 빈 상태로 준비만 해 둔다(§2.3 부팅 시퀀스가
     // 요구하는 "MountTable::init() 직후" 시점 확보).
     kernel::MountTable::init();
-    kernel::Serial::write("minicore: mount table ready\n");
+    kernel::Logger::info("minicore: mount table ready");
 
     // livefs(SP-7CC5693A §2.4, PN-71C2B857) - 어떤 유저 프로세스도 아직
     // 없는 이 시점에 커널 스스로 마운트한다(§2.4 부팅 시퀀스 그대로,
@@ -580,40 +498,37 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     static constexpr char kLiveFsMountPath[] = "/sys/live";
     if (!kernel::MountTable::mountKernel(kLiveFsMountPath, sizeof(kLiveFsMountPath) - 1,
                                           &kernel::LiveFs::instance())) {
-        kernel::Serial::write("minicore: livefs mount FAILED\n");
+        kernel::Logger::error("minicore: livefs mount FAILED");
     } else {
-        kernel::Serial::write("minicore: livefs mounted at /sys/live\n");
+        kernel::Logger::info("minicore: livefs mounted at /sys/live");
     }
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).
     kernel::TlbShootdown::init();
-    kernel::Serial::write("minicore: TLB shootdown IPI handler registered\n");
+    kernel::Logger::info("minicore: TLB shootdown IPI handler registered");
 
     // KernelAddressSpaceManager(SP-2AAD7C8D §2, PN-012E8C1A) - 위
     // TlbShootdown::init() 이후에만 안전(unmapRegion()이 broadcast()를
     // 부름). 전역 싱글턴이라 BSP에서 한 번만.
     kernel::KernelAddressSpaceManager::init();
-    kernel::Serial::write("minicore: kernel address space manager ready\n");
+    kernel::Logger::info("minicore: kernel address space manager ready");
 
     kernel::IoApic::init();
-    kernel::Serial::write("minicore: IOAPIC mapped\n");
+    kernel::Logger::info("minicore: IOAPIC mapped");
 
     kernel::Timer::init();
-    kernel::Serial::write("minicore: timer ready (100Hz), source=");
-    kernel::Serial::write(kernel::Timer::usesHpet() ? "hpet" : "lapic+pit");
-    kernel::Serial::write("\n");
+    kernel::Logger::info("minicore: timer ready (100Hz), source=%s", kernel::Timer::usesHpet() ? "hpet" : "lapic+pit");
 
     // 지연 실행 큐(SP-F15B4A63, PN-C46DF296) - Timer::tickCount()를
     // 시간 기준으로 쓰므로 Timer::init() 이후, 전역 테이블 하나뿐이라
     // BSP에서 한 번만(위 KernelReservedTable::init()과 같은 이유).
     kernel::DelayedExecutionQueue::init();
-    kernel::Serial::write("minicore: delayed execution queue ready, enabling interrupts\n");
+    kernel::Logger::info("minicore: delayed execution queue ready, enabling interrupts");
 
     kernel::Pci::init();
-    kernel::Serial::write("minicore: PCI config access=");
-    kernel::Serial::write(kernel::Pci::usesMmconfig() ? "mmconfig+legacy" : "legacy");
-    kernel::Serial::write("\nminicore: PCI enumeration:\n");
+    kernel::Logger::info("minicore: PCI config access=%s", kernel::Pci::usesMmconfig() ? "mmconfig+legacy" : "legacy");
+    kernel::Logger::info("minicore: PCI enumeration:");
     kernel::Pci::enumerate(kLogPciDevice);
 
     kSpawnInitProcess();

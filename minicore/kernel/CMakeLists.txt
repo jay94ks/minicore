@@ -3,6 +3,7 @@ add_library(minicore_kernel OBJECT
     kmain.cpp
     multiboot2.cpp
     serial.cpp
+    logger.cpp
     panic.cpp
     gdt.cpp
     idt.cpp

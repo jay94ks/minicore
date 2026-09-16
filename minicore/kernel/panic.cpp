@@ -1,13 +1,11 @@
 #include "panic.h"
 
-#include "serial.h"
+#include "logger.h"
 
 namespace kernel {
 
 void kPanic(const char* message) {
-    Serial::write("\nminicore: PANIC - ");
-    Serial::write(message);
-    Serial::write("\n");
+    Logger::panic("\nminicore: PANIC - %s", message);
     for (;;) {
         asm volatile("cli; hlt");
     }
