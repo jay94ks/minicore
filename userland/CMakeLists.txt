@@ -28,3 +28,7 @@ add_subdirectory(tests/userlandtest)
 # 빌드해야 해서 이 트리를 그대로 재사용(out-of-tree add_subdirectory,
 # 바이너리 디렉터리를 명시해 소스 트리 밖에서도 안전).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BINARY_DIR}/minicore-init)
+
+# devmgr(SP-9DD4F3EA §6, PN-BD9AAE2F) - init과 동일한 이유의 out-of-tree
+# add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/devmgr ${CMAKE_CURRENT_BINARY_DIR}/minicore-devmgr)

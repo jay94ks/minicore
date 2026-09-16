@@ -27,4 +27,32 @@ void selfTerminate(int32_t exitCode) {
     }
 }
 
+SyscallToken submit(SyscallEndpointId endpointId, void* args) {
+    // [고침, PN-BD9AAE2F devmgr end-to-end 검증 중 발견] 원래 "r"
+    // 제약 두 개를 각각 별도 mov로 rdi/rsi에 옮기는 방식이었는데,
+    // 컴파일러가 그 "r" 피연산자 하나를 이미 rdi(또는 rsi)에 배정해
+    // 두면 두 번째 mov가 그 값을 미처 쓰기 전에 덮어써 버리는
+    // 레지스터 배정 경합이 있었다(실제로 devmgr이 EnumerateDevices를
+    // 제출해도 커널 핸들러의 onExec이 단 한 번도 안 불리는 것으로
+    // 발견 - args 포인터가 손상돼 SyscallRegistry 조회 전에 이미
+    // 깨진 값이 됐을 가능성). "D"/"S" 제약으로 컴파일러가 애초에
+    // rdi/rsi에 직접 실어 주게 해 중간 mov 자체를 없앤다("+a"로
+    // verb 입력과 결과 출력을 같은 rax 하나로 왕복).
+    uint64_t verb = 0;  // submit
+    asm volatile("int $0x80"
+                 : "+a"(verb)
+                 : "D"(static_cast<uint64_t>(endpointId)), "S"(reinterpret_cast<uint64_t>(args))
+                 : "memory");
+    return static_cast<SyscallToken>(verb);
+}
+
+bool wait(SyscallToken token) {
+    // submit()과 동일한 이유로 "D" 제약 사용 - 커널 쪽은 verb=wait일 때
+    // RSI를 읽지 않으므로(idt.cpp kDispatchSyscallVerb) 별도로 채우지
+    // 않는다.
+    uint64_t verb = 1;  // wait
+    asm volatile("int $0x80" : "+a"(verb) : "D"(static_cast<uint64_t>(token)) : "memory");
+    return verb != 0;
+}
+
 }  // namespace mc
