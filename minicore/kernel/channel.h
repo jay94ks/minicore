@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_CHANNEL_H
 #define MINICORE_KERNEL_CHANNEL_H
 
+#include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "named_object.h"
@@ -117,6 +118,23 @@ struct PendingConnectRequest {
     PendingConnectRequest* next = nullptr;
 };
 
+// [신규, 2026-09-17, PN-21C2D4E9(DC-21647E46 전역 적용 로드맵 Phase 1)]
+// RingBuffer::data(아래)의 삭제자 - 확보 경로가 둘이라(useHugePage에
+// 따라 GenericSlabAllocator 4KiB 또는 PageFrameAllocator::allocOrder
+// 2MiB) 해제도 그 경로를 그대로 되짚어야 한다(예전엔 BridgePipe::
+// destroyPair가 이 분기를 직접 들고 있었다 - 이제 이 삭제자 하나로
+// 옮겨 옴). `physBase`는 huge page 경로에서만 의미 있다(가상주소
+// data와 물리주소 physBase가 다르므로 PageFrameAllocator::freeOrder
+// 에는 반드시 물리주소를 넘겨야 함 - RingBuffer::physBase 필드와
+// 동일한 값을 이 삭제자도 별도로 들고 있는 이유). operator() 본체는
+// PageFrameAllocator/GenericSlabAllocator를 몰라도 되게 channel.cpp에
+// 정의한다(이 헤더에 그 둘을 새로 include하지 않기 위함).
+struct RingBufferDeleter {
+    bool useHugePage = false;
+    uint64_t physBase = 0;
+    void operator()(uint8_t* ptr) const;
+};
+
 // 한 방향 raw binary 링버퍼(DS-D4E5C451 IPC 포맷 확정 그대로) -
 // BridgePipe 하나가 "이 반쪽이 write()할 때 채우는" 자기 소유 버퍼
 // 하나만 갖는다(상대는 이 버퍼를 읽는다) - 그래서 필드 이름이
@@ -124,8 +142,13 @@ struct PendingConnectRequest {
 // 가져서 자연히 성립한다(상대의 outbound = 내가 읽는 대상).
 struct RingBuffer {
     Spinlock lock;
-    uint8_t* data = nullptr;
-    uint64_t physBase = 0;   // 해제용(PageFrameAllocator/Slab 어느 쪽이든 GenericSlabAllocator::free에 그대로 넘김)
+    // [신규, 2026-09-17, PN-21C2D4E9] 배타적 소유(다른 소유자가 없음)라
+    // UniquePtr로 전환 - DC-21647E46/SP-201238BB가 이미 이 필드를
+    // UniquePtr 후보로 분류해 뒀다. 실제 확보/해제 시점·경로는 전혀
+    // 안 바뀐다(RAII 래퍼일 뿐 정책 변경 없음) - reset()이 여전히
+    // 그 시점을 결정한다.
+    UniquePtr<uint8_t, RingBufferDeleter> data;
+    uint64_t physBase = 0;   // 해제용(PageFrameAllocator/Slab 어느 쪽이든 GenericSlabAllocator::free에 그대로 넘김) - RingBufferDeleter도 이 값을 별도로 들고 있음(huge page 경로 전용)
     uint64_t capacity = 0;
     uint64_t readPos = 0;
     uint64_t writePos = 0;
@@ -144,9 +167,24 @@ struct RingBuffer {
     // 실행되지 않는다). lock.unlock()으로 강제 초기화하는 이유도
     // 같다 - Spinlock._locked가 이전 점유자의 값을 그대로 들고 있을
     // 수 있다.
+    //
+    // [수정, 2026-09-17, PN-21C2D4E9] `data`가 `UniquePtr`로 바뀌면서
+    // **`data.initRaw(...)`를 쓴다 - 절대 `data = ...`(operator=)를
+    // 쓰지 않는다.** 이 RingBuffer 자신이 위 주석 그대로 raw 슬랩
+    // 메모리 위에 놓여 아직 실제 생성자를 거친 적이 없으므로, `data`가
+    // 들고 있는 `_ptr`/`_deleter`는 진짜 값이 아니라 이전 슬랩
+    // 점유자가 남긴 쓰레기다 - 평범한 `operator=`는 "기존 소유
+    // 대상을 안전하게 먼저 해제"하려고 그 쓰레기 `_ptr`/`_deleter`를
+    // 그대로 읽어 호출해 버린다(실측 전 코드 추적으로 발견 - 이
+    // 세션에서 반복돼 온 "raw 슬랩 메모리 위 reinterpret_cast는
+    // 실제 생성자를 안 거친다" 패턴과 정확히 같은 함정). `initRaw()`
+    // 는 옛 값을 절대 읽지 않고 그대로 덮어써 이 함정을 피한다.
+    // useHugePage는 capacityIn만으로 판별 가능(둘이 겹칠 수 없는
+    // 고정값 - BridgePipe::destroyPair의 기존 판별 관례와 동일).
     void reset(uint8_t* dataIn, uint64_t physBaseIn, uint64_t capacityIn) {
         lock.unlock();
-        data = dataIn;
+        const bool useHugePage = (capacityIn == kHugeChannelRingBufferSize);
+        data.initRaw(dataIn, RingBufferDeleter{useHugePage, physBaseIn});
         physBase = physBaseIn;
         capacity = capacityIn;
         readPos = 0;

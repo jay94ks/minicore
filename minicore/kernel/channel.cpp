@@ -9,6 +9,17 @@
 
 namespace kernel {
 
+// [신규, 2026-09-17, PN-21C2D4E9] RingBuffer::data(UniquePtr) 전용
+// 삭제자 - destroyPair가 예전에 직접 들고 있던 분기(huge page vs 4K)
+// 를 그대로 옮겨 왔을 뿐, 해제 시점/경로는 전혀 안 바뀐다.
+void RingBufferDeleter::operator()(uint8_t* ptr) const {
+    if (useHugePage) {
+        PageFrameAllocator::freeOrder(physBase, kHugeChannelRingBufferOrder);
+    } else {
+        GenericSlabAllocator::free(ptr, kChannelRingBufferSize);
+    }
+}
+
 bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** outB) {
     void* memA = GenericSlabAllocator::alloc(sizeof(BridgePipe));
     void* memB = memA ? GenericSlabAllocator::alloc(sizeof(BridgePipe)) : nullptr;
@@ -84,18 +95,15 @@ bool BridgePipe::createPair(bool useHugePage, BridgePipe** outA, BridgePipe** ou
 }
 
 void BridgePipe::destroyPair(BridgePipe* a, BridgePipe* b) {
-    // capacity로 huge/4K 경로를 구분한다(둘이 겹칠 수 없는 고정값 -
-    // 새 discriminator 필드 불필요).
-    if (a->outbound.capacity == kHugeChannelRingBufferSize) {
-        PageFrameAllocator::freeOrder(a->outbound.physBase, kHugeChannelRingBufferOrder);
-    } else {
-        GenericSlabAllocator::free(a->outbound.data, kChannelRingBufferSize);
-    }
-    if (b->outbound.capacity == kHugeChannelRingBufferSize) {
-        PageFrameAllocator::freeOrder(b->outbound.physBase, kHugeChannelRingBufferOrder);
-    } else {
-        GenericSlabAllocator::free(b->outbound.data, kChannelRingBufferSize);
-    }
+    // [수정, 2026-09-17, PN-21C2D4E9] huge/4K 분기는 이제 RingBufferDeleter
+    // 안으로 옮겨 갔다 - `data.reset()`이 그 삭제자를 그대로 부른다.
+    // **BridgePipe 자신을 슬랩에 반납하기 전에 반드시 먼저 불러야
+    // 한다** - 이 프로젝트는 placement new/실제 소멸자를 안 쓰므로
+    // (그래서 아래 GenericSlabAllocator::free(a, ...)가 ~RingBuffer()를
+    // 자동으로 불러 주지 않는다) 이 명시적 호출이 없으면 outbound
+    // 버퍼 자체가 그대로 샌다.
+    a->outbound.data.reset();
+    b->outbound.data.reset();
     GenericSlabAllocator::free(a, sizeof(BridgePipe));
     GenericSlabAllocator::free(b, sizeof(BridgePipe));
 }

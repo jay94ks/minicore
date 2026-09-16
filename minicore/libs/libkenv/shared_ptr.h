@@ -397,6 +397,11 @@ public:
     T* operator->() const { return _ptr; }
     T& operator*() const { return *_ptr; }
     explicit operator bool() const { return _ptr != nullptr; }
+    // [신규, PN-21C2D4E9] 버퍼(예: RingBuffer::data)를 가리키는
+    // UniquePtr<uint8_t>류 용도 - std::unique_ptr<T[]>처럼 별도
+    // 배열 특수화를 두지 않고, 이 하나의 템플릿에 첨자 접근만
+    // 더했다(포인터처럼 쓰는 기존 관례의 자연스러운 확장).
+    T& operator[](uint64_t index) const { return _ptr[index]; }
 
     // 소유권을 포기하고 raw 포인터로 반환 - 이후 정리 책임은 호출자.
     T* release() {
@@ -412,9 +417,36 @@ public:
         _ptr = newPtr;
     }
 
+    // [신규, PN-21C2D4E9 실측 중 발견] raw 슬랩 메모리 위에
+    // reinterpret_cast로 앉혀진 뒤 실제 생성자를 거치지 않은 인스턴스
+    // (예: RingBuffer가 BridgePipe 슬랩 메모리 위에 놓이는 기존 관례,
+    // channel.h) 전용 - `operator=`/`reset()`과 달리 **기존 `_ptr`을
+    // 절대 읽거나 해제하지 않는다**. 이 인스턴스가 정말 raw 메모리에서
+    // 막 나왔다는 걸 호출부가 보장할 때만 안전하다(진짜 살아있는
+    // 소유권을 덮어쓰면 그 옛 대상이 그대로 샌다) - ChunkedList::
+    // ensureAllocator/AsyncTask::init()과 같은 "raw 메모리 재확립"
+    // 관례의 UniquePtr 버전.
+    void initRaw(T* ptr, Deleter deleter) {
+        _ptr = ptr;
+        _deleter = deleter;
+    }
+
 private:
     T* _ptr = nullptr;
-    Deleter _deleter = &kDestroyAndFree<T>;
+    // [수정, 2026-09-16, PN-21C2D4E9 실측 컴파일 중 발견] 원래
+    // `= &kDestroyAndFree<T>`였다 - 이 NSDMI는 기본 템플릿 인자
+    // (`Deleter = void (*)(T*)`)를 그대로 쓰는 경우에만 유효한 값이라,
+    // RingBufferDeleter처럼 함수 포인터로 변환 불가능한 **상태 있는
+    // 커스텀 삭제자 타입**을 명시하면 이 대입식 자체가 컴파일 에러가
+    // 난다(§2-A가 원래 약속한 "상태 있는 함수 객체도 Deleter로 가능"
+    // 이 실제로는 막혀 있었던 셈 - 실제 그런 타입을 처음 써 보기
+    // 전까지는 안 드러나는 종류의 결함, 이 세션에서 반복된 패턴과
+    // 동일). 값 초기화(`{}`)로 바꾸면 함수 포인터 Deleter는 여전히
+    // nullptr로, 상태 있는 구조체 Deleter는 그 타입의 기본 생성자로
+    // 초기화된다 - 어느 쪽이든 `_ptr`이 nullptr인 기본 생성 상태에서만
+    // 의미가 있는 값이라(살아있는 포인터가 있는 인스턴스는 항상 명시적
+    // 생성자/initRaw가 `_deleter`도 함께 세팅) 동작 변화가 없다.
+    Deleter _deleter{};
 };
 
 template <typename T>
