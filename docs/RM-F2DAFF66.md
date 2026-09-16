@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T20:13:23.191Z
+  updatedAt: 2026-09-16T20:14:50.932Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -58,7 +58,7 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 
 ## §1. 확정된 발견 (완료)
 
-### 1-A. `Task::numaNode` 필드 누락 (코드 갭, 처리 중)
+### 1-A. `Task::numaNode` 필드 누락 (코드 갭, 완전 해소)
 
 - **출처**: `PL-2D3184BC`(스케줄러 실행 계획, `DC-8EA1E7F6` 확정
   설계 반영) "Task 자료구조" 절의 PCB 필드 후보 목록 - "소속 NUMA
