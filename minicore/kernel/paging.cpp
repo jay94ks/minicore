@@ -117,6 +117,36 @@ void kSplitTwoMegabyte(kernel::uint64_t* pd, kernel::uint32_t pdIndex) {
     pd[pdIndex] = newTablePhys | kernel::PAGE_PRESENT | kernel::PAGE_WRITABLE | (leafFlags & kernel::PAGE_USER);
 }
 
+// [PN-2E6CB2D5] destroyAddressSpace()의 중간 테이블 재귀 반납 -
+// depth==3(PDPT, 엔트리는 PD를 가리킴)/depth==2(PD, 엔트리는 PT를
+// 가리키거나 PS 2M leaf일 수 있음)/depth==1(PT, 엔트리는 4K leaf
+// 데이터 페이지 - 더 내려갈 테이블이 없음)만 쓰인다. leaf 데이터
+// 페이지(PT 엔트리, PD의 PS 2M 엔트리) 자체는 호출부가 destroyAddressSpace
+// 호출 전에 unmapPage로 이미 반납했어야 하는 대상이라 여기서는 절대
+// 건드리지 않는다 - 오직 "테이블로 쓰인 프레임" 자신만 반납한다.
+// PD의 PS 2M 엔트리는 (정상 경로라면 unmapPage의 kSplitTwoMegabyte가
+// 이미 4K PT로 되돌려 놨겠지만) 방어적으로 건너뛴다 - 데이터 프레임을
+// 테이블 프레임으로 착각해 반납하면 실행 중인 다른 매핑을 깨뜨린다.
+void kFreeUserPageTablesRecursive(kernel::uint64_t tablePhys, kernel::uint32_t depth) {
+    kernel::uint64_t* table = kAsTable(tablePhys);
+    for (kernel::uint32_t i = 0; i < kEntriesPerTable; ++i) {
+        const kernel::uint64_t entry = table[i];
+        if (!(entry & kernel::PAGE_PRESENT)) {
+            continue;
+        }
+        if (depth == 2 && (entry & kPageSizeBit)) {
+            continue;  // PD의 2M leaf 데이터 엔트리 - 테이블이 아니다
+        }
+        if (depth > 1) {
+            kFreeUserPageTablesRecursive(entry & kAddrMask, depth - 1);
+        }
+        // depth==1(PT)의 present 엔트리는 4K leaf 데이터 페이지 자체라
+        // 더 내려갈 테이블이 없다 - 위 unmapPage 사전조건이 지켜졌다면
+        // 애초에 여기까지 present로 남아있지 않아야 정상이다.
+    }
+    kernel::PageFrameAllocator::freePage(tablePhys);
+}
+
 kernel::uint32_t kPml4Index(kernel::uint64_t virtualAddr) { return (virtualAddr >> 39) & 0x1FF; }
 kernel::uint32_t kPdptIndex(kernel::uint64_t virtualAddr) { return (virtualAddr >> 30) & 0x1FF; }
 kernel::uint32_t kPdIndex(kernel::uint64_t virtualAddr) { return (virtualAddr >> 21) & 0x1FF; }
@@ -384,6 +414,12 @@ uint64_t Paging::createAddressSpace() {
 }
 
 void Paging::destroyAddressSpace(uint64_t pml4Phys) {
+    uint64_t* pml4 = kAsTable(pml4Phys);
+    for (uint32_t i = 0; i < kHigherHalfPml4Start; ++i) {
+        if (pml4[i] & PAGE_PRESENT) {
+            kFreeUserPageTablesRecursive(pml4[i] & kAddrMask, 3);
+        }
+    }
     PageFrameAllocator::freePage(pml4Phys);
 }
 
