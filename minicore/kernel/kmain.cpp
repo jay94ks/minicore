@@ -92,19 +92,23 @@ kernel::uint64_t gInitImageSize = 0;
 bool gInitImageFound = false;
 
 // 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - initrd 안에서
-// "devmgr"/"fs"/"net"/"tty"라는 정확한 이름과 일치하는 실행 파일을
-// 찾아 ProcessRole::KernelService로 스폰하는 고정 이름 목록. "init"과
-// 완전히 같은 물리 메모리 안전성 이유(위 gInitImageBuffer 문서 주석
-// 참고 - PageFrameAllocator::init() 이전에 커널 BSS 안으로 복사해
-// 둬야 그 예약 범위에 자동으로 포함된다)로 각자 전용 정적 버퍼를
-// 쓴다. v1은 이 네 이름 각각 정확히 하나의 인스턴스만 지원(여러
-// 개가 있으면 마지막으로 매치된 것만 남는다 - 지금은 문제되지 않음,
-// 실제로 여러 인스턴스가 필요해지면 재검토).
-constexpr kernel::uint32_t kServiceManifestCount = 4;
+// "devmgr"/"fs"/"net"/"tty"/"pubreg"라는 정확한 이름과 일치하는
+// 실행 파일을 찾아 ProcessRole::KernelService로 스폰하는 고정 이름
+// 목록("pubreg"는 [추가, 2026-09-16, 설계자 지시 - SP-B071E628
+// "프로세스간 공개 인터페이스" 재설계로 5번째 커널 서비스 신설],
+// SP-EAB162FC §2.2가 이미 이 다섯 이름을 공식화해 둠 - PN-185406F6
+// 항목1). "init"과 완전히 같은 물리 메모리 안전성 이유(위
+// gInitImageBuffer 문서 주석 참고 - PageFrameAllocator::init() 이전에
+// 커널 BSS 안으로 복사해 둬야 그 예약 범위에 자동으로 포함된다)로
+// 각자 전용 정적 버퍼를 쓴다. v1은 이 다섯 이름 각각 정확히 하나의
+// 인스턴스만 지원(여러 개가 있으면 마지막으로 매치된 것만 남는다 -
+// 지금은 문제되지 않음, 실제로 여러 인스턴스가 필요해지면 재검토).
+constexpr kernel::uint32_t kServiceManifestCount = 5;
 kernel::uint8_t gDevmgrImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gFsImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gNetImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gTtyImageBuffer[kMaxInitImageSize];
+kernel::uint8_t gPubregImageBuffer[kMaxInitImageSize];
 
 struct ServiceManifestEntry {
     const char* name;
@@ -119,6 +123,7 @@ ServiceManifestEntry gServiceManifest[kServiceManifestCount] = {
     {"fs", 2, gFsImageBuffer},
     {"net", 3, gNetImageBuffer},
     {"tty", 3, gTtyImageBuffer},
+    {"pubreg", 6, gPubregImageBuffer},
 };
 
 // 부팅 모듈(initrd)이 있으면 libcpio로 훑어 로그를 남기고(QU-9DCDCE3E -
