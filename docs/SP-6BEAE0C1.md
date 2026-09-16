@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-6BEAE0C1
   status: approved
-  updatedAt: 2026-09-16T12:37:59.185Z
+  updatedAt: 2026-09-16T13:25:41.847Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -71,7 +71,8 @@ COW 인프라는 이 계획에서 준비하지만, `fork()` syscall 자체(그
 ```
 SpawnProcess(imageBuffer: void* [유저 메모리], imageSize: uint64_t,
              argv: char** [유저 메모리, NULL 종단], envp: char**
-             [유저 메모리, NULL 종단]) -> pid(int64_t, 실패 시 음수)
+             [유저 메모리, NULL 종단],
+             flags: uint32_t) -> pid(int64_t, 실패 시 음수)
 ```
 
 - `imageBuffer`/`imageSize` - **이미 메모리에 있는 ELF 이미지 원본
@@ -80,6 +81,29 @@ SpawnProcess(imageBuffer: void* [유저 메모리], imageSize: uint64_t,
   `Read`로, 지금 당장은 예를 들어 initrd에서 직접 읽거나 다른
   프로세스가 Channel로 전달하는 등) 이 바이트를 유저 메모리에
   올려 뒀다는 전제.
+- **[신규, 2026-09-16, QU-9585F6C4 답변("일반화된 정수로 플래그 셋을
+  받는 형태로 설계해놔. (확장성)")]** `flags: uint32_t` - 단일
+  `debugStart: bool` 대신 **비트마스크 플래그 집합**으로 설계한다
+  (앞으로 SpawnProcess에 새 on/off 옵션이 필요해질 때마다 syscall
+  시그니처 자체를 또 바꾸지 않고 새 비트만 추가하면 되도록 - 확장성
+  확보가 설계자 지시의 취지).
+
+  ```cpp
+  // minicore/libs/libkenv 어딘가(정확한 헤더는 착수 시 확정) - RM-32D06563에
+  // 용어로 등록.
+  enum SpawnProcessFlags : uint32_t {
+      kSpawnNone = 0,
+      // SP-9A6D579F §3.3 - 디버깅 대상으로 스폰된 자식은 첫 명령어
+      // 실행 전 정지 상태로 시작(TaskState::Blocked) - 디버거(부모)가
+      // 이 플래그를 세팅해 호출.
+      kSpawnDebugStart = 1u << 0,
+      // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 1, ...).
+  };
+  ```
+
+  호출자가 `flags`에 알 수 없는 비트를 세팅하면(아직 정의 안 된 비트)
+  `InvalidArgument`로 거부한다(조용히 무시하지 않음 - 오타/버전
+  불일치를 바로 드러내기 위함, 표준 커널 syscall 관례).
 - **[확정, 2026-09-16, QU-52253384 답변 + QU-51BA3736 답변]** "유저
   랜드에서 들어오는 포인터나 인자들은 기본적으로 untrusted. 복사를
   최소화하는 경로를 생각하면 syscall을 별도로 둬야 해." - 이
@@ -208,10 +232,11 @@ QU-52253384 답변이 큰 방향(§2/§3/§6)은 확정했지만, 실제 구현�
 별도 확인을 구하고, 순수 구현 세부(RM-23F4B687 §4 기준)는 착수하며
 정한다:
 
-1. **프로세스 트리 자료구조**(§6) - 부모의 자식 목록을 어떤 컨테이너로
-   둘지(`ChunkedList<Process*>`가 이 프로젝트의 표준 패턴과 가장
-   맞아 보임 - AsyncTaskGroup 등이 이미 재사용). 순수 구현 세부로
-   판단, 별도 확인 불필요.
+1. **[구현 완료, 2026-09-16]** 프로세스 트리 자료구조(§6) - `Process::
+   parent`(기본 nullptr)/`children`(`ChunkedList<Process*, 8>`) 추가,
+   `init()`이 Resurrect 재사용 대비 매번 리셋, `SpawnProcessHandler`가
+   `execImage()` 성공 후 호출자를 부모로 연결. init/고정 스폰 서비스는
+   여전히 루트(parent=nullptr). QEMU 실측 검증 완료(관계도 기록).
 2. **[해소, 2026-09-16, QU-51BA3736 답변]** syscall 분할 형태(§3) -
    설계자 답변("아니야 그냥 일반 syscall로 해도 되겠네")으로 별도
    준비 syscall/핸들 없이 `SpawnProcess` 단일 syscall로 확정 -
@@ -266,6 +291,14 @@ QU-52253384 답변이 큰 방향(§2/§3/§6)은 확정했지만, 실제 구현�
 - SP-9A6D579F(프로세스 디버깅) §3.1이 이 프로세스 트리 구조에
   의존한다(minicore-f8 세션 확인, 2026-09-16) - 자료구조가
   확정되면 그쪽 문서와 상호 참조를 맞춘다.
+- **[해소, 2026-09-16, QU-9585F6C4]** SP-9A6D579F §3.3("디버깅 대상
+  스폰 시 정지 시작")이 요구하던 플래그를 §3에 `flags: uint32_t`
+  (`SpawnProcessFlags::kSpawnDebugStart` 비트)로 반영 완료 - 단일
+  `debugStart: bool` 대신 확장 가능한 비트마스크로(설계자 지시,
+  "일반화된 정수로 플래그 셋을 받는 형태로 설계해놔"). minicore-88이
+  이미 구현한 SpawnProcess(syscall 59) 핸들러에 `flags` 파라미터
+  추가 반영 필요 - 별도 PN으로 추적(CLAUDE.md 규칙 7, 이 세션이
+  approved 문서 갱신과 함께 등록).
 
 ## 13. 질의 이력 (전체 해소됨)
 
