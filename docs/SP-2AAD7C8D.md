@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: approved
-  updatedAt: 2026-09-16T08:32:19.882Z
+  updatedAt: 2026-09-16T13:55:45.543Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -376,6 +376,23 @@ struct BrkArgs {
    `MapleArangeNode`를 `MapleRange64Node`/`MapleLeaf64Node`/
    `MapleDenseNode`로 바꿀지의 알고리즘 - 노드 "종류"는 확정됐으나
    전환 시점은 구현 착수 시 실측하며 다듬는 것으로 열어 둠.
+6. **[추가, 2026-09-16, minicore-f8 세션 리뷰]** Copy-on-Write(COW)
+   페이지 폴트 처리 - 이 문서 작성 이후 SP-6BEAE0C1("일반 프로세스
+   생성 syscall")가 `posix_spawn` + 향후 `fork()`(PN-44C91D6E)를 위해
+   COW 인프라를 요구하게 됐다. 프레임 단위 참조 카운트(`PageFrameAllocator::
+   retain()`/`refCount()`)는 이미 구현 완료(PN-543C0CE9 착수 1번째
+   증분)됐지만, **이 문서가 다루는 페이지 폴트 처리 흐름(§9.5의
+   `VmaBacking::Anonymous` "요구 페이징" 분기)은 아직 COW를 구분하지
+   않는다** - `error_code`의 Present 비트로 "아직 매핑 안 됨(순수
+   요구 페이징, 새 프레임 채움)"과 "이미 매핑됐지만 쓰기 금지라 폴트남
+   (COW, refCount로 분기해 단독 소유면 그냥 쓰기 허용 + refCount 감소
+   없이 writable로, 공유 중이면 새 프레임에 복사)"을 구분해야 하는데,
+   그 분기 자체가 아직 이 문서 어디에도 없다. `Paging::handlePageFault`
+   확장은 순수 구현 세부(RM-23F4B687 §4)로 보이지만(Present 비트로
+   이미 구분 가능한 표준 기법), PN-543C0CE9 착수 순서 (6)번
+   "COW 폴트 핸들러 확장"에 도달하기 전에 이 문서(또는 그 구현
+   증분 자체)에 실제로 그 분기 로직을 적어 둬야 한다 - 아직 코드가
+   없는 단계라 지금 확정하지 않고 착수 시점으로 남겨 둔다.
 
 ## 7. 선행 조건
 
