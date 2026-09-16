@@ -210,6 +210,26 @@ struct AsyncTask {
     // 건너뛴다.
     WeakPtr<Task> waitingTask;
 
+    // [신규, 2026-09-17, PN-DB5153B6, DC-21647E46 QU-B9683320 답변("(B)
+    // AsyncTask에 제출자 정보를 범용화")] 이 AsyncTask를 실제로 제출한
+    // kernel::Task(대개 UserThread) - `onExec()`은 `AsyncReactor`가
+    // 나중에(리액터 자신의 스택 위에서) 실행하므로, 그 안에서 새로
+    // `Scheduler::currentTask()`를 부르면 제출자가 아니라 그 순간
+    // 리액터의 컨텍스트를 반환한다(`address_space.h`의 `MmapArgs::
+    // process` 필드 주석이 이미 지적해 뒀던 문제, PN-9CC66142가 실제로
+    // 처음 마주침). `Syscall::submit()`이 `Scheduler::currentTask()`가
+    // 아직 정확한 시점(pendingSyscalls 부기 근처)에 이 필드를 자동으로
+    // 채운다 - 개별 syscall 핸들러는 이 필드를 신경 쓸 필요 없이
+    // `onExec()`에서 `task->submitterTask.lock()`으로 그냥 얻는다.
+    // `waitingTask`와 동일한 이유로 `WeakPtr`(제출자가 완료 전에 먼저
+    // 죽어도 안전하게 빈 값을 반환 - UAF 방지, PN-B4987BF6의 self-ref
+    // 패턴이 이미 검증한 것과 같은 종류의 안전성). `Syscall::submit()`을
+    // 거치지 않는 제출 경로(`Syscall::submitDetached()`, 프레임워크
+    // 내부 재제출 등)는 이 필드를 채우지 않는다 - 그런 경로는 애초에
+    // "제출자"라는 개념이 아직 필요해진 적이 없다(RM-23F4B687 §4,
+    // 실사용처가 생기면 그때 확장).
+    WeakPtr<Task> submitterTask;
+
     // false면 완료(Completed/Failed) 후에도 리액터가 이 AsyncTask
     // 구조체/전용 스택을 자동으로 반납하지 않는다 - 결과를 나중에
     // 소비해야 하는 호출부(예: waitForSyscall)가 직접 반납할 책임을

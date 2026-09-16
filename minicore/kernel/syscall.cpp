@@ -110,6 +110,11 @@ AsyncTaskManageCode Syscall::submit(SyscallEndpointId endpointId, void* args) {
     if (!task) {
         return 0;  // Slab 고갈 등
     }
+    // [신규, 2026-09-17, PN-DB5153B6] 지금(=제출 시점)이 `Scheduler::
+    // currentTask()`가 정확한 마지막 순간이다 - onExec()은 나중에
+    // AsyncReactor가 자기 스택 위에서 실행하므로 그 안에서는 이미
+    // 늦다(async_task.h의 `submitterTask` 필드 주석 참고).
+    task->submitterTask = self->weakAsTask();
 
     const AsyncTaskManageCode token = reinterpret_cast<AsyncTaskManageCode>(task);
     if (!self->pendingSyscalls.insert(UserThread::PendingSyscall{endpointId, token})) {

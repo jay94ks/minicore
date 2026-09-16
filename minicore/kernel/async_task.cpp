@@ -284,6 +284,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     // 지우면 슬랩 재사용으로 이전 점유자의 낡은 포인터가 남아, 리액터가
     // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
     waitingTask = WeakPtr<Task>();
+    submitterTask = WeakPtr<Task>();
     autoFree = true;
     cancelSource = AsyncTokenSource{};
     homeCoreIndex = Scheduler::currentCoreIndex();
