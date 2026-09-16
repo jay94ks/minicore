@@ -133,6 +133,12 @@ public:
     // 없다(edge-triggered, 한 번 쓰면 즉시 전달).
     static void sendFixedIpi(uint32_t destApicId, uint8_t vector);
 
+    // NMI(delivery mode 0b100) IPI - PN-F443FE73/SP-677210E6 "NMI 활용"
+    // 전용. NMI delivery mode는 벡터 필드를 무시하고 하드웨어가 항상
+    // IDT 벡터 2로 전달하므로 별도 벡터 인자가 필요 없다(sendFixedIpi
+    // 와 유일하게 다른 점).
+    static void sendNmiIpi(uint32_t destApicId);
+
     // 이 코어의 LAPIC 자체 주기 타이머를 PIT 채널2로 보정해 hz 주기로
     // 프로그래밍하고 vector로 인터럽트를 걸어 켠다 - LAPIC 타이머는
     // 코어마다 독립된 하드웨어라 BSP/AP가 각자 호출해도 서로 간섭하지

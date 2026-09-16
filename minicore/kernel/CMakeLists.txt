@@ -11,6 +11,7 @@ add_library(minicore_kernel OBJECT
     paging.cpp
     acpi.cpp
     lapic.cpp
+    nmi.cpp
     ioapic.cpp
     hpet.cpp
     pci.cpp

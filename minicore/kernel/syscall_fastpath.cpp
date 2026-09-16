@@ -4,6 +4,7 @@
 #include "gdt.h"
 #include "scheduler.h"
 #include "syscall.h"
+#include "x86_64/msr.h"
 
 namespace {
 
@@ -27,18 +28,12 @@ struct SyscallPerCpuScratch {
 
 SyscallPerCpuScratch gScratch[kernel::kAcpiMaxCpus];
 
-void kWriteMsr(kernel::uint32_t msr, kernel::uint64_t value) {
-    const kernel::uint32_t low = static_cast<kernel::uint32_t>(value & 0xFFFFFFFFUL);
-    const kernel::uint32_t high = static_cast<kernel::uint32_t>(value >> 32);
-    asm volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high));
-}
-
-kernel::uint64_t kReadMsr(kernel::uint32_t msr) {
-    kernel::uint32_t low = 0;
-    kernel::uint32_t high = 0;
-    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
-    return (static_cast<kernel::uint64_t>(high) << 32) | low;
-}
+// [정리, 2026-09-16, PN-F443FE73] 이전엔 이 파일 전용 kReadMsr/
+// kWriteMsr가 있었으나, lapic.cpp에도 동일한 중복이 있어 x86_64/
+// msr.h(kernel::arch::kReadMsr64/kWriteMsr64)로 통합했다 - 동작
+// 변경 없음.
+using kernel::arch::kReadMsr64;
+using kernel::arch::kWriteMsr64;
 
 }  // namespace
 
@@ -57,8 +52,8 @@ void SyscallFastPath::initForThisCore() {
     // KERNEL_GS_BASE = 이 코어 전용 스크래치 주소 - `swapgs`가 현재
     // GS_BASE(유저용)와 이 값을 맞바꾼다. 유저용 GS_BASE는 0으로
     // 시작한다(이 프로젝트는 아직 유저랜드 TLS/GS를 쓰지 않음).
-    kWriteMsr(kMsrKernelGsBase, reinterpret_cast<uint64_t>(&gScratch[coreIndex]));
-    kWriteMsr(kMsrGsBase, 0);
+    kWriteMsr64(kMsrKernelGsBase, reinterpret_cast<uint64_t>(&gScratch[coreIndex]));
+    kWriteMsr64(kMsrGsBase, 0);
 
     // STAR[63:48] = SYSRET 베이스(0x10 -> SS=0x18/CS=0x20, gdt.h의
     // kGdtUserDataSelector/kGdtUserCodeSelector 배치와 정확히 대응).
@@ -66,17 +61,17 @@ void SyscallFastPath::initForThisCore() {
     // CS=0x08/SS=0x10, boot.S/gdt.cpp의 커널 세그먼트와 대응).
     const uint64_t star =
         (static_cast<uint64_t>(0x10) << 48) | (static_cast<uint64_t>(kGdtKernelCodeSelector) << 32);
-    kWriteMsr(kMsrStar, star);
-    kWriteMsr(kMsrLstar, reinterpret_cast<uint64_t>(&kSyscallEntry));
+    kWriteMsr64(kMsrStar, star);
+    kWriteMsr64(kMsrLstar, reinterpret_cast<uint64_t>(&kSyscallEntry));
     // SFMASK - 진입 즉시 클리어할 RFLAGS 비트. IF(9)는 스택 전환이
     // 끝나기 전까지 이 코어에 다른 인터럽트가 끼어들지 못하게 막는
     // 필수 조건(int 0x80의 인터럽트 게이트가 자동으로 하는 일과
     // 동등). TF(8)/DF(10)도 유저가 통제하지 못하게 커널 진입 시
     // 항상 꺼 둔다(표준적인 안전 관례).
-    kWriteMsr(kMsrSfmask, (1ULL << 9) | (1ULL << 8) | (1ULL << 10));
+    kWriteMsr64(kMsrSfmask, (1ULL << 9) | (1ULL << 8) | (1ULL << 10));
 
-    const uint64_t efer = kReadMsr(kMsrEfer);
-    kWriteMsr(kMsrEfer, efer | kEferSce);
+    const uint64_t efer = kReadMsr64(kMsrEfer);
+    kWriteMsr64(kMsrEfer, efer | kEferSce);
 }
 
 void SyscallFastPath::setKernelRspForThisCore(uint64_t kernelRsp) {

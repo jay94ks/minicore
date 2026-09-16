@@ -3,11 +3,14 @@
 #include "interrupt_frame.h"
 #include "lapic.h"
 #include "libkenv/types.h"
+#include "logger.h"
+#include "nmi.h"
 #include "paging.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "syscall.h"
 #include "timer.h"
+#include "x86_64/msr.h"
 
 namespace {
 
@@ -79,6 +82,11 @@ IdtPointer gIdtPointer;
 // registerHandler/unregisterHandler가 채우는 벡터->콜백 표(33-254만
 // 유효, 나머지 인덱스는 항상 nullptr로 남는다 - 커널이 직접 처리).
 kernel::Idt::InterruptHandler gDynamicHandlers[256] = {};
+
+// [PN-F443FE73, SP-677210E6 "#DB 상세 설계"] registerHandler와 별도
+// 슬롯인 이유는 헤더 문서 주석 참고 - #DB는 고정 CPU 예외라
+// registerHandler(33-254 전용)를 못 쓴다.
+kernel::Idt::DebugCallback gDebugCallback = nullptr;
 
 // isr.S가 벡터 0~31 각각에 대해 정의한 스텁 - 이름은 그대로 isrN.
 extern "C" void isr0();
@@ -188,6 +196,10 @@ void Idt::unregisterHandler(uint32_t vector) {
     gDynamicHandlers[vector] = nullptr;
 }
 
+void Idt::registerDebugCallback(DebugCallback callback) {
+    gDebugCallback = callback;
+}
+
 }  // namespace kernel
 
 namespace {
@@ -213,19 +225,12 @@ kernel::uint64_t kReadCr2() {
     return cr2;
 }
 
-void kPanic(kernel::InterruptFrame* frame) {
-    kernel::Serial::write("\nminicore: PANIC - unhandled exception: ");
-    if (frame->vector < 32) {
-        kernel::Serial::write(kExceptionNames[frame->vector]);
-    } else {
-        // 33-254 대역인데 registerHandler로 등록된 콜백이 없는 채
-        // 인터럽트가 들어온 경우 - kExceptionNames는 CPU 예외(0-31)
-        // 전용이라 그대로 인덱싱하면 엉녡한 이름이 찍힌다(예전에는
-        // 이 경로 자체가 없어서 문제가 없었다 - PL-2D149D8F에서 범용
-        // 벡터 디스패치를 추가하며 같이 고침).
-        kernel::Serial::write("Unrouted hardware interrupt");
-    }
-    kernel::Serial::write("\n  vector=");
+// [PN-F443FE73, SP-677210E6 "NMI 활용"] kPanic(InterruptFrame*)와
+// NMI WatchdogTrap 분기 양쪽이 공유하는 레지스터 덤프 - 원래
+// kPanic() 본문 그대로, 재사용을 위해 이름만 붙여 뺐다(로직 변경
+// 없음).
+void kPrintFrameDiagnostics(kernel::InterruptFrame* frame) {
+    kernel::Serial::write("  vector=");
     kernel::Serial::writeHex(frame->vector);
     kernel::Serial::write(" error_code=");
     kernel::Serial::writeHex(frame->errorCode);
@@ -290,6 +295,148 @@ void kPanic(kernel::InterruptFrame* frame) {
         kernel::Serial::writeHex(cr3);
     }
     kernel::Serial::write("\n");
+}
+
+// [PN-F443FE73, SP-677210E6 "#DB(Debug) 상세 설계"] #DB는 NMI/#MC와
+// 성격이 다르다 - 하드웨어 오류나 마스크 불가 통지가 아니라 "누군가
+// 의도적으로 건 브레이크포인트/싱글스텝"이라 기본 동작이 panic이면
+// 안 된다(콜백 미등록 = 아직 아무도 안 쓴다는 뜻이지 오류가 아님).
+// 그래서 미처리 시에도 로그만 남기고 계속 실행한다(#MC/NMI와 다름 -
+// 이 함수는 항상 kIsrHandler가 EOI 없이 바로 반환하게 만든다, 트랩
+// 이지 하드웨어 IRQ가 아니므로 EOI 자체가 불필요 - kSyscallVector/
+// #NM과 동일한 관례).
+constexpr kernel::uint64_t kDr6BsBit = 1ULL << 14;  // Single-step
+
+void kHandleDebugException(kernel::InterruptFrame* frame) {
+    kernel::uint64_t dr6;
+    asm volatile("mov %%dr6, %0" : "=r"(dr6));
+
+    bool handled = false;
+    if (gDebugCallback != nullptr) {
+        handled = gDebugCallback(frame, dr6);  // true면 콜백이 처리 완료
+    }
+
+    // DR6는 CPU가 자동으로 클리어하지 않는다 - 핸들러가 명시적으로
+    // 비워야 한다(SDM Vol.3 §17.2 요구사항, 안 비우면 다음 #DB에서도
+    // 낡은 상태 비트가 그대로 남는다).
+    asm volatile("mov %0, %%dr6" : : "r"(kernel::uint64_t{0}));
+
+    if (!handled) {
+        // 등록된 소비자가 없거나 콜백이 "내 것 아님"이라고 반환 -
+        // 지금은 소비자가 실제로 없으므로 이 경로가 기본값이다.
+        kernel::Logger::warn("minicore: #DB unhandled (dr6=%llx, single-step=%x)", dr6,
+                              (dr6 & kDr6BsBit) != 0 ? 1 : 0);
+    }
+    // handled == true면 콜백이 필요한 상태 조작을 이미 끝냈다는 전제로
+    // 그냥 iretq(추가로 할 일 없음).
+}
+
+// [PN-F443FE73, SP-677210E6 §"#MC(Machine Check) 실제 처리"] MCA
+// (Machine Check Architecture, Intel SDM Vol.3 15.3) MSR을 읽어
+// 정정 가능(corrected)/정정 불가(uncorrected) 에러를 구분한다.
+// true를 반환하면(전부 정정 가능하거나 기록된 에러가 없음) 계속
+// 실행해도 안전하다는 뜻 - kIsrHandler가 그대로 반환한다. false면
+// (정정 불가 에러가 하나라도 있으면) 더 이상 안전하지 않으므로
+// 호출부가 일반 kPanic(frame) 경로로 떨어지게 둔다.
+constexpr kernel::uint32_t kMsrMcgCap = 0x179;
+constexpr kernel::uint32_t kMsrMcgStatus = 0x17A;
+constexpr kernel::uint32_t kMsrMc0StatusBase = 0x401;  // MCi_STATUS = base + 4*i
+
+bool kHandleMachineCheck() {
+    using kernel::arch::kReadMsr64;
+    using kernel::arch::kWriteMsr64;
+    const kernel::uint64_t mcgCap = kReadMsr64(kMsrMcgCap);
+    const auto bankCount = static_cast<kernel::uint32_t>(mcgCap & 0xFF);
+    bool uncorrectedFound = false;
+    for (kernel::uint32_t i = 0; i < bankCount; ++i) {
+        const kernel::uint32_t statusMsr = kMsrMc0StatusBase + 4 * i;
+        const kernel::uint64_t status = kReadMsr64(statusMsr);
+        constexpr kernel::uint64_t kValBit = 1ULL << 63;   // 이 뱅크에 유효한 기록이 있음
+        constexpr kernel::uint64_t kUcBit = 1ULL << 61;    // Uncorrected
+        constexpr kernel::uint64_t kPccBit = 1ULL << 57;   // Processor Context Corrupt
+        if (!(status & kValBit)) {
+            continue;  // 이 뱅크엔 기록된 에러 없음
+        }
+        const bool uncorrected = (status & kUcBit) != 0 || (status & kPccBit) != 0;
+        kernel::Logger::warn("minicore: #MC bank=%x status=%llx (%s)", i, status,
+                              uncorrected ? "UNCORRECTED" : "corrected");
+        if (uncorrected) {
+            uncorrectedFound = true;
+        }
+        // 로그로 남긴 뒤 뱅크를 비운다(SDM 15.3.1.2 권장 - 다음 에러
+        // 탐지를 위해 소프트웨어가 클리어해야 한다).
+        kWriteMsr64(statusMsr, 0);
+    }
+    // MCG_STATUS의 MCIP(bit2, Machine Check In Progress)를 반드시
+    // 클리어해야 한다 - 안 하면 이후 또 다른 #MC 진입 시 프로세서가
+    // 복구 불가능하다고 판단해 즉시 셧다운한다(SDM 15.3.1.1).
+    kWriteMsr64(kMsrMcgStatus, 0);
+    return !uncorrectedFound;
+}
+
+// [PN-F443FE73, SP-677210E6 "NMI 활용 - 워치독 및 디버그 강제 정지
+// IPI"] NMI(벡터 2)는 하드웨어가 직접 발생시키는 경우도 있지만, 이
+// 프로젝트에선 대부분 다른 코어가 kernel::Nmi::send()로 의도적으로
+// 보낸 것이다 - kernel::Nmi::reasonForThisCore()로 그 사유를
+// 구분한다. DebugHalt/WatchdogTrap 둘 다 이 코어를 안전하게 재개할
+// 수 있다는 보장이 없어(전자는 다른 코어의 진짜 패닉, 후자는 이
+// 코어 자신이 최근 스케줄러 틱조차 못 돈 상태) kPanic과 동일하게
+// 영구 정지한다 - 다만 새로 stop-the-world를 또 보내지는 않는다
+// (모든 대상 코어가 이미 같은 이유로 정지 중이므로 무의미한 IPI
+// 폭주를 피한다).
+void kHandleNmi(kernel::InterruptFrame* frame) {
+    switch (kernel::Nmi::reasonForThisCore()) {
+        case kernel::NmiReason::DebugHalt:
+            kernel::Serial::write("\nminicore: NMI - debug forced halt\n");
+            kPrintFrameDiagnostics(frame);
+            for (;;) {
+                asm volatile("cli; hlt");
+            }
+        case kernel::NmiReason::WatchdogTrap:
+            kernel::Serial::write("\nminicore: NMI - watchdog: this core unresponsive\n");
+            kPrintFrameDiagnostics(frame);
+            for (;;) {
+                asm volatile("cli; hlt");
+            }
+        case kernel::NmiReason::None:
+        default:
+            // 설명 안 되는 NMI(진짜 하드웨어 NMI 등 극히 드문 경우) -
+            // 로그만 남기고 계속(과잉 대응 방지, RM-23F4B687 §4 원칙 -
+            // 실제로 겪어본 뒤 재검토).
+            kernel::Serial::write("\nminicore: NMI - unexplained, continuing\n");
+            return;
+    }
+}
+
+void kPanic(kernel::InterruptFrame* frame) {
+    if (frame->vector == kNmiVector) {
+        // 다른 미등록 벡터와 같은 일반 패닉 경로로 떨어지지 않는다 -
+        // 위 kHandleNmi()가 자체적으로 처리(정지든 계속이든)를 끝낸다.
+        kHandleNmi(frame);
+        return;
+    }
+
+    // [SP-677210E6 "디버그 강제 정지(stop the world)"] 이 코어가 진짜로
+    // 패닉하는 중이다 - 다른 로그를 찍기 전에 최대한 빨리 나머지 온라인
+    // 코어부터 멈춰 공유 상태 오염/로그 뒤섞임을 막는다. Lapic::isReady()
+    // 확인은 극초반(ACPI/LAPIC 준비 전) 패닉을 위한 방어.
+    if (kernel::Lapic::isReady()) {
+        kernel::Nmi::stopAllOtherCores();
+    }
+
+    kernel::Serial::write("\nminicore: PANIC - unhandled exception: ");
+    if (frame->vector < 32) {
+        kernel::Serial::write(kExceptionNames[frame->vector]);
+    } else {
+        // 33-254 대역인데 registerHandler로 등록된 콜백이 없는 채
+        // 인터럽트가 들어온 경우 - kExceptionNames는 CPU 예외(0-31)
+        // 전용이라 그대로 인덱싱하면 엉녡한 이름이 찍힌다(예전에는
+        // 이 경로 자체가 없어서 문제가 없었다 - PL-2D149D8F에서 범용
+        // 벡터 디스패치를 추가하며 같이 고침).
+        kernel::Serial::write("Unrouted hardware interrupt");
+    }
+    kernel::Serial::write("\n");
+    kPrintFrameDiagnostics(frame);
 
     for (;;) {
         asm volatile("cli; hlt");
@@ -424,6 +571,16 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     if (frame->vector == 7) {  // #NM(Device Not Available) - lazy FPU/SSE 소유권 전환(SP-83A07867 §8, PN-F258698E)
         kernel::Scheduler::handleFpuTrap();
         return;
+    }
+    if (frame->vector == kDebugVector) {  // #DB - PN-F443FE73, 항상 계속 실행(panic 아님)
+        kHandleDebugException(frame);
+        return;
+    }
+    if (frame->vector == kMachineCheckVector) {  // #MC - PN-F443FE73
+        if (kHandleMachineCheck()) {
+            return;  // 전부 정정 가능(또는 기록된 에러 없음) - 계속 실행
+        }
+        // 정정 불가 에러 있음 - 아래 kPanic(frame)으로 떨어진다.
     }
     if (frame->vector == kSyscallVector) {
         // 소프트웨어 트랩(ring3의 `int 0x80`)이라 EOI 불필요 - 하드웨어

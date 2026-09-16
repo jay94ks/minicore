@@ -10,6 +10,7 @@
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "nmi.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "panic.h"
@@ -109,6 +110,22 @@ TaskQueue gCleanupQueues[kMaxCores];
 // Smp::startApCores()가 순차 기동)에서 한 번만 확정한다.
 uint32_t gBspCoreIndex = 0;
 bool gBspCoreIndexKnown = false;
+
+// [PN-F443FE73, SP-677210E6 "워치독(Watchdog)"] 코어마다 자기 틱
+// 핸들러가 100Hz로 증가시키는 하트비트 - 최근에 늘지 않았다는 것은
+// "이 코어가 최근 1초 가까이 자기 타이머 인터럽트조차 처리 못 했다"
+// 는 뜻이다(cli를 오래 쥐고 있거나 그 외 이유로 멈춘 경우 - 일반
+// Fixed IPI는 그런 코어에 전달되지 않지만 NMI는 마스크 불가라 여기서
+// 진단 가치가 있다). BSP(코어0) 자신의 틱 핸들러가 감시자 역할을
+// 겸한다(전용 워치독 코어를 따로 두지 않음 - 단순함 우선).
+AtomicU32 gHeartbeat[kMaxCores];
+uint32_t gHeartbeatLastSeen[kMaxCores] = {};
+bool gWatchdogTriggered[kMaxCores] = {};
+uint32_t gWatchdogTickCounter = 0;
+// 1초(100Hz 틱 * 100) - 설계자 확인이 필요한 지점이 아닌 구현 세부
+// (SP-677210E6 "1초 임계값/체크 주기는 구현 세부" 참고, 실측 후 조정
+// 가능).
+constexpr uint32_t kWatchdogCheckIntervalTicks = 100;
 
 // 부팅 시점(어느 프로세스도 아직 없어 CR3가 여전히 Paging::init()이
 // 만든 커널 전용 PML4인 시점)의 CR3 - `Scheduler::init()`에서 한 번만
@@ -766,6 +783,12 @@ void Scheduler::onTick(InterruptFrame*) {
 
     const uint32_t coreIndex = currentCoreIndex();
 
+    // [PN-F443FE73, SP-677210E6 "워치독"] 이 코어가 살아서 자기
+    // 틱조차 못 도는 상황을 겪지 않았다는 증거 - 선점 금지/idle
+    // 여부와 무관하게 항상 증가시켜야 워치독 판정이 정확하다(위
+    // Timer::onTick()과 같은 이유로 어떤 조기 반환보다도 먼저).
+    gHeartbeat[coreIndex].fetchAdd(1);
+
     // HPET가 없는 폴백 환경(DC-0CC88ABB/QU-3218B790 설계자 답변 (a),
     // 2026-09-14) - 물리 LAPIC 주기 타이머는 코어당 하나뿐이라 Timer가
     // 별도로 자신의 주기 인터럽트를 프로그래밍하면 이 스케줄러 틱
@@ -777,6 +800,35 @@ void Scheduler::onTick(InterruptFrame*) {
     // 보다도 먼저다.
     if (coreIndex == gBspCoreIndex && !Timer::usesHpet()) {
         Timer::onTick();
+    }
+
+    // [PN-F443FE73, SP-677210E6 "워치독"] BSP 자신의 틱 핸들러가
+    // 감시자 역할을 겸한다 - 100틱(약 1초)마다 자신을 제외한 온라인
+    // 코어 전부의 하트비트가 지난 체크 이후 늘었는지 확인한다. 이
+    // 블록도(선점 금지/idle 여부와 무관하게) Timer::onTick()과 같은
+    // 이유로 어떤 조기 반환보다 먼저 있어야 한다 - 그래야 이 코어
+    // 자신이 다른 이유로 일찍 반환해도 워치독 주기 자체는 어긋나지
+    // 않는다.
+    if (coreIndex == gBspCoreIndex) {
+        ++gWatchdogTickCounter;
+        if (gWatchdogTickCounter >= kWatchdogCheckIntervalTicks) {
+            gWatchdogTickCounter = 0;
+            const uint32_t cpuCount = Acpi::cpuCount();
+            for (uint32_t i = 0; i < cpuCount; ++i) {
+                if (i == gBspCoreIndex || gWatchdogTriggered[i]) {
+                    continue;
+                }
+                const uint32_t current = gHeartbeat[i].load();
+                if (current == gHeartbeatLastSeen[i]) {
+                    // 지난 체크 이후 이 코어가 자기 스케줄러 틱을 단
+                    // 한 번도 못 돌았다 - 멈춘 것으로 판단.
+                    gWatchdogTriggered[i] = true;
+                    Nmi::send(i, NmiReason::WatchdogTrap);
+                } else {
+                    gHeartbeatLastSeen[i] = current;
+                }
+            }
+        }
     }
 
     if (gPreemptDisableCount[coreIndex] > 0) {

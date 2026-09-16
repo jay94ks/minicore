@@ -1,6 +1,7 @@
 #include "lapic.h"
 
 #include "x86_64/io_port.h"
+#include "x86_64/msr.h"
 #include "libkenv/types.h"
 #include "paging.h"
 
@@ -26,6 +27,7 @@ constexpr kernel::uint32_t kCalibrationMs = 10;
 
 constexpr kernel::uint32_t kIcrDeliveryModeInit = 5U << 8;
 constexpr kernel::uint32_t kIcrDeliveryModeStartup = 6U << 8;
+constexpr kernel::uint32_t kIcrDeliveryModeNmi = 4U << 8;
 constexpr kernel::uint32_t kIcrLevelAssert = 1U << 14;
 constexpr kernel::uint32_t kIcrTriggerModeLevel = 1U << 15;
 constexpr kernel::uint32_t kIcrDeliveryStatusBit = 1U << 12;  // x2APIC엔 없음(전송이 항상 동기적으로 완료됨)
@@ -118,17 +120,12 @@ kernel::uint32_t kCalibrateLapicTicksPerWindow() {
     return 0xFFFFFFFFU - current;
 }
 
-kernel::uint64_t kReadMsr(kernel::uint64_t msr) {
-    kernel::uint32_t low, high;
-    asm volatile("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
-    return (static_cast<kernel::uint64_t>(high) << 32) | low;
-}
-
-void kWriteMsr(kernel::uint64_t msr, kernel::uint64_t value) {
-    const auto low = static_cast<kernel::uint32_t>(value & 0xFFFFFFFF);
-    const auto high = static_cast<kernel::uint32_t>(value >> 32);
-    asm volatile("wrmsr" : : "a"(low), "d"(high), "c"(msr));
-}
+// [정리, 2026-09-16, PN-F443FE73] 이전엔 이 파일 전용 kReadMsr/
+// kWriteMsr가 있었으나, syscall_fastpath.cpp에도 동일한 중복이 있어
+// x86_64/msr.h(kernel::arch::kReadMsr64/kWriteMsr64)로 통합했다 -
+// 동작 변경 없음.
+using kernel::arch::kReadMsr64;
+using kernel::arch::kWriteMsr64;
 
 }  // namespace
 
@@ -138,7 +135,7 @@ void Lapic::init() {
     kDisableLegacyPic();
 
     gUseX2Apic = !gX2ApicDisabledByOption && kCpuidHasX2Apic();
-    kernel::uint64_t apicBaseMsr = kReadMsr(kIa32ApicBaseMsr);
+    kernel::uint64_t apicBaseMsr = kReadMsr64(kIa32ApicBaseMsr);
 
     if (gUseX2Apic) {
         // x2APIC은 MSR 하나로 활성화+모드전환이 끝난다 - MMIO 매핑이
@@ -146,11 +143,11 @@ void Lapic::init() {
         // xAPIC 경로에 있던 Lapic<->PageFrameAllocator 닭-달걀 문제가
         // 이 경로에서는 애초에 발생하지 않는다).
         apicBaseMsr |= kApicBaseEnableBit | kApicBaseExtdBit;
-        kWriteMsr(kIa32ApicBaseMsr, apicBaseMsr);
+        kWriteMsr64(kIa32ApicBaseMsr, apicBaseMsr);
     } else {
         if (!(apicBaseMsr & kApicBaseEnableBit)) {
             apicBaseMsr |= kApicBaseEnableBit;
-            kWriteMsr(kIa32ApicBaseMsr, apicBaseMsr);
+            kWriteMsr64(kIa32ApicBaseMsr, apicBaseMsr);
         }
         const kernel::uint64_t lapicPhysAddr = apicBaseMsr & kApicBaseAddrMask;
         Paging::mapPage(kLapicVirtBase, lapicPhysAddr, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
@@ -185,7 +182,7 @@ kernel::uint32_t Lapic::id() {
         // x2APIC ID 레지스터는 MSR 하위 32비트에 ID가 그대로 들어있다
         // (xAPIC MMIO처럼 상위 8비트로 시프트되어 있지 않음 - 8비트
         // 제한도 없어져 32비트 전체를 ID로 쓸 수 있다).
-        return static_cast<kernel::uint32_t>(kReadMsr(kX2ApicIdMsr));
+        return static_cast<kernel::uint32_t>(kReadMsr64(kX2ApicIdMsr));
     }
     return readRegister(kLapicRegId) >> 24;
 }
@@ -234,7 +231,7 @@ void Lapic::setDestinationFormat(kernel::uint32_t format) {
 
 void Lapic::writeRegister(kernel::uint32_t offset, kernel::uint32_t value) {
     if (gUseX2Apic) {
-        kWriteMsr(kX2ApicMsrBase + (offset >> 4), value);
+        kWriteMsr64(kX2ApicMsrBase + (offset >> 4), value);
         return;
     }
     *reinterpret_cast<volatile kernel::uint32_t*>(gLapicVirtAddr + offset) = value;
@@ -242,7 +239,7 @@ void Lapic::writeRegister(kernel::uint32_t offset, kernel::uint32_t value) {
 
 kernel::uint32_t Lapic::readRegister(kernel::uint32_t offset) {
     if (gUseX2Apic) {
-        return static_cast<kernel::uint32_t>(kReadMsr(kX2ApicMsrBase + (offset >> 4)));
+        return static_cast<kernel::uint32_t>(kReadMsr64(kX2ApicMsrBase + (offset >> 4)));
     }
     return *reinterpret_cast<volatile kernel::uint32_t*>(gLapicVirtAddr + offset);
 }
@@ -254,7 +251,7 @@ void kSendIcr(kernel::uint32_t destApicId, kernel::uint32_t commandLow) {
         // x2APIC: 목적지(전체 32비트) + 명령을 한 번의 64비트 MSR
         // 쓰기로 보낸다 - 스펙상 항상 동기적으로 완료되어 xAPIC의
         // delivery status 폴링이 필요 없다.
-        kWriteMsr(kX2ApicIcrMsr, (static_cast<kernel::uint64_t>(destApicId) << 32) | commandLow);
+        kWriteMsr64(kX2ApicIcrMsr, (static_cast<kernel::uint64_t>(destApicId) << 32) | commandLow);
         return;
     }
     // xAPIC: 목적지를 먼저 ICR_HIGH에 쓰고(8비트, 물리모드), ICR_LOW를
@@ -287,6 +284,11 @@ void Lapic::sendFixedIpi(kernel::uint32_t destApicId, kernel::uint8_t vector) {
     // 보낸다(트리거 모드는 기본 edge, 0). INIT과 달리 de-assert가
     // 필요 없어 sendInitIpi(assert=false)에 대응하는 반쪽이 없다.
     const kernel::uint32_t command = kIcrLevelAssert | static_cast<kernel::uint32_t>(vector);
+    kSendIcr(destApicId, command);
+}
+
+void Lapic::sendNmiIpi(kernel::uint32_t destApicId) {
+    const kernel::uint32_t command = kIcrDeliveryModeNmi | kIcrLevelAssert;
     kSendIcr(destApicId, command);
 }
 

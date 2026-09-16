@@ -33,6 +33,17 @@ public:
     using InterruptHandler = void (*)(InterruptFrame*);
     static void registerHandler(uint32_t vector, InterruptHandler handler);
     static void unregisterHandler(uint32_t vector);
+
+    // [PN-F443FE73, SP-677210E6 "#DB(Debug) 상세 설계"] #DB(벡터1)는
+    // 고정 CPU 예외(0-31)라 위 registerHandler(33-254 전용)를 못 쓴다 -
+    // 커널 내부에서 #DB를 소비하고 싶은 쪽(디버거 서브시스템 등)이
+    // 등록하는 전용 슬롯. 콜백이 true를 반환하면 "내가 처리했다"는
+    // 뜻(필요한 상태 조작을 이미 끝냈다는 전제로 그냥 iretq) - false면
+    // (또는 콜백 미등록이면) 로그만 남기고 계속 실행한다(#MC/NMI와
+    // 달리 #DB 미처리는 오류가 아니다 - 브레이크포인트/싱글스텝은
+    // 의도적 이벤트).
+    using DebugCallback = bool (*)(InterruptFrame*, uint64_t dr6);
+    static void registerDebugCallback(DebugCallback callback);
 };
 
 }  // namespace kernel
