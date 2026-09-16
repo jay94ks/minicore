@@ -114,6 +114,25 @@ public:
     UserThread* mainThread = nullptr;  // v1: 프로세스당 스레드 하나(위 클래스 주석 참고)
     FaultInfo lastFault;
 
+    // [확정, 2026-09-16, QU-52253384 답변] 프로세스 트리(SP-6BEAE0C1
+    // §6) - 이 프로세스를 만든 부모(SpawnProcess 호출자). 최초
+    // 프로세스(init, kSpawnInitProcess)는 부모가 없는 루트라 nullptr
+    // 그대로 남는다 - kSpawnServiceProcesses가 만드는 고정 스폰
+    // KernelService들도 SpawnProcess syscall 경로를 타지 않으므로
+    // 마찬가지로 nullptr(이 트리는 SpawnProcess로 만들어진 프로세스의
+    // 부모-자식 관계만 표현한다 - 고정 스폰 서비스들의 생명주기는
+    // 이미 별도의 resurrect/essential 메커니즘(§6.3/§6.4)이 관리).
+    Process* parent = nullptr;
+
+    // 이 프로세스가 SpawnProcess로 만든 자식들의 목록 - `wait()`가
+    // 좀비(§6, 다음 증분에서 배선)를 찾을 때, 프로세스 종료 시 고아를
+    // init에게 입양시킬 때 쓴다. 청크 용량 8은 프로세스당 자식 수가
+    // 보통 많지 않을 거라는 가정의 순수 구현 세부(실측 후 조정 가능,
+    // RM-23F4B687 §4) - `pendingSignals`와 달리 하드웨어 버킷 크기에
+    // 맞출 이유가 없어 그냥 작게 시작한다.
+    static constexpr uint32_t kMaxChildrenChunkCapacity = 8;
+    ChunkedList<Process*, kMaxChildrenChunkCapacity> children;
+
     // 신원/시작 플래그(SP-EAB162FC) - 둘 다 스폰 시점에 호출부가 직접
     // 채우고, 그 이후 바꾸는 setter는 두지 않는다(§1/§6 원칙).
     ProcessRole role = ProcessRole::Normal;

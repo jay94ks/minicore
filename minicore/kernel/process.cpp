@@ -145,6 +145,14 @@ bool Process::init() {
     }
     mainThread = nullptr;
     lastFault = FaultInfo{};
+    // 프로세스 트리(§6) - Resurrect(§6.2)가 같은 정적 Process를
+    // 재사용할 수 있으므로, 이전 생애의 부모/자식 관계가 새 생애로
+    // 새어 들어가지 않도록 매번 명시적으로 리셋한다(아래 pendingSignals
+    // 와 동일한 이유). parent는 이 시점엔 아직 누가 부모인지 모르므로
+    // nullptr로만 리셋해 두고, 실제 부모-자식 연결은 스폰 경로(예:
+    // SpawnProcessHandler)가 init() 이후 직접 채운다.
+    parent = nullptr;
+    children.clear();
     addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
     // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로,
     // 이전 생애의 신호 상태가 새 생애로 새어 들어가지 않도록 매번
@@ -316,6 +324,31 @@ public:
             args->error = SpawnProcessError::ExecImageFailed;
             co_return;
         }
+
+        // 5단계 - [확정, 2026-09-16, QU-52253384 답변] 프로세스 트리
+        // 등록(§6) - 이 syscall을 부른 UserThread 자신의 프로세스가
+        // 부모다. enqueue() 이전에 반드시 끝내야 한다 - 실패(슬랩
+        // 고갈)하면 이미 시작된 스레드를 스케줄러에 올리기 전에 안전하게
+        // 되돌릴 수 있는 마지막 지점이기 때문이다(엔큐 이후엔 이미
+        // 실행 중일 수 있어 되돌릴 수 없다).
+        auto* caller = static_cast<UserThread*>(Scheduler::currentTask());
+        Process* parentProc = caller ? caller->process : nullptr;
+        if (parentProc) {
+            parentProc->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+            if (!parentProc->children.insert(proc)) {
+                UserThread::release(thread);
+                proc->destroy();
+                Process::release(proc);
+                args->error = SpawnProcessError::OutOfMemory;
+                co_return;
+            }
+            proc->parent = parentProc;
+        }
+        // parentProc==nullptr(이론상 도달 불가 - SpawnProcess는 항상
+        // 실제 UserThread 실행 흐름에서만 온다, Syscall 클래스 문서
+        // 주석과 동일한 전제)이면 방어적으로 트리에 편입하지 않고
+        // 계속 진행한다 - 새 프로세스 자체는 정상 동작하되 고아처럼
+        // 취급된다.
 
         // argv/envp는 아직 실제로 전달하지 않는다(SpawnProcessArgs
         // 문서 주석 참고 - §4 전체가 미착수).
