@@ -289,15 +289,12 @@ void kSyncFpu(Task* task, uint32_t coreIndex) {
 // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §3) - excludeCore를
 // 뺀 나머지 코어 중 gNormalQueues 근사 길이가 가장 긴 코어를 O(코어
 // 수) 선형 스캔으로 찾는다(Pull이 "훔쳐올 대상"을 고를 때 쓴다).
-// 대칭인 kFindLeastLoadedCore(§2.2, Push 전용)는 Push 분기 자체가
-// QU-9325BD40("최대 길이"의 정의) 답변 대기라 아직 호출부가 없어
-// 지금은 구현하지 않는다(빈 사용처 코드 방지) - 답변 도착 후 Push와
-// 함께 추가한다. 코어 수가 매우 많아지면 이 선형 스캔도 실측 후
-// 재검토(SP-0666DB3C §12가 이미 지적한 것과 같은 성격의 트레이드오프,
-// RM-23F4B687 §4 취지 - 별도 DC 불필요). 다른 모든 코어의
-// gNormalQueues가 비어 있으면(bestLen이 0에서 갱신되지 않으면)
-// excludeCore 자신을 그대로 반환해 "훔쳐올 곳이 없다"를 호출부가
-// `victimCore == coreIndex` 비교 하나로 판정할 수 있게 한다.
+// 코어 수가 매우 많아지면 이 선형 스캔도 실측 후 재검토(SP-0666DB3C
+// §12가 이미 지적한 것과 같은 성격의 트레이드오프, RM-23F4B687 §4
+// 취지 - 별도 DC 불필요). 다른 모든 코어의 gNormalQueues가 비어
+// 있으면(bestLen이 0에서 갱신되지 않으면) excludeCore 자신을 그대로
+// 반환해 "훔쳐올 곳이 없다"를 호출부가 `victimCore == coreIndex`
+// 비교 하나로 판정할 수 있게 한다.
 uint32_t kFindMostLoadedCore(uint32_t excludeCore) {
     uint32_t best = excludeCore;
     uint32_t bestLen = 0;
@@ -312,6 +309,55 @@ uint32_t kFindMostLoadedCore(uint32_t excludeCore) {
         }
     }
     return best;
+}
+
+// kFindMostLoadedCore와 정확히 대칭 - Push(§2)가 "밀어 넣을 대상"을
+// 찾는 데 쓴다. 다른 모든 코어가 이미 excludeCore만큼(또는 그 이상)
+// 차 있으면(bestLen이 초기값에서 갱신되지 않으면) excludeCore 자신을
+// 그대로 반환한다.
+uint32_t kFindLeastLoadedCore(uint32_t excludeCore) {
+    uint32_t best = excludeCore;
+    uint32_t bestLen = 0xFFFFFFFFU;
+    for (uint32_t i = 0; i < gCoreCount; ++i) {
+        if (i == excludeCore) {
+            continue;
+        }
+        const uint32_t len = gNormalQueues[i].approxLength();
+        if (len < bestLen) {
+            bestLen = len;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// SP-9525C4C0 §2 Push 임계치의 "최대 길이" - QU-9325BD40 설계자 답변
+// (2026-09-16, "설정가능한 최대/최소값 + 코어 수 대비 상대적 기준")을
+// 그대로 구현한 것. `TaskQueue`는 원래 무제한 연결리스트라 "최대
+// 길이"에 대응하는 고정값이 코드에 없었다 - 코어가 많을수록 시스템
+// 전체가 소화할 수 있는 총 대기열도 자연히 늘어난다는 전제로 "코어당
+// 기준값 x 코어 수"를 상대적 기준으로 삼되, 코어가 하나뿐이거나
+// 극단적으로 많을 때도 문턱값이 비합리적으로 작거나 커지지 않도록
+// 설정 가능한 min/max 상수로 clamp한다.
+constexpr uint32_t kNormalQueueLengthPerCore = 8;
+constexpr uint32_t kNormalQueueMinLength = 8;
+constexpr uint32_t kNormalQueueMaxLength = 64;
+constexpr uint32_t kPushThresholdPercent = 90;
+
+uint32_t kEffectiveNormalQueueMaxLength() {
+    uint32_t maxLength = kNormalQueueLengthPerCore * gCoreCount;
+    if (maxLength < kNormalQueueMinLength) {
+        maxLength = kNormalQueueMinLength;
+    }
+    if (maxLength > kNormalQueueMaxLength) {
+        maxLength = kNormalQueueMaxLength;
+    }
+    return maxLength;
+}
+
+// Push(§2)가 실제로 이관을 발동할 문턱값 - 위 유효 최대 길이의 90%.
+uint32_t kPushThresholdLength() {
+    return (kEffectiveNormalQueueMaxLength() * kPushThresholdPercent) / 100;
 }
 
 // SP-9525C4C0 §5.3/§6-항목3(2026-09-15 설계자 확정) - 코어 간 이관
@@ -336,6 +382,19 @@ bool kCanMigrateFpuSafely(const Task* task, uint32_t fromCore) {
 // 몸체가 필요 없다(tlb_shootdown.cpp의 "EOI는 kIsrHandler가 대신
 // 보낸다" 관례 그대로).
 void kLoadBalanceWakeIsr(InterruptFrame*) {}
+
+// SP-9525C4C0 §4 - Push가 다른 코어 큐에 Task를 밀어 넣은 뒤, 그
+// 코어가 지금 hlt로 잠들어 있을 가능성이 높으면 즉시 깨운다.
+// `gCurrentTask[coreIndex] == nullptr`은 정확한 판정이 아니지만
+// (idle 진입 직전/직후의 좁은 창) 안전한 근사다 - 이미 실행 중인
+// 코어에 괜히 IPI를 보내도 무해한 인터럽트 하나 처리하고 마는 것뿐
+// (기존 스케줄러 틱과 동일하게 EOI 후 즉시 반환)이라 false positive
+// 비용이 낮다.
+void kWakeCoreIfIdle(uint32_t coreIndex) {
+    if (gCurrentTask[coreIndex] == nullptr) {
+        Lapic::sendFixedIpi(Acpi::cpuApicId(coreIndex), static_cast<uint8_t>(kLoadBalanceWakeVector));
+    }
+}
 
 // kSyscallEndpointSelfTerminate(PN-71C3D483)의 실제 핸들러 - args는
 // kTaskOnFallingToEnd가 `Syscall::submitDetached()`로 넘긴, 종료 대상
@@ -583,7 +642,24 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
     if (task->taskClass == TaskClass::RealTime) {
         gRtQueues[coreIndex].pushBack(task);
     } else {
-        gNormalQueues[coreIndex].pushBack(task);
+        // Push(PN-04D6197A, SP-9525C4C0 §2) - affinity가 걸려 있으면
+        // (전체 코어가 아니면) 무조건 원래 coreIndex 그대로, 아니면
+        // 이 코어 큐가 임계치(kPushThresholdLength)를 넘었을 때만
+        // 가장 한가한 코어로 대신 넣는다. 대상 큐만 바뀔 뿐 "확인+
+        // 세팅+push"가 여전히 이 하나의 cli 임계구역 안에서 원자적으로
+        // 끝나므로 위 이중 스케줄링 방지 불변조건은 그대로 유지된다 -
+        // approxLength() 읽기/kFindLeastLoadedCore의 스캔은 락 없는
+        // 원자적 조회뿐이라 이 임계구역 안에서 수행해도 다른 코어의
+        // 진행을 막지 않는다.
+        uint32_t targetCore = coreIndex;
+        if (task->affinityMask == kTaskAffinityAllCores &&
+            gNormalQueues[coreIndex].approxLength() > kPushThresholdLength()) {
+            targetCore = kFindLeastLoadedCore(coreIndex);
+        }
+        gNormalQueues[targetCore].pushBack(task);
+        if (targetCore != coreIndex) {
+            kWakeCoreIfIdle(targetCore);
+        }
     }
     asm volatile("sti");
 }
