@@ -26,21 +26,50 @@ enum class ProcessRole : uint8_t {
 // 프로세스 생성 시점에 고정되는 시작 플래그(SP-EAB162FC §6) -
 // `ProcessRole`과 마찬가지로 생성 이후 바꾸는 API를 두지 않는다.
 struct ProcessStartFlags {
-    // true면 이 프로세스가 종료되는 즉시(별도 감시 Task/폴링 없이,
-    // SelfTerminateHandler::onExec 안에서 같은 흐름으로) `respawn`을
-    // 호출해 재생성한다. **[개정, 설계자 지시, 2026-09-15]** 무제한이
-    // 아니다 - 연속 `kMaxResurrectAttempts`회에 도달하면 재스폰 대신
-    // 커널 패닉으로 멈추다(§6.4, `Process::resurrectCount` 참고).
+    // true면 이 프로세스가 종료됐을 때 `respawn`으로 재생성을
+    // 시도한다(§6.3) - **[개정, 설계자 지시, 2026-09-15] 더 이상
+    // "즉시"가 아니다.** `essential`이 이 재생성을 어떻게 다룰지를
+    // 완전히 가른다: `essential==true`면 재생성 자체를 시도하지
+    // 않고 이 값과 무관하게 즉시 커널 패닉(§6.3), `essential==false`
+    // 면 §6.4의 지연/백오프 일정(`kResurrectIntervalMinutes()`)에
+    // 따라 `DelayedExecutionQueue::schedule()`로 재스폰을 예약한다
+    // (패닉 없이 무한정 재시도).
     bool resurrect = false;
+
+    // **[추가, 2026-09-15, 설계자 지시]** "커널 서비스가 죽으면
+    // 커널이 정상 동작하지 않는다"는 기존 암묵적 전제를 이 플래그로
+    // 명시했다(§6.3) - true(기본값, 기존 전제와 동일)면 이 프로세스가
+    // 죽었을 때 `resurrect` 값과 무관하게 즉시 커널 패닉. false면
+    // 패닉하지 않고 `resurrect==true`일 때만 §6.4의 지연/백오프
+    // 일정으로 재스폰을 시도한다(무제한 재시도 - 더 이상 시도 횟수
+    // 상한으로 패닉하지 않는다, 패닉 방아쇠가 "재시도 횟수 초과"에서
+    // 이 플래그 하나로 완전히 이전됨).
+    bool essential = true;
 
     // resurrect==true일 때만 유효 - 이 프로세스를 원래와 동일한
     // 방식으로 다시 스폰하는 함수(스폰 헤퍼 자신을 가리킨, §6.2 -
     // 모듈 버퍼/경로를 이미 들고 있는 고정 스폰 경로만 v1 대상).
-    // 인자는 새로 만들 Process에 그대로 이어 담을 `resurrectCount`
-    // (§6.4 - 호출부가 상한 확인 후 넘겨준다, 스폰 헤퍼는 이 값을
-    // 새 Process::resurrectCount에 대입하기만 하면 된다).
-    void (*respawn)(uint32_t resurrectCount) = nullptr;
+    // 인자는 새로 만들 Process에 그대로 이어 담을
+    // `consecutiveFailures`(§6.4 - 더 이상 "패닉까지 남은 횟수"가
+    // 아니라 "백오프 계산용 연속 실패 횟수" - 스폰 헤퍼는 이 값을
+    // 새 Process::consecutiveFailures에 대입하기만 하면 된다).
+    void (*respawn)(uint32_t consecutiveFailures) = nullptr;
 };
+
+// §6.4 비필수(essential==false) 서비스 재스폰 지연/백오프 일정 -
+// 실패 0~4회는 기본 간격(1분), 이후 5회마다 1분씩 늘어 최대 10분
+// 상한에서 멈춘다(그 이후로는 영원히 10분 간격으로 계속 시도 -
+// 패닉하지 않는다는 게 이 정책의 핵심).
+constexpr uint32_t kResurrectBaseIntervalMinutes = 1;
+constexpr uint32_t kResurrectBackoffStepMinutes = 1;
+constexpr uint32_t kResurrectBackoffEveryNFailures = 5;
+constexpr uint32_t kResurrectMaxIntervalMinutes = 10;
+
+inline uint32_t kResurrectIntervalMinutes(uint32_t consecutiveFailures) {
+    const uint32_t steps = consecutiveFailures / kResurrectBackoffEveryNFailures;
+    const uint32_t interval = kResurrectBaseIntervalMinutes + steps * kResurrectBackoffStepMinutes;
+    return interval < kResurrectMaxIntervalMinutes ? interval : kResurrectMaxIntervalMinutes;
+}
 
 // 유저 프로세스의 커널 쪽 표현(SP-8B6B8D25 §2-B/§5, 유저랜드 준비
 // 마일스톤 - 계획 PN-16CA347D) - 이름 자체는 제안일 뿐 확정이 아니다
@@ -61,11 +90,6 @@ struct ProcessStartFlags {
 // 실측 검증할 방법이 정해지기 전까지는 별도로 이어간다.
 class Process {
 public:
-    // §6.4 크래시 루프 방지 - 연속 5회 제한 후 커널 패닉(설계자 지시,
-    // 2026-09-15: "백오프/최대 재시도 횟수 같은 안전장치는 연속 5회
-    // 까지만 시도하고, 이후는 커널 패닉으로... 커널 서비스 자체가
-    // 커널의 역할을 보조하여 노예로서 대행하는 서비스들이기 때문").
-    static constexpr uint32_t kMaxResurrectAttempts = 5;
     // 유저 모드 페이지 폴트 정보(§2-B "그 폴트 정보는 그 프로세스
     // 자신의 자료구조(PCB)에 매달아 둔다") - 폴트가 나면 커널을 멈추지
     // 않고 이 프로세스만 멈춘 뒤 여기 기록해 둔다.
@@ -108,11 +132,16 @@ public:
 
     // §6.4 - `role`/`startFlags`와 달리 살아있는 동안 불변인 값이
     // **아니다**. 재스폰마다 이어지는 런타임 카운터라 별도 필드로
-    // 둔다 - 재스폰 트리거 지점(SelfTerminateHandler::onExec)이 옷
+    // 둔다 - 재스폰 트리거 지점(SelfTerminateHandler::onExec)이 옛
     // Process의 이 값을 읽어 +1 한 값을 새 Process에 명시적으로
-    // 이어줘야만 "연속 횟수"가 유지된다(그러지 않으면 새 Process가
-    // 항상 0으로 시작해 상한 자체가 무의미해진다).
-    uint32_t resurrectCount = 0;
+    // 이어줘야만 "연속 실패 횟수"가 유지된다(그러지 않으면 새
+    // Process가 항상 0으로 시작해 백오프 간격이 매번 기본값으로
+    // 되돌아간다). **[개명, 2026-09-16, SP-EAB162FC §6.4 개정]**
+    // 옛 이름 `resurrectCount`에서 개명 - 더 이상 "패닉까지 남은
+    // 횟수"가 아니라 순수하게 `kResurrectIntervalMinutes()` 백오프
+    // 계산에만 쓰인다(패닉 방아쇠는 `ProcessStartFlags::essential`
+    // 하나로 완전히 이전됨).
+    uint32_t consecutiveFailures = 0;
 
     // 이 프로세스가 소유한 VMA(코드/데이터/스택 - execImage()가 채움)의
     // 장부(PN-71C3D483 항목 3, SP-2AAD7C8D §2/§4) - destroy()가 이걸로

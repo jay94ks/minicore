@@ -1,6 +1,7 @@
 #include "scheduler.h"
 
 #include "acpi.h"
+#include "delayed_exec.h"
 #include "gdt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
@@ -11,6 +12,7 @@
 #include "paging.h"
 #include "panic.h"
 #include "process.h"
+#include "serial.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
 #include "timer.h"
@@ -252,6 +254,23 @@ void kSyncFpu(Task* task, uint32_t coreIndex) {
 // 클래스 문서) 이 스레드가 끝나는 순간이 곧 그 Process 전체가 끝나는
 // 순간과 같다. `process` 필드는 execImage()가 항상 채워 두지만
 // (process.cpp의 `thread->process = this;`) 방어적으로 null 확인한다.
+// §6.4 비필수 서비스 재스폰 예약(DelayedExecutionQueue::schedule)의
+// 콜백 인자 - `respawn`(프로세스별 고정 스폰 헬퍼)과
+// `consecutiveFailures`(그 헬퍼가 새 Process에 그대로 이어 담을 값)를
+// 한 번에 실어 날라야 하는데 DelayedCallback은 void* 인자 하나뿐이라
+// slab에서 이 작은 구조체 하나를 빌려 온다(AsyncTask 자신의 콜백 인자
+// 전달 관례와 동일).
+struct ResurrectSpawnArgs {
+    void (*respawn)(uint32_t consecutiveFailures);
+    uint32_t consecutiveFailures;
+};
+
+void kResurrectSpawnTrampoline(void* arg) {
+    auto* args = static_cast<ResurrectSpawnArgs*>(arg);
+    args->respawn(args->consecutiveFailures);
+    GenericSlabAllocator::free(args, sizeof(ResurrectSpawnArgs));
+}
+
 class SelfTerminateHandler : public AsyncTaskHandler {
 public:
     void onExec(AsyncTask*, void* args) override {
@@ -295,28 +314,50 @@ public:
         userThread->pendingSyscalls.clear();
 
         if (userThread->process) {
-            // Resurrect(SP-EAB162FC §6) - destroy() 이후에도 Process
-            // 객체 자체(캐스팅 근거: 정적/장기수명 인스턴스 - destroy()는
-            // 주소공간만 반납할 뿐 이 구조체를 지우지 않는다)는 살아있어
-            // startFlags/resurrectCount를 안전하게 읽을 수 있다. 재스폰은
+            // Resurrect(SP-EAB162FC §6, 2026-09-16 §6.3/§6.4 개정 반영) -
+            // destroy() 이후에도 Process 객체 자체(캐스팅 근거: 정적/
+            // 장기수명 인스턴스 - destroy()는 주소공간만 반납할 뿐 이
+            // 구조체를 지우지 않는다)는 살아있어 startFlags/
+            // consecutiveFailures를 안전하게 읽을 수 있다. 재스폰은
             // 기존 주소공간이 완전히 반납된 뒤에 한다(자원 회수 -> 재생성
             // 순서).
             Process* process = userThread->process;
             const ProcessStartFlags startFlags = process->startFlags;
-            const uint32_t newResurrectCount = process->resurrectCount + 1;
+            const uint32_t newConsecutiveFailures = process->consecutiveFailures + 1;
             process->destroy();
-            if (startFlags.resurrect && startFlags.respawn) {
-                // §6.4 크래시 루프 방지 - 연속 kMaxResurrectAttempts회에
-                // 도달하면 재스폰을 아예 시도하지 않고 커널 전체를
-                // 멈춘다("커널 서비스는 커널을 대행하는 존재라 반복
-                // 재크래시는 개별 프로세스 문제가 아니라 커널 자체가
-                // 정상 동작할 수 없는 상태" - 설계자 지시, silent
-                // degraded mode 금지).
-                if (newResurrectCount >= Process::kMaxResurrectAttempts) {
-                    kPanic("KernelService resurrect limit exceeded");
+            if (startFlags.essential) {
+                // §6.3 1번 - resurrect 값과 무관하게 항상 즉시 패닉("커널
+                // 서비스가 죽으면 커널이 정상 동작하지 않는다"는 전제가
+                // 그대로 적용되는 쪽). 이 프로세스의 이름은 spawnName이
+                // memcpy(exactLength)로만 채워지고 나머지는 정적 초기화로
+                // 이미 0(널)이라 항상 안전하게 널종단 문자열로 읽힌다.
+                Serial::write("minicore: PANIC - essential service died: ");
+                Serial::write(process->spawnName);
+                Serial::write("\n");
+                kPanic("Essential service died");
+            } else if (startFlags.resurrect && startFlags.respawn) {
+                // §6.3 2번 - 더 이상 "즉시" 재스폰하지 않는다. §6.4의
+                // 지연/백오프 일정(분 단위)을 DelayedExecutionQueue(§2/§3,
+                // PN-C46DF296)의 틱 단위로 환산해 예약한다 - 100Hz는
+                // timer.h가 문서화한 Timer::tickCount()의 고정 틱 레이트
+                // (HPET/PIT 보정 공통, 새 시간원 도입 없이 그대로 재사용).
+                constexpr uint32_t kTimerTicksPerSecond = 100;
+                const uint32_t intervalMinutes = kResurrectIntervalMinutes(newConsecutiveFailures);
+                const uint64_t delayTicks =
+                    static_cast<uint64_t>(intervalMinutes) * 60 * kTimerTicksPerSecond;
+                auto* args = static_cast<ResurrectSpawnArgs*>(GenericSlabAllocator::alloc(sizeof(ResurrectSpawnArgs)));
+                if (args) {
+                    args->respawn = startFlags.respawn;
+                    args->consecutiveFailures = newConsecutiveFailures;
+                    DelayedExecutionQueue::schedule(delayTicks, kResurrectSpawnTrampoline, args);
                 }
-                startFlags.respawn(newResurrectCount);
+                // args 할당 실패(슬랩 고갈)면 이번 재스폰 시도 자체를
+                // 건너뛴다 - essential=false라 패닉하지 않는다는 정책과
+                // 일관되게, 자원 고갈도 "조용히 재시도를 포기"로 처리한다
+                // (다음에 이 서비스가 다른 경로로 다시 죽을 때 또 시도됨).
             }
+            // 그 외(resurrect==false): 기존과 동일하게 그냥 종료(재스폰
+            // 없음, 패닉 없음) - §6.3 3번.
         }
     }
     void onFailure(AsyncTask*) override {}
