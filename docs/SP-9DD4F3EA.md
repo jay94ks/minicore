@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-15T17:57:07.791Z
+  updatedAt: 2026-09-16T15:00:00.989Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -332,12 +332,21 @@ blacklist)을 devmgr 프로세스 하나의 실제 시작 시퀀스로 엮는다
    프로세스로 스폰(§3.2, `ProcessRole::KernelService` 상속 -
    SP-EAB162FC §2.2 개정).
 6. **자식 쪽**: `RequestIoPermission`(§3.3)으로 BAR/IRQ 확보 →
-   자체 데이터 Channel `openChannel()` → **[갱신, 2026-09-16,
-   설계자 지시로 재설계]** `pubreg` 서비스(SP-B071E628, 5번째 커널
-   서비스)에 연결해 MCP 스타일 tool 선언(예: `ahci.blockRead`)을
-   `register` 메시지로 등록 → 이제 소비자가 `pubreg`에서 발견 가능
-   (예전 안의 커널 syscall `PublishInterface`는 폐기됨,
-   RM-48E1E610 참고).
+   자체 데이터 Channel `openChannel()`. **[정정, 2026-09-16,
+   SP-B071E628 §5-A/§5-B 재확인]** 한때(2026-09-15~16 사이) 이
+   지점에서 `pubreg`에 `register`하는 것으로 갱신했었으나, 그 직후
+   SP-B071E628 §5-A(설계자 지시 "커널 서비스들이 pubreg에 뭔가를
+   등록하지 않아")가 이 전제 자체를 뒤집었다 - **커널 서비스(devmgr
+   과 그 드라이버 자식 포함)는 pubreg에 등록하지 않는다**, fs가
+   AHCI 등 블록 장치를 찾는 경로는 pubreg를 거치지 않고 기존 PnP
+   "장치 열거 → IO 권한 요청" 패턴(바로 이 §3.1/§6, `EnumerateDevices`/
+   `RequestIoPermission`)을 그대로 쓴다(SP-B071E628 §5-B가 명시).
+   이 문서의 이 절이 그 반전을 반영하지 못한 채 남아 있었던 자리다 -
+   `PublishInterface`(옛 커널 syscall)는 여전히 폐기 상태 그대로지만,
+   "pubreg register로 대체"도 마찬가지로 폐기됐다(대체할 것 자체가
+   없어짐). devmgr/드라이버 자식은 여기서 pubreg를 아예 모른다 -
+   PN-BD9AAE2F(devmgr 구현 계획)가 이미 이 최종 상태로 반영돼
+   있었다(이 문서만 갱신이 빠져 있었음).
 7. **핫플러그 대기**: PCIe Slot Capability/USB 포트 상태 변경
    인터럽트(§3.4)를 PN-B3DD3D19 라우팅으로 수신 대기 - 도착하면
    2번부터 그 슬롯/포트만 재실행.
