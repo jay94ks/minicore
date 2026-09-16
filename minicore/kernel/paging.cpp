@@ -390,6 +390,48 @@ uint64_t Paging::translatePage(uint64_t virtualAddr, uint64_t pml4Phys) {
     return pt[kPtIndex(virtualAddr)] & kAddrMask;
 }
 
+bool Paging::isUserRangeValid(uint64_t virtualAddr, uint64_t length, uint64_t pml4Phys) {
+    if (length == 0) {
+        return true;
+    }
+    const uint64_t end = virtualAddr + length;
+    if (end < virtualAddr) {
+        return false;  // 오버플로우 - 악의적/잘못된 (addr,length) 조합
+    }
+    if (pml4Phys == 0) {
+        pml4Phys = kCurrentPml4Phys();
+    }
+
+    const uint64_t alignedStart = virtualAddr & ~(kPageSize4K - 1);
+    const uint64_t alignedEnd = (end + kPageSize4K - 1) & ~(kPageSize4K - 1);
+    for (uint64_t addr = alignedStart; addr < alignedEnd; addr += kPageSize4K) {
+        uint64_t* pml4 = kAsTable(pml4Phys);
+        const uint64_t pml4Entry = pml4[kPml4Index(addr)];
+        if (!(pml4Entry & PAGE_PRESENT) || !(pml4Entry & PAGE_USER)) {
+            return false;
+        }
+        uint64_t* pdpt = kAsTable(pml4Entry & kAddrMask);
+        const uint64_t pdptEntry = pdpt[kPdptIndex(addr)];
+        if (!(pdptEntry & PAGE_PRESENT) || !(pdptEntry & PAGE_USER)) {
+            return false;
+        }
+        uint64_t* pd = kAsTable(pdptEntry & kAddrMask);
+        const uint64_t pdEntry = pd[kPdIndex(addr)];
+        if (!(pdEntry & PAGE_PRESENT) || !(pdEntry & PAGE_USER)) {
+            return false;
+        }
+        if (pdEntry & kPageSizeBit) {
+            continue;  // 2MiB 대형 페이지 - PD 엔트리 자체가 이미 leaf
+        }
+        uint64_t* pt = kAsTable(pdEntry & kAddrMask);
+        const uint64_t ptEntry = pt[kPtIndex(addr)];
+        if (!(ptEntry & PAGE_PRESENT) || !(ptEntry & PAGE_USER)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 uint64_t Paging::currentPml4Phys() {
     return kCurrentPml4Phys();
 }

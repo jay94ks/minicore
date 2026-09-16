@@ -112,6 +112,26 @@ public:
     // 이 함수로 읽어 둬야 한다.
     static uint64_t translatePage(uint64_t virtualAddr, uint64_t pml4Phys = 0);
 
+    // [SP-6BEAE0C1 §3] 유저 랜드에서 넘어온 포인터/길이를 커널이
+    // 역참조하기 전에 검증한다 - "이 프로젝트 전체에 통일된 규약"이
+    // 아직 없어(기존 Channel Read/Write 핸들러 전수 확인 결과 지금까지
+    // 이 검증 자체가 어디에도 없었다) 새로 추가하는 첫 표준 원시
+    // 연산이다. [virtualAddr, virtualAddr+length) 전체가 PML4/PDPT/PD/
+    // PT **모든 레벨**에서 PAGE_PRESENT + PAGE_USER를 만족해야 true -
+    // x86_64는 어느 한 레벨이라도 U/S 비트가 꺼져 있으면 그 페이지
+    // 전체를 supervisor 전용으로 취급하므로(CPU 자체의 권한 판정
+    // 방식과 동일), 리프(PT) 엔트리만 보면 안 되고 매 레벨을 실제로
+    // 확인해야 한다 - mapPage()가 유저 매핑 시 모든 중간 테이블에도
+    // PAGE_USER를 전파해 두므로(kGetOrCreateNextLevel 호출부 참고)
+    // 정상적으로 만들어진 유저 페이지는 이 함수를 항상 통과한다.
+    // length==0은 검증할 것이 없어 true(빈 범위), virtualAddr+length가
+    // 오버플로우하면(악의적 (addr,length) 조합) 즉시 false. pml4Phys
+    // 생략 시 현재 CR3(호출자 자신의 주소공간) 기준 - syscall 핸들러가
+    // 항상 그 syscall을 제출한 UserThread 자신의 컨텍스트에서 실행되는
+    // 이 코드베이스의 관례상 이 기본값이 곧 "그 유저 포인터를 실제로
+    // 소유한 프로세스"를 뜻한다.
+    static bool isUserRangeValid(uint64_t virtualAddr, uint64_t length, uint64_t pml4Phys = 0);
+
     // #PF(vector 14) 핸들러가 호출한다(idt.cpp). faultAddr는 CR2,
     // errorCode는 하드웨어가 스택에 남긴 값 그대로. 이 폴트를 정말
     // 처리했으면(=매핑을 새로 붙여서 재실행하면 될 상황) true를
