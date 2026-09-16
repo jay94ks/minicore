@@ -41,10 +41,18 @@ public:
     // 별도로 잡아야 함 - 지금은 그런 호출부 없음).
     bool isEmpty() const;
 
+    // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §2.1)의 근사
+    // 큐 길이 - 정확한 값일 필요 없다(대략 얼마나 밀렸는지만 알면
+    // 충분). pushBack/pushFront/popFront마다 락 임계구역 밖에서
+    // 원자적으로 갱신되므로, 다른 코어가 동시에 값을 바꾸는 중에
+    // 읽어도(±1~2 오차) 로드밸런싱 판단에 지장이 없다.
+    uint32_t approxLength() const;
+
 private:
     Spinlock _lock;
     Task* _head = nullptr;
     Task* _tail = nullptr;
+    AtomicU32 _approxLength;
 };
 
 // 코어별 TaskQueue를 관리한다(DS-D4E5C451 "코어별 개별 큐"). Acpi::init()

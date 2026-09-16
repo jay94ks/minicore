@@ -4,6 +4,7 @@
 #include "async_task.h"
 #include "delayed_exec.h"
 #include "gdt.h"
+#include "idt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
 #include "libkenv/spinlock.h"
@@ -21,34 +22,48 @@
 namespace kernel {
 
 void TaskQueue::pushBack(Task* task) {
-    SpinlockGuard guard(_lock);
-    task->next.store(nullptr);
-    if (_tail) {
-        _tail->next.store(task);
-    } else {
-        _head = task;
+    {
+        SpinlockGuard guard(_lock);
+        task->next.store(nullptr);
+        if (_tail) {
+            _tail->next.store(task);
+        } else {
+            _head = task;
+        }
+        _tail = task;
     }
-    _tail = task;
+    // 임계구역 밖에서 원자적으로 갱신(SP-9525C4C0 §2.1) - 근사치라
+    // 정밀 동기화 불필요.
+    _approxLength.fetchAdd(1);
 }
 
 void TaskQueue::pushFront(Task* task) {
-    SpinlockGuard guard(_lock);
-    task->next.store(_head);
-    _head = task;
-    if (!_tail) {
-        _tail = task;
+    {
+        SpinlockGuard guard(_lock);
+        task->next.store(_head);
+        _head = task;
+        if (!_tail) {
+            _tail = task;
+        }
     }
+    _approxLength.fetchAdd(1);
 }
 
 Task* TaskQueue::popFront() {
-    SpinlockGuard guard(_lock);
-    Task* task = _head;
-    if (task) {
-        _head = task->next.load();
-        if (!_head) {
-            _tail = nullptr;
+    Task* task;
+    {
+        SpinlockGuard guard(_lock);
+        task = _head;
+        if (task) {
+            _head = task->next.load();
+            if (!_head) {
+                _tail = nullptr;
+            }
+            task->next.store(nullptr);
         }
-        task->next.store(nullptr);
+    }
+    if (task) {
+        _approxLength.fetchSub(1);
     }
     return task;
 }
@@ -57,9 +72,21 @@ bool TaskQueue::isEmpty() const {
     return _head == nullptr;
 }
 
+uint32_t TaskQueue::approxLength() const {
+    return _approxLength.load();
+}
+
 namespace {
 
 constexpr uint32_t kMaxCores = kAcpiMaxCpus;
+
+// Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §4) - idle(hlt) 상태일
+// 수 있는 코어를 즉시 깨우는 전용 IPI 벡터. RM-28225668에 이미 배정된
+// 값(0xE1) 그대로 - tlb_shootdown.cpp/async_task.cpp와 동일한 관례로
+// ISR은 EOI조차 직접 보내지 않는다(idt.cpp의 kIsrHandler가 등록된
+// 동적 핸들러 호출 후 대신 보낸다) - 벡터가 뭘 나르는지는 중요하지
+// 않다, hlt가 어떤 인터럽트로도 깨어나기만 하면 된다.
+constexpr uint32_t kLoadBalanceWakeVector = 0xE1;
 
 // 3단 우선순위(6단계 RT 클래스 + 8-1단계 즉시 스케줄링) - pickNext가
 // 이 순서(immediate -> rt -> normal)로 훑는다. 셋을 하나로 합치지
@@ -259,6 +286,57 @@ void kSyncFpu(Task* task, uint32_t coreIndex) {
     asm volatile("mov %0, %%cr0" : : "r"(cr0 | (1ULL << 3)) : "memory");
 }
 
+// Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §3) - excludeCore를
+// 뺀 나머지 코어 중 gNormalQueues 근사 길이가 가장 긴 코어를 O(코어
+// 수) 선형 스캔으로 찾는다(Pull이 "훔쳐올 대상"을 고를 때 쓴다).
+// 대칭인 kFindLeastLoadedCore(§2.2, Push 전용)는 Push 분기 자체가
+// QU-9325BD40("최대 길이"의 정의) 답변 대기라 아직 호출부가 없어
+// 지금은 구현하지 않는다(빈 사용처 코드 방지) - 답변 도착 후 Push와
+// 함께 추가한다. 코어 수가 매우 많아지면 이 선형 스캔도 실측 후
+// 재검토(SP-0666DB3C §12가 이미 지적한 것과 같은 성격의 트레이드오프,
+// RM-23F4B687 §4 취지 - 별도 DC 불필요). 다른 모든 코어의
+// gNormalQueues가 비어 있으면(bestLen이 0에서 갱신되지 않으면)
+// excludeCore 자신을 그대로 반환해 "훔쳐올 곳이 없다"를 호출부가
+// `victimCore == coreIndex` 비교 하나로 판정할 수 있게 한다.
+uint32_t kFindMostLoadedCore(uint32_t excludeCore) {
+    uint32_t best = excludeCore;
+    uint32_t bestLen = 0;
+    for (uint32_t i = 0; i < gCoreCount; ++i) {
+        if (i == excludeCore) {
+            continue;
+        }
+        const uint32_t len = gNormalQueues[i].approxLength();
+        if (len > bestLen) {
+            bestLen = len;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// SP-9525C4C0 §5.3/§6-항목3(2026-09-15 설계자 확정) - 코어 간 이관
+// 앞에서 FPU 소유권을 안전하게 넘길 수 있는지 판정한다. **여기서
+// 실제로 FXSAVE를 하지 않는다** - §5.3이 밝힌 대로 FXSAVE는 항상
+// "이 명령을 실행하는 코어"의 하드웨어 레지스터만 읽으므로, 로드밸런싱을
+// 수행 중인 코어(Push를 받는 쪽이든 Pull로 훔쳐오는 쪽이든)가 원격
+// fromCore를 대상으로 직접 FXSAVE하면 엉뚱한(자기 자신의) 레지스터를
+// 저장하는 조용한 데이터 손상 버그가 된다 - IPI로 fromCore 자신에게
+// 위임하는 방법도 있지만 매 이관마다 왕복 비용이 커 v1은 채택하지
+// 않는다(§6-항목3 확정). 대신 **이미 안전이 보장된 경우에만 이관을
+// 허용**한다: 이 Task가 FPU를 한 번도 안 썼거나(`!fpuInitialized`),
+// 이미 다른 소유자에게 넘어가 `fpuState`가 최신인 것이 보장된 경우
+// (`gFpuOwner[fromCore] != task`) - 그렇지 않으면(정말 이 Task가
+// fromCore의 살아있는 FPU 소유자) false를 반환해 호출부가 이번 이관을
+// 보류(스킵)하게 한다.
+bool kCanMigrateFpuSafely(const Task* task, uint32_t fromCore) {
+    return !task->fpuInitialized || gFpuOwner[fromCore] != task;
+}
+
+// kLoadBalanceWakeVector의 ISR - hlt에서 깨우는 것 자체가 목적이라
+// 몸체가 필요 없다(tlb_shootdown.cpp의 "EOI는 kIsrHandler가 대신
+// 보낸다" 관례 그대로).
+void kLoadBalanceWakeIsr(InterruptFrame*) {}
+
 // kSyscallEndpointSelfTerminate(PN-71C3D483)의 실제 핸들러 - args는
 // kTaskOnFallingToEnd가 `Syscall::submitDetached()`로 넘긴, 종료 대상
 // UserThread 자신(Task*)이다. **이 onExec이 실행되고 있다는 사실 자체가
@@ -409,6 +487,11 @@ void Scheduler::init() {
     // 예약해 둔 고정 슬롯(PN-71C3D483 완료 전까지는 핸들러 없이
     // 비어 있었다).
     SyscallRegistry::registerHandler(kSyscallEndpointSelfTerminate, &gSelfTerminateHandler);
+    // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §4) - idle 코어
+    // 기상 IPI. Push 분기(§2)는 아직 미구현(QU-9325BD40 답변 대기)
+    // 이라 지금은 이 벡터를 보내는 호출부가 없지만, 벡터 등록 자체는
+    // Pull과 무관하게 먼저 완료해 둔다.
+    Idt::registerHandler(kLoadBalanceWakeVector, kLoadBalanceWakeIsr);
 }
 
 namespace {
@@ -646,6 +729,33 @@ void Scheduler::runLoop() {
             if (AsyncReactor::drainOnce(coreIndex)) {
                 continue;
             }
+            // Pull(PN-04D6197A, SP-9525C4C0 §3) - 로컬에 할 일이 정말
+            // 없을 때만(위 drainOnce가 false) 가장 바쁜 다른 코어의
+            // gNormalQueues에서 하나 훔쳐온다. "~100ms 이상 idle 지속"
+            // (PL-2D3184BC 원안)은 설계 단계에서 불필요한 복잡도로
+            // 판단해 v1은 채택하지 않았다(매 idle 진입마다 즉시
+            // 시도 - O(코어 수) 스캔 한 번뿐이라 비용이 낮다).
+            const uint32_t victimCore = kFindMostLoadedCore(coreIndex);
+            if (victimCore != coreIndex) {
+                Task* stolen = gNormalQueues[victimCore].popFront();
+                if (stolen) {
+                    if (kCanMigrateFpuSafely(stolen, victimCore)) {
+                        // pickNext()와 동일한 관례 - 큐에서 실제로
+                        // 빠져나오는 순간 inRunQueue를 내린다.
+                        stolen->inRunQueue = false;
+                        next = stolen;
+                    } else {
+                        // FPU 소유권이 아직 살아있다(§5.3/§6-항목3) -
+                        // 이번엔 보류하고 원래 큐 끝으로 돌려놓는다.
+                        // popFront와 이 pushBack 사이 inRunQueue를
+                        // 건드리지 않으므로(계속 true) 그 사이 다른
+                        // 코어가 같은 Task를 이중 스케줄링할 수 없다.
+                        gNormalQueues[victimCore].pushBack(stolen);
+                    }
+                }
+            }
+        }
+        if (!next) {
             asm volatile("sti; hlt");
             continue;
         }
