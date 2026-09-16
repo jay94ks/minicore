@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T21:18:27.380Z
+  updatedAt: 2026-09-16T21:50:19.294Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -228,10 +228,18 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - [ ] `SP-B1E258D8`(RCU) - `rejected`(도입 시점 보류)라 코드 갭
   대상 아님, 재개 조건(커널단 v1 완료)이 실제로 도래했는지만 주기적
   확인.
-- [ ] (신규, 2026-09-17) `PN-C4611402`(§1-B, 완전 해소) 취소 로직이
-  실제 취소 레이스로는 아직 검증 안 됨(코드 검토로만 확인) -
-  `PN-71E50394`(Signal 기반 강제 종료)가 실전 배선되면 그때 실제
-  멀티스레드 강제종료 시나리오로 재검증.
+- [ ] (2026-09-17 재정정) `PN-C4611402`(§1-B, 완전 해소) 취소 로직이
+  실제 취소 레이스로는 아직 검증 안 됨(코드 검토로만 확인). **직전
+  갱신("PN-71E50394 완료로 착수 가능")은 틀렸다 - `PN-B5C2845A`로
+  실측 확인**: `Kill`은 `Task::blockedOn`(Waitable 기반 블로킹)이나
+  실행 중인 대상에만 실제로 도달하고, `acceptFromChannel`/
+  `connectChannel` 등이 쓰는 `Syscall::wait()`의 순수 파킹
+  (`Scheduler::parkCurrent()`, `blockedOn` 전혀 안 씀)에는 강제
+  웨이크업 경로 자체가 없다 - 그 파킹을 깨우는 유일한 길은 그
+  UserThread 자신이 제출한 AsyncTask가 정상 완료되는 것뿐이라,
+  `Kill`로 `pendingSignals`에 기록해도 대상이 절대 깨어나지 않는다.
+  **여전히 재현 불가능** - `PN-B5C2845A`(신규 등록, 해법 후보 및
+  위험도 분석 포함)가 해소돼야 이 항목도 재검증 가능해진다.
 - [ ] (신규, 2026-09-17) `PN-2008220B`(coroHandle.resume() CR3
   미동기화, RM-23F4B687에 원칙으로도 기록) 해소되면 그 수정이
   `SP-F682B889` §7.3(코루틴 재개 경로) 서술과 여전히 일치하는지
