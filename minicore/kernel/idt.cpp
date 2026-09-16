@@ -472,6 +472,40 @@ constexpr kernel::uint64_t kSyscallVerbWait = 1;
 // 딜따 호출부만 존재).
 extern "C" void kTaskOnFallingToEnd();
 
+// [신규, 2026-09-17, PN-71E50394 항목3 나머지 - SP-0666DB3C §4.4
+// 체크포인트] 실행 중(비대기)인 UserThread도 다음 syscall 진입
+// 시점에 Kill/Terminate가 걸려 있으면 여기서 걸러낸다 - §9.5의
+// Waitable::cancel() 강제 웨이크업 경로(대기 중)와 쌍을 이루는 "실행
+// 중" 경로. 두 신호 모두 disposition을 실제로 소비하는 syscall API
+// (§4.5, 항목4)가 아직 없어 dispositions[]는 항상 기본값(Default=
+// 종료) 그대로다 - 그래서 v1은 Ignore/Handler 분기 없이 발견 즉시
+// 무조건 종료로 처리한다(이 둘의 기본 동작과 정확히 일치, POSIX상
+// Kill은 애초에 마스킹 불가). `kTerminateFaultingUserTask`/self-
+// terminate와 동일한 패턴(kTaskOnFallingToEnd + sti+hlt 루프)을
+// 재사용 - 호출부(int 0x80/`syscall` 양쪽)로 절대 반환하지 않는다.
+bool kCheckSignalCheckpoint() {
+    auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+    if (!thread) {
+        return false;
+    }
+    kernel::SharedPtr<kernel::Process> process = thread->process.lock();
+    if (!process) {
+        return false;
+    }
+    auto* slot = process->pendingSignals.find([](const kernel::PendingSignal& sig) {
+        return sig.number == kernel::SignalNumber::Kill || sig.number == kernel::SignalNumber::Terminate;
+    });
+    if (!slot) {
+        return false;
+    }
+    kernel::Logger::info("minicore: signal checkpoint - terminating UserThread (pending Kill/Terminate)");
+    kTaskOnFallingToEnd();
+    asm volatile("sti");
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
 }  // namespace
 
 namespace kernel {
@@ -482,6 +516,10 @@ namespace kernel {
 // 핸들러 하나에만 있던 이 로직을 그대로 옥겨 온 것뿐** - 동작 자체는
 // 전혀 바뀌지 않았다.
 uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
+    // [PN-71E50394 항목3 나머지] 어떤 verb든 실제로 처리하기 전에
+    // 먼저 체크포인트를 통과해야 한다 - Kill/Terminate가 걸려 있으면
+    // 이 호출에서 반환하지 않는다(아래 kCheckSignalCheckpoint 참고).
+    kCheckSignalCheckpoint();
     switch (verb) {
         case kSyscallVerbSubmit: {
             const auto endpointId = static_cast<SyscallEndpointId>(arg0);
