@@ -1,11 +1,13 @@
 #include "idt.h"
 
+#include "gdt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
 #include "libkenv/types.h"
 #include "logger.h"
 #include "nmi.h"
 #include "paging.h"
+#include "process.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "syscall.h"
@@ -524,6 +526,31 @@ void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
     frame->rax = kernel::kDispatchSyscallVerb(frame->rax, frame->rdi, frame->rsi);
 }
 
+// [QU-04C420BF, SP-0666DB3C, PN-71E50394 항목3] ring3(유저) 코드가
+// 커널이 해결할 수 없는 #PF/#UD를 냈을 때 커널 전체를 kPanic으로
+// 정지시키는 대신 그 프로세스 하나만 죽인다. 폴트난 그 ring3
+// 명령어를 안전하게 재개할 방법이 없어 §4.4의 체크포인트 방식(다음
+// syscall 진입/ring3 재진입 시점에 pendingSignals 확인)이 적용될 수
+// 없다 - 그래서 self-terminate syscall(위 kDispatchSyscallVerb의
+// kSyscallEndpointSelfTerminate 분기)이 이미 쓰는 것과 동일한 패턴을
+// 그대로 재사용한다: kTaskOnFallingToEnd()(Zombie 표시 +
+// Syscall::submitDetached로 리액터에 정리 위임)를 부른 뒤 이 함수에서
+// 반환하지 않고 sti+hlt 루프로 들어간다 - 다음 스케줄러 틱이 다른
+// Task로 kContextSwitch할 때까지 이 코어를 안전하게 대기시키므로
+// 절대 iretq로 ring3에 돌아가지 않는다(설계자 확인 완료, "그래 이렇게
+// 해", 2026-09-16).
+void kTerminateFaultingUserTask(kernel::SignalNumber signal) {
+    auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+    if (thread && thread->process) {
+        thread->process->raiseSignal(signal);
+    }
+    kTaskOnFallingToEnd();
+    asm volatile("sti");
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
 }  // namespace
 
 // isr_common_stub(isr.S)이 호출한다.
@@ -566,6 +593,22 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
         const kernel::uint64_t faultAddr = kReadCr2();
         if (kernel::Paging::handlePageFault(faultAddr, frame->errorCode)) {
             return;
+        }
+        // [QU-04C420BF, PN-71E50394 항목3] 온디맨드 매핑으로도 못 고친
+        // 진짜 세그폴트 - ring3(유저 코드)에서 난 것이면 커널 전체를
+        // 패닉시키지 않고 그 프로세스만 죽인다. ring0(커널 자신)
+        // 폴트는 진짜 커널 버그이므로 그대로 아래 kPanic(frame)으로
+        // 떨어진다(동작 변경 없음).
+        if (frame->cs == kernel::kGdtUserCodeSelector) {
+            kTerminateFaultingUserTask(kernel::SignalNumber::Segv);
+            // kTerminateFaultingUserTask는 절대 반환하지 않는다(위 주석).
+        }
+    }
+    if (frame->vector == 6) {  // #UD(Invalid Opcode) - [QU-04C420BF, PN-71E50394 항목3]
+        if (frame->cs == kernel::kGdtUserCodeSelector) {
+            kTerminateFaultingUserTask(kernel::SignalNumber::IllegalInstruction);
+            // 반환하지 않음 - ring0의 #UD(진짜 커널 버그)는 이 분기에
+            // 안 걸리고 그대로 아래 kPanic(frame)으로 떨어진다.
         }
     }
     if (frame->vector == 7) {  // #NM(Device Not Available) - lazy FPU/SSE 소유권 전환(SP-83A07867 §8, PN-F258698E)
