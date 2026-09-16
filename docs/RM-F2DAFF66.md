@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T21:50:19.294Z
+  updatedAt: 2026-09-16T22:19:34.174Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -223,8 +223,16 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
 결과를 이 절에서 §1(발견) 또는 §2(갭 없음)로 옮긴다:
 
-- [ ] `SP-9A6D579F`(DebugSession) - PN-87D6B615 여전히 착수 전(다른
-  버그 대응 중) - 착수 후 재확인.
+- [ ] `SP-9A6D579F`(DebugSession) - **[갱신, 2026-09-17] PN-87D6B615
+  착수됨.** 항목1(자료구조)/항목2(부모-자식 권한, 일부) 구현·실왕복
+  검증 완료(`debug_session.cpp`에서 `kFindDebuggableChild`/
+  `submitterTask.lock()` 사용 직접 grep 재확인 - PN-5BBD4301류
+  실수 없이 처음부터 올바르게 작성됨). 항목2의 KernelService 예외는
+  `QU-764C5624`(Kill 스코프) 답변과 연동 대기 중임을 코드 관계도에도
+  기록해 둠 - 별도 질의 중복 없이 잘 처리됨. **항목3-9(브레이크포인트/
+  싱글스텝/#DB ISR/메모리 대행/이벤트 통지/멀티스레드)는 여전히
+  미착수이나 계획 자신의 체크리스트로 이미 openly 추적 중** - 전부
+  완료되면 그때 전체를 §목차 방법론으로 재대조.
 - [ ] `SP-B1E258D8`(RCU) - `rejected`(도입 시점 보류)라 코드 갭
   대상 아님, 재개 조건(커널단 v1 완료)이 실제로 도래했는지만 주기적
   확인.
