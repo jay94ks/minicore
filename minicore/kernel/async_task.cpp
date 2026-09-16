@@ -24,10 +24,31 @@ void kAsyncTaskEntryWrapper(void* arg) {
     auto* task = static_cast<kernel::AsyncTask*>(arg);
     kernel::AsyncTaskHandler* handler = kernel::AsyncCallbackRegistry::resolve(task->subjectCode);
     if (handler) {
-        // [PN-C62F7908, 2/5 -> 4/5] onExec이 AsyncExecCoro를 반환한다
-        // (§7.3) - final_suspend=SuspendAlways라 자동으로 정리되지
-        // 않으므로 done()을 직접 확인해야 한다.
+        // [PN-C62F7908, 2/5 -> 4/5 -> 5/5] onExec이 AsyncExecCoro를
+        // 반환한다(§7.3) - final_suspend=SuspendAlways라 자동으로
+        // 정리되지 않으므로 done()을 직접 확인해야 한다.
         kernel::AsyncExecCoro result = handler->onExec(task, task->args);
+        // [PN-C62F7908 5/5, §7.2 확정] result.handle()이 비어 있으면
+        // 코루틴 프레임 Slab 할당이 실패한 것(promise_type::
+        // get_return_object_on_allocation_failure() 경로, done()이
+        // 아니라 handle()로 구분해야 한다 - done()은 빈 핸들도 true로
+        // 본다). onExec() 본문은 이 경우 전혀 실행되지 않았으므로(실측
+        // 확인, §7.2) 부작용 걱정 없이 그냥 다시 호출하면 된다 - 이
+        // AsyncTask 자신이 yield()로 리액터에 제어를 돌려준 뒤 나중에
+        // 다시 스케줄링(kContextSwitch로 재개)되면 바로 이 지점에서
+        // 재시도가 이어진다.
+        while (!result.handle()) {
+            // **실측으로 찾은 버그(AsyncTaskAwaiter::await()가 이미 문서화한
+            // 것과 정확히 같은 종류)**: `AsyncTask::yield()`만 부르면 그
+            // 뒤 아무도 이 AsyncTask를 다시 큐에 넣어 주지 않아 영원히
+            // Suspended로 멈춘다 - AsyncTaskAwaiter::await()와 동일한
+            // 패턴으로, yield() 직전 스스로를 다시 제출해(drainOnce()가
+            // 이미 지원하는 "Suspended면 Running으로 되돌려 재개" 경로
+            // 재사용) 다음 드레인 차례에 반드시 다시 뽑히게 한다.
+            kernel::AsyncReactor::submitCompletion(task);
+            kernel::AsyncTask::yield();
+            result = handler->onExec(task, task->args);
+        }
         if (result.done()) {
             // co_await를 안 썼거나(전부 co_return만 씀) 이미 완료 -
             // 기존 그대로 즉시 정리.

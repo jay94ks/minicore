@@ -111,8 +111,23 @@ public:
         // 프로토콜상 이 메서드 자체는 있어야 하지만 호출될 일이 없다.
         void unhandled_exception() noexcept {}
 
-        static void* operator new(size_t size) { return GenericSlabAllocator::alloc(size); }
+        // noexcept 필수(C++20 표준 - get_return_object_on_allocation_failure()
+        // 를 선언한 promise_type의 operator new는 반드시 noexcept여야
+        // 컴파일러가 예외 대신 nullptr 반환/실패 콜백 경로를 쓴다).
+        // -fno-exceptions 빌드라 애초에 예외를 던질 수도 없다.
+        static void* operator new(size_t size) noexcept { return GenericSlabAllocator::alloc(size); }
         static void operator delete(void* ptr, size_t size) { GenericSlabAllocator::free(ptr, size); }
+
+        // [PN-C62F7908 5/5, §7.2 확정, QU-5E58E361 설계자 답변 -
+        // "get_return_object_on_allocation_failure로 해"] operator new가
+        // (Slab 고갈로) nullptr을 반환하면 코루틴 본문은 전혀 실행되지
+        // 않고(실측 확인, §7.2) 이 정적 메서드의 반환값이 그대로
+        // handler->onExec(...)의 결과가 된다 - 빈 핸들을 담은
+        // AsyncExecCoro를 반환해 "실패"를 표현한다. 호출부
+        // (kAsyncTaskEntryWrapper)는 이걸 AsyncTaskState::Failed가
+        // 아니라 **재시도 트리거**로 해석해야 한다(§7.2 - 실패로
+        // 취급하면 이미 확정된 "yield하며 재시도" 결정과 충돌한다).
+        static AsyncExecCoro get_return_object_on_allocation_failure() noexcept { return AsyncExecCoro{}; }
     };
 
     AsyncExecCoro() = default;
