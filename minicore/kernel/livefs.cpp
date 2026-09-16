@@ -5,6 +5,7 @@
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "named_object.h"
+#include "procfs.h"
 #include "process.h"
 #include "scheduler.h"
 #include "syscall.h"
@@ -146,6 +147,13 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
     static constexpr char kNamedPrefix[] = "named/";
     static constexpr char kKernelPrefix[] = "kernel/";
     static constexpr char kInitrdCpioPath[] = "initrd.cpio";
+    static constexpr char kProcPrefix[] = "proc/";
+
+    if (kHasPrefix(relPath, relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
+        const char* rest = relPath + (sizeof(kProcPrefix) - 1);
+        const kernel::uint32_t restLen = relPathLen - (sizeof(kProcPrefix) - 1);
+        return kernel::ProcFs::open(task, rest, restLen, 0);
+    }
 
     if (kHasPrefix(relPath, relPathLen, kNamedPrefix, sizeof(kNamedPrefix) - 1)) {
         const char* name = relPath + (sizeof(kNamedPrefix) - 1);
@@ -194,6 +202,10 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
 
 kernel::ReadResult kLiveFsReadImpl(kernel::FileHandle handle, kernel::uint64_t offset, void* buf,
                                     kernel::uint32_t len) {
+    if (handle.value & kernel::kProcFsHandleTagBit) {
+        return kernel::ProcFs::read(handle, offset, buf, len);
+    }
+
     if (handle.value == kInitrdCpioHandleValue) {
         if (offset >= gLiveFsCpioSize) {
             return kernel::ReadResult{0, kernel::VfsError::None};  // EOF
@@ -260,7 +272,19 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
             break;
         }
         case KernelFsOpCode::Stat: {
-            kLiveFsStatImpl(static_cast<KernelFsStatArgs*>(argsRaw));
+            auto* args = static_cast<KernelFsStatArgs*>(argsRaw);
+            static constexpr char kProcPrefix[] = "proc/";
+            if (kHasPrefix(args->relPath, args->relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
+                KernelFsStatArgs procArgs = *args;
+                procArgs.relPath = args->relPath + (sizeof(kProcPrefix) - 1);
+                procArgs.relPathLen = args->relPathLen - (sizeof(kProcPrefix) - 1);
+                ProcFs::stat(task, &procArgs);
+                args->size = procArgs.size;
+                args->isDirectory = procArgs.isDirectory;
+                args->error = procArgs.error;
+            } else {
+                kLiveFsStatImpl(args);
+            }
             break;
         }
         case KernelFsOpCode::Mkdir: {

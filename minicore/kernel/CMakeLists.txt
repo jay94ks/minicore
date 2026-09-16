@@ -30,6 +30,7 @@ add_library(minicore_kernel OBJECT
     interrupt_subscription.cpp
     pnp.cpp
     livefs.cpp
+    procfs.cpp
     mount_table.cpp
     process.cpp
     debug_session.cpp
