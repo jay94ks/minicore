@@ -378,6 +378,32 @@ bool kCanMigrateFpuSafely(const Task* task, uint32_t fromCore) {
     return !task->fpuInitialized || gFpuOwner[fromCore] != task;
 }
 
+// [SP-ECC59BAE §3.1] 강제 이관 요청 슬롯 - tlb_shootdown.cpp의
+// g_tlbShootdownRequest 단일 슬롯과 동일한 관례(PN-D132A1E9가 그
+// 문서에 남긴 "동시 호출자가 여럿이면 슬롯을 늘리거나 직렬화 락이
+// 필요하다"는 경고도 그대로 유효 - v1은 자동 트리거가 없어(§5 (C))
+// 호출부가 사실상 하나뿐이라 문제되지 않는다).
+struct ForcedMigrationRequest {
+    Task* target = nullptr;
+    uint32_t targetCore = 0;
+};
+ForcedMigrationRequest gForcedMigrationRequest;
+
+// [SP-ECC59BAE §4] kCanMigrateFpuSafely()와 달리 이 함수는 "지금
+// 당장 fromCore 자신에서 실행되는" IPI 핸들러 안에서만 호출된다 -
+// FXSAVE는 항상 그 명령을 실행하는 코어의 하드웨어 레지스터만
+// 읽으므로, fromCore 자신이 직접 부르는 한 원격 코어를 잘못
+// FXSAVE하는 문제(kCanMigrateFpuSafely 문서 주석 참고)가 애초에
+// 생기지 않는다 - Ready 큐 이관(Push/Pull)처럼 "허용된 경우에만
+// 이관"으로 회피할 필요 없이, 살아있는 FPU 상태를 그 자리에서 바로
+// 안전하게 반납(evict)할 수 있다.
+void kEvictFpuBeforeMigration(Task* task, uint32_t fromCore) {
+    if (gFpuOwner[fromCore] == task) {
+        asm volatile("fxsave (%0)" : : "r"(task->fpuState) : "memory");
+        gFpuOwner[fromCore] = nullptr;
+    }
+}
+
 // kLoadBalanceWakeVector의 ISR - hlt에서 깨우는 것 자체가 목적이라
 // 몸체가 필요 없다(tlb_shootdown.cpp의 "EOI는 kIsrHandler가 대신
 // 보낸다" 관례 그대로).
@@ -784,6 +810,68 @@ void Scheduler::onTick(InterruptFrame*) {
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
     // isr_common_stub -> iretq로 이어진다(자기 자신의 InterruptFrame
     // 그대로).
+    kContextSwitch(&current->savedRsp, next->savedRsp);
+}
+
+void Scheduler::requestForcedMigration(uint32_t fromCore, uint32_t targetCore) {
+    // tlb_shootdown.cpp와 동일한 이유로 요청 슬롯 채우기 자체는
+    // 직렬화가 필요하다(PN-D132A1E9 경고 동일 적용) - v1은 호출부가
+    // 하나뿐인 수동/진단 API라 별도 락 없이 그대로 채운다.
+    gForcedMigrationRequest.target = gCurrentTask[fromCore];  // 요청 시점
+    // 스냅샷 - IPI 도착 시점에 이미 다른 Task로 바뀌어 있을 수 있다
+    // (onForcedMigration()의 current != target 방어가 이 경쟁을 무해하게
+    // 처리한다).
+    gForcedMigrationRequest.targetCore = targetCore;
+    Lapic::sendFixedIpi(Acpi::cpuApicId(fromCore), static_cast<uint8_t>(kForcedMigrationVector));
+}
+
+void Scheduler::onForcedMigration(InterruptFrame*) {
+    // 가장 먼저 EOI - onTick()과 정확히 같은 이유(위 kForcedMigrationVector
+    // 선언부 주석과 onTick() 자신의 주석 참고). 이 아래서 kContextSwitch로
+    // 다른 Task의 스택으로 전환하면 이 함수 호출은 그 Task가 다시
+    // 스케줄될 때까지 "반환"하지 않는다 - EOI를 미루면 그 사이 이
+    // 코어에 어떤 인터럽트도(다음 스케줄러 틱 포함) 전달되지 않는다.
+    Lapic::sendEoi();
+
+    const uint32_t coreIndex = currentCoreIndex();
+    Task* current = gCurrentTask[coreIndex];
+
+    // 경쟁 방어: IPI가 도착했을 때 이미 이 코어가 idle이거나(current==
+    // nullptr) 요청 시점과 다른 Task를 실행 중이면(그 사이 이 Task가
+    // 스스로 끝났거나 블로킹돼 자연스럽게 전환됐을 수 있음) 이 요청은
+    // 그냥 무해하게 버린다 - 목표는 "가능하면 지금 옮긴다"지 "반드시
+    // 옮긴다"가 아니다(근사적 로드밸런싱, approxLength()와 같은 정신).
+    if (!current || current != gForcedMigrationRequest.target) {
+        return;
+    }
+    const uint32_t targetCore = gForcedMigrationRequest.targetCore;
+
+    Task* next = pickNext(coreIndex);
+
+    // FPU 강제 반납(§4) - kContextSwitch 전에 반드시 먼저.
+    kEvictFpuBeforeMigration(current, coreIndex);
+
+    if (current->state != TaskState::Zombie) {
+        enqueue(targetCore, current);  // <- onTick()과 유일하게 다른 한
+                                        // 줄: 같은 코어가 아니라 targetCore에 재삽입.
+    }
+    if (!next) {
+        // 이 코어에 대신 돌릴 다른 Task가 없다 - runLoop()의 idle
+        // 분기로 자연스럽게 떨어지도록 gCurrentTask만 비운다(이 ISR
+        // 자신은 인터럽트 컨텍스트라 여기서 직접 hlt하지 않는다,
+        // onTick()의 idle 분기 "return"과 동일한 원칙).
+        gCurrentTask[coreIndex] = nullptr;
+        // current 자신의 kContextSwitch는 필요하다 - 원래 실행 흐름
+        // (이 인터럽트가 끼어든 지점)으로 다시는 돌아오지 않고 idle
+        // 스택으로 넘어가야 하기 때문이다.
+        kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+        return;
+    }
+    gCurrentTask[coreIndex] = next;
+    next->state = TaskState::Running;
+    kSyncRsp0ForDispatch(next);
+    kSyncCr3(next);
+    kSyncFpu(next, coreIndex);
     kContextSwitch(&current->savedRsp, next->savedRsp);
 }
 

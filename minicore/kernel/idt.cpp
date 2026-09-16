@@ -408,6 +408,10 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
         kernel::Scheduler::onTick(frame);  // EOI는 이 함수가 직접 가장 먼저 보낸다
         return;
     }
+    if (frame->vector == kernel::kForcedMigrationVector) {
+        kernel::Scheduler::onForcedMigration(frame);  // EOI는 이 함수가 직접 가장 먼저 보낸다 - onTick()과 동일한 이유
+        return;
+    }
     if (frame->vector == 0xFF) {
         return;  // spurious - EOI 불필요(스펙상 안 보내도 됨)
     }

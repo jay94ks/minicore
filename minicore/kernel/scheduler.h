@@ -19,6 +19,13 @@ constexpr uint32_t kSchedulerTickVector = 0x24;
 // 말고 변수/상수 하나로 노출").
 constexpr uint32_t kSchedulerTickHz = 100;
 
+// [SP-ECC59BAE, RM-28225668] 선점형 강제 이관(Running Task Forced
+// Migration) 전용 IPI 벡터 - `kSchedulerTickVector`와 똑같은 이유로
+// `idt.cpp`의 `kIsrHandler`가 하드코딩된 분기로 직접 호출해야 한다
+// (동적 핸들러 테이블의 "핸들러 반환 후 EOI" 관례를 타면 안 됨 -
+// `onForcedMigration()` 문서 주석 참고).
+constexpr uint32_t kForcedMigrationVector = 0xE2;
+
 // PL-2D3184BC 4단계 - 코어별 개별 큐(DS-D4E5C451이 이미 확정한 상위
 // 구조). 큐 자체는 Task::next 침습적 포인터를 재사용하는 단일 연결
 // 리스트(FIFO)다. 지금은 Spinlock 기반 폴백만 구현한다(계획 지시대로
@@ -104,6 +111,30 @@ public:
     // 틱이 막히지 않아야 하기 때문에 kIsrHandler의 일반적인 "핸들러
     // 반환 후 EOI" 순서를 따르지 않는다, kTimerVector와 같은 특례).
     static void onTick(InterruptFrame* frame);
+
+    // [SP-ECC59BAE §3.2] 어느 코어에서나 호출 가능 - fromCore가 지금
+    // 실행 중인 Task를 그 자리에서 강제로 끌어내 targetCore로 이관
+    // 한다(선점형, Ready 큐 대기를 기다리지 않음). v1은 자동 발동
+    // 트리거가 없다(QU-FAC822D4 확정) - 수동/진단 API로만 노출.
+    // `gForcedMigrationRequest` 단일 슬롯을 쓰므로 여러 코어가 동시에
+    // 부르면 요청이 섞인다(PN-D132A1E9와 동일한 v1 제약 - 지금은
+    // 호출부가 하나뿐이라 문제되지 않는다).
+    static void requestForcedMigration(uint32_t fromCore, uint32_t targetCore);
+
+    // [SP-ECC59BAE §3.3] idt.cpp의 kIsrHandler가 kForcedMigrationVector
+    // 인터럽트마다 **하드코딩된 분기로 직접** 호출한다(동적 핸들러
+    // 테이블 경유 금지) - EOI는 이 함수가 직접, 가장 먼저 보낸다.
+    // **[실측으로 발견한 버그 수정, 2026-09-16]** 1차 구현은 이
+    // 함수를 `Idt::registerHandler()`의 동적 핸들러로 등록해 "핸들러
+    // 반환 후 EOI"라는 일반 관례를 그대로 탔는데, 이 함수는 `onTick()`
+    // 과 마찬가지로 `kContextSwitch`로 다른 Task의 스택으로 전환하면
+    // 그 호출 지점(`kIsrHandler`)으로 다시는 "반환"하지 않는다 - 그
+    // 결과 EOI가 영원히 전송되지 않아 이 코어가 이후 어떤 인터럽트도
+    // (다음 스케줄러 틱 포함) 받지 못한 채 조용히 완전히 멈춰버리는
+    // 실측 결함(패닉/폴트 메시지조차 없음)으로 이어졌다 - 정확히
+    // `onTick()`이 이미 같은 이유로 피하고 있던 그 함정. `onTick()`과
+    // 동일하게 EOI를 이 함수 맨 앞에서 직접 보내는 것으로 수정했다.
+    static void onForcedMigration(InterruptFrame* frame);
 
     // 이 코어의 디스패치 루프 - 절대 반환하지 않는다. kMain/kApMain이
     // 기존 hlt 루프 대신 마지막에 호출한다. 이 코어의 큐가 비어 있는
