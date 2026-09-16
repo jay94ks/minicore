@@ -153,6 +153,18 @@ private:
     std::coroutine_handle<promise_type> _handle;
 };
 
+// [PN-D01B7D07, SP-F682B889 §3.7, 설계자 답변 - "lock-free 기반으로
+// 약한 참조를 구현해"] AsyncTask 타임아웃(§3.7)이 겪는 use-after-free
+// 문제(타이머가 울리기 전에 AsyncTask가 이미 반납/재사용될 수 있음)를
+// AsyncTask 구조체 자체에 새 필드를 잔뜩 추가하거나 모든 반납 지점에
+// 개별 배선을 하는 대신, 독립적으로 힙 할당되는 이 작은 컨트롤
+// 블록으로 해결한다 - AsyncTask 쪽은 포인터 하나(`weakRef`)만 갖고,
+// 실제 무효화/수명 판단은 전부 이 클래스 안에서 원자적으로 끝난다.
+// 자세한 내용은 async_task.cpp 정의부 주석 참고(구현 세부는 이
+// 헤더의 소비자가 알 필요 없음 - `AsyncTask::scheduleTimeout()`만
+// 공개 API).
+class AsyncTaskWeakRef;
+
 struct AsyncTask {
     // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이
     // 오프셋(항상 첫 필드)을 그대로 참조한다 - task.h의 Task와 동일한
@@ -220,6 +232,21 @@ struct AsyncTask {
     // 후속), (3) 타임아웃(PN-D01B7D07, QU-681F256C 설계자 답변 -
     // "Cancel Source 쪽에 timeout을 유발").
     AsyncTokenSource cancelSource;
+
+    // [PN-D01B7D07, §3.7] scheduleTimeout()이 호출된 적 있으면(최대
+    // 1회, v1 - 한 AsyncTask에 타임아웃을 두 번 거는 것은 지원하지
+    // 않음) 그때 만들어진 약한 참조 컨트롤 블록 - 이 AsyncTask가
+    // 실제로 반납될 때(kReleaseAsyncTask, async_task.cpp) 이 필드를
+    // 보고 무효화/해제한다. 타임아웃이 걸린 적 없으면 계속 nullptr.
+    AsyncTaskWeakRef* weakRef = nullptr;
+
+    // [PN-D01B7D07, SP-F682B889 §3.7] delayTicks(Timer::tickCount()
+    // 단위, DelayedExecutionQueue 재사용) 뒤에도 이 AsyncTask가 아직
+    // 끝나지 않았으면 cancelSource.trigger()로 취소(§8.3 세 번째
+    // 트리거 지점, QU-681F256C 답변 그대로) - 이미 끝나 반납됐으면
+    // (약한 참조가 무효화돼 있으면) 아무 일도 하지 않는다. 한
+    // AsyncTask에 최대 한 번만 호출한다(v1 - 두 번째 호출은 무시).
+    void scheduleTimeout(uint64_t delayTicks);
 
     // subjectCode에 등록된 AsyncTaskHandler::onExec을 처음 실행할
     // 준비가 된 상태로 스택을 구성한다(GenericSlabAllocator에서 전용

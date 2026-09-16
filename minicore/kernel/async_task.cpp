@@ -170,6 +170,108 @@ kernel::Spinlock gRegistryLock;
 
 namespace kernel {
 
+// [PN-D01B7D07, SP-F682B889 §3.7] 헤더의 전방 선언(async_task.h)에
+// 대응하는 실제 정의 - AsyncTask 자신의 수명과 완전히 독립적으로
+// 힙에 할당되는 작은 컨트롤 블록. 정확히 두 참여자가 있다: (1)
+// AsyncTask 자신(생성한 쪽, `task->weakRef`로 들고 있음), (2)
+// `DelayedExecutionQueue`에 예약된 타임아웃 콜백(`kOnAsyncTaskTimeout`).
+// 락 없이 두 원자 연산만으로 "AsyncTask가 아직 살아있는지"와 "이
+// 컨트롤 블록 자체를 누가 마지막으로 다 썼는지"를 둘 다 안전하게
+// 판정한다:
+//
+// - `lock()` - 타이머 콜백이 발화 시점에 부른다. 아직 무효화되지
+//   않았으면 그 순간의 `AsyncTask*`를 반환(그 뒤로도 안전하게
+//   역참조할 수 있다 - 왜 안전한지는 `invalidate()`가 반드시
+//   `kReleaseAsyncTask()`"안에서" 실제 반납보다 **먼저** 불린다는
+//   보장 덕분이다: `lock()`이 non-null을 반환했다는 건 그 반환
+//   시점에 아직 무효화 전이었다는 뜻이고, 같은 코어 위에서 순차
+//   실행되는 이 커널에 진짜 동시 실행 경쟁은 없다 - 타임아웃
+//   콜백도 `DelayedExecutionQueue::pump()`도 전부 리액터의 idle
+//   경로에서만 실행되는 협조적 스케줄링이라 인터럽트 컨텍스트를
+//   제외하면 서로 겹치지 않는다).
+// - `invalidate()` - AsyncTask가 실제로 반납되는 바로 그 순간
+//   (`kReleaseAsyncTask()`)에만 부른다 - 이후 `lock()`은 항상
+//   nullptr.
+// - `release()` - "이 컨트롤 블록 자체"의 참조 카운트를 하나 줄이고,
+//   0이 되면(마지막 참여자) 블록 자신을 반납한다. 생성 시 2로
+//   시작(AsyncTask 쪽 몫 1 + 타이머 콜백 쪽 몫 1) - 둘 다 각자 볼일이
+//   끝나면(AsyncTask는 반납 시, 타이머는 발화 시) 정확히 한 번씩
+//   `release()`를 불러야 한다. `DelayedExecutionQueue::cancel()`이
+//   전혀 필요 없다는 게 이 설계의 핵심 - 타이머는 항상 예정대로
+//   발화하고, 이미 끝난 AsyncTask를 가리키면(`lock()==nullptr`)
+//   그냥 조용히 자기 몫만 `release()`하고 끝난다.
+class AsyncTaskWeakRef {
+public:
+    // 이 프로젝트 전역 관례대로 placement new를 쓰지 않는다(raw slab
+    // 메모리 위에 reinterpret_cast로 앉힌 뒤 명시적으로 초기화 -
+    // AsyncTask::init()/chunked_list.h와 동일한 패턴).
+    void init(AsyncTask* target) {
+        _target.store(target);
+        _refCount.store(2);  // AsyncTask 쪽 몫 1 + 타이머 콜백 쪽 몫 1
+    }
+
+    AsyncTask* lock() const { return _target.load(); }
+    void invalidate() { _target.store(nullptr); }
+
+    void release() {
+        if (_refCount.fetchSub(1) == 1) {
+            GenericSlabAllocator::free(this, sizeof(AsyncTaskWeakRef));
+        }
+    }
+
+private:
+    AtomicPtr<AsyncTask> _target;
+    AtomicU32 _refCount;
+};
+
+namespace {
+
+void kOnAsyncTaskTimeout(void* arg) {
+    auto* weakRef = static_cast<AsyncTaskWeakRef*>(arg);
+    AsyncTask* task = weakRef->lock();
+    if (task) {
+        // §8.3 세 번째 트리거 지점(QU-681F256C 답변 - "Cancel Source
+        // 쪽에 timeout을 유발") - Failed/Cancelled 상태 전이 자체는
+        // 기존 협조적 취소 채널(cancelSource를 각 handler의 onExec/
+        // 코루틴 본문이 스스로 확인)이 그대로 처리한다, 이 콜백은
+        // 트리거만 담당.
+        task->cancelSource.trigger();
+    }
+    weakRef->release();
+}
+
+}  // namespace
+
+void AsyncTask::scheduleTimeout(uint64_t delayTicks) {
+    if (weakRef) {
+        return;  // v1 - 이미 걸려 있으면 두 번째 호출은 무시(설계 문서 그대로)
+    }
+    void* mem = GenericSlabAllocator::alloc(sizeof(AsyncTaskWeakRef));
+    if (!mem) {
+        return;  // 할당 실패 - 타임아웃 없이 계속 진행(치명적이지 않음)
+    }
+    weakRef = reinterpret_cast<AsyncTaskWeakRef*>(mem);
+    weakRef->init(this);
+    DelayedExecutionQueue::schedule(delayTicks, &kOnAsyncTaskTimeout, weakRef);
+}
+
+// [PN-D01B7D07] 이 AsyncTask를 실제로 반납하는 유일한 통로 - 기존에
+// 4곳(AsyncTaskGroup::pendingCount()/AsyncTaskAwaiter::~AsyncTaskAwaiter/
+// drainOnce()의 Cancelled/Completed·Failed 분기)에 각자 따로 있던
+// "스택 반납 + 구조체 반납" 두 줄을 여기로 모았다 - weakRef 무효화를
+// **정확히 한 곳**에서만 하면 되게 하기 위함(그렇지 않으면 4곳
+// 전부에 빠짐없이 배선해야 해 QU-0CB8CAEE가 지적한 "새 필드 최소화"
+// 취지와 다시 부딪힌다).
+void kReleaseAsyncTask(AsyncTask* task) {
+    if (task->weakRef) {
+        task->weakRef->invalidate();
+        task->weakRef->release();
+        task->weakRef = nullptr;
+    }
+    GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
+    GenericSlabAllocator::free(task, sizeof(AsyncTask));
+}
+
 void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode manageCodeIn, void* argsIn) {
     subjectCode = subjectCodeIn;
     manageCode = manageCodeIn;
@@ -187,6 +289,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     homeCoreIndex = Scheduler::currentCoreIndex();
     allowCoreMigration = false;
     coroHandle = nullptr;
+    weakRef = nullptr;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
@@ -277,8 +380,7 @@ uint32_t AsyncTaskGroup::pendingCount() {
     // 내릴 뿐 순회 중인 청크/인덱스 구조 자체는 바뀌지 않는다.
     _tasks.forEach([&](AsyncTask*& task, ChunkedList<AsyncTask*, kChunkCapacity>::Slot* slot) {
         if (kIsAsyncTaskTerminal(task->state)) {
-            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
-            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+            kReleaseAsyncTask(task);
             _tasks.erase(slot);
         } else {
             ++pending;
@@ -331,8 +433,7 @@ void AsyncTaskAwaiter::await() {
         }
         AsyncTask::yield();
     }
-    GenericSlabAllocator::free(reinterpret_cast<void*>(_target->stackBase), kAsyncTaskStackSize);
-    GenericSlabAllocator::free(_target, sizeof(AsyncTask));
+    kReleaseAsyncTask(_target);
 }
 
 AsyncTaskSubjectCode AsyncCallbackRegistry::registerHandler(AsyncTaskHandler* handler) {
@@ -410,8 +511,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             handler->onCancel(task, task->args);
         }
         if (task->autoFree) {
-            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
-            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+            kReleaseAsyncTask(task);
         }
         gDraining[coreIndex] = false;
         return true;
@@ -481,8 +581,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         // 못 읽은 소비자(위에서 막 깨운 그 Task)가 직접 반납할
         // 책임을 진다.
         if (task->autoFree) {
-            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
-            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+            kReleaseAsyncTask(task);
         }
     }
     // Suspended면 아무 것도 안 함 - 나중에 submitCompletion으로 다시
