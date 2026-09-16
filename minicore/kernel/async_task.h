@@ -29,6 +29,51 @@ enum class AsyncTaskState { Ready, Running, Suspended, Completed, Failed, Cancel
 // 가능하다(페이지 하나를 그대로 받는다).
 constexpr uint64_t kAsyncTaskStackSize = 4096;
 
+class AsyncToken;  // 전방 선언 - AsyncTokenSource::token()이 필요로 함
+
+// SP-F682B889 §8(설계자 지시, 2026-09-14) - "AsyncTask에 AsyncToken,
+// AsyncTokenSource를 도입하고, 이게 트리거되면 취소된 걸로 간주하는
+// 메커니즘". freestanding 환경에는 임의 지점에서 스택을 안전하게
+// 되감는 장치가 없어(C++ 예외 자체를 안 씀, RM-23F4B687) 강제 중단이
+// 아니라 협조적(cooperative) 신호로 푼다 - 실행 중인 코드 스스로
+// "지금 취소됐는지"를 확인하고 자기 판단으로 조기 종료한다(§8.4).
+// AsyncTask 하나당 정확히 하나씩 값으로 소유된다(힙 할당/참조 카운트
+// 없음, 아래 AsyncTask::cancelSource 필드) - 한 번 트리거되면
+// 되돌릴 수 없다(단방향).
+class AsyncTokenSource {
+public:
+    // 취소를 요청한다 - 멱등(이미 트리거된 상태에서 다시 불러도
+    // 안전, 아무 일도 하지 않는다). 어느 코어에서 불러도 안전
+    // (AtomicU32 사용, 별도 Spinlock 불필요).
+    void trigger() { _triggered.store(1); }
+
+    bool isTriggered() const { return _triggered.load() != 0; }
+
+    // 이 소스를 가리키는 경량 읽기 전용 핸들을 발급한다 - 값 복사
+    // 가능, 소유권 없음(AsyncTokenSource보다 오래 살아있으면 안 됨 -
+    // 항상 그 소스를 담은 AsyncTask보다 짧게 유지).
+    AsyncToken token() const;
+
+private:
+    AtomicU32 _triggered;
+};
+
+// onExec/코루틴 본문이 폴링하는 뷰 - AsyncTokenSource*를 감싼 얇은
+// 값 타입.
+class AsyncToken {
+public:
+    explicit AsyncToken(const AsyncTokenSource* source) : _source(source) {}
+
+    bool isCancelled() const { return _source != nullptr && _source->isTriggered(); }
+
+private:
+    const AsyncTokenSource* _source;
+};
+
+inline AsyncToken AsyncTokenSource::token() const {
+    return AsyncToken(this);
+}
+
 struct AsyncTask {
     // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이
     // 오프셋(항상 첫 필드)을 그대로 참조한다 - task.h의 Task와 동일한
@@ -59,6 +104,15 @@ struct AsyncTask {
     // 진다. 기본값 true(기존 "제출하고 잊는" 소비자와 동일하게 자동
     // 정리)라 기존 submit() 호출부의 동작은 그대로 유지된다.
     bool autoFree = true;
+
+    // §8 협조적 취소 채널 - onExec/코루틴 몸체가 cancelSource.token()
+    // 으로 얻은 AsyncToken을 원하는 지점마다 확인한다. 트리거 지점은
+    // §8.3 - (1) 소유자(UserThread) 조기 종료(scheduler.cpp의
+    // SelfTerminateHandler::onExec), (2) SP-0666DB3C §9 Waitable::
+    // cancel() 경로(아직 미연동 - PN-71E50394 Signal 인프라와 함께
+    // 후속), (3) 타임아웃(PN-D01B7D07, QU-681F256C 설계자 답변 -
+    // "Cancel Source 쪽에 timeout을 유발").
+    AsyncTokenSource cancelSource;
 
     // subjectCode에 등록된 AsyncTaskHandler::onExec을 처음 실행할
     // 준비가 된 상태로 스택을 구성한다(GenericSlabAllocator에서 전용

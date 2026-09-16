@@ -458,6 +458,17 @@ public:
             // 반납하게 한다.
             const bool wasSuspended = (asyncTask->state == AsyncTaskState::Suspended);
             asyncTask->autoFree = true;
+            // §8.3-1(SP-F682B889) - onCancel을 부르기 전에 먼저
+            // cancelSource를 트리거한다. 이 AsyncTask가 Ready였다면
+            // 아래에서 onExec 자체를 건너뛰므로 사실상 무관하지만,
+            // Suspended였다면(yield()로 실행 중간에 멈춰 있었다면)
+            // onCancel만 불리고 onExec으로는 다시 재개되지 않으므로
+            // (state==Cancelled 검사가 onExec 재개보다 우선) 이 트리거
+            // 자체가 onExec 쪽에서 관측될 일은 없다 - 그래도 §8.2가
+            // "이미 끝난 작업에 트리거해도 무해"를 보장하고, cancelSource
+            // 를 직접 폴링하는 다른 코드(예: 타임아웃과 경합하는 코드)
+            // 가 상태를 일관되게 보게 하기 위해 항상 호출한다.
+            asyncTask->cancelSource.trigger();
             asyncTask->state = AsyncTaskState::Cancelled;
             if (wasSuspended) {
                 // Ready(이미 실행 큐에 있음)라면 언젠가 popFront될 때

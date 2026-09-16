@@ -142,6 +142,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
     waitingTask = nullptr;
     autoFree = true;
+    cancelSource = AsyncTokenSource{};
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
