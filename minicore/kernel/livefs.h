@@ -57,9 +57,14 @@ constexpr uint64_t kMaxLiveFsCpioSize = 8UL * 1024UL * 1024UL;  // 8MiB v1 상�
 //                        전체를 하나의 불투명한 파일로 노출
 //   - `kernel/<name>` -> KernelReservedTable 조회 + 호출자 신원 검사
 //                        (SP-00CA7175 §2.0)
-// 아직 이 드라이버를 실제로 호출하는 syscall 경로(Open/Read,
-// SP-2AAD7C8D §9)가 없다 - `MountTable::mountKernel()`로 마운트는
-// 걸어 두되, 실제 소비자는 §9 착수 이후.
+// [수정, 2026-09-17, PN-BC04D3DC] `KernelFsDriver`가 이제
+// `AsyncTaskHandler`를 상속하므로(mount_table.h 문서 주석 참고)
+// open/close/read 가상함수 대신 `onExec()` 하나로 9개 op 전부를
+// 받는다 - 여전히 이 드라이버를 실제로 호출하는 syscall 경로(Open/
+// Read 등, SP-2AAD7C8D §9)는 없다(`MountTable::mountKernel()`로
+// 마운트+`AsyncCallbackRegistry` 등록까지는 걸리지만, §9 착수 이후에야
+// 진짜 유저 syscall이 `AsyncTask::submit(subjectCode(), ...)`로 이
+// onExec을 부르게 된다) - 이번 증분은 인터페이스 변환 자체가 범위.
 class LiveFs : public KernelFsDriver {
 public:
     // 이 프로세스 전체에서 딱 하나만 존재하는 인스턴스 - `MountTable::
@@ -75,9 +80,9 @@ public:
     // `kMaxLiveFsCpioSize`를 넘으면 실패.
     static bool captureCpioArchive(const void* archive, uint64_t archiveSize);
 
-    OpenResult open(const char* relPath, uint32_t relPathLen, uint32_t flags) override;
-    void close(FileHandle handle) override;
-    ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) override;
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override;
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
 };
 
 }  // namespace kernel

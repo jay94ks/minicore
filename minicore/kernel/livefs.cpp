@@ -128,73 +128,80 @@ bool LiveFs::captureCpioArchive(const void* archive, uint64_t archiveSize) {
     return true;
 }
 
-OpenResult LiveFs::open(const char* relPath, uint32_t relPathLen, uint32_t /*flags*/) {
+namespace {
+
+// [수정, 2026-09-17, PN-BC04D3DC 변환 중 발견] 예전엔 `Scheduler::
+// currentTask()`를 직접 불러 "kernel/" 분기의 호출자 신원을 얻었다 -
+// 이 코드가 동기 가상함수로 직접 호출되던 시절(§9 syscall 배선이
+// 없어 실제로는 아무도 안 부르던 상태)엔 우연히 안전했지만, 이제
+// `onExec()`을 통해 실행되면(AsyncReactor가 나중에 idle 경로에서
+// 실행) `Scheduler::currentTask()`가 제출자가 아니라 리액터 자신의
+// 컨텍스트를 가리키는 그 익숙한 버그(async_task.h의 submitterTask
+// 문서 주석, PN-DB5153B6/PN-9CC66142/PN-523B779F가 이미 겪은 것과
+// 동일한 클래스)를 그대로 재현하게 된다 - `task->submitterTask.
+// lock()` 체이닝으로 고쳤다(pnp.cpp의 kProcessFromSubmitterForPnp와
+// 동일한 패턴).
+kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath, kernel::uint32_t relPathLen,
+                                    kernel::uint32_t /*flags*/) {
     static constexpr char kNamedPrefix[] = "named/";
     static constexpr char kKernelPrefix[] = "kernel/";
     static constexpr char kInitrdCpioPath[] = "initrd.cpio";
 
     if (kHasPrefix(relPath, relPathLen, kNamedPrefix, sizeof(kNamedPrefix) - 1)) {
         const char* name = relPath + (sizeof(kNamedPrefix) - 1);
-        const uint32_t nameLen = relPathLen - (sizeof(kNamedPrefix) - 1);
-        NamedObjectKind kind = NamedObjectKind::Channel;
-        uint64_t objectId = 0;
-        if (!NamedObjectTable::resolve(name, static_cast<uint64_t>(nameLen), &kind, &objectId)) {
-            return OpenResult{FileHandle{}, false, VfsError::NotFound};
+        const kernel::uint32_t nameLen = relPathLen - (sizeof(kNamedPrefix) - 1);
+        kernel::NamedObjectKind kind = kernel::NamedObjectKind::Channel;
+        kernel::uint64_t objectId = 0;
+        if (!kernel::NamedObjectTable::resolve(name, static_cast<kernel::uint64_t>(nameLen), &kind, &objectId)) {
+            return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
         }
-        return OpenResult{FileHandle{objectId}, false, VfsError::None};
+        return kernel::OpenResult{kernel::FileHandle{objectId}, false, kernel::VfsError::None};
     }
 
     if (kEqualsExact(relPath, relPathLen, kInitrdCpioPath, sizeof(kInitrdCpioPath) - 1)) {
         if (!gLiveFsCpioFound) {
-            return OpenResult{FileHandle{}, false, VfsError::NotFound};
+            return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
         }
-        return OpenResult{FileHandle{kInitrdCpioHandleValue}, false, VfsError::None};
+        return kernel::OpenResult{kernel::FileHandle{kInitrdCpioHandleValue}, false, kernel::VfsError::None};
     }
 
     if (kHasPrefix(relPath, relPathLen, kKernelPrefix, sizeof(kKernelPrefix) - 1)) {
         const char* name = relPath + (sizeof(kKernelPrefix) - 1);
-        const uint32_t nameLen = relPathLen - (sizeof(kKernelPrefix) - 1);
-        KernelReservedEntry* entry = KernelReservedTable::find(name, nameLen);
+        const kernel::uint32_t nameLen = relPathLen - (sizeof(kKernelPrefix) - 1);
+        kernel::KernelReservedEntry* entry = kernel::KernelReservedTable::find(name, nameLen);
         if (!entry) {
-            return OpenResult{FileHandle{}, false, VfsError::NotFound};
+            return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
         }
 
         // 호출자 신원 검사(SP-00CA7175 §2.0/RM-C65F7760) - 이 표를
         // 아는 것만으로는 부족하고, 호출자 자신이 정확히 그 이름으로
-        // 스폰된 KernelService 프로세스여야 한다. Syscall::submit/wait
-        // (syscall.cpp)와 동일한 관례 - RTTI가 없어 "이 경로는 항상
-        // UserThread 실행 흐름에서만 호출된다"는 전제를 호출부 책임으로
-        // 강제한다.
-        auto* callerThread = static_cast<UserThread*>(Scheduler::currentTask());
-        // [수정, 2026-09-17, PN-E2A114C1] `UserThread::process`가 이제
-        // `WeakPtr<Process>`라 `.lock()`으로 유효성을 확인해야 한다 -
-        // 이 지역 `SharedPtr<Process>`가 아래 검사 내내 대상을 살려 둔다.
-        SharedPtr<Process> callerProcess = callerThread->process.lock();
-        if (!callerProcess || callerProcess->role != ProcessRole::KernelService ||
-            callerProcess->spawnNameLen != nameLen || memcmp(callerProcess->spawnName, name, nameLen) != 0) {
-            return OpenResult{FileHandle{}, false, VfsError::PermissionDenied};
+        // 스폰된 KernelService 프로세스여야 한다.
+        kernel::SharedPtr<kernel::Task> submitter = task->submitterTask.lock();
+        if (!submitter) {
+            return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::PermissionDenied};
         }
-        return OpenResult{FileHandle{entry->tierBChannelId}, false, VfsError::None};
+        auto* callerThread = static_cast<kernel::UserThread*>(submitter.get());
+        kernel::SharedPtr<kernel::Process> callerProcess = callerThread->process.lock();
+        if (!callerProcess || callerProcess->role != kernel::ProcessRole::KernelService ||
+            callerProcess->spawnNameLen != nameLen || memcmp(callerProcess->spawnName, name, nameLen) != 0) {
+            return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::PermissionDenied};
+        }
+        return kernel::OpenResult{kernel::FileHandle{entry->tierBChannelId}, false, kernel::VfsError::None};
     }
 
-    return OpenResult{FileHandle{}, false, VfsError::NotFound};
+    return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
 }
 
-void LiveFs::close(FileHandle /*handle*/) {
-    // v1: 세 하위 경로 전부 상태 없는 핸들(그 자체가 곧 대상 식별자)이라
-    // LiveFs 자신이 정리할 자원이 없다 - 실제 자원(Channel 등)의 수명은
-    // 그 자원 자신이 관리한다.
-}
-
-ReadResult LiveFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) {
+kernel::ReadResult kLiveFsReadImpl(kernel::FileHandle handle, kernel::uint64_t offset, void* buf,
+                                    kernel::uint32_t len) {
     if (handle.value == kInitrdCpioHandleValue) {
         if (offset >= gLiveFsCpioSize) {
-            return ReadResult{0, VfsError::None};  // EOF
+            return kernel::ReadResult{0, kernel::VfsError::None};  // EOF
         }
-        const uint64_t available = gLiveFsCpioSize - offset;
-        const uint32_t toCopy = static_cast<uint32_t>(available < len ? available : len);
+        const kernel::uint64_t available = gLiveFsCpioSize - offset;
+        const kernel::uint32_t toCopy = static_cast<kernel::uint32_t>(available < len ? available : len);
         memcpy(buf, gLiveFsCpioBuffer + offset, toCopy);
-        return ReadResult{toCopy, VfsError::None};
+        return kernel::ReadResult{toCopy, kernel::VfsError::None};
     }
 
     // named/kernel 핸들은 실제로는 Channel(objectId/channelId)이다 -
@@ -202,7 +209,82 @@ ReadResult LiveFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t 
     // 않다(§9 착수 시 Channel 기반 fd의 read()가 무엇을 뜻하는지부터
     // 재확정 필요, SP-2AAD7C8D §9.1의 KernelDriver 분기 공백 참고) -
     // 지금은 실패로 명확히 응답한다.
-    return ReadResult{0, VfsError::InvalidHandle};
+    return kernel::ReadResult{0, kernel::VfsError::InvalidHandle};
+}
+
+// [v1] initrd.cpio만 크기 조회가 의미 있다(named/kernel 핸들은
+// Channel이라 "파일 크기" 개념 자체가 아직 정의돼 있지 않음 -
+// kLiveFsReadImpl의 같은 주석 참고).
+void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
+    static constexpr char kInitrdCpioPath[] = "initrd.cpio";
+    if (kEqualsExact(args->relPath, args->relPathLen, kInitrdCpioPath, sizeof(kInitrdCpioPath) - 1)) {
+        if (!gLiveFsCpioFound) {
+            args->error = kernel::VfsError::NotFound;
+            return;
+        }
+        args->size = gLiveFsCpioSize;
+        args->isDirectory = false;
+        args->error = kernel::VfsError::None;
+        return;
+    }
+    args->error = kernel::VfsError::InvalidArgument;
+}
+
+}  // namespace
+
+AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
+    const auto op = *static_cast<const KernelFsOpCode*>(argsRaw);
+    switch (op) {
+        case KernelFsOpCode::Open: {
+            auto* args = static_cast<KernelFsOpenArgs*>(argsRaw);
+            args->result = kLiveFsOpenImpl(task, args->relPath, args->relPathLen, args->flags);
+            break;
+        }
+        case KernelFsOpCode::Close: {
+            // v1: 세 하위 경로 전부 상태 없는 핸들(그 자체가 곧 대상
+            // 식별자)이라 LiveFs 자신이 정리할 자원이 없다 - 실제
+            // 자원(Channel 등)의 수명은 그 자원 자신이 관리한다.
+            break;
+        }
+        case KernelFsOpCode::Read: {
+            auto* args = static_cast<KernelFsReadArgs*>(argsRaw);
+            args->result = kLiveFsReadImpl(args->handle, args->offset, args->buf, args->len);
+            break;
+        }
+        case KernelFsOpCode::Write: {
+            // v1 축소 범위 - mount_table.h 문서 주석 참고(LiveFs 전체가
+            // 본질적으로 읽기 전용).
+            auto* args = static_cast<KernelFsWriteArgs*>(argsRaw);
+            args->bytesWritten = 0;
+            args->error = VfsError::PermissionDenied;
+            break;
+        }
+        case KernelFsOpCode::Stat: {
+            kLiveFsStatImpl(static_cast<KernelFsStatArgs*>(argsRaw));
+            break;
+        }
+        case KernelFsOpCode::Mkdir: {
+            static_cast<KernelFsMkdirArgs*>(argsRaw)->error = VfsError::PermissionDenied;
+            break;
+        }
+        case KernelFsOpCode::Rmdir: {
+            static_cast<KernelFsRmdirArgs*>(argsRaw)->error = VfsError::PermissionDenied;
+            break;
+        }
+        case KernelFsOpCode::Unlink: {
+            static_cast<KernelFsUnlinkArgs*>(argsRaw)->error = VfsError::PermissionDenied;
+            break;
+        }
+        case KernelFsOpCode::Readdir: {
+            // v1 미구현 - mount_table.h 문서 주석 참고(디렉터리 엔트리
+            // 나열 ABI 자체가 아직 설계돼 있지 않음).
+            auto* args = static_cast<KernelFsReaddirArgs*>(argsRaw);
+            args->entryCount = 0;
+            args->error = VfsError::InvalidArgument;
+            break;
+        }
+    }
+    co_return;
 }
 
 }  // namespace kernel

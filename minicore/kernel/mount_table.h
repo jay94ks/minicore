@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_MOUNT_TABLE_H
 #define MINICORE_KERNEL_MOUNT_TABLE_H
 
+#include "async_task.h"
 #include "libkenv/types.h"
 
 namespace kernel {
@@ -52,16 +53,136 @@ struct ReadResult {
     VfsError error = VfsError::None;
 };
 
-// KernelDriver 종류 마운트가 구현해야 하는 최소 인터페이스(§2.1) -
-// §3.2 FileSystemDriver(open/close/read)와 같은 모양이지만 block
-// device가 없으므로 mount(BlockDevice*)는 없다.
-class KernelFsDriver {
-public:
-    virtual ~KernelFsDriver() = default;
+// [수정, 2026-09-17, PN-BC04D3DC, SP-7CC5693A §2.1 갱신 - 설계자 지시
+// 2건("해당 드라이버와 쌍을 이루는 구조", "비동기 프레임워크를 기반으로
+// 동작하도록 시그니처 재검토")] `KernelFsDriver`가 평범한 가상함수
+// 인터페이스(open/close/read 직접 호출)에서 `AsyncTaskHandler`를
+// 상속하는 형태로 바뀌었다 - SP-F682B889 §3.1이 확립한 다른 모든
+// syscall 핸들러(Channel/Pnp 등)와 동일한 모양(args 구조체 +
+// onExec/onFailure/onCancel)을 맞춘다. §3.2 FileSystemDriver(open/
+// close/read/write/stat/mkdir/rmdir/unlink/readdir 9개)와 같은
+// 오퍼레이션 집합을 갖되 block device가 없으므로 mount(BlockDevice*)
+// 는 없다.
+enum class KernelFsOpCode : uint32_t {
+    Open,
+    Close,
+    Read,
+    Write,
+    Stat,
+    Mkdir,
+    Rmdir,
+    Unlink,
+    Readdir,
+};
 
-    virtual OpenResult open(const char* relPath, uint32_t relPathLen, uint32_t flags) = 0;
-    virtual void close(FileHandle handle) = 0;
-    virtual ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) = 0;
+// 9개 KernelFsXxxArgs 전부 첫 필드가 `op`로 시작한다 - onExec()가
+// `args`를 이 태그만으로 먼저 읽어(모든 구조체의 첫 멤버이므로 어떤
+// 구체 타입으로 들어와도 안전) 실제 op별 구조체로 재캐스팅해 분기한다.
+struct KernelFsOpenArgs {
+    KernelFsOpCode op = KernelFsOpCode::Open;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    uint32_t flags = 0;
+    // out
+    OpenResult result;
+};
+
+struct KernelFsCloseArgs {
+    KernelFsOpCode op = KernelFsOpCode::Close;
+    FileHandle handle;
+};
+
+struct KernelFsReadArgs {
+    KernelFsOpCode op = KernelFsOpCode::Read;
+    FileHandle handle;
+    uint64_t offset = 0;
+    void* buf = nullptr;
+    uint32_t len = 0;
+    // out
+    ReadResult result;
+};
+
+// [v1 축소 범위] LiveFs(현재 유일한 KernelFsDriver 구현체)의 세
+// 하위 경로(named/initrd.cpio/kernel/<name>)가 전부 본질적으로
+// 읽기 전용 뷰라, write/mkdir/rmdir/unlink는 항상 PermissionDenied를
+// 반환한다(실제 쓰기 가능한 KernelFsDriver 구현체가 생기면 그때
+// 이 가정을 재검토). Readdir은 디렉터리 엔트리 나열 ABI 자체가 아직
+// 이 프로젝트 어디에도 설계돼 있지 않아(SP-2AAD7C8D §9.3 Readdir
+// syscall 미착수) `entryCount`만 두고 실제 나열은 미구현 -
+// InvalidArgument로 응답한다(CLAUDE.md 규칙 4 - 없는 설계를 임의로
+// 채우지 않음).
+struct KernelFsWriteArgs {
+    KernelFsOpCode op = KernelFsOpCode::Write;
+    FileHandle handle;
+    uint64_t offset = 0;
+    const void* buf = nullptr;
+    uint32_t len = 0;
+    // out
+    uint32_t bytesWritten = 0;
+    VfsError error = VfsError::None;
+};
+
+struct KernelFsStatArgs {
+    KernelFsOpCode op = KernelFsOpCode::Stat;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    // out
+    uint64_t size = 0;
+    bool isDirectory = false;
+    VfsError error = VfsError::None;
+};
+
+struct KernelFsMkdirArgs {
+    KernelFsOpCode op = KernelFsOpCode::Mkdir;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    // out
+    VfsError error = VfsError::None;
+};
+
+struct KernelFsRmdirArgs {
+    KernelFsOpCode op = KernelFsOpCode::Rmdir;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    // out
+    VfsError error = VfsError::None;
+};
+
+struct KernelFsUnlinkArgs {
+    KernelFsOpCode op = KernelFsOpCode::Unlink;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    // out
+    VfsError error = VfsError::None;
+};
+
+struct KernelFsReaddirArgs {
+    KernelFsOpCode op = KernelFsOpCode::Readdir;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    // out
+    uint32_t entryCount = 0;  // v1: 항상 0(위 "v1 축소 범위" 참고)
+    VfsError error = VfsError::None;
+};
+
+class KernelFsDriver : public AsyncTaskHandler {
+public:
+    // `MountTable::mountKernel()`이 `AsyncCallbackRegistry::
+    // registerHandler(this)`로 발급받은 코드를 여기 채운다 - 실제
+    // syscall 배선(§9 착수 이후)이 `AsyncTask::submit(subjectCode(),
+    // ...)`로 이 드라이버에 op를 제출하는 데 쓴다. 0도 유효한
+    // subjectCode일 수 있어(가장 먼저 등록되는 핸들러가 받음) 별도
+    // `_registered` 플래그로 "아직 등록 안 됨"을 구분한다.
+    AsyncTaskSubjectCode subjectCode() const { return _subjectCode; }
+    bool hasSubjectCode() const { return _registered; }
+    void setSubjectCode(AsyncTaskSubjectCode code) {
+        _subjectCode = code;
+        _registered = true;
+    }
+
+private:
+    AsyncTaskSubjectCode _subjectCode = 0;
+    bool _registered = false;
 };
 
 struct MountEntry {

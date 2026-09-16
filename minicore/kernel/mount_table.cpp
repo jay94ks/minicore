@@ -150,6 +150,15 @@ bool MountTable::mountKernel(const char* path, uint32_t pathLen, KernelFsDriver*
     slot->kind = MountKind::KernelDriver;
     slot->kernelDriver = driver;
     slot->used = true;
+    // [신규, PN-BC04D3DC] driver가 이미(다른 마운트 경로로) 등록된
+    // 적 있으면 재등록하지 않는다 - AsyncCallbackRegistry::
+    // registerHandler는 매 호출마다 새 subjectCode를 발급하므로,
+    // 같은 드라이버 인스턴스를 두 마운트 경로에 걸면(이론상 가능 -
+    // 지금은 LiveFs 하나뿐이라 실사용 없음) 재호출 시 이전 코드가
+    // 조용히 새는 것을 막는다.
+    if (!driver->hasSubjectCode()) {
+        driver->setSubjectCode(AsyncCallbackRegistry::registerHandler(driver));
+    }
     return true;
 }
 
