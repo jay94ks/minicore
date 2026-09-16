@@ -10,6 +10,23 @@ constexpr uint64_t PAGE_WRITABLE = 1UL << 1;
 constexpr uint64_t PAGE_USER = 1UL << 2;
 constexpr uint64_t PAGE_CACHE_DISABLE = 1UL << 4;  // MMIO(LAPIC 등)는 반드시 이걸 켜야 한다
 
+// [신규, 2026-09-16, SP-6BEAE0C1 §2/§11, PN-543C0CE9 착수 6번째 증분]
+// Copy-on-Write 표시 - x86_64 페이지 테이블 엔트리의 비트 9-11은
+// 하드웨어가 절대 건드리지 않는 "OS 전용" 자리(SDM Vol.3A)라 이 중
+// 하나(비트 9)를 골라 썼다. 이 비트가 세팅된 leaf 엔트리는 항상
+// `PAGE_WRITABLE`이 꺼져 있어야 하고(그래야 실제 쓰기 시도가 #PF를
+// 일으켜 handlePageFault가 가로챌 수 있다), 그 물리 프레임은
+// `PageFrameAllocator::retain()`으로 참조 카운트가 매겨져 있어야
+// 한다(공유 여부를 이 비트 하나로만 표현하고, 실제 "몇 명이
+// 공유하는지"는 참조 카운트가 담당 - 이 비트는 순수하게 "쓰기 폴트가
+// 나면 이건 위반이 아니라 복사해야 할 신호"라는 뜻만 가진다). 이
+// 프로젝트에 아직 이 비트를 실제로 세팅하는 코드(향후 `fork()`,
+// PN-44C91D6E)는 없다 - `Paging::handlePageFault`가 이 비트를 보고
+// 반응하는 인프라만 이번 증분에서 미리 갖춘다(§2 COW 설계 스케치가
+// 요구한 "posix_spawn은 COW를 안 쓰지만 미래 fork()가 쓸 인프라를
+// 지금 준비해 둔다"는 원칙 그대로).
+constexpr uint64_t PAGE_COW = 1UL << 9;
+
 // 커널이 임의 물리 프레임을 한 번에 볼 수 있게 만드는 direct physical
 // map(가상 kDirectMapBase + 물리주소 = 그 물리 프레임)의 시작 주소.
 // 실제 설치된 usable 메모리를 전부 덮도록 1GiB 페이지로 동적으로
@@ -135,9 +152,16 @@ public:
     // #PF(vector 14) 핸들러가 호출한다(idt.cpp). faultAddr는 CR2,
     // errorCode는 하드웨어가 스택에 남긴 값 그대로. 이 폴트를 정말
     // 처리했으면(=매핑을 새로 붙여서 재실행하면 될 상황) true를
-    // 반환한다 - false면 호출부가 평소대로 패닉한다. kLazyZoneBase
-    // 범위 안의 not-present 폴트만 처리한다(권한 위반은 그대로
-    // 패닉시킨다 - 조용히 덮어쓰지 않는다).
+    // 반환한다 - false면 호출부가 평소대로 패닉한다. 두 가지 경우만
+    // 처리한다: (1) kLazyZoneBase 범위 안의 not-present 폴트(기존),
+    // (2) [신규, PN-543C0CE9 착수 6번째 증분] `PAGE_COW`가 세팅된
+    // present 페이지에 대한 쓰기 위반 - 새 물리 프레임을 확보해 내용을
+    // 복사한 뒤 이 주소공간만 그 새 프레임으로 다시 매핑(WRITABLE,
+    // COW 비트 제거)하고, 원래 공유 프레임은 `PageFrameAllocator::
+    // freePage`로 참조 카운트를 하나 줄인다(0이 되지 않는 한 실제
+    // 반납은 안 됨 - retain()/freePage 관례 그대로). 그 외 모든 권한
+    // 위반(COW 아닌 present 페이지에 대한 위반, 쓰기가 아닌 위반 등)은
+    // 조용히 덮어쓰지 않고 그대로 패닉시킨다.
     static bool handlePageFault(uint64_t faultAddr, uint64_t errorCode);
 
     // 지금 실행 중인 CR3(활성 PML4의 물리 프레임 주소) - 새 주소공간을

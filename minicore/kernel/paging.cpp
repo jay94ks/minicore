@@ -1,5 +1,6 @@
 #include "paging.h"
 
+#include "libkenv/mem.h"
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
 
@@ -154,6 +155,62 @@ kernel::uint32_t kPtIndex(kernel::uint64_t virtualAddr) { return (virtualAddr >>
 
 void kInvalidatePage(kernel::uint64_t virtualAddr) {
     asm volatile("invlpg (%0)" : : "r"(virtualAddr) : "memory");
+}
+
+// [신규, 2026-09-16, SP-6BEAE0C1 §2/§11, PN-543C0CE9 착수 6번째 증분]
+// `PAGE_COW` 쓰기 폴트 처리 - 항상 **지금 실행 중인(CR3) 주소공간**
+// 기준으로만 동작한다(#PF는 그 폴트를 일으킨 코드가 실제로 실행되던
+// 바로 그 주소공간에서만 발생하므로, mapPage 등 다른 API처럼 임의
+// pml4Phys를 받을 이유가 없다). faultAddr가 실제로 present+COW+
+// non-writable 4K leaf를 가리킬 때만 true - 그 외(테이블 경로가
+// 끊겨 있음, 2M 대형 페이지 - v1 COW는 4K 리프만 대상, COW 비트
+// 없음)는 false(호출부 handlePageFault가 그대로 패닉시킨다).
+bool kHandleCowWriteFault(kernel::uint64_t faultAddr) {
+    const kernel::uint64_t va = faultAddr & ~(kPageSize4K - 1);
+    const kernel::uint64_t pml4Phys = kCurrentPml4Phys();
+
+    kernel::uint64_t* pml4 = kAsTable(pml4Phys);
+    if (!(pml4[kPml4Index(va)] & kernel::PAGE_PRESENT)) {
+        return false;
+    }
+    kernel::uint64_t* pdpt = kAsTable(pml4[kPml4Index(va)] & kAddrMask);
+    if (!(pdpt[kPdptIndex(va)] & kernel::PAGE_PRESENT)) {
+        return false;
+    }
+    kernel::uint64_t* pd = kAsTable(pdpt[kPdptIndex(va)] & kAddrMask);
+    const kernel::uint64_t pdEntry = pd[kPdIndex(va)];
+    if (!(pdEntry & kernel::PAGE_PRESENT) || (pdEntry & kPageSizeBit)) {
+        return false;  // 없거나 2M 대형 페이지(v1 COW는 4K 리프 전제) - COW 대상 아님
+    }
+    kernel::uint64_t* pt = kAsTable(pdEntry & kAddrMask);
+    const kernel::uint32_t ptIndex = kPtIndex(va);
+    const kernel::uint64_t ptEntry = pt[ptIndex];
+    if (!(ptEntry & kernel::PAGE_PRESENT) || !(ptEntry & kernel::PAGE_COW)) {
+        return false;  // COW로 표시되지 않은 페이지에 대한 진짜 쓰기 권한 위반
+    }
+
+    const kernel::uint64_t oldPhys = ptEntry & kAddrMask;
+    const kernel::uint64_t newPhys = kernel::PageFrameAllocator::allocPage();
+    if (!newPhys) {
+        return false;  // OOM - 매핑해줄 방법이 없으니 그대로 패닉시킨다
+    }
+
+    // 공유돼 있던 원본 내용을 그대로 복사한 뒤(direct map을 거쳐 두
+    // 물리 프레임 모두에 커널이 접근), 새 프레임을 이 주소공간에만
+    // 쓰기 가능(WRITABLE)/COW 아님으로 다시 매핑한다 - 다른 주소공간이
+    // 여전히 원래 oldPhys를 공유하고 있어도 전혀 영향받지 않는다.
+    memcpy(reinterpret_cast<void*>(kernel::kPhysToVirt(newPhys)),
+           reinterpret_cast<void*>(kernel::kPhysToVirt(oldPhys)), kPageSize4K);
+
+    const kernel::uint64_t preservedFlags = (ptEntry & kLeafFlagsMask) & ~kernel::PAGE_WRITABLE;
+    pt[ptIndex] = newPhys | preservedFlags | kernel::PAGE_PRESENT | kernel::PAGE_WRITABLE;
+    kInvalidatePage(va);
+
+    // oldPhys 몫의 공유 참조를 하나 반납한다 - retain()/freePage의
+    // 기존 카운팅 관례 그대로(0이 되지 않는 한 실제 반납 안 됨, 다른
+    // 주소공간이 여전히 이 프레임을 갖고 있으면 그쪽 몫은 그대로 남음).
+    kernel::PageFrameAllocator::freePage(oldPhys);
+    return true;
 }
 
 }  // namespace
@@ -313,8 +370,16 @@ bool Paging::mergeRange(uint64_t virtualAddr, uint64_t sizeBytes, uint64_t pml4P
 
 bool Paging::handlePageFault(uint64_t faultAddr, uint64_t errorCode) {
     constexpr uint64_t kErrorCodePresentBit = 1UL << 0;
+    constexpr uint64_t kErrorCodeWriteBit = 1UL << 1;
     if (errorCode & kErrorCodePresentBit) {
-        return false;  // 이미 매핑된 페이지에 대한 권한 위반 - 조용히 넘기지 않는다
+        // 이미 매핑된 페이지에 대한 위반 - [신규, PN-543C0CE9 착수
+        // 6번째 증분] COW 쓰기 폴트만 예외적으로 처리한다(§2/§11).
+        // 그 외(쓰기가 아닌 위반, COW 아닌 페이지에 대한 위반)는
+        // 조용히 넘기지 않고 그대로 패닉시킨다.
+        if (!(errorCode & kErrorCodeWriteBit)) {
+            return false;
+        }
+        return kHandleCowWriteFault(faultAddr);
     }
     if (faultAddr < kLazyZoneBase || faultAddr >= kLazyZoneBase + kLazyZoneSize) {
         return false;  // 지연 매핑 구역 밖 - 진짜 잘못된 접근
