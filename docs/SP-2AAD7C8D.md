@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: approved
-  updatedAt: 2026-09-16T00:17:20.850Z
+  updatedAt: 2026-09-16T08:32:19.882Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
@@ -304,6 +304,18 @@ struct Vma {
 
 ## 5. mmap/munmap/brk Syscall API
 
+**[구현 완료, 2026-09-16, commit a569f27, RM-48E1E610 17-19]** 아래
+스케치 그대로 `minicore/kernel/address_space.h/.cpp`에 구현됐다 -
+다만 두 가지가 실제 구현에서 달라졌다: (1) 에러 타입은 `ChannelError`
+재사용이 서로 무관한 서브시스템을 섞는 드래프트 단계의 실수로 판단해
+`AddressSpaceError`(`{None, OutOfMemory, InvalidArgument, NotMapped}`)
+를 새로 만들어 썼다, (2) `Scheduler::currentTask()`가 `onExec`
+실행 시점엔 제출자를 가리키지 않는다는 실측 버그(비동기 리액터의
+idle-drain 컨텍스트 문제)를 막기 위해 각 Args 구조체에 `Process*
+process` 필드를 추가해 제출 시점에 캐시해 둔다. `Process::init()`에
+`heapStart`/`heapBrk` 필드(4096B 최소 힙 VMA를 즉시 생성)도 함께
+추가됐다. 자세한 배경은 PN-012E8C1A 참고.
+
 ```cpp
 // 유저 프로세스 → 커널: ProcessAddressSpaceManager(호출자 프로세스 것)를 사용.
 struct MmapArgs {
@@ -386,9 +398,12 @@ ProcessAddressSpaceManager/Vma/VmaBacking, Maple Tree 멀티레벨
 분할/병합)은 PN-012E8C1A(1차 증분) + PN-38D17292(멀티레벨 노드
 분할)로 이미 구현 완료됐다** - 위 선행 조건 전부가 충족된 뒤 실제로
 착수돼 `minicore/kernel/address_space.h/.cpp`에 반영됐다. 이 §7이
-가리키던 "아직 없음" 상태는 더 이상 유효하지 않다 - 남은 건 §5(mmap
-syscall API)/§9(표준 파일 API, MountKind::KernelDriver 분기 필요)
-뿐이다.
+가리키던 "아직 없음" 상태는 더 이상 유효하지 않다.
+
+**[갱신, 2026-09-16]** §5(mmap/munmap/brk syscall API)도
+commit a569f27로 구현 완료됐다(위 §5 참고) - 남은 건 §9(표준 파일
+API, MountKind::KernelDriver 분기 필요)뿐이다. §6 항목 4(파일 백킹
+mmap)도 §9와 같은 전제(fs 서비스)에 묶여 있다.
 
 ## 8. RM-9B8CA541과의 관계
 
