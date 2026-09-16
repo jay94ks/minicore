@@ -1,21 +1,32 @@
-# QEMU gdb stub 연결 스크립트(PN-1E7798AF) - scripts/debug-qemu.sh로
-# 띄운 QEMU(-s -S, TCP 1234)에 붙는다: `gdb -x scripts/kernel.gdb`.
+# gdb 연결 스크립트(SP-DABFCF9F §3.2, PN-1E7798AF) - scripts/
+# run-qemu-gdb.sh 또는 run-grub-gdb.sh로 띄운 QEMU(-s -S, TCP 1234)에
+# 붙는다: 프로젝트 루트에서 `gdb -x scripts/kernel.gdb`.
 #
-# freestanding ELF라 심볼/디버그 정보는 이미 minicore.elf 안에 있다
-# (CMake가 기본으로 -g를 켜지 않으면 스택 트레이스가 부실할 수 있음 -
-# 그런 경우 CMakeLists.txt에 add_compile_options(-g)를 임시로 추가).
-file build/minicore.elf
+# **gdb-multiarch 불필요(2026-09-16 실측 확인, §5-2)** - 이 WSL
+# 환경엔 gdb-multiarch가 설치돼 있지 않지만, 호스트/타겟 아키텍처가
+# 둘 다 x86_64로 같아 평범한 `gdb`(amd64용)가 이 타겟을 이미 기본
+# 지원한다 - gdb-multiarch는 호스트/타겟 아키텍처가 다를 때만
+# 필요하다.
 target remote localhost:1234
+symbol-file build/minicore.elf
+set architecture i386:x86-64
 
-# 지금까지(2026-09-16) 관찰된 크래시 패턴은 전부 panic.cpp의 kPanic
-# 또는 idt.cpp의 파일 로컬 kPanic(InterruptFrame*)로 귀결되는
-# Double Fault류였다(PN-57CF48DB) - 여기서 자동으로 멈춰 그 시점의
-# 진짜 레지스터/스택 상태를 살펴본다. Triple Fault(PN-6049A353처럼
-# kPanic까지 도달하지 못하는 경우)는 이 브레이크포인트로 못 잡는다 -
-# 대신 의심되는 함수(예: kForcedMigrationIsr, kSyncCr3 등)에 직접
-# `break <함수명>`을 걸고 `continue`/`stepi`로 좁혀 나간다.
-break kPanic
+# higher-half 커널이라 심볼 주소 자체가 이미 KERNEL_VMA 기준(linker.ld
+# 참고) - 별도 오프셋 계산 불필요.
+
+# 기본 브레이크포인트 - 부팅 진입점(전체 흐름을 처음부터 보고 싶을 때).
+break kMain
+
+# 크래시 지점(2026-09-16까지 관찰된 패턴은 전부 Double Fault류가
+# 도달하는 kPanic이었다 - PN-57CF48DB) - 필요하면 주석을 풀거나
+# 직접 `break kPanic`을 입력한다.
+# break kPanic
+
+# SMP: `-smp N`으로 띄웠으면 QEMU gdbstub이 vCPU마다 별도 gdb
+# 스레드로 노출한다 - `info threads`로 코어별 스레드 목록을,
+# `thread N`으로 그 코어의 레지스터/스택으로 전환해 확인한다.
 
 echo \n[kernel.gdb] 연결 완료 - 'continue'로 실행을 재개하세요.\n
-echo [kernel.gdb] 특정 함수에서 멈추려면: break <함수명>\n
-echo [kernel.gdb] 낮은 재현율 버그(PN-584DB994 ~4-6%)는 재시작 스크립트와 결합해 반복하세요.\n
+echo [kernel.gdb] 특정 함수에서 멈추려면: break <함수명> (조건부: break <함수명> if <조건>)\n
+echo [kernel.gdb] SMP 코어 전환: info threads / thread N\n
+echo [kernel.gdb] 낮은 재현율 버그(PN-584DB994 ~4-6%)는 §4의 2단계 절차(반복 재현 확인 후 gdb 전환) 참고.\n
