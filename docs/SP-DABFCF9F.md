@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-DABFCF9F
   status: approved
-  updatedAt: 2026-09-16T04:03:19.377Z
+  updatedAt: 2026-09-16T04:15:01.976Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # QEMU gdb stub 기반 커널 디버깅 워크플로 — 설계 제안
@@ -117,21 +117,28 @@ PN-584DB994(~4-6%)처럼 매번 수동으로 붙어 기다리기 비효율적인
    멈추게 하면 반복 실행 중 자연 재현을 기다리며 그 시점을 놓치지
    않을 수 있다.
 
-## 5. 확인 필요 - 구현 착수 시 재검토 (설계 확정 후, 구현 세부)
+## 5. 확인 필요 → [전부 해소, 2026-09-16, PN-1E7798AF 구현/실측 완료]
 
-1. **`-d cpu_reset` 로그가 Triple Fault 시 실제로 무언가 남기는지**
-   실측 확인 - PN-6049A353의 "침묵"이 커널 시리얼 출력만 없었던
-   것인지, QEMU 자체 트레이스도 없었던 것인지 재확인하면 gdb 없이도
-   1차 단서를 얻을 수 있을지 모른다.
-2. WSL 환경에 `gdb-multiarch`(또는 `gdb`의 x86_64 타겟 지원 여부)가
-   실제로 설치돼 있는지 확인 - 없으면 설치 절차를 스크립트/README에
-   추가.
-3. `-S`(정지 시작)가 부팅 극초반(`.boot` 섹션, 페이징 켜지기 전)
-   코드까지 스텝 가능한지, 아니면 higher-half 전환 이후부터 유효한지
-   확인 - boot.S 저지대 코드 디버깅이 필요한 경우(드물 것으로 예상)
-   와 일반적인 커널 코드 디버깅은 요구사항이 다를 수 있음.
+1. **`-d cpu_reset` 로그, Triple Fault 시에도 남는다 확인됨** -
+   PN-6049A353의 실제 재현 로그에서 `CPU Reset (CPU N)` 항목 14건
+   확인 - 게다가 요청한 core 0/1뿐 아니라 core 2/3까지 반복 리셋된
+   흔적이 있어, 그 버그가 국소적이 아니라 전역 공유 상태 손상일
+   가능성이라는 새 단서로 PN-6049A353에 반영됨.
+2. **`gdb-multiarch` 불필요로 확정** - WSL에 설치돼 있지 않았지만,
+   호스트/타겟이 둘 다 x86_64라 평범한 `gdb`로 `target remote`/
+   브레이크포인트/`detach`까지 전부 정상 동작 확인 - `scripts/
+   kernel.gdb`는 plain `gdb` 전제로 확정.
+3. **`-S`가 리셋 벡터(`0xfff0`)에서 실제로 정지함을 확인** - `.boot`
+   저지대 코드(higher-half 전환/페이징 이전)부터 부팅 전체를 처음부터
+   단일 스텝 가능.
+
+구현/실측(commit cc01edb/96b1d13) - `scripts/run-qemu-gdb.sh`/
+`run-grub-gdb.sh`(`MINICORE_QEMU_SMP`/`MINICORE_QEMU_INITRD` 환경변수화)
++ `scripts/kernel.gdb`(`break kMain`/`break kPanic` 둘 다 정확한 소스
+위치로 resolve 확인) + 최상위 `CMakeLists.txt`에 전역 `-g`(DWARF, 런타임
+동작 무변화, QEMU 4개 표준 시나리오 회귀 없음 확인) 추가. 자세한 내용은
+PN-1E7798AF(completed) 참고.
 
 ## 착수 조건
 
-없음 - 이 문서 자체가 설계 산출물, 기존 스크립트 패턴을 그대로
-재사용하는 낮은 위험의 도구 작업이라 즉시 착수 가능.
+없음 - 설계/구현/실측 전부 완료(PN-1E7798AF).
