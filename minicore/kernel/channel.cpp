@@ -256,6 +256,34 @@ SharedPtr<BridgePipe> kResolveOwnedBridge(AsyncTask* task, BridgeHandle handle) 
     return slot->value;
 }
 
+// [신규, 2026-09-17, PN-B552E75F] `ChannelReadArgs::buffer`/
+// `ChannelWriteArgs::data`(유저 포인터)를 역참조하기 전에 호출자
+// 자신의 유저 주소공간에 실제로 속하는지 검증한다(SP-6BEAE0C1 §3이
+// 도입한 `Paging::isUserRangeValid()`의 첫 소급 적용 - 이전까지
+// Channel Read/Write 핸들러는 이 검증이 전혀 없었다, 임의 커널
+// 메모리 읽기/쓰기로 이어질 수 있는 보안 공백).
+//
+// **주의(일반 기본 인자를 안 쓰는 이유)**: `isUserRangeValid()`의
+// 기본 `pml4Phys=0`은 "현재 CR3"를 뜻하는데, 그 문서 주석은 "syscall
+// 핸들러가 항상 제출자 자신의 컨텍스트에서 실행된다"고 가정한다 -
+// 그런데 `onExec()`은 `AsyncReactor`가 나중에(리액터 자신의 스택 위,
+// `Scheduler::runLoop()`의 idle 경로에서) 실행하므로 그 순간의 CR3가
+// 반드시 이 syscall을 제출한 UserThread의 것이라는 보장이 없다
+// (`task.h`의 `Task::userPml4Phys` 문서 주석 - "runLoop()의 idle
+// 컨텍스트에서는 CR3 재동기화를 하지 않는다" - PN-DB5153B6/
+// PN-9CC66142가 이미 다룬 것과 정확히 같은 문제 클래스). 그래서
+// 기본값을 믿지 않고 `submitterTask.lock()` 체이닝으로 얻은 실제
+// UserThread의 `userPml4Phys`를 명시적으로 넘긴다 - 제출자를 못
+// 찾으면(이미 죽었거나 Process 없는 호출자) 안전한 쪽으로 실패.
+bool kValidateUserBuffer(AsyncTask* task, const void* ptr, uint64_t length) {
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    if (!submitter) {
+        return false;
+    }
+    auto* thread = static_cast<UserThread*>(submitter.get());
+    return Paging::isUserRangeValid(reinterpret_cast<uint64_t>(ptr), length, thread->userPml4Phys);
+}
+
 class OpenChannelHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
@@ -444,6 +472,12 @@ public:
             args->error = ChannelError::BrokenPipe;  // 상대가 이미 반납됨(프로세스 종료 등) - closedLocal 여부와 무관하게 broken
             co_return;
         }
+        // [신규, 2026-09-17, PN-B552E75F] 실제로 버퍼에 쓰기 전에 그
+        // 포인터가 호출자 자신의 유저 주소공간에 속하는지 검증.
+        if (!kValidateUserBuffer(task, args->buffer, args->maxLength)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
         RingBuffer& ring = peer->outbound;  // 내가 읽는 대상 = 상대가 쓰는 곳
 
         for (;;) {
@@ -496,6 +530,13 @@ public:
         SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
         if (!bridge) {
             args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        // [신규, 2026-09-17, PN-B552E75F] 실제로 버퍼를 읽기 전에 그
+        // 포인터가 호출자 자신의 유저 주소공간에 속하는지 검증
+        // (ChannelReadHandler와 동일한 이유, 위 kValidateUserBuffer 참고).
+        if (!kValidateUserBuffer(task, args->data, args->length)) {
+            args->error = ChannelError::InvalidPointer;
             co_return;
         }
         RingBuffer& ring = bridge->outbound;  // 내가 쓰는 대상 = 상대가 읽는 곳

@@ -38,6 +38,7 @@ enum class ChannelError : uint32_t {
     ResourceExhausted,     // Slab/페이지 고갈
     HugePageUnsupported,   // 더 이상 이 경로에서 반환되지 않음(PN-34B34DB4) - API 호환을 위해 값만 유지
     BrokenPipe,            // 이 반쪽 또는 상대가 이미 닫힌 상태에서 read/write 시도
+    InvalidPointer,        // [신규, PN-B552E75F] buffer/data가 호출자 자신의 유저 주소공간에 속하지 않음(Paging::isUserRangeValid 실패)
 };
 
 // 링버퍼 크기 정책(설계 문서 "링버퍼 크기 정책") - 호출부는 정확한
