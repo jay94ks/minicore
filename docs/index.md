@@ -22,7 +22,7 @@
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
-| [DS-D4E5C451](./DS-D4E5C451.md) | Minicore 초기 설계 결정 확정 (빌드/부팅/커널서비스/라이선스) | review | 2026-09-15T16:02:49.455Z |
+| [DS-D4E5C451](./DS-D4E5C451.md) | Minicore 초기 설계 결정 확정 (빌드/부팅/커널서비스/라이선스) | review | 2026-09-16T15:44:45.478Z |
 | [PL-16E2CDA4](./PL-16E2CDA4.md) | Slab 할당자(libkmm) 구현 | archived | 2026-09-15T05:53:27.054Z |
 | [PL-1E247831](./PL-1E247831.md) | 비동기 프레임워크(AsyncTask) 구현 | approved | 2026-09-14T11:37:59.139Z |
 | [PL-2070E6EF](./PL-2070E6EF.md) | MSI/MSI-X 인터럽트 지원 | archived | 2026-09-15T05:53:21.418Z |
@@ -40,8 +40,8 @@
 | [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-16T00:03:46.677Z |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-15T17:44:39.178Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-16T13:53:07.262Z |
-| [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-16T06:12:06.977Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-16T15:13:33.033Z |
+| [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-16T15:40:32.171Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-16T16:16:18.686Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-16T14:01:54.423Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-15T19:29:32.611Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
@@ -50,8 +50,9 @@
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-16T00:01:24.894Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-16T00:04:06.361Z |
+| [SP-1DB13F61](./SP-1DB13F61.md) | 가상 함수(vtable) 타입의 슬랩 할당 초기화 관례 - placement new 예외 설계 제안 | review | 2026-09-16T16:14:57.741Z |
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-15T18:09:07.248Z |
-| [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:05:43.169Z |
+| [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-16T07:36:40.243Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-16T03:13:54.308Z |
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved | 2026-09-16T14:29:59.188Z |
