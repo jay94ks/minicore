@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-6BEAE0C1
   status: approved
-  updatedAt: 2026-09-16T12:24:33.039Z
+  updatedAt: 2026-09-16T12:30:37.600Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -216,11 +216,20 @@ QU-52253384 답변이 큰 방향(§2/§3/§6)은 확정했지만, 실제 구현�
    설계자 답변("아니야 그냥 일반 syscall로 해도 되겠네")으로 별도
    준비 syscall/핸들 없이 `SpawnProcess` 단일 syscall로 확정 -
    RM-48E1E610 번호도 기존 예약(59)만으로 충분, 추가 예약 불필요.
-3. **COW 참조 카운트 배치**(§2) - `PageFrameAllocator`가 프레임 단위
-   참조 카운트를 이미 갖고 있는지 실측 확인이 아직 안 됐다(이
-   문서 작성 시점 기준) - 없다면 새로 추가해야 하는데, 그 카운트를
-   프레임 메타데이터 어디에 둘지(별도 배열? 프레임 헤더?)는 실측
-   후 정한다.
+3. **[실측 완료, 2026-09-16] COW 참조 카운트 배치**(§2) -
+   `page_frame_allocator.cpp` 전수 확인 결과 **프레임 단위 메타데이터
+   자체가 지금 전혀 없다** - 이 buddy 할당자는 각 노드가 `freeListHeads
+   [kMaxOrder+1]`(물리주소 기반 intrusive free list)만 갖고, "할당된"
+   프레임에는 아무 사이드밴드 정보도 없다(free 상태일 때만 그 페이지
+   자신의 메모리에 임시로 `FreeBlock::next`를 써 두는 것뿐 - 할당되면
+   그 공간은 온전히 호출자 것). 이 할당자는 이미 "커널이 정적으로
+   identity map해 둔 저지대 물리 메모리(1GiB)" 범위로만 관리 범위를
+   제한해 뒀으므로(page_frame_allocator.h 문서 주석), 그 기존 상한을
+   그대로 재사용해 **1GiB/4KiB = 262144 프레임 고정 크기의 별도
+   참조 카운트 배열**(`uint16_t refCount[262144]`류, 전역 정적 배열 -
+   프레임 번호 = physAddr >> 12)을 새로 추가하는 것으로 충분해
+   보인다 - 이미 이 할당자 자신이 확정해 둔 스코프 제약을 그대로
+   따르는 것이라 별도 확인 없이 착수 시 그대로 구현한다.
 4. **`wait()` syscall ABI** - 반환값(exit code만? 종료 사유
    포함?), 여러 자식 중 아무나 기다리는 것도 지원할지(`waitpid(-1,
    ...)` 같은 것) - 순수 구현 세부, 착수하며 정한다.
