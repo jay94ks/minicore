@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T19:59:14.649Z
+  updatedAt: 2026-09-16T20:13:23.191Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -71,9 +71,12 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   (Push/Pull 소비 로직, PN-A74871F2에 plan_depend)로 별도 추적.
 - **부수 정정**: `DC-8EA1E7F6`(archived)의 "전부 반영·검증 끝났다"
   단언에 정정 각주 추가. `RM-32D06563`에 `Task::numaNode` 용어 등록.
-- **현재 상태(2026-09-17)**: PN-A74871F2/PN-9DDFB774 둘 다 아직
-  minicore-88 착수 전(scheduled) - 완료되면 이 절을 "완전 해소"로
-  갱신.
+- **[완전 해소, 2026-09-17, minicore-88 세션]** PN-A74871F2
+  완료(commit 7347c47) - `Task::numaNode` 필드 반영 및 QEMU 단일/
+  2노드 토폴로지 검증 완료(단, 부팅 시점 Task가 전부 BSP에서
+  생성돼 `numaNode!=0` 실제 경로는 아직 미실측 - PN-A74871F2 본문
+  참고). PN-9DDFB774(Push/Pull 소비 로직)는 이제 착수 조건이
+  풀려 `scheduled` 상태로 착수 가능.
 
 ### 1-B. `SP-1FBC0EEB` Channel IPC `onCancel` 미구현 - 댕글링 포인터
 위험 (코드 갭, **미착수 - 가장 심각한 발견**)
@@ -175,6 +178,25 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   이 아니므로 구분 - 이런 항목은 그냥 기존 PN 추적에 맡기고 이
   문서에는 안 옮긴다(점검은 했으나 §1 대상 아님, §2에도 안 옮기고
   여기 기록만 남김).
+- **`SP-F682B889`(AsyncTask 프레임워크) §3/§7/§8/§9**: 이 문서는 이미
+  스스로 대량의 "확정/정정" 각주를 누적해 온 문서라(§3.4가 리액터를
+  전용 Task→인라인 idle 경로로, §7.3이 재개 드라이버를
+  reactorTaskEntry→drainOnce로 뒤집는 등) 특히 위험 지대일 수 있다고
+  보고 실제 `async_task.cpp`와 대조 - **최신 확정 구조
+  (homeCoreIndex/allowCoreMigration, coroHandle을 drainOnce()가
+  resume, 별도 reactorTaskEntry 없음)가 코드에 정확히 반영돼 있음을
+  grep으로 확인**(2026-09-17). §8.6/§9.5의 "아직 열려 있는 하위
+  과제"들은 전부 PL-1E247831/PN-C62F7908 구현 시점으로 명시적으로
+  미뤄진 항목(RM-23F4B687 §4 정당한 유예 패턴)이라 숨은 갭 아님 -
+  갭 없음.
+- **`SP-677210E6`(TSS/IST) "이번 범위에 포함하지 않은 것"**: 4개
+  항목(RSP0/IST5-7/NMI·MC·DB 실처리/#DF 레지스터 복구) 전부 각자
+  PN 계획(PN-124C105B completed, PN-5377545F, PN-F443FE73 completed,
+  PN-AD3B2D5B)으로 명시적으로 openly 추적 중 - 숨은 갭 아니다.
+  PN-F443FE73을 실제로 열어 확인한 결과 NMI/#MC/#DB 커널 라우팅과
+  QEMU 실측까지 전부 완료, 그 안에서 파생된 "#DB 유저 syscall
+  범위" 후속 질의(QU-3DB5F85C)도 빠짐없이 SP-9A6D579F/PN-87D6B615로
+  분리 등록돼 이미 이 감사 문서 §3에서 추적 중임을 재확인 - 갭 없음.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
@@ -184,14 +206,16 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 
 - [ ] `SP-9A6D579F`(DebugSession) - PN-87D6B615 여전히 착수 전(다른
   버그 대응 중) - 착수 후 재확인.
-- [ ] `SP-F682B889`(AsyncTask 프레임워크) - §3 전체 API 목록 vs
-  실제 구현 대조 안 해봄(부분적으로만 확인됨 - AsyncTaskCompletion/
-  AsyncReactor 정도).
-- [ ] `SP-677210E6`(TSS/IST) - PCB 급은 아니지만 "이번 범위에
-  포함하지 않은 것" 절이 실제로 방치돼 있는지 재확인.
 - [ ] `SP-B1E258D8`(RCU) - `rejected`(도입 시점 보류)라 코드 갭
   대상 아님, 재개 조건(커널단 v1 완료)이 실제로 도래했는지만 주기적
   확인.
+- [ ] (신규, 2026-09-17) `PN-C4611402`(Channel onCancel 댕글링
+  포인터, §1-B) 완료되면 그 구현이 `SP-1FBC0EEB`의 "정리 불필요"
+  서술 재검토까지 실제로 반영했는지 재확인.
+- [ ] (신규, 2026-09-17) `PN-2008220B`(coroHandle.resume() CR3
+  미동기화, RM-23F4B687에 원칙으로도 기록) 해소되면 그 수정이
+  `SP-F682B889` §7.3(코루틴 재개 경로) 서술과 여전히 일치하는지
+  재확인.
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을
 미리 체크리스트에 못박아 둔 것)
