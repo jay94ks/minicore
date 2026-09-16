@@ -297,6 +297,11 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
+    // [검토 완료, PN-C4611402] 이 onExec은 co_await/yield 지점이 전혀
+    // 없어 항상 한 번에 끝까지 실행된다 - 그래서 취소는 오직 "이
+    // AsyncTask가 리액터에서 한 번도 실행되기 전"에만 일어날 수 있고,
+    // 그 시점엔 Channel이 아직 만들어지지도 않았다(onExec 안에서 처음
+    // 만들어짐) - 정리할 자원이 없다. no-op 유지가 맞음.
     void onCancel(AsyncTask*, void*) override {}
 };
 
@@ -358,7 +363,42 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
-    void onCancel(AsyncTask*, void*) override {}
+    // [구현, PN-C4611402] SP-1FBC0EEB가 명시한 "connectChannel 취소:
+    // 그 Channel의 대기열에서 자신의 PendingConnectRequest를 제거"를
+    // 실제로 수행한다 - 이전엔 no-op이라 `&req`(취소되면 코루틴 스택과
+    // 함께 곧 반납될 지역 변수)가 channel->pendingConnects에 댕글링
+    // 포인터로 남아, 다음 acceptFromChannel의 popPendingConnect()가
+    // 그걸 꺼내 역참조하면 UAF였다. onExec과 동일한 방법으로 Channel을
+    // 재조회한다(target 우선, 없으면 name) - args는 onExec에 넘겼던
+    // 바로 그 포인터라 여기서도 안전하게 다시 읽을 수 있다(onCancel도
+    // onExec/onFailure와 동일하게 args에 접근 가능 - async_task.h
+    // AsyncTaskHandler::onCancel 문서 참고).
+    void onCancel(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ConnectChannelArgs*>(argsRaw);
+        Channel* channel = nullptr;
+        if (args->target != 0) {
+            channel = reinterpret_cast<Channel*>(args->target);
+        } else if (args->nameLength > 0) {
+            NamedObjectKind kind{};
+            uint64_t objectId = 0;
+            if (NamedObjectTable::resolve(args->name, args->nameLength, &kind, &objectId) &&
+                kind == NamedObjectKind::Channel) {
+                channel = reinterpret_cast<Channel*>(objectId);
+            }
+        }
+        if (!channel) {
+            // 이름이 이미 해제됐다(=destroyChannel이 먼저 실행돼 이름
+            // 해제까지 끝났다는 뜻 - 그 경로가 pendingConnects 전체를
+            // 이미 비우고 깨웠으므로 더 할 일 없음) 또는 target==0인
+            // 채로 취소된 경우.
+            return;
+        }
+        SpinlockGuard guard(channel->lock);
+        if (channel->destroyed) {
+            return;  // destroyChannel이 이미 pendingConnects 전체를 비우고 깨웠음
+        }
+        channel->removePendingConnect(task);
+    }
 };
 
 class AcceptFromChannelHandler : public AsyncTaskHandler {
@@ -452,7 +492,25 @@ public:
         }
     }
     void onFailure(AsyncTask*) override {}
-    void onCancel(AsyncTask*, void*) override {}
+    // [정정, PN-C4611402] SP-1FBC0EEB의 "acceptFromChannel 취소: 별도
+    // 정리 없음(대기열은 그대로)"는 실제 자료구조와 맞지 않았다 - 이
+    // 큐(channel->pendingAccepters)에 매다는 건 다른 무언가가 아니라
+    // **취소되면 곧 반납될 이 AsyncTask 자기 자신**이다. no-op이면
+    // 반납된 AsyncTask가 댕글링 포인터로 남아, 나중에 connectChannel이
+    // popFront()로 그걸 꺼내 AsyncReactor::submitCompletion()에
+    // 넘기면 UAF다(SP-1FBC0EEB §"취소/실패 처리"에 정정 각주 추가함).
+    void onCancel(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<AcceptFromChannelArgs*>(argsRaw);
+        auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
+        if (!channel) {
+            return;
+        }
+        SpinlockGuard guard(channel->lock);
+        if (channel->destroyed) {
+            return;  // destroyChannel이 이미 pendingAccepters 전체를 비우고 깨웠음
+        }
+        channel->pendingAccepters.remove(task);
+    }
 };
 
 class ChannelReadHandler : public AsyncTaskHandler {
@@ -518,7 +576,26 @@ public:
         }
     }
     void onFailure(AsyncTask*) override {}
-    void onCancel(AsyncTask*, void*) override {}
+    // [구현, PN-C4611402] SP-1FBC0EEB는 read/write 취소 시 "이미 만들어진
+    // BridgePipe는 그대로 유지"만 명시했지만, 실제 코드는 대기 중일 때
+    // 이 AsyncTask 자신을 `ring.pendingReaders`에 매달아 둔다 -
+    // pendingAccepters와 완전히 같은 모양의 댕글링 포인터 위험(취소되면
+    // 곧 반납될 이 task가 그 큐에 남아, 나중에 write()가 popFront()로
+    // 꺼내 깨우면 UAF). BridgePipe 자체의 수명(Process::openBridges가
+    // 강한 소유)과는 별개의 문제라 이 정리도 별도로 필요하다.
+    void onCancel(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ChannelReadArgs*>(argsRaw);
+        SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
+        if (!bridge) {
+            return;
+        }
+        SharedPtr<BridgePipe> peer = bridge->peer.lock();
+        if (!peer) {
+            return;
+        }
+        SpinlockGuard guard(peer->outbound.lock);
+        peer->outbound.pendingReaders.remove(task);
+    }
 };
 
 class ChannelWriteHandler : public AsyncTaskHandler {
@@ -578,7 +655,18 @@ public:
         }
     }
     void onFailure(AsyncTask*) override {}
-    void onCancel(AsyncTask*, void*) override {}
+    // [구현, PN-C4611402] ChannelReadHandler::onCancel과 대칭 - 대기
+    // 중이던 이 task를 `bridge->outbound.pendingWriters`에서 제거한다
+    // (같은 댕글링 포인터 위험, 위 ChannelReadHandler 주석 참고).
+    void onCancel(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ChannelWriteArgs*>(argsRaw);
+        SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
+        if (!bridge) {
+            return;
+        }
+        SpinlockGuard guard(bridge->outbound.lock);
+        bridge->outbound.pendingWriters.remove(task);
+    }
 };
 
 class CloseBridgeHandler : public AsyncTaskHandler {
@@ -624,6 +712,10 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
+    // [검토 완료, PN-C4611402] OpenChannelHandler와 동일한 이유 - 이
+    // onExec도 co_await/yield 없이 한 번에 끝까지 실행되므로 취소는
+    // "실행되기 전"에만 가능하고, 그 시점엔 closedLocal도 안 세워졌고
+    // openBridges에서도 안 빠졌다 - 정리할 자원이 없다. no-op 유지.
     void onCancel(AsyncTask*, void*) override {}
 };
 
@@ -674,6 +766,10 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
+    // [검토 완료, PN-C4611402] 위 CloseBridgeHandler/OpenChannelHandler와
+    // 동일한 이유 - co_await/yield 없이 한 번에 끝까지 실행되므로
+    // 취소는 실행 전에만 가능하고 그 시점엔 아무 자원도 안 건드렸다.
+    // no-op 유지.
     void onCancel(AsyncTask*, void*) override {}
 };
 

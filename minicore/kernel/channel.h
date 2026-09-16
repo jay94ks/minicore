@@ -105,6 +105,31 @@ struct AsyncTaskWaitQueue {
         }
         return task;
     }
+
+    // [신규, PN-C4611402] 취소(onCancel) 전용 - FIFO 순서를 지키는
+    // pushBack/popFront와 달리 임의 위치의 항목 하나를 제거해야 한다
+    // (그 AsyncTask 자신이 곧 반납될 예정이라 이 큐에 댕글링 포인터로
+    // 남으면 안 됨). 선형 탐색 - 이 큐들의 길이가 짧다는 다른
+    // AsyncTaskWaitQueue 소비자와 동일한 전제. target이 큐에 없으면
+    // (이미 정상적으로 popFront된 뒤였거나 애초에 안 들어간 경우)
+    // 아무 일도 하지 않는다.
+    void remove(AsyncTask* target) {
+        AsyncTask* prev = nullptr;
+        for (AsyncTask* cur = head; cur; prev = cur, cur = cur->next.load()) {
+            if (cur == target) {
+                AsyncTask* nextNode = cur->next.load();
+                if (prev) {
+                    prev->next.store(nextNode);
+                } else {
+                    head = nextNode;
+                }
+                if (cur == tail) {
+                    tail = prev;
+                }
+                return;
+            }
+        }
+    }
 };
 
 // 코어당이 아니라 채널 전역 - connectChannel이 채워 넣고
@@ -297,6 +322,30 @@ public:
             }
         }
         return req;
+    }
+
+    // [신규, PN-C4611402] ConnectChannelHandler::onCancel 전용 - 취소된
+    // connectChannel의 `PendingConnectRequest`(그 코루틴 자신의 스택
+    // 위 지역 변수라 곧 반납될 예정)를 이 큐에서 찾아 제거한다. 그
+    // 요청 자체가 아니라 그것을 제출한 `task`로 찾는다(onCancel은
+    // `&req` 주소를 모른다 - AsyncTaskHandler 계약이 `AsyncTask*`/
+    // `void* args`만 넘겨준다). 못 찾으면(이미 popPendingConnect됐거나
+    // destroyChannel이 먼저 비웠음) 아무 일도 하지 않는다.
+    void removePendingConnect(AsyncTask* task) {
+        PendingConnectRequest* prev = nullptr;
+        for (PendingConnectRequest* cur = pendingHead; cur; prev = cur, cur = cur->next) {
+            if (cur->task == task) {
+                if (prev) {
+                    prev->next = cur->next;
+                } else {
+                    pendingHead = cur->next;
+                }
+                if (cur == pendingTail) {
+                    pendingTail = prev;
+                }
+                return;
+            }
+        }
     }
 
     // 부팅 시 한 번 호출 - 아래 7개 endpoint 전부를 SyscallRegistry에
