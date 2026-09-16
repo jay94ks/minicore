@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-1FBC0EEB
   status: approved
-  updatedAt: 2026-09-15T18:09:07.248Z
+  updatedAt: 2026-09-16T21:15:46.480Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -297,6 +297,23 @@ struct BridgePipe {
   `acceptFromChannel` 호출이 여전히 유효).
 - `read`/`write` 취소: 이미 만들어진 `BridgePipe`는 그대로 유지(다른
   스레드가 같은 핸들로 계속 쓸 수 있음).
+
+> **[정정, 2026-09-17, PN-C4611402]** 위 "acceptFromChannel 취소:
+> 별도 정리 없음" 전제는 실제 자료구조와 맞지 않았다 - 대기 큐
+> (`channel->pendingAccepters`)에 매달아 두는 건 다른 무언가가 아니라
+> **취소되면 곧 반납될 이 AsyncTask 자기 자신**이다(코드 확인,
+> channel.cpp). 정리하지 않으면 반납된 AsyncTask가 그 큐에 댕글링
+> 포인터로 남아, 다음 `connectChannel`이 그걸 꺼내 깨우려 하면
+> use-after-free다 - 실제로는 `connectChannel`과 동일하게 **자기
+> 자신을 대기열에서 제거하는 정리가 필요하다**(구현 완료,
+> `AcceptFromChannelHandler::onCancel`). 위 "`read`/`write` 취소:
+> `BridgePipe`는 그대로 유지" 자체는 맞지만, 이 문서가 언급하지 않은
+> 별개의 정리가 하나 더 필요했다 - 대기 중이던 이 task를 그
+> `RingBuffer::pendingReaders`/`pendingWriters`에서도 제거해야 한다
+> (`BridgePipe` 객체의 수명과는 무관한, `pendingAccepters`와 같은
+> 모양의 댕글링 포인터 문제 - 구현 완료, `ChannelReadHandler`/
+> `ChannelWriteHandler::onCancel`). `connectChannel` 절 자체는 원문
+> 그대로 정확했다.
 
 ## 참고
 
