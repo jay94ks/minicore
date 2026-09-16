@@ -212,6 +212,84 @@ AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCo
     return task;
 }
 
+namespace {
+
+bool kIsAsyncTaskTerminal(AsyncTaskState state) {
+    return state == AsyncTaskState::Completed || state == AsyncTaskState::Failed ||
+           state == AsyncTaskState::Cancelled;
+}
+
+}  // namespace
+
+void AsyncTaskGroup::add(AsyncTask* task) {
+    _tasks.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+    _tasks.insert(task);
+}
+
+uint32_t AsyncTaskGroup::pendingCount() {
+    uint32_t pending = 0;
+    // forEach 도중 erase()는 안전하다 - 그 슬롯의 used를 false로
+    // 내릴 뿐 순회 중인 청크/인덱스 구조 자체는 바뀌지 않는다.
+    _tasks.forEach([&](AsyncTask*& task, ChunkedList<AsyncTask*, kChunkCapacity>::Slot* slot) {
+        if (kIsAsyncTaskTerminal(task->state)) {
+            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
+            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+            _tasks.erase(slot);
+        } else {
+            ++pending;
+        }
+    });
+    return pending;
+}
+
+void AsyncTaskWaitGroup::waitAll() {
+    // **실측으로 발견한 버그(2026-09-16) 수정**: Scheduler::yieldCurrent()
+    // 만으로는 리액터가 절대 실행될 기회를 못 얻는다 - runLoop()은
+    // pickNext()가 뭔가를 찾는 한(이 호출 자신이 yieldCurrent()로 막
+    // 다시 큐에 넣은 그 Task 자신을 즉시 재선택하는 경우 포함) 리액터
+    // 드레인(idle 분기)으로 절대 안 넘어간다 - 이 Task가 유일한 Ready
+    // Task이면 yieldCurrent()가 자기 자신에게 즉시 되돌아오는 무한
+    // 루프가 된다(다른 Ready Task가 있을 때만 우연히 그 사이 idle이
+    // 낄 여지가 생긴다 - 신뢰할 수 없는 전제). §4 (C) 경로가 이미
+    // 증명한 대로 drainOnce()는 idle 컨텍스트 전용이 아니라 어떤
+    // 실행 흐름에서 불러도 안전하므로, 직접 능동적으로 드레인을
+    // 시도하고 - 정말 할 일이 없을 때만(false) yieldCurrent()로 다른
+    // Task에게 양보한다.
+    const uint32_t coreIndex = Scheduler::currentCoreIndex();
+    while (_group.pendingCount() > 0) {
+        if (!AsyncReactor::drainOnce(coreIndex)) {
+            Scheduler::yieldCurrent();
+        }
+    }
+}
+
+void AsyncTaskAwaiter::await() {
+    // **실측으로 발견한 버그(2026-09-16) 수정**: AsyncTask::yield()는
+    // 그저 리액터 쪽으로 제어를 돌려줄 뿐, 그 뒤 아무도 다시 이
+    // AsyncTask를 실행 큐에 넣어 주지 않는 한(예: Channel 핸드셰이크
+    // 처럼 상대편이 명시적으로 submitCompletion() 해 주는 협조적
+    // 관계) 영원히 Suspended 상태로 멈춰 있는다 - onCancel/유저
+    // 소유자 종료와 무관한 "임의의 관계없는 AsyncTask 하나를 그냥
+    // 기다리는" 이 범용 Awaiter에는 그런 협조자가 없어, §3.3 원안
+    // 그대로("yield 반복") 구현하면 첫 yield() 이후 영원히 멈춘다
+    // (실측 확인). 그래서 매번 양보하기 직전 스스로를 다시 제출해
+    // (drainOnce()가 이미 지원하는 "Suspended면 Running으로 되돌려
+    // 재개" 경로를 그대로 재사용) 다음 드레인 차례에 반드시 다시
+    // 뽑히도록 만든다 - AsyncTask 구조체에 새 필드를 추가하지 않고도
+    // (QU-86DD998F 답변 그대로) 이 AsyncTask 자신의 기존 재개
+    // 메커니즘만으로 해결된다.
+    const uint32_t coreIndex = Scheduler::currentCoreIndex();
+    while (!kIsAsyncTaskTerminal(_target->state)) {
+        AsyncTask* self = gCurrentAsyncTask[coreIndex];
+        if (self) {
+            AsyncReactor::submitCompletion(self);
+        }
+        AsyncTask::yield();
+    }
+    GenericSlabAllocator::free(reinterpret_cast<void*>(_target->stackBase), kAsyncTaskStackSize);
+    GenericSlabAllocator::free(_target, sizeof(AsyncTask));
+}
+
 AsyncTaskSubjectCode AsyncCallbackRegistry::registerHandler(AsyncTaskHandler* handler) {
     SpinlockGuard guard(gRegistryLock);
     if (gNextSubjectCode >= kMaxHandlers) {

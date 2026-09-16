@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_ASYNC_TASK_H
 #define MINICORE_KERNEL_ASYNC_TASK_H
 
+#include "libkenv/chunked_list.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 
@@ -109,6 +110,69 @@ class AsyncCallbackRegistry {
 public:
     static AsyncTaskSubjectCode registerHandler(AsyncTaskHandler* handler);
     static AsyncTaskHandler* resolve(AsyncTaskSubjectCode subjectCode);
+};
+
+// SP-F682B889 §3.3(QU-86DD998F 설계자 답변, 2026-09-16) - "AsyncTaskGroup은
+// AsyncTask를 확장하는 무언가가 아니라 그 작업들을 대기하는 곳에서
+// 모아놓고 관리하는 유틸리티야. 얘는 AsyncTask를 weak ref로 들고
+// 있으면 돼." `AsyncTask` 구조체 자체는 전혀 건드리지 않는다 - 이
+// 그룹이 담는 포인터는 소유권이 없는 약한 참조라, 각 멤버는 반드시
+// **`autoFree=false`로 제출**돼야 한다(`Syscall::submit()`이
+// `AsyncTask::submit(..., autoFree=false)`로 자기 소비를 예약하는
+// 것과 동일한 관례 - 소유권/수명 관리는 여전히 제출자 쪽에 있고,
+// 이 그룹은 그 수명 위에 얹혀 상태만 들여다본다). 완료 여부를 알려줄
+// 콜백/필드가 없으므로(그런 훅을 AsyncTask에 추가하지 않기로 확정
+// 됐으므로) 폴링으로 확인한다.
+class AsyncTaskGroup {
+public:
+    // task는 autoFree=false로 제출된 것이어야 한다(위 클래스 문서
+    // 참고) - 이 그룹이 나중에 pendingCount()/완료 확인 중에 직접
+    // 반납한다(Syscall::waitForAnyOf의 readyTask 반납과 동일한 관례).
+    void add(AsyncTask* task);
+
+    // 아직 끝나지 않은(Completed/Failed/Cancelled가 아닌) 멤버 수.
+    // 호출할 때마다 이미 끝난 멤버를 찾아 이 자리에서 직접 정리한다
+    // (스택/구조체 반납 - "폴링하면서 동시에 청소"가 이 유틸리티의
+    // 유일한 소비 경로이므로 별도 consume API를 두지 않는다).
+    uint32_t pendingCount();
+
+private:
+    // §6-4/PN-BCE6CFF3(QU-F475C6C2 답변)와 동일한 관례 - 단순 배열
+    // 대신 재사용 가능한 제네릭 컨테이너.
+    static constexpr uint32_t kChunkCapacity = 8;
+    ChunkedList<AsyncTask*, kChunkCapacity> _tasks;
+};
+
+// 그룹 전체가 끝날 때까지 "현재(진짜 kernel::Task) 컨텍스트"를
+// 되풀이해 확인한다. **설계 변경(실측 반영, 2026-09-16)**: §3.3
+// 원안은 "스케줄러의 비공개 block 프리미티브"(Scheduler::parkCurrent
+// 류의 진짜 파킹)를 제안했으나, QU-86DD998F가 확정한 weak-ref-폴링
+// 모델에는 그 파킹을 깨워 줄 콜백/통지 경로가 없다(그런 훅을
+// AsyncTask에 추가하지 않기로 확정됐으므로) - 그래서 대신
+// `Scheduler::yieldCurrent()`(진짜 블로킹이 아니라 협조적 양보) 반복
+// 으로 구현한다. 코어를 완전히 놓지는 않지만(스케줄러 틱마다 다시
+// 깨어나 재확인), 다른 Ready Task들에게는 계속 실행 기회를 준다.
+class AsyncTaskWaitGroup {
+public:
+    void add(AsyncTask* task) { _group.add(task); }
+    void waitAll();
+
+private:
+    AsyncTaskGroup _group;
+};
+
+// 다른 AsyncTask 하나가 끝나기를 "현재 AsyncTask 컨텍스트 안에서"
+// 기다린다 - AsyncTask::yield()를 반복 호출하며 리액터에 제어를
+// 돌려주는 방식으로 구현한다(전체 리액터를 블로킹하지 않음). target
+// 도 위 AsyncTaskGroup과 동일하게 autoFree=false로 제출된 것이어야
+// 하며, 완료를 관측한 이 호출이 직접 반납한다.
+class AsyncTaskAwaiter {
+public:
+    explicit AsyncTaskAwaiter(AsyncTask* target) : _target(target) {}
+    void await();
+
+private:
+    AsyncTask* _target;
 };
 
 // 커널 전용 비동기 프레임워크의 디스패치 계층(SP-F682B889 §3.4/§4,
