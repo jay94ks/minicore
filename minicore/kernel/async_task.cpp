@@ -24,19 +24,28 @@ void kAsyncTaskEntryWrapper(void* arg) {
     auto* task = static_cast<kernel::AsyncTask*>(arg);
     kernel::AsyncTaskHandler* handler = kernel::AsyncCallbackRegistry::resolve(task->subjectCode);
     if (handler) {
-        // [PN-C62F7908, 1/5 -> 2/5] onExec이 이제 AsyncExecCoro를
-        // 반환한다(§7.3) - final_suspend=SuspendAlways라 자동으로
-        // 정리되지 않으므로 명시적으로 destroy()해야 프레임이 새지
-        // 않는다. **지금은 실제로 co_await하는 핸들러가 하나도 없어
-        // (전부 co_return만 씀) result.done()은 항상 true다** - "아직
-        // suspend된 채 남아있는" 경우(coroHandle을 task에 저장해 뒀다가
-        // AsyncReactor::drainOnce()가 나중에 resume()하는 §7.3의 재개
-        // 드라이버)는 이 프레임워크의 별도 증분에서 다룬다(아직 실제
-        // 소비자가 없어 지금 섣불리 만들지 않는다 - CLAUDE.md 규칙 4
-        // 취지, "쓰이지 않는 경로를 먼저 만들지 않는다").
+        // [PN-C62F7908, 2/5 -> 4/5] onExec이 AsyncExecCoro를 반환한다
+        // (§7.3) - final_suspend=SuspendAlways라 자동으로 정리되지
+        // 않으므로 done()을 직접 확인해야 한다.
         kernel::AsyncExecCoro result = handler->onExec(task, task->args);
-        result.destroy();
-        task->state = kernel::AsyncTaskState::Completed;
+        if (result.done()) {
+            // co_await를 안 썼거나(전부 co_return만 씀) 이미 완료 -
+            // 기존 그대로 즉시 정리.
+            result.destroy();
+            task->state = kernel::AsyncTaskState::Completed;
+        } else {
+            // [PN-C62F7908 4/5] 첫 co_await에서 suspend됐다 - 이
+            // AsyncTask의 전용 스택(이 함수 자신이 실행 중인 스택)은
+            // 여기서 마지막으로 쓰인다: 아래 yield()로 리액터에 복귀한
+            // 뒤 이 지점으로는 다시는 안 돌아온다(더 이상 kContextSwitch
+            // 로 이 스택을 재개하지 않기 때문) - 이후 재개는 전부
+            // AsyncReactor::drainOnce()의 `coroHandle.resume()` 경로
+            // (리액터 자신의 스택 위에서 직접 실행, 스택 전환 없음)로만
+            // 일어난다. coroHandle을 여기서 저장해 둬야 drainOnce()가
+            // 그 경로를 고를 수 있다.
+            task->coroHandle = result.handle();
+            task->state = kernel::AsyncTaskState::Suspended;
+        }
     } else {
         // 등록되지 않은 subjectCode로 제출된 경우 - 설계/구현 오류지만
         // 이 코어를 멈추지 않기 위해 실패로만 표시하고 계속 진행한다.
@@ -387,23 +396,54 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         return true;
     }
 
-    if (task->state == AsyncTaskState::Ready || task->state == AsyncTaskState::Suspended) {
+    if (task->coroHandle) {
+        // [PN-C62F7908 4/5, SP-F682B889 §7.3] 이전에 코루틴이 co_await로
+        // suspend된 채 남아 있다 - 이 AsyncTask의 전용 스택(kContextSwitch)
+        // 은 kAsyncTaskEntryWrapper가 첫 suspend에서 이미 마지막으로 썼다
+        // (그 함수 주석 참고) - 이후로는 다시 그 스택으로 돌아가지 않고
+        // `coroutine_handle::resume()`만으로 재개한다(리액터 자신의
+        // 스택 위에서 직접 실행되는 일반 함수 호출 - 별도 스택 전환
+        // 없음, 코루틴 방식이 스택풀 방식보다 가벼운 핵심 이유).
         task->state = AsyncTaskState::Running;
+        gCurrentAsyncTask[coreIndex] = task;
+        {
+            // 아래 스택풀 경로와 동일한 이유로 이 구간도 Task 수준
+            // 선점 대상에서 제외한다(같은 "AsyncTask가 실행 슬롯을
+            // 빌려 쓰는 동안" 불변조건 - 재개 메커니즘만 다를 뿐 이
+            // 구간이 "AsyncTask가 실행 중"이라는 의미 자체는 동일).
+            PreemptionGuard guard;
+            task->coroHandle.resume();
+        }
+        gCurrentAsyncTask[coreIndex] = nullptr;
+
+        if (task->coroHandle.done()) {
+            task->coroHandle.destroy();
+            task->coroHandle = nullptr;
+            task->state = AsyncTaskState::Completed;
+        } else {
+            // 다시 co_await로 suspend됨 - coroHandle을 그대로 남겨
+            // 다음 drainOnce()가 다시 이 경로를 고르게 한다.
+            task->state = AsyncTaskState::Suspended;
+        }
+    } else {
+        if (task->state == AsyncTaskState::Ready || task->state == AsyncTaskState::Suspended) {
+            task->state = AsyncTaskState::Running;
+        }
+        gCurrentAsyncTask[coreIndex] = task;
+        {
+            // AsyncTask 프레임워크의 원래 설계 의도(kAsyncTaskEntryWrapper
+            // 주석 참고 - "AsyncTask를 실행하는 동안 바깥 kernel::Task
+            // 수준에서는 여전히 (예전 리액터에 해당하는) 그 흐름이 실행
+            // 중이어야 한다")를 실제로 강제한다 - 이 구간(AsyncTask가 이
+            // 실행 슬롯을 "빌려 쓰는" 동안) 전체를 Task 수준 선점 대상에서
+            // 제외한다(Slab 매거진 보호에 쓰는 것과 같은 PreemptionGuard
+            // 재사용 - 인터럽트 자체는 막지 않아 EOI/하드웨어 처리는 정상
+            // 진행됨).
+            PreemptionGuard guard;
+            kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
+        }
+        gCurrentAsyncTask[coreIndex] = nullptr;
     }
-    gCurrentAsyncTask[coreIndex] = task;
-    {
-        // AsyncTask 프레임워크의 원래 설계 의도(kAsyncTaskEntryWrapper
-        // 주석 참고 - "AsyncTask를 실행하는 동안 바깥 kernel::Task
-        // 수준에서는 여전히 (예전 리액터에 해당하는) 그 흐름이 실행
-        // 중이어야 한다")를 실제로 강제한다 - 이 구간(AsyncTask가 이
-        // 실행 슬롯을 "빌려 쓰는" 동안) 전체를 Task 수준 선점 대상에서
-        // 제외한다(Slab 매거진 보호에 쓰는 것과 같은 PreemptionGuard
-        // 재사용 - 인터럽트 자체는 막지 않아 EOI/하드웨어 처리는 정상
-        // 진행됨).
-        PreemptionGuard guard;
-        kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
-    }
-    gCurrentAsyncTask[coreIndex] = nullptr;
 
     if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
         // 이 AsyncTask가 끝나기를 기다리는 kernel::Task가 있으면
