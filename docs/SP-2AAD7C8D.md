@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: approved
-  updatedAt: 2026-09-16T13:55:45.543Z
+  updatedAt: 2026-09-16T14:29:59.188Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -376,23 +376,42 @@ struct BrkArgs {
    `MapleArangeNode`를 `MapleRange64Node`/`MapleLeaf64Node`/
    `MapleDenseNode`로 바꿀지의 알고리즘 - 노드 "종류"는 확정됐으나
    전환 시점은 구현 착수 시 실측하며 다듬는 것으로 열어 둠.
-6. **[추가, 2026-09-16, minicore-f8 세션 리뷰]** Copy-on-Write(COW)
-   페이지 폴트 처리 - 이 문서 작성 이후 SP-6BEAE0C1("일반 프로세스
-   생성 syscall")가 `posix_spawn` + 향후 `fork()`(PN-44C91D6E)를 위해
-   COW 인프라를 요구하게 됐다. 프레임 단위 참조 카운트(`PageFrameAllocator::
-   retain()`/`refCount()`)는 이미 구현 완료(PN-543C0CE9 착수 1번째
-   증분)됐지만, **이 문서가 다루는 페이지 폴트 처리 흐름(§9.5의
-   `VmaBacking::Anonymous` "요구 페이징" 분기)은 아직 COW를 구분하지
-   않는다** - `error_code`의 Present 비트로 "아직 매핑 안 됨(순수
-   요구 페이징, 새 프레임 채움)"과 "이미 매핑됐지만 쓰기 금지라 폴트남
-   (COW, refCount로 분기해 단독 소유면 그냥 쓰기 허용 + refCount 감소
-   없이 writable로, 공유 중이면 새 프레임에 복사)"을 구분해야 하는데,
-   그 분기 자체가 아직 이 문서 어디에도 없다. `Paging::handlePageFault`
-   확장은 순수 구현 세부(RM-23F4B687 §4)로 보이지만(Present 비트로
-   이미 구분 가능한 표준 기법), PN-543C0CE9 착수 순서 (6)번
-   "COW 폴트 핸들러 확장"에 도달하기 전에 이 문서(또는 그 구현
-   증분 자체)에 실제로 그 분기 로직을 적어 둬야 한다 - 아직 코드가
-   없는 단계라 지금 확정하지 않고 착수 시점으로 남겨 둔다.
+6. **[완료, 2026-09-16, PN-543C0CE9 착수 6번째(마지막) 증분, commit
+   33473bf]** Copy-on-Write(COW) 페이지 폴트 처리 - 아래에 실제
+   확정/구현된 분기 로직을 기록한다(위에 남아 있던 "아직 이 문서
+   어디에도 없다"는 간극 해소).
+
+   **비트**: 새 leaf 플래그 `PAGE_COW`(paging.h, 비트 9 - x86_64
+   페이지 테이블 엔트리의 하드웨어 무간섭 "OS 전용" 자리, SDM
+   Vol.3A)를 도입했다. 이 비트가 세팅된 leaf는 항상 `PAGE_WRITABLE`이
+   꺼져 있고, 그 물리 프레임은 `PageFrameAllocator::retain()`으로
+   참조 카운트가 매겨져 있다는 게 전제(공유 여부는 비트 하나, "몇 명이
+   공유하는지"는 참조 카운트가 각각 분담).
+
+   **분기**(`Paging::handlePageFault`): `error_code`의 Present 비트가
+   꺼져 있으면(=아직 전혀 매핑 안 됨) 기존 §9.5 요구 페이징 그대로
+   (`VmaBacking::Anonymous` 새 프레임 채움, COW와 무관). Present
+   비트가 켜져 있으면(이미 매핑된 페이지에 대한 위반) - Write
+   비트까지 켜져 있고 그 leaf가 `PAGE_COW`로 표시돼 있을 때만 COW로
+   처리, 그 외(쓰기 아닌 위반, COW 아닌 페이지에 대한 위반)는 기존과
+   동일하게 그대로 패닉.
+
+   **단독 소유 최적화는 채택하지 않았다(위 review 의견과 다른 최종
+   결정)**: minicore-f8의 리뷰 의견은 "refCount로 분기해 단독 소유면
+   복사 없이 그냥 writable로"였으나, 실제 구현은 **항상 복사**한다
+   (SP-6BEAE0C1 §2 원안 "그 페이지만 실제로 복사한 뒤... 매핑하는
+   표준 COW 폴트 핸들러"의 문구 그대로) - 이유: "지금 이 폴트 시점에
+   내가 유일한 소유자인가"를 판정하려면 `refCount`를 읽는 시점과
+   실제로 writable 플래그를 세팅하는 시점 사이가 원자적이어야 하는데,
+   `gCowRefCounts`는 지금 락 없는 평범한 `uint16_t` 배열이라(SMP에서
+   다른 코어가 그 사이에 같은 프레임을 `retain()`하면 TOCTOU 경합)
+   이 최적화를 안전하게 하려면 그 카운터 자체에 원자성/락을 먼저
+   추가해야 한다 - 아직 이 프로젝트에 COW를 실제로 쓰는 소비자
+   (`fork()`, PN-44C91D6E)조차 없는 시점에 미리 그 복잡도를 들이는
+   건 RM-23F4B687 §4("당장 필요하지 않은 일반화/최적화는 미룬다")에
+   어긋난다고 판단했다 - **후속 최적화 후보로만 남겨 둔다**(실제
+   `fork()` 착수 후 성능이 문제가 되면 그때 원자적 refCount로
+   재검토).
 
 ## 7. 선행 조건
 

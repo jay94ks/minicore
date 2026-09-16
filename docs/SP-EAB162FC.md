@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-EAB162FC
   status: approved
-  updatedAt: 2026-09-15T16:53:41.001Z
+  updatedAt: 2026-09-16T14:16:06.929Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -201,6 +201,15 @@ v1에서 실제로 `Resurrect`가 걸릴 대상은 §2.2의 두 고정 스폰
 시퀀스에서만 함) 재현할 "원래 스폰 파라미터"라는 개념 자체가 아직
 성립하지 않는다. 그 syscall이 실제로 설계되는 시점에 이 플래그를
 그 API의 인자로 노출할지 함께 확정한다.
+
+**[해소, 2026-09-16] 그 syscall이 실제로 설계됐다** - SP-6BEAE0C1
+("일반 프로세스 생성 syscall")의 `SpawnProcess`가 바로 그것이고,
+그 문서 §7이 이 절의 결론을 그대로 따라 확정했다: `SpawnProcess`로
+만든 프로세스는 `resurrect`/`essential` 둘 다 기본값(`resurrect=
+false`)으로 고정하고 API 인자로 노출하지 않는다 - 이유도 정확히
+이 절이 예상한 그대로("동적으로 임의의 imageBuffer/argv를 받는
+경로는 원래 스폰 파라미터를 재현할 방법이 없음"). 이제 더 이상
+열린 확인 사항이 아니다.
 
 ### 6.3 트리거 지점 [개정, 2026-09-15, 설계자 지시 - "즉시" 전제 철회]
 
