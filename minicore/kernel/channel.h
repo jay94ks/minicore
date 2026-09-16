@@ -39,6 +39,8 @@ enum class ChannelError : uint32_t {
     HugePageUnsupported,   // 더 이상 이 경로에서 반환되지 않음(PN-34B34DB4) - API 호환을 위해 값만 유지
     BrokenPipe,            // 이 반쪽 또는 상대가 이미 닫힌 상태에서 read/write 시도
     InvalidPointer,        // [신규, PN-B552E75F] buffer/data가 호출자 자신의 유저 주소공간에 속하지 않음(Paging::isUserRangeValid 실패)
+    InvalidArgument,       // [신규, PN-71E50394] 인자 자체가 유효 범위 밖(예: 정의 안 된 SignalNumber, Kill/Stop을 Ignore로 설정 시도)
+    NotSupported,          // [신규, PN-71E50394] 유효한 요청이지만 아직 구현되지 않은 기능(예: SignalDisposition::Handler - §4.4/PN-124C105B 전까지)
 };
 
 // 링버퍼 크기 정책(설계 문서 "링버퍼 크기 정책") - 호출부는 정확한

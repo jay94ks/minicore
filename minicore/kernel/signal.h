@@ -1,8 +1,10 @@
 #ifndef MINICORE_KERNEL_SIGNAL_H
 #define MINICORE_KERNEL_SIGNAL_H
 
+#include "channel.h"
 #include "libkenv/chunked_list.h"
 #include "libkenv/types.h"
+#include "syscall.h"
 
 namespace kernel {
 
@@ -70,6 +72,52 @@ struct PendingSignal {
 // 구현 세부(RM-23F4B687 §4) - 지금은 UserThread::kPendingSyscallChunkCapacity
 // 와 같은 자릿수로 시작.
 constexpr uint32_t kPendingSignalChunkCapacity = 10;
+
+// RM-48E1E610 29-30번 - SP-0666DB3C §4.5 Syscall API.
+constexpr SyscallEndpointId kSyscallEndpointKill = 29;
+constexpr SyscallEndpointId kSyscallEndpointSignalAction = 30;
+
+// [SP-0666DB3C §4.5, PN-71E50394 항목 4] `Kill(targetProcessId, signal)` -
+// `targetProcessId`는 `SpawnProcessArgs::pid`/`WaitArgs::targetPid`와
+// 동일한 관례(대상 `Process*`를 `reinterpret_cast<int64_t>`한 값).
+//
+// **[v1 잠정 범위, 2026-09-17]** SP-0666DB3C §11 항목4("프로세스 ID
+// 체계 - PN-268F062B와 통일 예정, 아직 열려 있는 설계 영역")가 실제
+// 구현 시점까지 미확정으로 남겨 둔 부분 - 임의의 `targetProcessId`를
+// 검증 없이 `reinterpret_cast`해 역참조하면 Channel/Bridge에서 이미
+// 겪은 것과 같은 임의 포인터 역참조 보안 공백이 되므로, v1은 **호출자
+// 자신의 직계 자식(`Process::children`)만** 대상으로 허용한다(`Wait`
+// syscall과 정확히 같은 스코프/검증 방식 - `WaitHandler::onExec` 참고).
+// 자식이 아닌 값(위조/타 프로세스/조부모 등)은 전부 `NotFound`로
+// 거부된다 - 자기 자신도 대상이 될 수 없다(자기 자신은 `children`에
+// 없음). 부모가 자식 이외의 임의 프로세스에 신호를 보내야 하는
+// 시나리오(예: 특권 관리 프로세스가 무관한 프로세스를 종료)가 실제로
+// 필요해지면, 그건 이 v1 스코프를 넘어서는 새 설계 결정이라 별도 DC/
+// 질의로 확인 후 넓힌다(CLAUDE.md 규칙 4) - 지금 임의로 넓히지 않는다.
+struct KillArgs {
+    int64_t targetProcessId = -1;
+    SignalNumber signal = SignalNumber::None;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [SP-0666DB3C §4.5, PN-71E50394 항목 4] `SignalAction(signal,
+// disposition)` - 호출자 자신의 `Process::dispositions[]`만 바꾼다
+// (다른 프로세스의 처리 방식을 원격으로 바꾸는 API는 없음 - 각
+// 프로세스가 자기 자신의 신호 처리 방식만 스스로 설정하는 POSIX
+// `sigaction()`과 동일한 범위). `Kill`/`Stop`을 `Ignore`로 설정하려는
+// 시도는 `InvalidArgument`로 거부한다(signal.h `SignalDisposition`
+// 문서 주석의 "마스킹 불가 원칙" 그대로). `Handler`는 §4.4 조건
+// (PN-124C105B, 유저 핸들러 실제 ring3 호출 인프라)이 아직 없어
+// `NotSupported`로 거부한다 - 등록만 받아 두고 조용히 무시하지
+// 않는다(표준 커널 syscall 관례, SpawnProcess의 flags 검증과 동일한
+// 취지).
+struct SignalActionArgs {
+    SignalNumber signal = SignalNumber::None;
+    SignalDisposition disposition = SignalDisposition::Default;
+    // out
+    ChannelError error = ChannelError::None;
+};
 
 }  // namespace kernel
 

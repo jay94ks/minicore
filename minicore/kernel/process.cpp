@@ -353,7 +353,7 @@ namespace {
 // 직접 채워 co_return).
 class SpawnProcessHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<SpawnProcessArgs*>(argsRaw);
 
         // 0단계 - [PN-A6E01B8A, QU-9585F6C4] flags 유효성 검증 - 정의
@@ -458,7 +458,19 @@ public:
         // `children`에 복사해 넣는 순간부터가 진짜 소유의 시작이고,
         // 이 함수 끝에서 지역 변수 `procShared`가 스코프를 벗어나도
         // (강한 참조 하나 감소) 그 슬롯의 몫이 남아 있어 안전하다.
-        auto* caller = static_cast<UserThread*>(Scheduler::currentTask());
+        //
+        // [수정, 2026-09-17, PN-5BBD4301] `Scheduler::currentTask()`에서
+        // `task->submitterTask.lock()`으로 전환 - RM-23F4B687이 이미 네
+        // 번 문서화한 "onExec() 안에서 Scheduler::currentTask()를 믿으면
+        // 안 된다" 함정의 다섯 번째 재발(실측으로 발견 - PN-5BBD4301
+        // 참고). `Syscall::wait()`는 항상 호출자를 실제로 파킹시키므로
+        // (syscall.cpp) 이 AsyncTask가 나중에 idle 드레인으로 처음
+        // 실행될 때 `Scheduler::currentTask()`는 이미 nullptr(코어가
+        // 진짜로 idle)이지, 제출자가 절대 아니다 - Channel/Pnp 핸들러가
+        // 처음부터 쓰던 `task->submitterTask.lock()`이 유일하게 안전한
+        // 방법이다.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
         SharedPtr<Process> parentProc = caller ? caller->process.lock() : SharedPtr<Process>();
         if (!parentProc) {
             // 이론상 도달 불가(SpawnProcess는 항상 실제 UserThread
@@ -505,18 +517,19 @@ SpawnProcessHandler gSpawnProcessHandler;
 // `children`에서 (targetPid 조건에 맞는) 좀비를 하나 찾아 회수한다.
 class WaitHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<WaitArgs*>(argsRaw);
         args->hadZombieChild = false;
         args->reapedPid = -1;
         args->exitCode = 0;
         args->hasAnyChild = false;
 
-        // SpawnProcessHandler::onExec과 동일한 관례로 호출자 자신의
-        // Process를 얻는다 - 커널 Task(process가 비어 있음)가 이
-        // syscall을 부를 일은 없다(SelfTerminateHandler와 동일한 전제),
-        // 방어적으로만 확인.
-        auto* caller = static_cast<UserThread*>(Scheduler::currentTask());
+        // SpawnProcessHandler::onExec과 동일한 관례(및 동일한 수정,
+        // PN-5BBD4301 참고)로 호출자 자신의 Process를 얻는다 - 커널
+        // Task(process가 비어 있음)가 이 syscall을 부를 일은 없다
+        // (SelfTerminateHandler와 동일한 전제), 방어적으로만 확인.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
         SharedPtr<Process> self = caller ? caller->process.lock() : SharedPtr<Process>();
         if (!self) {
             co_return;
@@ -574,11 +587,109 @@ public:
 
 WaitHandler gWaitHandler;
 
+// [SP-0666DB3C §4.5, RM-48E1E610 29번, PN-71E50394 항목 4] `Kill` 본체 -
+// signal.h의 `KillArgs` 문서 주석 그대로, v1은 호출자 자신의 직계
+// 자식만 대상으로 허용한다(`WaitHandler`와 동일한 스코프/검증 방식).
+class KillHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<KillArgs*>(argsRaw);
+
+        if (args->signal == SignalNumber::None || static_cast<uint32_t>(args->signal) >= kSignalCount) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        // WaitHandler::onExec과 동일한 관례(PN-5BBD4301 - task->
+        // submitterTask.lock()으로, Scheduler::currentTask()가 아니다)로
+        // 호출자 자신의 Process를 얻는다.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> self = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!self) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        // v1 스코프(위 KillArgs 문서 주석 참고) - children에서 정확히
+        // 일치하는 것만 대상으로 인정한다. 좀비(이미 죽어 주소공간이
+        // 반납된 자식)에게 신호를 보내는 건 무의미하므로 함께 걸러낸다
+        // - `raiseSignal()` 자체는 좀비에도 안전하게 호출 가능하지만
+        // (mainThread가 이미 반납됐을 수 있어 그냥 pendingSignals에만
+        // 쌓이고 끝) 아무 효과가 없어 혼란만 준다.
+        SharedPtr<Process> target;
+        self->children.forEach([&](SharedPtr<Process>& child, auto*) {
+            if (target || !child || child->isZombie) {
+                return;
+            }
+            if (reinterpret_cast<int64_t>(child.get()) == args->targetProcessId) {
+                target = child;
+            }
+        });
+
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        args->error = target->raiseSignal(args->signal) ? ChannelError::None : ChannelError::ResourceExhausted;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+KillHandler gKillHandler;
+
+// [SP-0666DB3C §4.5, RM-48E1E610 30번, PN-71E50394 항목 4] `SignalAction`
+// 본체 - signal.h의 `SignalActionArgs` 문서 주석 그대로, 호출자 자신의
+// `dispositions[]`만 바꾼다.
+class SignalActionHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<SignalActionArgs*>(argsRaw);
+
+        if (args->signal == SignalNumber::None || static_cast<uint32_t>(args->signal) >= kSignalCount) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+        if (args->disposition == SignalDisposition::Handler) {
+            // §4.4/PN-124C105B 전까지 - 등록만 받아 두고 조용히
+            // 무시하지 않는다(signal.h SignalActionArgs 문서 참고).
+            args->error = ChannelError::NotSupported;
+            co_return;
+        }
+        if (args->disposition == SignalDisposition::Ignore &&
+            (args->signal == SignalNumber::Kill || args->signal == SignalNumber::Stop)) {
+            args->error = ChannelError::InvalidArgument;  // 마스킹 불가 원칙(signal.h)
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> self = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!self) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        self->dispositions[static_cast<uint32_t>(args->signal)] = args->disposition;
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+SignalActionHandler gSignalActionHandler;
+
 }  // namespace
 
 void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointSpawnProcess, &gSpawnProcessHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointWait, &gWaitHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointKill, &gKillHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointSignalAction, &gSignalActionHandler);
 }
 
 }  // namespace kernel
