@@ -222,6 +222,46 @@ void Process::destroy() {
     }
 }
 
+// [신규, PN-6D497EB0/PN-543C0CE9, SP-6BEAE0C1 §4] System V AMD64 ABI
+// 관례대로 유저 스택 최상단에 argc/argv/envp(+빈 auxv)를 배치하고
+// `_start` 진입 시 기대되는 초기 RSP를 계산한다. **v1 범위** - 이
+// 호출부(execImage())가 아직 실제 argv/envp를 안 받으므로(그건
+// SpawnProcess가 유저 포인터에서 검증+복사해 넘겨야 하는 후속
+// 증분 - 이 함수 자신은 그 파싱을 하지 않는다) 지금은 항상
+// `argc=0, argv=[NULL], envp=[NULL]`을 쓴다 - 그래도 모든 프로세스
+// (init/devmgr/SpawnProcess 전부)가 처음부터 표준 레이아웃을 갖게
+// 해 두는 게 이번 증분의 목적이다. **한 페이지(4KiB) 안에 들어가는
+// 스택 프레임만 지원**(실제 argv/envp 문자열이 실려야 하는 다음
+// 증분에서 여러 페이지로 확장할 근거가 생기면 재검토).
+bool kSetupInitialUserStack(uint64_t stackTop, uint64_t pml4Phys, uint64_t* outInitialRsp) {
+    const uint64_t stackPageStart = stackTop - 4096UL;
+    const uint64_t phys = Paging::translatePage(stackPageStart, pml4Phys);
+    if (!phys) {
+        return false;  // execImage()가 이 페이지를 이미 매핑해 뒀어야 함 - 실패하면 호출부 버그
+    }
+    auto* pageVirt = reinterpret_cast<uint8_t*>(kPhysToVirt(phys));
+
+    uint64_t offsetFromTop = 4096UL;
+    auto pushU64 = [&](uint64_t value) {
+        offsetFromTop -= 8;
+        *reinterpret_cast<uint64_t*>(pageVirt + offsetFromTop) = value;
+    };
+
+    pushU64(0);  // auxv: AT_NULL 값(이 커널은 아직 aux 벡터 항목을 안 만듦)
+    pushU64(0);  // auxv: AT_NULL 타입(auxv 배열 종단)
+    pushU64(0);  // envp[0] = NULL(envp 배열 종단, envc=0)
+    pushU64(0);  // argv[0] = NULL(argv 배열 종단, argc=0이라 문자열 포인터 없음)
+    pushU64(0);  // argc = 0
+
+    // 16바이트 정렬 - _start 진입 시점 RSP는 16의 배수여야 한다(SysV
+    // 초기 프로세스 스택 규약 - "call 이후 -8"이 아니라 진입 자체가
+    // 16-정렬).
+    offsetFromTop &= ~static_cast<uint64_t>(15);
+
+    *outInitialRsp = stackPageStart + offsetFromTop;
+    return true;
+}
+
 UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
     if (!elf::loadIntoAddressSpace(image, pml4Phys, &addressSpace)) {
         return nullptr;
@@ -256,7 +296,11 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
     thread->isUserLevel = true;
     thread->userPml4Phys = pml4Phys;
     thread->ring3EntryPoint = image.entryPoint();
-    thread->ring3UserStackTop = kUserStackTop;
+    uint64_t initialRsp = kUserStackTop;
+    if (!kSetupInitialUserStack(kUserStackTop, pml4Phys, &initialRsp)) {
+        return nullptr;
+    }
+    thread->ring3UserStackTop = initialRsp;
     thread->init(kEnterRing3, nullptr);
     // [신규, PN-523B779F] `thread`가 `UserThread::allocate()`를 거치지
     // 않은 정적 전역(kmain.cpp의 gInitThread/gServiceThread[])이면
