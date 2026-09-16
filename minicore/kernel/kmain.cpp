@@ -23,6 +23,7 @@
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "pci.h"
+#include "pnp.h"
 #include "process.h"
 #include "scheduler.h"
 #include "serial.h"
@@ -545,6 +546,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 가 벡터별로 지연 수행한다(여기서는 syscall endpoint 4개만 연다).
     kernel::InterruptSubscriptionService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: interrupt subscription syscall endpoints registered");
+
+    // SP-9DD4F3EA §3.1/§6 2단계 - devmgr(PN-BD9AAE2F)이 PCI 토폴로지를
+    // 조회하는 데 쓰는 EnumerateDevices만 이 증분에서 연다(위와 같은
+    // 이유로 BSP에서 한 번만 - RequestIoPermission 등 나머지 §3.2-§3.4
+    // syscall은 후속 증분).
+    kernel::PnpService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: pnp EnumerateDevices syscall endpoint registered");
 
     // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
     // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에

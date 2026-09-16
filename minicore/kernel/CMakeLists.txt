@@ -28,6 +28,7 @@ add_library(minicore_kernel OBJECT
     named_object.cpp
     channel.cpp
     interrupt_subscription.cpp
+    pnp.cpp
     livefs.cpp
     mount_table.cpp
     process.cpp
