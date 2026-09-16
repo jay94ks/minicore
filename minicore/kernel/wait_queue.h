@@ -33,6 +33,13 @@ public:
     // 파킹된다. 비어 있으면 아무 일도 안 함.
     void wakeOne();
 
+    // 대기 중인 전부를 한 번에 재개시킨다(SP-F682B889 §9.5-4,
+    // AsyncTaskCompletion::_syncWaiters의 완료 통지처럼 "누가 먼저
+    // 잡느냐" 경쟁이 아니라 브로드캐스트 의미일 때 쓴다 - wakeOne()의
+    // "재경쟁" 철학과 달리 큐에 있던 Task 전부가 그대로 깨어난다).
+    // 비어 있으면 아무 일도 안 함.
+    void wakeAll();
+
     // 진단용 스냅샷(정확한 값이 필요하면 호출부가 락을 별도로 잡아야
     // 함 - scheduler.h의 TaskQueue::isEmpty와 같은 관례).
     bool isEmpty() const;

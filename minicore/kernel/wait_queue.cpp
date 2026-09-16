@@ -49,6 +49,29 @@ void WaitQueue::wakeOne() {
     }
 }
 
+void WaitQueue::wakeAll() {
+    _lock.lock();
+    Task* head = _head;
+    _head = nullptr;
+    _tail = nullptr;
+    _lock.unlock();
+
+    // 리스트 전체를 큐 밖으로 빼낸 뒤(위 락 안에서 원자적으로 끝남)
+    // 잠금 밖에서 순회한다 - 이 시점부터 이 인스턴스의 관점에서는
+    // 이미 빈 큐이므로, 순회 중 blockedOn을 아직 못 지운 Task를
+    // 노리는 동시 cancel() 호출이 있어도 내부 리스트에서 찾지 못해
+    // 안전하게 false를 반환한다(wakeOne()/cancel()과 같은 "경쟁 시
+    // 조용히 무시" 계약).
+    Task* task = head;
+    while (task) {
+        Task* next = task->next.load();
+        task->next.store(nullptr);
+        task->blockedOn = nullptr;
+        Scheduler::scheduleImmediate(task->parkedCoreIndex, task);
+        task = next;
+    }
+}
+
 bool WaitQueue::isEmpty() const {
     return _head == nullptr;
 }
