@@ -138,6 +138,10 @@ void Process::release(Process* proc) {
     GenericSlabAllocator::free(proc, sizeof(Process));
 }
 
+// [신규, 2026-09-16, PN-543C0CE9 착수 5번째 증분(2/2)] Process::
+// setOrphanRoot() 문서 주석 참고 - kmain.cpp가 부팅 중 딱 한 번만 채운다.
+Process* Process::gOrphanRoot = nullptr;
+
 bool Process::init() {
     pml4Phys = Paging::createAddressSpace();
     if (!pml4Phys) {
@@ -153,6 +157,10 @@ bool Process::init() {
     // SpawnProcessHandler)가 init() 이후 직접 채운다.
     parent = nullptr;
     children.clear();
+    // 좀비 상태(§6, PN-543C0CE9 착수 5번째 증분(2/2)) - parent/children과
+    // 동일한 이유(Resurrect가 같은 정적 Process를 재사용)로 매번 리셋.
+    isZombie = false;
+    exitCode = 0;
     addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
     // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로,
     // 이전 생애의 신호 상태가 새 생애로 새어 들어가지 않도록 매번
@@ -374,10 +382,74 @@ public:
 
 SpawnProcessHandler gSpawnProcessHandler;
 
+// [SP-6BEAE0C1 §6, RM-48E1E610 35번, PN-543C0CE9 착수 5번째 증분(2/2)]
+// Wait 본체 - **논블로킹**(WaitArgs 문서 주석 참고). 호출자 자신의
+// `children`에서 (targetPid 조건에 맞는) 좀비를 하나 찾아 회수한다.
+class WaitHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<WaitArgs*>(argsRaw);
+        args->hadZombieChild = false;
+        args->reapedPid = -1;
+        args->exitCode = 0;
+        args->hasAnyChild = false;
+
+        // SpawnProcessHandler::onExec과 동일한 관례로 호출자 자신의
+        // Process를 얻는다 - 커널 Task(process==nullptr)가 이 syscall을
+        // 부를 일은 없다(SelfTerminateHandler와 동일한 전제), 방어적으로만
+        // null 확인.
+        auto* caller = static_cast<UserThread*>(Scheduler::currentTask());
+        Process* self = caller ? caller->process : nullptr;
+        if (!self) {
+            co_return;
+        }
+
+        Process* zombie = nullptr;
+        decltype(self->children)::Slot* zombieSlot = nullptr;
+        self->children.forEach([&](Process*& child, auto* slot) {
+            if (!child) {
+                return;
+            }
+            if (args->targetPid != -1 && reinterpret_cast<int64_t>(child) != args->targetPid) {
+                return;
+            }
+            args->hasAnyChild = true;
+            if (!zombie && child->isZombie) {
+                zombie = child;
+                zombieSlot = slot;
+            }
+        });
+
+        if (zombie) {
+            self->children.erase(zombieSlot);
+            args->hadZombieChild = true;
+            args->reapedPid = reinterpret_cast<int64_t>(zombie);
+            args->exitCode = zombie->exitCode;
+            // reap = Process 구조체 자신 + (있다면) mainThread까지 완전히
+            // 반납한다 - self->children에 들어올 수 있는 Process는 전부
+            // SpawnProcessHandler::onExec이 Process::allocate()/
+            // UserThread::allocate()로 만든 것뿐이라(고정 스폰 static
+            // Process/UserThread는 절대 어떤 children 리스트에도 들어가지
+            // 않음 - process.h parent/children 문서 주석 참고) 여기서
+            // release()하는 게 항상 안전하다.
+            if (zombie->mainThread) {
+                UserThread::release(zombie->mainThread);
+            }
+            Process::release(zombie);
+        }
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+WaitHandler gWaitHandler;
+
 }  // namespace
 
 void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointSpawnProcess, &gSpawnProcessHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointWait, &gWaitHandler);
 }
 
 }  // namespace kernel

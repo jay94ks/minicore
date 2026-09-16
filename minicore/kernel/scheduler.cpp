@@ -538,6 +538,56 @@ public:
             const ProcessStartFlags startFlags = process->startFlags;
             const uint32_t newConsecutiveFailures = process->consecutiveFailures + 1;
             process->destroy();
+
+            // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째
+            // 증분(2/2)] 고아 입양 - 이 프로세스 자신이 SpawnProcess로
+            // 자식을 만들어 뒀다면(parent==nullptr인 고정 스폰
+            // KernelService라도 스스로 SpawnProcess를 부를 수 있다 -
+            // devmgr가 PnP 드라이버 자식을 만드는 경우 등), 그 자식들은
+            // 이제 부모를 잃는다. §6 "고아는 init이 입양"에 따라
+            // 살아있는 자식이든 이미 좀비인 자식이든 전부 orphanRoot()로
+            // reparent한다 - 좀비 자식은 reparent만 하고 실제 회수(reap)는
+            // 여전히 init이 나중에 wait()를 불러야 하는 채로 남는다(이
+            // 시점에 자동으로 회수하지 않는다 - §11-2 참고, "init이
+            // 실제로 wait()를 자동 반복 호출하는지"는 커널이 강제할
+            // 정책이 아니라 유저랜드 init 구현의 몫).
+            Process* const orphanRoot = Process::orphanRoot();
+            if (orphanRoot && orphanRoot != process) {
+                process->children.forEach([&](Process*& child, auto*) {
+                    if (!child) {
+                        return;
+                    }
+                    child->parent = orphanRoot;
+                    orphanRoot->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+                    // 실패(슬랩 고갈)해도 그냥 넘어간다 - child->parent는
+                    // 이미 orphanRoot로 바뀌었으니 그 자식이 나중에 종료할
+                    // 때 좀비로는 남지만, 이 순간 orphanRoot->children
+                    // 목록에 못 들어갔다면 root가 그 좀비를 wait()로 찾지
+                    // 못한다(드문 자원 고갈 경합 - 새 DC 없이 감수할 수준의
+                    // v1 한계, RM-23F4B687 §4).
+                    orphanRoot->children.insert(child);
+                });
+            }
+            process->children.clear();
+
+            // 부모가 있으면(SpawnProcess로 만들어진 트리 멤버) 좀비로
+            // 남겨 부모의 wait()(RM-48E1E610 35번)를 기다린다 - Process
+            // 구조체/mainThread 반납은 WaitHandler(process.cpp)가 회수
+            // 시점에 담당한다. 부모가 없으면(고정 스폰 KernelService,
+            // 또는 SpawnProcessHandler 주석의 이론상 도달 불가 경로) 기존과
+            // 완전히 동일하게 아무도 회수하지 않는 상태로 그냥 남는다 -
+            // 이번 증분 이전에도 이 함수가 Process::release()를 부른 적은
+            // 없었다(정적 전역 Process는 애초에 release() 대상이 아님).
+            if (process->parent) {
+                process->isZombie = true;
+                // exitCode(§6) - SelfTerminate syscall 자체가 아직 종료
+                // 코드를 인자로 받지 않는다(kSyscallEndpointSelfTerminate
+                // 문서 주석에 이미 명시된 기존 한계, §4의 인자 전달 규약
+                // 미착수와 같은 급) - 그 인자가 생기기 전까지는 0으로
+                // 고정한다.
+                process->exitCode = 0;
+            }
+
             if (startFlags.essential) {
                 // §6.3 1번 - resurrect 값과 무관하게 항상 즉시 패닉("커널
                 // 서비스가 죽으면 커널이 정상 동작하지 않는다"는 전제가

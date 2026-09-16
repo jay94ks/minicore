@@ -252,6 +252,13 @@ void kSpawnInitProcess() {
         kernel::Logger::error("minicore: init process address space allocation FAILED");
         return;
     }
+    // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
+    // gInitProcess를 고아 입양 대상(orphan root)으로 등록 - init()이
+    // 성공해 pml4Phys/addressSpace가 진짜로 유효해진 직후, 하지만
+    // execImage()가 유저 스택/ELF 로드를 시도하기 전에 먼저 해 둔다
+    // (이 등록 자체는 그 이후 단계들의 성패와 무관 - "이 Process 포인터가
+    // 유효한 좀비 트리 루트다"라는 사실만 필요하다).
+    kernel::Process::setOrphanRoot(&gInitProcess);
     // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - role/startFlags와 같은
     // 관례로 init() 직후 호출부가 직접 채운다.
     memcpy(gInitProcess.spawnName, "init", 4);

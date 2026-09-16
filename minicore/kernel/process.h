@@ -133,6 +133,19 @@ public:
     static constexpr uint32_t kMaxChildrenChunkCapacity = 8;
     ChunkedList<Process*, kMaxChildrenChunkCapacity> children;
 
+    // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
+    // 좀비 상태 - self-terminate 시(SelfTerminateHandler::onExec)
+    // `destroy()`로 주소공간은 즉시 반납하지만, `parent != nullptr`이면
+    // 이 Process 구조체 자신(및 `mainThread`)은 그 자리에서 바로 반납하지
+    // 않고 좀비로 남겨 부모가 `wait()`(RM-48E1E610 35번)로 회수(reap)할
+    // 때까지 보존한다 - POSIX 좀비 프로세스와 동일한 개념. `parent ==
+    // nullptr`(고정 스폰 KernelService, 또는 SpawnProcess의 caller가
+    // 이론상 없었던 경우)이면 이 필드는 아예 세팅되지 않는다 - 회수할
+    // 부모 자체가 없기 때문(§6.3/§6.4의 기존 resurrect/essential
+    // 메커니즘은 이 좀비 개념과 무관하게 그대로 동작).
+    bool isZombie = false;
+    int32_t exitCode = 0;
+
     // 신원/시작 플래그(SP-EAB162FC) - 둘 다 스폰 시점에 호출부가 직접
     // 채우고, 그 이후 바꾸는 setter는 두지 않는다(§1/§6 원칙).
     ProcessRole role = ProcessRole::Normal;
@@ -253,11 +266,27 @@ public:
     // 시 false.
     bool raiseSignal(SignalNumber number);
 
-    // [SP-6BEAE0C1, PN-543C0CE9 착수 4번째 증분] SpawnProcess(RM-48E1E610
-    // 59번) syscall 엔드포인트를 SyscallRegistry에 등록한다 - Channel::
-    // registerSyscallEndpoints()와 같은 관례(부팅 시 BSP에서 한 번,
-    // kmain.cpp가 호출).
+    // [SP-6BEAE0C1, PN-543C0CE9 착수 4번째/5번째 증분] SpawnProcess(59번)/
+    // Wait(35번) syscall 엔드포인트를 SyscallRegistry에 등록한다 -
+    // Channel::registerSyscallEndpoints()와 같은 관례(부팅 시 BSP에서
+    // 한 번, kmain.cpp가 호출).
     static void registerSyscallEndpoints();
+
+    // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
+    // 고아 입양 대상(init 프로세스)을 가리키는 전역 포인터 - kmain.cpp가
+    // `kSpawnInitProcess()`에서 `gInitProcess.init()`이 성공한 직후 딱
+    // 한 번 등록한다. self-terminate 시 이 프로세스에게 살아있는 자식이
+    // 있었다면(자신도 부모였던 경우) 그 자식들을 전부 이 루트로
+    // reparent한다(§6 "고아는 init이 입양"). init 자체가 아직 스폰되지
+    // 않았거나(gInitImageFound==false) 실패했다면 nullptr로 남아
+    // 있을 수 있다 - 그 경우 orphan reparent 단계는 방어적으로 그냥
+    // 건너뛴다(고아가 root 없는 상태로 남는 건 이번 증분 스코프 밖의
+    // 부팅 실패 시나리오 - 커널이 정상 부팅했다면 항상 세팅돼 있다).
+    static void setOrphanRoot(Process* root) { gOrphanRoot = root; }
+    static Process* orphanRoot() { return gOrphanRoot; }
+
+private:
+    static Process* gOrphanRoot;
 };
 
 // RM-48E1E610 59번 - SpawnProcess.
@@ -325,6 +354,37 @@ struct SpawnProcessArgs {
 // 할당은 애초에 성공할 수 없다 - 그 한도에 정확히 맞춘 값(실측 후
 // 조정 가능한 순수 구현 세부, RM-23F4B687 §4).
 constexpr uint64_t kMaxSpawnImageSize = 4UL * 1024 * 1024;
+
+// RM-48E1E610 35번 - Wait.
+constexpr SyscallEndpointId kSyscallEndpointWait = 35;
+
+// [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
+// Wait syscall 인자 - **v1은 논블로킹**(POSIX `waitpid(pid, status,
+// WNOHANG)`과 동일한 의미 - §11 "wait() syscall ABI(반환값 형태,
+// waitpid(-1,...)류 지원 여부) - 순수 구현 세부, 착수하며 정한다"의
+// 답을 이렇게 내렸다: 진짜 블로킹(자식이 죽을 때까지 호출자를 실제로
+// 재우는)을 지원하려면 이 Process/UserThread 쌍을 걸어 둘 새 대기열
+// 서브시스템이 통째로 더 필요한데, 지금은 그걸 실제로 쓸 유저랜드
+// 소비자(예: init의 자동 회수 루프)가 전혀 없어 미리 만들 근거가
+// 없다 - 나중에 필요해지면 이 ABI를 그대로 두고 "좀비가 없으면
+// hadZombieChild=false로 즉시 반환" 대신 "생길 때까지 블로킹"으로
+// 내부 구현만 바꿔 확장할 수 있다.
+struct WaitArgs {
+    // -1이면 아무 자식이나(POSIX wait(-1, ...)와 동일) - 그 외 값이면
+    // `SpawnProcessArgs::pid`와 동일한 관례(그 자식 Process*를
+    // reinterpret_cast<int64_t>한 값)와 정확히 일치하는 자식만 찾는다.
+    int64_t targetPid = -1;
+
+    // out - hadZombieChild==true일 때만 reapedPid/exitCode가 유효하다.
+    bool hadZombieChild = false;
+    int64_t reapedPid = -1;
+    int32_t exitCode = 0;
+
+    // out - targetPid 조건에 맞는 자식이(좀비든 아니든) 하나라도
+    // 있었는지 - POSIX의 ECHILD("애초에 기다릴 자식이 없다") 판정을
+    // 호출부가 hadZombieChild==false와 구분할 수 있게 한다.
+    bool hasAnyChild = false;
+};
 
 }  // namespace kernel
 
