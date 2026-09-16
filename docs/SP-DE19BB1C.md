@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-DE19BB1C
   status: approved
-  updatedAt: 2026-09-16T08:43:38.850Z
+  updatedAt: 2026-09-16T16:41:25.580Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -212,6 +212,17 @@ extern "C" void kTlbShootdownIsr() {
       - 수신측(IPI 핸들러)은 자신을 깨운 슬롯(들)의 "이 코어를 향한
         대기 중" 표시(수신자별 Target Pending Mask)를 확인해 처리할
         요청을 식별한다.
+
+   **[구현 완료, 2026-09-16, minicore-f8 세션 확인]** PN-D132A1E9가
+   `completed` - 위 설계 그대로 `gRequests[kAcpiMaxCpus]`(요청자
+   슬롯)/`gPendingMask[kAcpiMaxCpus]`(수신자별 Target Pending Mask,
+   `AtomicU32::fetchOr`/`fetchAnd` 신규 추가)로 구현됐고,
+   `ProcessAddressSpaceManager::unmapRegion()`/`resizeAnonymousRegion()`
+   축소 분기가 실제 소비자로 연결됐다(이 둘은 이전엔 TLB 샷다운을
+   전혀 하지 않던 별개의 공백이었다는 사실도 그 계획에서 함께
+   발견됨). Active CPU Mask 타겟팅(`Scheduler::taskOnCore()` 스캔)
+   실측 검증까지 완료 - 4코어 중 실제로 그 PML4를 실행 중인 코어
+   1개만 IPI 대상으로 골라짐을 확인.
 2. **정확한 벡터 번호/인터럽트 우선순위 배정**: **[확정, 2026-09-16]**
    `0xE0`으로 배정 - 전용 현황판 RM-28225668("Minicore 인터럽트 벡터
    목록") 신설에 맞춰 등재(우선순위 클래스 자체는 여전히 구현 착수
