@@ -6,8 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # 서브디렉터리 전부에 공통 적용 - 각 모듈 CMakeLists.txt에서 따로
-# 반복하지 않는다.
-add_compile_options(-Wall -Wextra)
+# 반복하지 않는다. -g(DWARF 디버그 정보)는 PN-1E7798AF(QEMU gdb stub
+# 디버깅 워크플로) 요구사항 - 런타임 코드 생성에는 전혀 영향 없고
+# ELF에 디버그 섹션만 추가한다(최적화 레벨 미지정 -> 기본 -O0이라
+# 소스 대응도 정확하다).
+add_compile_options(-Wall -Wextra -g)
 
 set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/arch/x86_64/linker.ld)
 
