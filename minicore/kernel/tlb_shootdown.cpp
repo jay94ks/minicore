@@ -11,11 +11,15 @@
 
 namespace {
 
-// isr.S 동적 벡터(33-254) 대역 - kTimerVector(0x20, timer.h)/
-// kHpetVector(0x22, hpet.h)/kLegacyPitVector(0x23, timer.cpp)/
-// kSchedulerTickVector(0x24, scheduler.h) 다음 자리(SP-DE19BB1C §5-2 -
-// 정확한 번호는 구현 시점에 확정해도 되는 것으로 명시됨).
-constexpr kernel::uint32_t kTlbShootdownVector = 0x25;
+// PN-C7D62610(QU-C5B8A7D9 설계자 답변, 2026-09-16) - RM-28225668/
+// SP-DE19BB1C §5-1이 확정한 커널 내부 IPI 전용 벡터 범위(0xE0~0xFD)로
+// 재배선했다. 원래 PN-6D33BB03이 임시로 쓴 값은 0x25(하드웨어 IRQ와
+// 안 겹치는 다음 빈 자리라는 이유만으로 고른 것 - kTimerVector(0x20)/
+// kHpetVector(0x22)/kLegacyPitVector(0x23)/kSchedulerTickVector(0x24)
+// 다음 자리)였으나, 이후 설계자가 "커널 내부 IPI는 전부 별도 현황판
+// (RM-28225668)에서 관리하는 고정 범위에 모아 배정"하기로 확정하며
+// 이 벡터도 그 범위 안(0xE0)으로 옮기라는 지시를 받았다.
+constexpr kernel::uint32_t kTlbShootdownVector = 0xE0;
 
 // IPI 자체는 데이터를 못 옮기므로, 실제 무효화 범위는 공유 메모리에
 // 적어 두고 IPI는 "그 메모리를 확인하라"는 신호로만 쓴다
