@@ -18,7 +18,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [DC-4809BB47](./DC-4809BB47.md) | Slab 할당자(SP-D7013B26) 세부 결정 미정 | archived |
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved |
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved |
-| [DC-6E2500A6](./DC-6E2500A6.md) | 커널 ↔ 커널 서비스 전용 고속 통신 채널 - 결정 요구사항 | review |
+| [DC-6E2500A6](./DC-6E2500A6.md) | 커널 ↔ 커널 서비스 전용 고속 통신 채널 - 결정 요구사항 | archived |
 | [DC-79A2387A](./DC-79A2387A.md) | 커널 C++ 런타임/코딩 컨벤션 세부 미정 | approved |
 | [DC-8EA1E7F6](./DC-8EA1E7F6.md) | 스케줄러: 프로세스/스레드 모델 및 컨텍스트 스위칭 구조 미정 | archived |
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived |
@@ -39,6 +39,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [PL-D65F49CC](./PL-D65F49CC.md) | x2APIC 지원 | archived |
 | [PL-E68894CD](./PL-E68894CD.md) | HPET 지원 | approved |
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved |
+| [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review |
@@ -48,7 +49,7 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review |
-| [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | review |
+| [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved |
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved |
@@ -62,13 +63,14 @@ GitHub에서 코드 없이도 설계 문서를 볼 수 있게 하기 위한 읽�
 | [SP-7CC5693A](./SP-7CC5693A.md) | VFS 커널 서브시스템 — 설계 제안 | approved |
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | review |
-| [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | review |
+| [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved |
 | [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved |
-| [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | review |
+| [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | pending |
 | [SP-C2670F69](./SP-C2670F69.md) | AHCI(SATA 스토리지 컨트롤러) 드라이버 — 설계 제안 | approved |
 | [SP-D7013B26](./SP-D7013B26.md) | Slab 할당자(libkmm) — 설계 제안 | approved |
 | [SP-DE19BB1C](./SP-DE19BB1C.md) | 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안 | approved |
 | [SP-E35FD36C](./SP-E35FD36C.md) | USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안 | approved |
 | [SP-EAB162FC](./SP-EAB162FC.md) | 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안 | approved |
+| [SP-F15B4A63](./SP-F15B4A63.md) | 지연 실행(타이머/알람) 인프라 — 설계 제안 | review |
 | [SP-F682B889](./SP-F682B889.md) | 커널 전용 비동기 프레임워크(Task 기반) — 설계 제안 | approved |

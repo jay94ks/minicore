@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-DE19BB1C
   status: approved
-  updatedAt: 2026-09-15T16:25:19.243Z
+  updatedAt: 2026-09-16T00:19:20.949Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안
@@ -190,7 +190,7 @@ extern "C" void kTlbShootdownIsr() {
    착수 시점에 "요청 슬롯을 여러 개로 늘릴지" 또는 "모든 샷다운
    호출 경로를 감싸는 별도의 전역 직렬화 락을 새로 둘지" 결정이
    필요하다(v1 커널 전용 범위에서는 무관 - 이 확장이 실제로 시작될
-   때 재확인).
+   때 재확인). **계획 PN-D132A1E9로 추적 중.**
 2. **정확한 벡터 번호/인터럽트 우선순위 배정**: **[확정, 2026-09-16]**
    `0xE0`으로 배정 - 전용 현황판 RM-28225668("Minicore 인터럽트 벡터
    목록") 신설에 맞춰 등재(우선순위 클래스 자체는 여전히 구현 착수

@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2AAD7C8D
   status: approved
-  updatedAt: 2026-09-15T13:40:44.368Z
+  updatedAt: 2026-09-16T00:17:20.850Z
   갱신: node scripts/export-cnw-docs.mjs
 -->
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
@@ -104,7 +104,9 @@ mapRegion()`의 첫 실제 호출(현재는 소비자가 없어 미발현)이 �
    레벨에서 보장하도록) 코드/주석을 보강한다 - 우연히 맞는 동작에
    의존하지 않기 위한 방어적 설계.
 
-실제 구현은 PN-1EF2B3B3로 추적한다.
+**[해소, 2026-09-16, 재확인] PN-1EF2B3B3 completed** - 위 두 수정
+사항(PML4E 사전 생성 + `mapRegion()` 타깃 명시)이 실제로 구현
+완료됐다. 이 §2.1은 더 이상 열린 항목이 아니다.
 
 ## 3. Maple Tree 자료구조 설계
 
