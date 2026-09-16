@@ -7,7 +7,7 @@
 |---|---|---|---|
 | [DC-01434F82](./DC-01434F82.md) | 비동기 프레임워크(SP-F682B889) 세부 결정 미정 | archived | 2026-09-15T05:46:52.264Z |
 | [DC-0CC88ABB](./DC-0CC88ABB.md) | HPET 없는 환경에서 스케줄러 LAPIC 틱과 Timer 전역 틱의 하드웨어 소유권 충돌 | archived | 2026-09-15T05:47:07.531Z |
-| [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T16:50:40.232Z |
+| [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived | 2026-09-15T05:47:02.266Z |
@@ -18,7 +18,7 @@
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved | 2026-09-13T13:14:35.340Z |
 | [DC-6E2500A6](./DC-6E2500A6.md) | 커널 ↔ 커널 서비스 전용 고속 통신 채널 - 결정 요구사항 | archived | 2026-09-16T00:33:55.662Z |
 | [DC-79A2387A](./DC-79A2387A.md) | 커널 C++ 런타임/코딩 컨벤션 세부 미정 | approved | 2026-09-13T13:14:35.335Z |
-| [DC-8EA1E7F6](./DC-8EA1E7F6.md) | 스케줄러: 프로세스/스레드 모델 및 컨텍스트 스위칭 구조 미정 | archived | 2026-09-15T05:46:54.889Z |
+| [DC-8EA1E7F6](./DC-8EA1E7F6.md) | 스케줄러: 프로세스/스레드 모델 및 컨텍스트 스위칭 구조 미정 | archived | 2026-09-16T19:03:38.956Z |
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
@@ -39,14 +39,15 @@
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved | 2026-09-14T11:59:56.596Z |
 | [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-16T00:03:46.677Z |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-15T17:44:39.178Z |
-| [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-16T13:53:07.262Z |
+| [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-16T18:28:43.546Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-16T15:40:32.171Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-16T16:29:47.545Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-16T14:01:54.423Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-16T18:59:33.833Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-16T19:17:44.547Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-15T19:29:32.611Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-15T12:46:23.061Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-15T18:57:47.422Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-16T19:12:43.602Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-16T00:01:24.894Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-16T00:04:06.361Z |
@@ -65,8 +66,8 @@
 | [SP-71DA77B3](./SP-71DA77B3.md) | 인터럽트 구독(Interrupt Subscription) 서브시스템 — 설계 제안 | approved | 2026-09-16T07:30:06.834Z |
 | [SP-7CC5693A](./SP-7CC5693A.md) | VFS 커널 서브시스템 — 설계 제안 | approved | 2026-09-16T15:00:21.061Z |
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved | 2026-09-16T00:23:43.317Z |
-| [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | review | 2026-09-15T17:32:40.491Z |
-| [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-16T05:34:58.179Z |
+| [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | review | 2026-09-16T19:03:02.131Z |
+| [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-16T18:58:41.608Z |
 | [SP-9A6D579F](./SP-9A6D579F.md) | 프로세스 디버깅(브레이크포인트/싱글스텝) 서브시스템 — 설계 제안 | approved | 2026-09-16T16:48:19.575Z |
 | [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved | 2026-09-16T15:00:00.989Z |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-16T00:29:09.944Z |
