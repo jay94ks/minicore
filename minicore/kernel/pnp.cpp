@@ -1,8 +1,10 @@
 #include "pnp.h"
 
+#include "address_space.h"
 #include "libkenv/spinlock.h"
 #include "paging.h"
 #include "pci.h"
+#include "process.h"
 #include "task.h"
 
 namespace kernel {
@@ -85,6 +87,103 @@ void kEnsureDeviceCache() {
     gDeviceCacheReady = true;
 }
 
+// kEnsureDeviceCache() 이후에만 의미 있다 - 못 찾으면 nullptr.
+const DeviceDescriptor* kFindCachedDevice(uint32_t bus, uint32_t device, uint32_t function) {
+    for (uint32_t i = 0; i < gDeviceCacheCount; ++i) {
+        const DeviceDescriptor& d = gDeviceCache[i];
+        if (d.bus == bus && d.device == device && d.function == function) {
+            return &d;
+        }
+    }
+    return nullptr;
+}
+
+// [channel.cpp의 kProcessFromSubmitter(PN-9CC66142)와 동일한 패턴
+// 재사용] "이 AsyncTask를 제출한 UserThread가 속한 Process"를 얻는다 -
+// channel.h가 이 헬퍼를 외부에 노출하지 않아(파일 스코프) 여기 다시
+// 만든다(관계도에 중복 패턴으로 기록해 둠, DC-21647E46).
+SharedPtr<Process> kProcessFromSubmitterForPnp(AsyncTask* task) {
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    if (!submitter) {
+        return SharedPtr<Process>();
+    }
+    auto* thread = static_cast<UserThread*>(submitter.get());
+    return thread->process.lock();
+}
+
+// [SP-9DD4F3EA §3.3a] BAR별 소유 프로세스 기록 - "이 BAR를 이미
+// 누가 점유했는가"만 답한다. **v1 축소 - Process Teardown Hook과
+// 아직 연동되지 않았다**(§3.3a가 명시한 공식 요구사항이지만
+// PN-71C3D483의 teardown 경로에 이 테이블을 끼워 넣는 배선은 후속
+// 계획으로 분리 - 아래 kIsBarOwned가 매 조회마다 `owner.lock()`으로
+// 소유자가 이미 죽었는지 확인해 죽었으면 그 자리에서 슬롯을 회수하는
+// **지연(lazy) GC**로 임시 대체한다 - 프로세스가 죽어도 그 BAR를
+// 다시 요청하는 다음 호출이 있을 때까지는 슬롯이 남아있을 수 있다는
+// 뜻, 명시적 즉시 반납은 아니다).
+constexpr uint32_t kMaxDeviceOwnerEntries = 64;
+
+struct DeviceOwnerEntry {
+    bool used = false;
+    uint32_t bus = 0, device = 0, function = 0;
+    uint64_t mmioBase = 0;
+    WeakPtr<Process> owner;
+};
+
+DeviceOwnerEntry gDeviceOwners[kMaxDeviceOwnerEntries];
+Spinlock gDeviceOwnerLock;
+
+bool kMatchesOwnerEntry(const DeviceOwnerEntry& entry, uint32_t bus, uint32_t device, uint32_t function,
+                         uint64_t mmioBase) {
+    return entry.bus == bus && entry.device == device && entry.function == function && entry.mmioBase == mmioBase;
+}
+
+// 이미 다른(살아있는) 프로세스가 점유했으면 true - 지나가는 김에
+// 죽은 소유자의 슬롯은 회수한다(위 "지연 GC" 참고).
+bool kIsBarOwned(uint32_t bus, uint32_t device, uint32_t function, uint64_t mmioBase) {
+    SpinlockGuard guard(gDeviceOwnerLock);
+    for (auto& entry : gDeviceOwners) {
+        if (!entry.used || !kMatchesOwnerEntry(entry, bus, device, function, mmioBase)) {
+            continue;
+        }
+        if (entry.owner.lock()) {
+            return true;
+        }
+        entry.used = false;  // 소유자가 이미 죽음 - 회수
+    }
+    return false;
+}
+
+// 호출 전 kIsBarOwned()로 비어있음을 이미 확인했다는 전제(그 사이
+// 다른 코어가 끼어들 가능성은 이 스핀락으로 직렬화된다 - 같은 락
+// 아래서 재확인 없이 바로 빈 슬롯에 꽂는 건 안전하다, 호출부가
+// 항상 이 순서로만 부르는 devmgr 단일 인스턴스 전제와도 일치,
+// SP-9DD4F3EA §4a-3). 빈 슬롯이 없으면 false(테이블 포화).
+bool kClaimBar(uint32_t bus, uint32_t device, uint32_t function, uint64_t mmioBase, const SharedPtr<Process>& owner) {
+    SpinlockGuard guard(gDeviceOwnerLock);
+    for (auto& entry : gDeviceOwners) {
+        if (entry.used && kMatchesOwnerEntry(entry, bus, device, function, mmioBase) && entry.owner.lock()) {
+            return false;  // 그 사이 다른 요청이 먼저 점유함
+        }
+    }
+    for (auto& entry : gDeviceOwners) {
+        if (entry.used && !entry.owner.lock()) {
+            entry.used = false;  // 지나가는 김에 죽은 슬롯 회수
+        }
+    }
+    for (auto& entry : gDeviceOwners) {
+        if (!entry.used) {
+            entry.used = true;
+            entry.bus = bus;
+            entry.device = device;
+            entry.function = function;
+            entry.mmioBase = mmioBase;
+            entry.owner = WeakPtr<Process>(owner);
+            return true;
+        }
+    }
+    return false;
+}
+
 // [channel.cpp의 kValidateUserBuffer(PN-B552E75F)와 동일한 패턴 재사용
 // - 관계도에 기록해 둠] outDevices가 호출자 자신의 유저 주소공간에
 // 속하는지 제출자(submitterTask)의 실제 userPml4Phys로 검증한다 -
@@ -136,10 +235,80 @@ public:
 
 EnumerateDevicesHandler gEnumerateDevicesHandler;
 
+// [SP-9DD4F3EA §3.3] devmgr(또는 devmgr이 스폰한 드라이버 자식)이
+// probe() 성공 후 그 장치의 MMIO BAR 접근 권한을 요청한다. role
+// 검증 없음(SP-EAB162FC §4/QU-3AAAB5E9 확정) - DeviceOwnerTable
+// 소유권 확인만으로 충분.
+class RequestIoPermissionHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<RequestIoPermissionArgs*>(argsRaw);
+
+        SharedPtr<Process> process = kProcessFromSubmitterForPnp(task);
+        if (!process) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+
+        kEnsureDeviceCache();
+        const DeviceDescriptor* dev = kFindCachedDevice(args->bus, args->device, args->function);
+        if (!dev) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        // args->mmioBase가 이 장치가 실제로 광고한 BAR 중 하나인지
+        // 확인 - 그 외 값은 임의 물리주소 접근 시도(보안 검증,
+        // RequestIoPermissionArgs 문서 주석 참고).
+        bool validBar = false;
+        for (uint64_t base : dev->mmioBases) {
+            if (base != 0 && base == args->mmioBase) {
+                validBar = true;
+                break;
+            }
+        }
+        if (!validBar) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        if (kIsBarOwned(args->bus, args->device, args->function, args->mmioBase)) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+
+        // v1 고정 4KiB - RequestIoPermissionArgs 문서 주석의 "v1 축소
+        // 범위" 참고(실제 BAR 크기 조회 절차 미구현).
+        constexpr uint64_t kMappingSize = 4096;
+        uint64_t mappedAddr = 0;
+        if (!process->addressSpace.mapRegion(kMappingSize, PAGE_WRITABLE | PAGE_USER | PAGE_CACHE_DISABLE,
+                                              VmaBacking::FixedPhysical, args->mmioBase, &mappedAddr)) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+
+        if (!kClaimBar(args->bus, args->device, args->function, args->mmioBase, process)) {
+            process->addressSpace.unmapRegion(mappedAddr, kMappingSize);
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+
+        args->mappedVirtualAddr = mappedAddr;
+        args->assignedIrqVector = 0;  // v1: MSI/MSI-X 배정 미구현(문서 주석 참고)
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+RequestIoPermissionHandler gRequestIoPermissionHandler;
+
 }  // namespace
 
 void PnpService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointEnumerateDevices, &gEnumerateDevicesHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointRequestIoPermission, &gRequestIoPermissionHandler);
 }
 
 }  // namespace kernel

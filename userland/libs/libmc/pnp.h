@@ -49,6 +49,20 @@ struct EnumerateDevicesArgs {
 
 constexpr SyscallEndpointId kSyscallEndpointEnumerateDevices = 8;
 
+// minicore/kernel/pnp.h의 RequestIoPermissionArgs와 바이트 단위로
+// 정확히 같은 레이아웃이어야 한다(위 문서 주석의 수동 동기화 부담
+// 그대로 적용).
+struct RequestIoPermissionArgs {
+    uint32_t bus = 0, device = 0, function = 0;
+    uint64_t mmioBase = 0;
+    // out
+    ChannelError error = ChannelError::None;
+    uint64_t mappedVirtualAddr = 0;
+    uint32_t assignedIrqVector = 0;
+};
+
+constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = 9;
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_PNP_H

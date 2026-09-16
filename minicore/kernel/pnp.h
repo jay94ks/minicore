@@ -51,9 +51,41 @@ struct EnumerateDevicesArgs {
 
 constexpr SyscallEndpointId kSyscallEndpointEnumerateDevices = 8;
 
+// [SP-9DD4F3EA §3.3] devmgr(또는 devmgr이 스폰한 드라이버 자식,
+// SP-EAB162FC §4/QU-3AAAB5E9 - 이 syscall은 role 검증을 하지 않고
+// `DeviceOwnerTable` 소유권 확인만으로 충분하다고 확정됨)이 특정
+// 장치의 MMIO BAR에 대한 접근 권한을 요청한다. **v1 축소 범위(다음
+// 두 항목은 의도적으로 미구현 - PN-* 후속 계획으로 별도 추적)**:
+// (1) MSI/MSI-X 인터럽트 벡터 배정 - `assignedIrqVector`는 항상 0을
+//     반환한다(§3.1의 "0=아직 미배정"과 같은 의미), (2) BAR 실제
+//     크기 조회(표준 PCI BAR sizing 절차 - "전부 1 써보고 읽어서
+//     크기 역산") - 이 syscall이 요청받은 물리주소 하나당 고정
+//     4KiB만 매핑한다(대다수 소형 MMIO 레지스터 블록엔 충분, 그
+//     이상이 필요한 장치가 실제로 나오면 그때 확장).
+struct RequestIoPermissionArgs {
+    uint32_t bus = 0, device = 0, function = 0;  // 이 PCI 장치를 특정
+    // 요청하는 BAR - EnumerateDevices가 돌려준 그 장치의
+    // DeviceDescriptor::mmioBases[] 값 중 정확히 하나와 일치해야
+    // 한다(그 외 값은 임의 물리주소 접근 시도로 간주해 거부).
+    uint64_t mmioBase = 0;
+    // out
+    // NotFound(장치가 없거나 mmioBase가 그 장치의 실제 BAR가 아님) /
+    // InvalidHandle(제출자를 못 찾음 또는 이미 다른 프로세스가 이
+    // BAR를 점유) / ResourceExhausted(주소공간 매핑 실패 또는
+    // DeviceOwnerTable 포화) - 전부 기존 ChannelError 재사용(SP
+    // 원문이 RequestIoPermissionArgs에 이미 ChannelError를 쓰기로
+    // 확정해 둔 선례 그대로).
+    ChannelError error = ChannelError::None;
+    uint64_t mappedVirtualAddr = 0;  // 성공 시 호출자 프로세스 주소공간의 가상주소
+    uint32_t assignedIrqVector = 0;  // v1: 항상 0(위 "v1 축소 범위" 참고)
+};
+
+constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = 9;
+
 class PnpService {
 public:
-    // 부팅 시 한 번 호출 - EnumerateDevices endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - EnumerateDevices/RequestIoPermission
+    // endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 
