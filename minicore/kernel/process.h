@@ -4,6 +4,7 @@
 #include "address_space.h"
 #include "libkenv/types.h"
 #include "signal.h"
+#include "syscall.h"
 
 namespace elf {
 class Image;  // 전방 선언(minicore/libs/libelf/elf.h) - Process::execImage 시그니처용
@@ -232,7 +233,53 @@ public:
     // 아직 어디에도 배선돼 있지 않다(별도 후속 항목). 실패(자원 고갈)
     // 시 false.
     bool raiseSignal(SignalNumber number);
+
+    // [SP-6BEAE0C1, PN-543C0CE9 착수 4번째 증분] SpawnProcess(RM-48E1E610
+    // 59번) syscall 엔드포인트를 SyscallRegistry에 등록한다 - Channel::
+    // registerSyscallEndpoints()와 같은 관례(부팅 시 BSP에서 한 번,
+    // kmain.cpp가 호출).
+    static void registerSyscallEndpoints();
 };
+
+// RM-48E1E610 59번 - SpawnProcess.
+constexpr SyscallEndpointId kSyscallEndpointSpawnProcess = 59;
+
+// SpawnProcess 실패 사유(SP-6BEAE0C1 §3) - `ChannelError`와 같은 관례
+// (out 파라미터로 결과 코드 하나 + 부가 값).
+enum class SpawnProcessError : uint32_t {
+    None = 0,
+    InvalidImageRange,   // imageBuffer/imageSize가 Paging::isUserRangeValid를 통과 못함
+    ImageTooLarge,       // kMaxSpawnImageSize 초과
+    OutOfMemory,         // 커널 버퍼/Process·UserThread slab/페이지 고갈
+    ElfParseFailed,      // elf::Image::parse 실패(BadMagic 등)
+    ExecImageFailed,     // Process::execImage 실패(유저 스택 확보 등)
+};
+
+// [SP-6BEAE0C1 §3] SpawnProcess syscall 인자 - `imageBuffer`/`argv`/
+// `envp`는 전부 유저 포인터(untrusted, 핸들러 내부에서 Paging::
+// isUserRangeValid로 검증 후에만 역참조). **이번 증분 한계**: `argv`/
+// `envp`는 아직 실제로 새 프로세스에 전달되지 않는다(§4 "인자/환경변수
+// 전달 규약"이 프로젝트 전체에서 아직 미착수 - execImage()가 지금은
+// 그런 스택 프레임을 구성하지 않는다, 이 syscall만의 제약이 아니다) -
+// ABI 자리만 미리 잡아 두고 §4가 준비되면 이어붙인다.
+struct SpawnProcessArgs {
+    const void* imageBuffer = nullptr;  // 유저 포인터 - ELF64 이미지 원본 바이트
+    uint64_t imageSize = 0;
+    char* const* argv = nullptr;  // 유저 포인터, NULL 종단 - 아직 미사용(위 참고)
+    char* const* envp = nullptr;  // 유저 포인터, NULL 종단 - 아직 미사용(위 참고)
+    // out
+    SpawnProcessError error = SpawnProcessError::None;
+    int64_t pid = -1;  // 성공 시 새 Process*를 재해석한 값(AsyncTaskManageCode의
+                        // "포인터를 그대로 토큰으로" 관례와 동일) - 실패 시 -1 유지.
+};
+
+// 단일 요청 안에서 커널 버퍼로 복사하는 이미지 바이트의 상한 -
+// GenericSlabAllocator::alloc()이 2048B 초과 요청을 PageFrameAllocator::
+// allocOrder로 그대로 위임하는데, 그 buddy 할당자의 최대 order(10,
+// page_frame_allocator.cpp의 kMaxOrder)가 4MiB라 이 값을 넘는 단일
+// 할당은 애초에 성공할 수 없다 - 그 한도에 정확히 맞춘 값(실측 후
+// 조정 가능한 순수 구현 세부, RM-23F4B687 §4).
+constexpr uint64_t kMaxSpawnImageSize = 4UL * 1024 * 1024;
 
 }  // namespace kernel
 

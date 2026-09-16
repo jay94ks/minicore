@@ -478,6 +478,11 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Channel::registerSyscallEndpoints();
     kernel::Logger::info("minicore: channel IPC syscall endpoints registered");
 
+    // SP-6BEAE0C1/PN-543C0CE9 - 위 Channel 등록과 같은 이유(BSP에서
+    // 한 번만).
+    kernel::Process::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: SpawnProcess syscall endpoint registered");
+
     // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
     // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에
     // 예약을 걸기 전에 초기화돼 있어야 한다.

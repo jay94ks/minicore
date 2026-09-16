@@ -244,4 +244,96 @@ bool Process::raiseSignal(SignalNumber number) {
     return true;
 }
 
+namespace {
+
+// [SP-6BEAE0C1 §3, PN-543C0CE9 착수 4번째 증분] SpawnProcess 본체 -
+// 앞선 세 증분(PageFrameAllocator::retain/refCount, Process::
+// allocate()/UserThread::allocate(), Paging::isUserRangeValid)을 실제로
+// 엮는다. ChannelReadHandler/ChannelWriteHandler와 완전히 같은 관례
+// (AsyncTaskHandler 하나 = syscall 엔드포인트 하나, args를 그 자리에서
+// 직접 채워 co_return).
+class SpawnProcessHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<SpawnProcessArgs*>(argsRaw);
+
+        // 1단계 - imageBuffer/imageSize 검증(SP-6BEAE0C1 §3 "기본적으로
+        // untrusted"). isUserRangeValid는 length==0도 true를 돌려주므로
+        // imageSize==0은 별도로 걸러야 한다(빈 ELF는 어차피 파싱
+        // 실패하겠지만, 크기 상한 검사 이전에 명확히 거부).
+        if (args->imageSize == 0 || args->imageSize > kMaxSpawnImageSize ||
+            !Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->imageBuffer), args->imageSize)) {
+            args->error = SpawnProcessError::InvalidImageRange;
+            co_return;
+        }
+
+        // 2단계 - 검증을 통과한 뒤에만, 커널 버퍼로 딱 한 번 복사한다
+        // (§3 "복사를 최소화하는 경로" - 이 요청 안에서 다시 복사하지
+        // 않고 이 버퍼를 그대로 파싱+로드에 재사용한다).
+        void* kernelImage = GenericSlabAllocator::alloc(args->imageSize);
+        if (!kernelImage) {
+            args->error = SpawnProcessError::OutOfMemory;
+            co_return;
+        }
+        memcpy(kernelImage, args->imageBuffer, args->imageSize);
+
+        elf::Image image;
+        if (elf::Image::parse(kernelImage, args->imageSize, &image) != elf::Error::None) {
+            GenericSlabAllocator::free(kernelImage, args->imageSize);
+            args->error = SpawnProcessError::ElfParseFailed;
+            co_return;
+        }
+
+        // 3단계 - 동적 Process/UserThread 확보(§5, allocate()가 이미
+        // memset(0)까지 끝내 둠 - init() 호출 전제 조건).
+        Process* proc = Process::allocate();
+        UserThread* thread = proc ? UserThread::allocate() : nullptr;
+        if (!proc || !thread || !proc->init()) {
+            if (thread) {
+                UserThread::release(thread);
+            }
+            if (proc) {
+                Process::release(proc);
+            }
+            GenericSlabAllocator::free(kernelImage, args->imageSize);
+            args->error = SpawnProcessError::OutOfMemory;
+            co_return;
+        }
+
+        // 4단계 - kEnterInitProcess/kSpawnServiceProcesses와 동일한
+        // execImage 경로. **elf::Image는 원본 버퍼를 복사하지 않고
+        // 그대로 가리키므로(elf.h 문서 주석) kernelImage는 execImage가
+        // 끝난 뒤에만 반납한다** - loadIntoAddressSpace가 이 버퍼에서
+        // 새 주소공간으로 실제 페이지 복사를 끝내는 지점이 execImage
+        // 안이다.
+        UserThread* started = proc->execImage(image, thread);
+        GenericSlabAllocator::free(kernelImage, args->imageSize);
+
+        if (!started) {
+            UserThread::release(thread);
+            proc->destroy();
+            Process::release(proc);
+            args->error = SpawnProcessError::ExecImageFailed;
+            co_return;
+        }
+
+        // argv/envp는 아직 실제로 전달하지 않는다(SpawnProcessArgs
+        // 문서 주석 참고 - §4 전체가 미착수).
+        Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
+        args->pid = reinterpret_cast<int64_t>(proc);
+        args->error = SpawnProcessError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+SpawnProcessHandler gSpawnProcessHandler;
+
+}  // namespace
+
+void Process::registerSyscallEndpoints() {
+    SyscallRegistry::registerHandler(kSyscallEndpointSpawnProcess, &gSpawnProcessHandler);
+}
+
 }  // namespace kernel
