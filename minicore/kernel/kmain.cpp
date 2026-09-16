@@ -3,6 +3,7 @@
 #include "async_task.h"
 #include "boot_info.h"
 #include "channel.h"
+#include "delayed_exec.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
 #include "idt.h"
@@ -601,7 +602,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Timer::init();
     kernel::Serial::write("minicore: timer ready (100Hz), source=");
     kernel::Serial::write(kernel::Timer::usesHpet() ? "hpet" : "lapic+pit");
-    kernel::Serial::write(", enabling interrupts\n");
+    kernel::Serial::write("\n");
+
+    // 지연 실행 큐(SP-F15B4A63, PN-C46DF296) - Timer::tickCount()를
+    // 시간 기준으로 쓰므로 Timer::init() 이후, 전역 테이블 하나뿐이라
+    // BSP에서 한 번만(위 KernelReservedTable::init()과 같은 이유).
+    kernel::DelayedExecutionQueue::init();
+    kernel::Serial::write("minicore: delayed execution queue ready, enabling interrupts\n");
 
     kernel::Pci::init();
     kernel::Serial::write("minicore: PCI config access=");

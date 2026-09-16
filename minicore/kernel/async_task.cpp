@@ -1,6 +1,7 @@
 #include "async_task.h"
 
 #include "acpi.h"
+#include "delayed_exec.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
@@ -243,6 +244,28 @@ void AsyncReactor::reactorTaskEntry(void*) {
         AsyncTask* task = gPreemptiveQueues[coreIndex].popFront();
         if (!task) {
             task = gExecQueues[coreIndex].popFront();
+        }
+        if (!task) {
+            // 지연 실행 큐(SP-F15B4A63, PN-C46DF296) - 전용 커널 Task를
+            // 새로 만들지 않고 이 리액터의 idle 분기에서 만료 타이머를
+            // 처리한다(§3, QU-A8C0CC2C 설계자 답변). pump()가 만료된
+            // 콜백을 실행하는 도중 AsyncTask::submit()으로 새 작업을
+            // 큐에 넣을 수 있으므로, park 여부를 결정하기 전에 먼저
+            // 실행 큐를 한 번 더 확인한다.
+            DelayedExecutionQueue::pump();
+            task = gPreemptiveQueues[coreIndex].popFront();
+            if (!task) {
+                task = gExecQueues[coreIndex].popFront();
+            }
+        }
+        if (!task && DelayedExecutionQueue::hasPending()) {
+            // 아직 만료되지 않은 타이머가 남아 있다 - Scheduler::onTick()을
+            // 건드려 새 wake 경로를 만드는 대신, 완전히 파킹하지 않고
+            // 저비용으로 다시 돌아 재확인한다(내 판단, SP-F15B4A63 문서화
+            // 예정 - yieldCurrent()는 이 Task를 곧장 다시 실행 큐 끝에
+            // 넣으므로 다음 스케줄러 틱 안에 이 루프로 되돌아온다).
+            Scheduler::yieldCurrent();
+            continue;
         }
         if (!task) {
             // gReactorParked를 "진짜로 블로킹되는" 이 순간에만 true로

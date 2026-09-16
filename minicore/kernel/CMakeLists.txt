@@ -18,6 +18,7 @@ add_library(minicore_kernel OBJECT
     task.cpp
     scheduler.cpp
     async_task.cpp
+    delayed_exec.cpp
     wait_queue.cpp
     syscall.cpp
     syscall_fastpath.cpp
