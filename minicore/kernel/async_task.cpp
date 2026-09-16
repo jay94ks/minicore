@@ -9,12 +9,65 @@
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "paging.h"
 #include "scheduler.h"
+#include "syscall.h"
 #include "task.h"
 
 namespace {
 
 extern "C" void kTaskStartTrampoline();
+
+// [신규, PN-523B779F 조사 중 발견/수정] onExec()이 제출자(UserThread)의
+// 유저 포인터를 직접 역참조하는 게 이 코드베이스 전반의 기존 관례인데
+// (channel.cpp의 kValidateUserBuffer/kResolveOwnedBridge, pnp.cpp의
+// kValidateEnumerateBuffer 등 - 전부 "포인터가 그 주소공간에 속하는지"
+// 검증만 하고, 실제 그 CR3로 전환하는 건 이 진입 래퍼의 몫이라고
+// 암묵적으로 가정해 왔다), 정작 그 CR3 동기화 자체가 어디에도 없었다 -
+// `Scheduler::runLoop()`이 idle로 들어가기 전에 CR3를 `gBootPml4Phys`
+// 로 되돌려 두므로(scheduler.cpp 1218행 부근), 그 뒤 리액터가
+// `drainOnce()`로 이 AsyncTask를 처음 실행할 때 CR3가 제출자의 유저
+// 주소공간이 아니라 `gBootPml4Phys`인 채로 `onExec()`이 실행돼, 제출자의
+// 유저 스택(예: syscall args를 담은 지역 변수)을 가리키는 포인터를
+// 그대로 역참조하면 그 주소가 `gBootPml4Phys`엔 아예 매핑돼 있지 않아
+// Page Fault -> (ring0에서 난 폴트라 `kTerminateFaultingUserTask`
+// 경로를 못 타고) `kPanic`까지 간다 - devmgr의 EnumerateDevices
+// 첫 실사용으로 실측 발견(PN-BD9AAE2F 3번 항목).
+//
+// **여기(스택풀 최초 진입, 아래 kAsyncTaskEntryWrapper) 한정으로만
+// 고친다** - 이 함수는 `kContextSwitch`로 AsyncTask 자신의 전용
+// 스택(GenericSlabAllocator 커널 힙 메모리, 모든 프로세스의 PML4에
+// 공유되는 higher-half 안에 있어 CR3가 뭐든 항상 안전하게 접근
+// 가능)으로 이미 넘어온 뒤라 CR3를 바꿔도 다음 스택 접근이 위험하지
+// 않다(`kSyncCr3`가 "onTick()에서만 안전, runLoop()에서는 위험"이라고
+// 경고하는 그 위험한 부트 스택과는 다른 스택 - scheduler.cpp의
+// `kSyncCr3` 문서 주석 참고). **`AsyncReactor::drainOnce()`의
+// `coroHandle.resume()` 재개 경로(co_await로 suspend됐다 나중에
+// 재개되는 경우, 예: ChannelReadHandler의 대기 루프)는 일부러 손대지
+// 않았다** - 그 경로는 리액터 자신이 지금 서 있는 스택 위에서 직접
+// resume()하므로(스택 전환 없음, `async_task.h`의 "코루틴 방식이
+// 스택풀 방식보다 가벼운 핵심 이유" 주석 참고), `drainOnce()`가
+// `Scheduler::runLoop()`의 idle 인라인 호출에서 불렸다면 그 스택이 바로
+// 위 "위험한 부트 스택"일 수 있어 여기와 같은 방식으로 안전하게 CR3를
+// 바꿀 수 없다 - 별도 설계가 필요한 남은 범위로 PN-523B779F에 기록해
+// 둔다.
+kernel::uint64_t kSyncCr3ForAsyncExecEntry(kernel::AsyncTask* task) {
+    const kernel::uint64_t original = kernel::Paging::currentPml4Phys();
+    kernel::SharedPtr<kernel::Task> submitter = task->submitterTask.lock();
+    if (submitter) {
+        auto* thread = static_cast<kernel::UserThread*>(submitter.get());
+        if (thread->isUserLevel && thread->userPml4Phys && thread->userPml4Phys != original) {
+            asm volatile("mov %0, %%cr3" : : "r"(thread->userPml4Phys) : "memory");
+        }
+    }
+    return original;
+}
+
+void kRestoreCr3AfterAsyncExecEntry(kernel::uint64_t original) {
+    if (kernel::Paging::currentPml4Phys() != original) {
+        asm volatile("mov %0, %%cr3" : : "r"(original) : "memory");
+    }
+}
 
 // AsyncTask 전용 진입 래퍼 - kTaskStartTrampoline(context_switch.S)이
 // "call rbx"로 이 함수를 호출한다(rdi = r12 = AsyncTask* 그대로). Task와
@@ -23,6 +76,10 @@ extern "C" void kTaskStartTrampoline();
 // AsyncTask::yield()류의 kContextSwitch로 리액터에 영구 복귀한다.
 void kAsyncTaskEntryWrapper(void* arg) {
     auto* task = static_cast<kernel::AsyncTask*>(arg);
+    // [PN-523B779F] onExec() 호출 전 제출자의 유저 주소공간으로 CR3를
+    // 맞춘다 - 위 kSyncCr3ForAsyncExecEntry 문서 주석 참고. handler가
+    // 없어도(아래 else 분기) 호출 자체는 무해하므로 조건 없이 부른다.
+    const kernel::uint64_t savedPml4ForAsyncExec = kSyncCr3ForAsyncExecEntry(task);
     kernel::AsyncTaskHandler* handler = kernel::AsyncCallbackRegistry::resolve(task->subjectCode);
     if (handler) {
         // [PN-C62F7908, 2/5 -> 4/5 -> 5/5] onExec이 AsyncExecCoro를
@@ -48,6 +105,9 @@ void kAsyncTaskEntryWrapper(void* arg) {
             // 재사용) 다음 드레인 차례에 반드시 다시 뽑히게 한다.
             kernel::AsyncReactor::submitCompletion(task);
             kernel::AsyncTask::yield();
+            // [PN-523B779F] yield() 동안 다른 Task/AsyncTask가 CR3를
+            // 바꿔 놨을 수 있어 재시도 직전에 다시 맞춘다.
+            kSyncCr3ForAsyncExecEntry(task);
             result = handler->onExec(task, task->args);
         }
         if (result.done()) {
@@ -73,6 +133,11 @@ void kAsyncTaskEntryWrapper(void* arg) {
         // 이 코어를 멈추지 않기 위해 실패로만 표시하고 계속 진행한다.
         task->state = kernel::AsyncTaskState::Failed;
     }
+    // [PN-523B779F] 리액터/idle 컨텍스트로 돌아가기 전 CR3를 이 함수
+    // 진입 시점 값으로 되돌린다 - runLoop()의 idle 분기가 요구하는
+    // "idle 컨텍스트에서는 항상 gBootPml4Phys(또는 이 함수를 부른
+    // 시점의 원래 값)"라는 기존 불변조건을 그대로 지킨다.
+    kRestoreCr3AfterAsyncExecEntry(savedPml4ForAsyncExec);
     kernel::AsyncTask::yield();
     // yield()가 이 AsyncTask를 다시 스케줄하지 않으므로(리액터가 상태를
     // 보고 정리) 이 지점으로 다시는 돌아오지 않는다 - 방어적 무한 루프.

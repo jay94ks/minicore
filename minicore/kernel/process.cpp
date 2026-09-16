@@ -258,6 +258,15 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
     thread->ring3EntryPoint = image.entryPoint();
     thread->ring3UserStackTop = kUserStackTop;
     thread->init(kEnterRing3, nullptr);
+    // [신규, PN-523B779F] `thread`가 `UserThread::allocate()`를 거치지
+    // 않은 정적 전역(kmain.cpp의 gInitThread/gServiceThread[])이면
+    // `_selfRef`가 비어 있어 `weakAsTask()`/`submitterTask` 체이닝이
+    // 전부 조용히 실패한다(syscall.h의 ensureSelfRef() 문서 주석
+    // 참고) - allocate() 경로면 이미 채워져 있어 멱등하게 아무 일도
+    // 안 한다. 실패(Slab 고갈)해도 이 함수 자체를 실패시키지 않는다 -
+    // submitterTask 관련 기능(CR3 동기화/유저 포인터 검증)만 못 쓰게
+    // 될 뿐 프로세스 기동 자체는 그 없이도 가능했던 기존 동작이다.
+    thread->ensureSelfRef();
     mainThread = thread;
     return thread;
 }

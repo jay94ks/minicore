@@ -139,6 +139,23 @@ public:
     static UserThread* allocate();
     static void release(UserThread* thread);
 
+    // [신규, PN-523B779F 조사 중 발견] `allocate()`를 거치지 않는
+    // 정적 전역 UserThread(kmain.cpp의 `gInitThread`/`gServiceThread[]`
+    // - init/devmgr/fs/net/tty의 최초 스레드)는 `_selfRef`가 영영
+    // 채워지지 않아 `weakAsTask()`가 항상 빈 `WeakPtr<Task>`를
+    // 반환한다 - `Syscall::submit()`이 그 빈 값을 그대로
+    // `AsyncTask::submitterTask`에 넣으면, 나중에 `onExec()`이
+    // `submitterTask.lock()`으로 제출자를 찾으려는 모든 시도(CR3
+    // 동기화, `kValidateUserBuffer`류 포인터 검증 등)가 조용히
+    // 실패한다 - devmgr의 `EnumerateDevices` 첫 호출이 유저 스택
+    // 최상단 근처 Page Fault로 커널 PANIC까지 간 근본 원인이 바로
+    // 이것(async_task.cpp의 CR3 동기화 자체는 정상 동작했으나, sync할
+    // 대상 자체를 못 찾았다). `Process::execImage()`가 `thread->init()`
+    // 직후 이 메서드를 호출해 두면(이미 `allocate()`로 채워져 있으면
+    // 멱등하게 아무 일도 안 함) 정적/동적 UserThread 양쪽 다 이후로는
+    // `submitterTask` 체이닝이 항상 성립한다.
+    bool ensureSelfRef();
+
 private:
     // [신규, 2026-09-17, PN-B4987BF6] `allocate()`가 `kMakeShared`로
     // 만든 강한 참조를 스스로 붙들고 있다가 `release()`가 명시적으로

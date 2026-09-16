@@ -58,6 +58,16 @@ UserThread* UserThread::allocate() {
     return thread;
 }
 
+// [신규, PN-523B779F] syscall.h의 ensureSelfRef() 문서 주석 참고 -
+// allocate()와 정확히 같은 kMakeShared+no-op 삭제자 패턴을 재사용한다.
+bool UserThread::ensureSelfRef() {
+    if (_selfRef) {
+        return true;  // 이미 채워져 있음(allocate() 경로) - 멱등
+    }
+    _selfRef = kMakeShared<UserThread>(this, &kNoOpReleaseUserThread);
+    return static_cast<bool>(_selfRef);
+}
+
 void UserThread::release(UserThread* thread) {
     // _selfRef.reset()은 강한 참조 카운트만 0으로 내릴 뿐(no-op
     // 삭제자라 이 시점엔 아무 메모리도 안 건드림) - 실제 반납은 항상
