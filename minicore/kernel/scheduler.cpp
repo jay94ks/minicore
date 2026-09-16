@@ -1,6 +1,7 @@
 #include "scheduler.h"
 
 #include "acpi.h"
+#include "async_task.h"
 #include "delayed_exec.h"
 #include "gdt.h"
 #include "interrupt_frame.h"
@@ -613,6 +614,17 @@ void Scheduler::runLoop() {
 
         Task* next = pickNext(coreIndex);
         if (!next) {
+            // 리액터가 idle을 흡수한다(SP-F682B889 §3.4/§4, 2026-09-16
+            // 재구조 - QU-96BBB769/QU-4034561A/QU-3BDEE348 답변,
+            // PN-FEAAF154) - 실행할 Task가 없을 때 곧장 hlt하지 않고
+            // 먼저 이 코어의 비동기 실행 큐/지연 타이머를 확인한다.
+            // 할 일을 했으면(true) 다음 루프에서 pickNext()부터 다시
+            // 확인하고, 정말 아무 것도 없을 때만(false) hlt한다 - hlt는
+            // 어떤 인터럽트로도 즉시 깨어나므로(스케줄러 틱 100Hz 포함)
+            // 그 자체로 안전하다는 게 이번 재설계의 핵심 전제다.
+            if (AsyncReactor::drainOnce(coreIndex)) {
+                continue;
+            }
             asm volatile("sti; hlt");
             continue;
         }

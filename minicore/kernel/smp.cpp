@@ -101,7 +101,10 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     kernel::Serial::write("\n");
 
     kernel::Scheduler::startTickOnThisCore();
-    kernel::AsyncReactor::initForThisCore();
+    // AsyncReactor는 더 이상 코어당 초기화가 필요 없다(2026-09-16
+    // 재구조, PN-FEAAF154 - 전역 IDT 등록 하나만 BSP의 kMain()에서
+    // 한 번 하면 끝) - 이 AP가 예전에 여기서 부르던
+    // AsyncReactor::initForThisCore()는 삭제됐다.
 
     gApStartedCount.fetchAdd(1);
 

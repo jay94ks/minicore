@@ -19,7 +19,7 @@ using AsyncTaskManageCode = uint64_t;    // 그 작업 주체 안에서 이 인�
 // 완료/실패보다 먼저 죽어, 결과를 가져갈 사람이 아무도 남지 않았을 때
 // 전이하는 상태. onExec을 실행/재개하지 않고 바로 AsyncTaskHandler::
 // onCancel만 호출한 뒤 프레임워크가 자원을 반납한다(AsyncReactor::
-// reactorTaskEntry, scheduler.cpp의 SelfTerminateHandler::onExec 참고).
+// drainOnce, scheduler.cpp의 SelfTerminateHandler::onExec 참고).
 enum class AsyncTaskState { Ready, Running, Suspended, Completed, Failed, Cancelled };
 
 // 전용 스택 크기 - PL-1E247831이 "정확한 크기는 실측 확정"으로 남겨둔
@@ -51,15 +51,6 @@ struct AsyncTask {
     // 대기하는 Task도 반드시 같은 코어에서 Scheduler::parkCurrent()로
     // 잠들어 있어야 한다(v1 범위 - 코어 간 이관 없음).
     Task* waitingTask = nullptr;
-
-    // [PN-40E976F2, 설계자 지시] 이 AsyncTask의 실제 소유자는 그것을
-    // 실행하는 커널 Task(리액터 - AsyncReactor::submit이 호출된 그
-    // 코어의 gReactorTasks[coreIndex])이지, waitingTask(완료를 기다리는
-    // 대상일 뿐 소유자가 아님)나 그걸 제출한 UserThread가 아니다 -
-    // AsyncTask::submit()이 채운다. 지금은 진단/문서화 목적으로만
-    // 쓰이고(v1은 코어 간 이관이 없어 항상 자기 코어의 리액터를
-    // 가리킴이 자명하다) 실제 로직이 이 필드를 읽지는 않는다.
-    Task* ownerTask = nullptr;
 
     // false면 완료(Completed/Failed) 후에도 리액터가 이 AsyncTask
     // 구조체/전용 스택을 자동으로 반납하지 않는다 - 결과를 나중에
@@ -120,39 +111,57 @@ public:
     static AsyncTaskHandler* resolve(AsyncTaskSubjectCode subjectCode);
 };
 
-// 코어당 전용 리액터 Task - 우선순위 무시 즉시 스케줄링으로 깨어난다.
+// 커널 전용 비동기 프레임워크의 디스패치 계층(SP-F682B889 §3.4/§4,
+// 2026-09-16 재구조 - QU-96BBB769/QU-4034561A/QU-3BDEE348 답변,
+// PN-FEAAF154) - **더 이상 코어당 전용 kernel::Task가 아니다.** 예전
+// (PN-C46DF296까지)에는 리액터가 각 코어에 하나씩 배치되는 전용
+// Task로 존재했으나, "리액터가 idle을 흡수한다"는 설계자 지시에 따라
+// `Scheduler::runLoop()`의 idle 폴백(코어에 실행할 Task가 없을 때)이
+// `drainOnce()`를 직접 호출하는 방식으로 전면 교체됐다 - 새 kernel::
+// Task/전용 스택/park-wake 프로토콜이 전혀 없다.
 class AsyncReactor {
 public:
-    // BSP/AP 각자 자기 코어에서 한 번씩 호출한다(Scheduler::init() 이후,
-    // Lapic::init() 이전이든 이후이든 무방 - 실제 실행은 Scheduler가
-    // 디스패치를 시작한 뒤에나 일어난다). 이 코어의 리액터 Task를
-    // 만들어 일반 큐에 최초 1회 넣는다 - 실행되면 즉시 자기 할 일이
-    // 없음을 확인하고 파킹한다.
-    static void initForThisCore();
+    // 전역 1회(BSP에서만, Idt::init() 이후) - "다른 Task가 실행
+    // 중일 때"의 즉시 개입 경로(§4 (C), async_task.cpp의
+    // kAsyncDrainVector) IDT 벡터를 등록한다. 코어별 상태는 전혀
+    // 없다(gExecQueues/gPreemptiveQueues는 이미 정적 배열) - AP는
+    // 더 이상 이 클래스를 위해 아무것도 호출할 필요가 없다.
+    static void init();
 
-    // 코어별로 하나씩 생성되는 리액터 Task의 진입점 - 실행 큐를
-    // 드레인하며 각 AsyncTask를 kContextSwitch로 진입/재개한다. 할
-    // 일이 없으면 Scheduler::parkCurrent()로 잠든다.
-    static void reactorTaskEntry(void* arg);
+    // 이 코어의 실행 큐(선점 큐 우선)에서 정확히 하나를 꺼내 실행/
+    // 재개하거나(kContextSwitch), 만료된 지연 타이머(DelayedExecutionQueue,
+    // SP-F15B4A63)를 처리한다 - 할 일을 하나 처리했으면 true, 정말
+    // 아무 것도 없었으면 false(그 결과에 따라 호출부가 계속 반복할지
+    // 결정한다). **재진입 방지**: 이미 이 코어에서 드레인이 진행 중이면
+    // (runLoop()의 인라인 호출이든 §4 (C) 경로의 IPI 핸들러든) 즉시
+    // false를 반환한다 - 그렇지 않으면 AsyncTask의 kContextSwitch
+    // 재개 지점(gReactorSavedRsp[coreIndex])을 두 실행 흐름이 동시에
+    // 덮어쓸 수 있다(같은 코어 안에서 인터럽트로만 발생 가능한 중첩 -
+    // 새로 큐잉된 항목은 바깥쪽에서 이미 진행 중인 호출이 이어서
+    // 처리하므로 유실되지 않는다). `Scheduler::runLoop()`의 idle
+    // 분기와 §4 (C)의 IPI 핸들러(kAsyncDrainVector) 둘 다 이 함수를
+    // 호출한다.
+    static bool drainOnce(uint32_t coreIndex);
 
     // 인터럽트 컨텍스트에서 호출 가능 - 완료(또는 새로 생성)된
-    // AsyncTask를 이 코어의 실행 큐에 push하고, 리액터가 파킹돼 있으면
-    // Scheduler::scheduleImmediate로 즉시 깨운다(이미 실행 중이면 다음
-    // 자기 루프에서 자연히 집어가므로 다시 깨울 필요가 없다).
+    // AsyncTask를 이 코어의 실행 큐에 push한다.
     //
-    // preemptive=true(SP-00CA7175 §2.2, PN-7AC01E6E 항목 6)면 일반 큐가
-    // 아니라 선점 큐에 넣는다 - reactorTaskEntry가 매 루프마다 선점 큐를
-    // 먼저 비운다. 호출부가 그 자리에서 "이 완료가 exclusivePreemptive
-    // Channel에서 파생된 것인지" 판단할 수 있을 때만(channel.cpp의
-    // connectChannel/acceptFromChannel 핸드셰이크 완료 지점 - Channel*가
-    // 직접 스코프에 있는 곳) true로 넘긴다. ChannelRead/Write는 연결
-    // 이후의 BridgePipe(Channel과 무관한 별개 구조체)에서만 동작해
-    // 여기서 판단할 방법이 없어 기본값(false)으로 남는다 - 설계자 답변
-    // (QU-1D44FA84)은 read/write도 선점 대상이어야 한다고 했으나, 그걸
-    // 위해서는 BridgePipe에 새 필드가 필요해 그 답변의 "새 필드 불필요"
-    // 부분과 충돌한다 - 실제 Tier B 소비자가 생겨 이 간극이 실제로
-    // 문제가 될 때 재확인한다(지금은 어떤 devmgr/fs/net/tty도 구현돼
-    // 있지 않아 read/write 우선순위 차이가 실측될 수 없다).
+    // **[재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]**
+    // 리액터가 더 이상 Task가 아니므로 "파킹돼 있으면 강제 스케줄링"
+    // 개념 자체가 사라졌다 - 대신:
+    // - **preemptive=false → (A)**: 그냥 큐에 넣기만 한다. 이 코어가
+    //   다음에 idle 분기(pickNext()==nullptr)에 도달하는 순간 자연히
+    //   처리된다(그 사이 다른 Task가 실행 중이었다면 그 Task가 곧
+    //   블로킹되거나 스스로 끝나 idle로 돌아오는 게 일반적인 패턴 -
+    //   실측 근거: `Syscall::submit()`이 유일한 "다른 Task 실행 중"
+    //   실사용처이고, 그 직후 관례상 `Syscall::wait()`로 곧 자기
+    //   자신을 파킹한다).
+    // - **preemptive=true → (C)**: 선점 큐에 넣은 뒤 이 코어 자신에게
+    //   `kAsyncDrainVector` IPI를 보낸다(async_task.cpp) - 인터럽트가
+    //   다시 켜지는 즉시(대개 이 함수의 호출부가 반환하는 시점) 그
+    //   ISR이 `drainOnce()`를 큐가 빌 때까지 반복 호출해 즉시 처리를
+    //   보장한다. exclusivePreemptive Channel(SP-00CA7175 Tier B)
+    //   핸드셰이크 완료 등 지연시간이 중요한 경로가 이 값을 넘긴다.
     static void submitCompletion(AsyncTask* task, bool preemptive = false);
 };
 

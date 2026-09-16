@@ -2,6 +2,9 @@
 
 #include "acpi.h"
 #include "delayed_exec.h"
+#include "idt.h"
+#include "interrupt_frame.h"
+#include "lapic.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
@@ -84,36 +87,38 @@ AsyncTaskQueue gPreemptiveQueues[kMaxCores];
 // 갱신한다. nullptr이면 리액터가 popFront()/parkCurrent() 사이 어딘가.
 kernel::AsyncTask* gCurrentAsyncTask[kMaxCores] = {};
 
-// 리액터 Task가 AsyncTask로 전환하기 직전의 자기 자신(리액터
-// 컨텍스트) RSP - AsyncTask::yield()가 돌아올 자리.
+// 이 코어에서 "지금 이 자리"(runLoop()의 idle 인라인 호출이든, §4 (C)
+// 경로의 IPI 핸들러든)가 AsyncTask로 전환하기 직전의 자기 자신 RSP -
+// AsyncTask::yield()가 돌아올 자리(옛 "리액터 Task 컨텍스트"와 정확히
+// 같은 역할, 이름만 유지 - 별도 Task가 아니게 됐다고 해서 이 슬롯
+// 자체의 의미가 바뀌지는 않는다).
 kernel::uint64_t gReactorSavedRsp[kMaxCores] = {};
 
-// 코어당 전용 리액터 Task 실체 - 일반 kernel::Task 그대로, Scheduler가
-// 다른 Task와 동일하게 다룬다(다만 즉시 스케줄링으로만 깨어남).
-kernel::Task gReactorTasks[kMaxCores];
+// AsyncReactor::drainOnce()의 재진입 방지 플래그(2026-09-16 재구조,
+// PN-FEAAF154) - 이미 이 코어에서 드레인이 진행 중일 때(gReactorSavedRsp
+// 슬롯이 사용 중일 때) §4 (C) 경로의 IPI가 겹쳐 들어와도 또 다른
+// drainOnce() 호출이 같은 슬롯을 건드리지 않도록 막는다. 옛
+// `gReactorParked`(리액터 Task의 park/wake 상태 추적)와는 목적이
+// 다르다 - Task 자체가 없어졌으므로 그 개념은 폐기됐다.
+bool gDraining[kMaxCores] = {};
 
-// 이 리액터가 지금 "명시적으로 깨워 줘야만 다시 도는" 상태(진짜
-// Scheduler::parkCurrent()로 블로킹됨)인지 - 실측으로 발견한 경쟁
-// (2026-09-14, Channel IPC 스트레스 테스트): 원래
-// AsyncReactor::submitCompletion()은 Scheduler::currentTask() !=
-// &gReactorTasks[coreIndex]로 "리액터가 지금 안 돌고 있으니 깨워야
-// 한다"를 판단했는데, 이 신호는 스케줄러 틱이 리액터 Task를(어느
-// AsyncTask의 onExec를 대신 실행하는 도중이든, popFront 직후 막
-// parkCurrent()를 부르려던 참이든) Task 수준에서 그냥 보통의
-// 라운드로빈으로 선점해 버리면 완전히 어긋난다 - 그 순간
-// gCurrentTask[coreIndex]는 더 이상 리액터가 아니게 되지만, 리액터
-// Task 자신은 (parkCurrent()를 실제로 부른 게 아니라 그냥 Ready로
-// 재큐잉될 뿐이므로) 이미 스스로 다시 스케줄될 수 있는 상태다 -
-// 그런데도 currentTask() 기반 판단은 "안 돌고 있다"고 오판해
-// scheduleImmediate로 또 다른 큐에 넣어 버려, 같은 Task가 두 큐에
-// 동시에 들어가는 이중 스케줄링이 된다(runLoop/yieldCurrent에서 이미
-// 실측 발견한 것과 같은 근본 원인). 이 플래그는 "진짜로 명시적 wake가
-// 필요한가"만을 오직 reactorTaskEntry() 자신이(parkCurrent() 호출
-// 직전, cli로 보호된 구간에서) true로 세우고, submitCompletion()이
-// 그 값을 확인+false로 되돌리는 것으로 대체해 이 오판을 근본적으로
-// 없앤다 - currentTask()가 무엇이든(틱 선점으로 바뀌었든 말든) 상관
-// 없이 항상 정확하다.
-bool gReactorParked[kMaxCores] = {};
+// §4 (C) 경로("다른 Task 실행 중일 때"의 즉시 개입, QU-3BDEE348 답변)
+// 전용 IPI 벡터 - RM-28225668에 배정(0xE3, kForcedMigrationVector
+// (SP-ECC59BAE, 0xE2) 다음 번호). ISR은 이 코어 자신에게만 보내는
+// self-IPI를 받는다 - x86 표준 동작대로 인터럽트가 다시 켜지는 순간
+// (대개 submitCompletion() 호출부가 반환하며 sti하는 시점, 또는 이미
+// sti 상태였다면 그 즉시) 전달된다.
+constexpr kernel::uint32_t kAsyncDrainVector = 0xE3;
+
+void kAsyncDrainIsr(kernel::InterruptFrame*) {
+    const kernel::uint32_t coreIndex = kernel::Scheduler::currentCoreIndex();
+    // 이 IPI가 도착한 시점에 큐에 있던 것 전부를 이 자리에서 처리한다 -
+    // 그 사이 또 들어온 게 있으면(드문 경쟁) 다음 IPI가 마저 처리하므로
+    // 무한정 여기 머무르지 않는다. EOI는 공통 ISR 스텁이 처리
+    // (tlb_shootdown.cpp와 동일 관례).
+    while (kernel::AsyncReactor::drainOnce(coreIndex)) {
+    }
+}
 
 constexpr kernel::uint32_t kMaxHandlers = 64;  // v1 상한 - 필요해지면 늘림
 kernel::AsyncTaskHandler* gHandlers[kMaxHandlers] = {};
@@ -136,7 +141,6 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     // 지우면 슬랩 재사용으로 이전 점유자의 낡은 포인터가 남아, 리액터가
     // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
     waitingTask = nullptr;
-    ownerTask = nullptr;
     autoFree = true;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
@@ -204,10 +208,6 @@ AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCo
     // 않으면 아주 빨리 완료되는 작업이 기본값(true)으로 자동 반납될
     // 수 있다(경쟁).
     task->autoFree = autoFree;
-    // [PN-40E976F2] 이 AsyncTask의 실제 소유자는 지금 이 호출을 하고
-    // 있는 코어의 리액터다 - submit()이 항상 그 코어에서 곧바로
-    // submitCompletion()을 부르므로(아래) 코어가 갈릴 일이 없다.
-    task->ownerTask = &gReactorTasks[Scheduler::currentCoreIndex()];
     AsyncReactor::submitCompletion(task);
     return task;
 }
@@ -229,119 +229,112 @@ AsyncTaskHandler* AsyncCallbackRegistry::resolve(AsyncTaskSubjectCode subjectCod
     return gHandlers[subjectCode];
 }
 
-void AsyncReactor::initForThisCore() {
-    const uint32_t coreIndex = Scheduler::currentCoreIndex();
-    gReactorTasks[coreIndex].init(reactorTaskEntry, nullptr);
-    // 최초 1회는 일반 큐에 넣어 실행되게 한다 - 실행되자마자 할 일이
-    // 없으면 곧장 parkCurrent()로 잠든다.
-    Scheduler::enqueue(coreIndex, &gReactorTasks[coreIndex]);
+void AsyncReactor::init() {
+    // 전역 IDT 등록이라 BSP에서 한 번만(tlb_shootdown.cpp와 동일한
+    // 이유) - AP는 이 클래스를 위해 더 이상 아무것도 부를 필요가 없다
+    // (코어별 큐는 이미 정적 배열, 전용 Task 자체가 없어졌다).
+    Idt::registerHandler(kAsyncDrainVector, kAsyncDrainIsr);
 }
 
-void AsyncReactor::reactorTaskEntry(void*) {
-    const uint32_t coreIndex = Scheduler::currentCoreIndex();
-    for (;;) {
-        // 선점 큐(§2.2)를 항상 먼저 확인한다 - 비어 있으면 일반 큐로.
-        AsyncTask* task = gPreemptiveQueues[coreIndex].popFront();
+bool AsyncReactor::drainOnce(uint32_t coreIndex) {
+    if (gDraining[coreIndex]) {
+        // 이미 이 코어에서(runLoop() 인라인 호출이든 §4 (C) IPI
+        // 핸들러든) 드레인이 진행 중 - gReactorSavedRsp[coreIndex]를
+        // 두 번 건드리면 진행 중인 AsyncTask의 재개 지점이 깨진다.
+        // 새로 큐잉된 항목은 바깥쪽 호출이 이어서 처리하므로 유실
+        // 걱정 없다.
+        return false;
+    }
+
+    // 선점 큐(§2.2)를 항상 먼저 확인한다 - 비어 있으면 일반 큐로.
+    AsyncTask* task = gPreemptiveQueues[coreIndex].popFront();
+    if (!task) {
+        task = gExecQueues[coreIndex].popFront();
+    }
+    if (!task) {
+        // 지연 실행 큐(SP-F15B4A63, PN-C46DF296) - 전용 커널 Task를
+        // 새로 만들지 않고 이 코어의 idle 분기에서 만료 타이머를
+        // 처리한다(§3, QU-A8C0CC2C 설계자 답변). pump()가 만료된
+        // 콜백을 실행하는 도중 AsyncTask::submit()으로 새 작업을 큐에
+        // 넣을 수 있으므로, 포기하기 전에 먼저 실행 큐를 한 번 더
+        // 확인한다.
+        DelayedExecutionQueue::pump();
+        task = gPreemptiveQueues[coreIndex].popFront();
         if (!task) {
             task = gExecQueues[coreIndex].popFront();
         }
-        if (!task) {
-            // 지연 실행 큐(SP-F15B4A63, PN-C46DF296) - 전용 커널 Task를
-            // 새로 만들지 않고 이 리액터의 idle 분기에서 만료 타이머를
-            // 처리한다(§3, QU-A8C0CC2C 설계자 답변). pump()가 만료된
-            // 콜백을 실행하는 도중 AsyncTask::submit()으로 새 작업을
-            // 큐에 넣을 수 있으므로, park 여부를 결정하기 전에 먼저
-            // 실행 큐를 한 번 더 확인한다.
-            DelayedExecutionQueue::pump();
-            task = gPreemptiveQueues[coreIndex].popFront();
-            if (!task) {
-                task = gExecQueues[coreIndex].popFront();
-            }
-        }
-        if (!task && DelayedExecutionQueue::hasPending()) {
-            // 아직 만료되지 않은 타이머가 남아 있다 - Scheduler::onTick()을
-            // 건드려 새 wake 경로를 만드는 대신, 완전히 파킹하지 않고
-            // 저비용으로 다시 돌아 재확인한다(내 판단, SP-F15B4A63 문서화
-            // 예정 - yieldCurrent()는 이 Task를 곧장 다시 실행 큐 끝에
-            // 넣으므로 다음 스케줄러 틱 안에 이 루프로 되돌아온다).
-            Scheduler::yieldCurrent();
-            continue;
-        }
-        if (!task) {
-            // gReactorParked를 "진짜로 블로킹되는" 이 순간에만 true로
-            // 세운다 - cli로 이 대입과 parkCurrent()의 실제 전환 사이를
-            // 하나로 묶어, 그 틈에 스케줄러 틱이 끼어들어도(리액터를
-            // 그냥 보통의 라운드로빈으로 재큐잉해 버리는 경우도 포함)
-            // submitCompletion()이 이 플래그만 보고 정확히 판단할 수 있게
-            // 한다(위 gReactorParked 선언부 주석 참고 - cli는
-            // parkCurrent() 안의 cli와 중복이라 무해하다).
-            asm volatile("cli");
-            gReactorParked[coreIndex] = true;
-            Scheduler::parkCurrent();
-            continue;  // 깨어나면(submitCompletion) 다시 popFront부터
-        }
-        if (task->state == AsyncTaskState::Cancelled) {
-            // [PN-40E976F2] 이 AsyncTask를 기다리던 UserThread가 이미
-            // 죽어(scheduler.cpp의 SelfTerminateHandler::onExec) 결과를
-            // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곧장
-            // onCancel만 부른 뒤 자원을 반납한다. autoFree는 취소
-            // 시점에 이미 강제로 true가 돼 있다(그 시점 이후로는 아무도
-            // wait()로 직접 반납할 수 없으므로).
-            AsyncTaskHandler* handler = AsyncCallbackRegistry::resolve(task->subjectCode);
-            if (handler) {
-                handler->onCancel(task, task->args);
-            }
-            if (task->autoFree) {
-                GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
-                GenericSlabAllocator::free(task, sizeof(AsyncTask));
-            }
-            continue;
-        }
-        if (task->state == AsyncTaskState::Ready) {
-            task->state = AsyncTaskState::Running;
-        } else if (task->state == AsyncTaskState::Suspended) {
-            task->state = AsyncTaskState::Running;
-        }
-        gCurrentAsyncTask[coreIndex] = task;
-        {
-            // AsyncTask 프레임워크의 원래 설계 의도(kAsyncTaskEntryWrapper
-            // 주석 참고 - "리액터가 AsyncTask를 실행하는 동안 바깥
-            // kernel::Task 수준에서는 여전히 리액터가 실행 중이어야
-            // 한다")를 실제로 강제한다 - 이 구간(AsyncTask가 리액터의
-            // 실행 슬롯을 "빌려 쓰는" 동안) 전체를 Task 수준 선점
-            // 대상에서 제외한다(Slab 매거진 보호에 쓰는 것과 같은
-            // PreemptionGuard 재사용 - 인터럽트 자체는 막지 않아 EOI/
-            // 하드웨어 처리는 정상 진행됨). gReactorParked 플래그가
-            // 이중 스케줄링 자체는 이미 막아 주지만, 이 가드가 없으면
-            // 여전히 리액터가 Task 수준에서 불필요하게 선점->재큐잉될
-            // 수 있어 방어적으로 같이 둔다.
-            PreemptionGuard guard;
-            kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
-        }
-        gCurrentAsyncTask[coreIndex] = nullptr;
-
-        if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
-            // 이 AsyncTask가 끝나기를 기다리는 kernel::Task가 있으면
-            // (예: Syscall::wait) 먼저 깨운다 - 이 코어에서 실행됐으니
-            // 대기자도 반드시 같은 코어에서 파킹돼 있다(v1 - 코어 간
-            // 이관 없음). 아래에서 task를 반납하기 전에 반드시 먼저
-            // 읽어야 한다(반납 후에는 이 필드도 더 이상 유효하지 않음).
-            if (task->waitingTask) {
-                Scheduler::scheduleImmediate(coreIndex, task->waitingTask);
-            }
-            // args의 생성/반납은 처리기 책임(SP-F682B889 §3.1) - 여기서는
-            // 프레임워크 소유물(AsyncTask 구조체 자신과 그 전용 스택)만,
-            // 그것도 autoFree인 경우에만 반납한다 - false면 결과를 아직
-            // 못 읽은 소비자(위에서 막 깨운 그 Task)가 직접 반납할
-            // 책임을 진다.
-            if (task->autoFree) {
-                GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
-                GenericSlabAllocator::free(task, sizeof(AsyncTask));
-            }
-        }
-        // Suspended면 아무 것도 안 함 - 나중에 submitCompletion으로 다시
-        // 큐에 들어와야 재개된다.
     }
+    if (!task) {
+        // 정말 아무 것도 없다 - 호출부(runLoop()의 idle 분기)가 그대로
+        // hlt로 진행한다. 아직 만료 안 된 타이머가 남아 있어도 별도
+        // 조치가 필요 없다(2026-09-16 재구조로 해소) - 스케줄러 틱이
+        // 이미 100Hz로 모든 idle 코어를 hlt에서 깨우므로, 다음 틱에서
+        // 이 함수가 다시 호출되면 그때 다시 확인된다.
+        return false;
+    }
+
+    gDraining[coreIndex] = true;
+
+    if (task->state == AsyncTaskState::Cancelled) {
+        // [PN-40E976F2] 이 AsyncTask를 기다리던 UserThread가 이미
+        // 죽어(scheduler.cpp의 SelfTerminateHandler::onExec) 결과를
+        // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곧장
+        // onCancel만 부른 뒤 자원을 반납한다. autoFree는 취소
+        // 시점에 이미 강제로 true가 돼 있다(그 시점 이후로는 아무도
+        // wait()로 직접 반납할 수 없으므로).
+        AsyncTaskHandler* handler = AsyncCallbackRegistry::resolve(task->subjectCode);
+        if (handler) {
+            handler->onCancel(task, task->args);
+        }
+        if (task->autoFree) {
+            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
+            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+        }
+        gDraining[coreIndex] = false;
+        return true;
+    }
+
+    if (task->state == AsyncTaskState::Ready || task->state == AsyncTaskState::Suspended) {
+        task->state = AsyncTaskState::Running;
+    }
+    gCurrentAsyncTask[coreIndex] = task;
+    {
+        // AsyncTask 프레임워크의 원래 설계 의도(kAsyncTaskEntryWrapper
+        // 주석 참고 - "AsyncTask를 실행하는 동안 바깥 kernel::Task
+        // 수준에서는 여전히 (예전 리액터에 해당하는) 그 흐름이 실행
+        // 중이어야 한다")를 실제로 강제한다 - 이 구간(AsyncTask가 이
+        // 실행 슬롯을 "빌려 쓰는" 동안) 전체를 Task 수준 선점 대상에서
+        // 제외한다(Slab 매거진 보호에 쓰는 것과 같은 PreemptionGuard
+        // 재사용 - 인터럽트 자체는 막지 않아 EOI/하드웨어 처리는 정상
+        // 진행됨).
+        PreemptionGuard guard;
+        kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
+    }
+    gCurrentAsyncTask[coreIndex] = nullptr;
+
+    if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
+        // 이 AsyncTask가 끝나기를 기다리는 kernel::Task가 있으면
+        // (예: Syscall::wait) 먼저 깨운다 - 이 코어에서 실행됐으니
+        // 대기자도 반드시 같은 코어에서 파킹돼 있다(v1 - 코어 간
+        // 이관 없음). 아래에서 task를 반납하기 전에 반드시 먼저
+        // 읽어야 한다(반납 후에는 이 필드도 더 이상 유효하지 않음).
+        if (task->waitingTask) {
+            Scheduler::scheduleImmediate(coreIndex, task->waitingTask);
+        }
+        // args의 생성/반납은 처리기 책임(SP-F682B889 §3.1) - 여기서는
+        // 프레임워크 소유물(AsyncTask 구조체 자신과 그 전용 스택)만,
+        // 그것도 autoFree인 경우에만 반납한다 - false면 결과를 아직
+        // 못 읽은 소비자(위에서 막 깨운 그 Task)가 직접 반납할
+        // 책임을 진다.
+        if (task->autoFree) {
+            GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
+            GenericSlabAllocator::free(task, sizeof(AsyncTask));
+        }
+    }
+    // Suspended면 아무 것도 안 함 - 나중에 submitCompletion으로 다시
+    // 큐에 들어와야 재개된다.
+    gDraining[coreIndex] = false;
+    return true;
 }
 
 void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
@@ -351,35 +344,18 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
     } else {
         gExecQueues[coreIndex].pushBack(task);
     }
-    // 실측으로 발견한 경쟁(2026-09-14, Channel IPC 스트레스 테스트):
-    // 원래 여기서는 Scheduler::currentTask() != &gReactorTasks[coreIndex]
-    // 로 "리액터가 지금 안 돌고 있다"를 판단했는데, 스케줄러 틱이
-    // 리액터 Task를(어느 onExec 실행 도중이든, popFront 직후 막
-    // parkCurrent()를 부르려던 참이든) Task 수준에서 그냥 보통의
-    // 라운드로빈으로 선점해 버리면 이 판단이 완전히 어긋난다 - 그
-    // 순간 currentTask()는 더 이상 리액터가 아니지만, 리액터 자신은
-    // (parkCurrent()를 실제로 부른 게 아니므로) 이미 스스로 다시
-    // 스케줄될 수 있는 상태다. 그런데도 "안 돌고 있다"고 오판해
-    // scheduleImmediate로 또 다른 큐에 넣으면, 같은 Task가 두 큐에
-    // 동시에 들어가는 이중 스케줄링이 된다(runLoop/yieldCurrent에서
-    // 이미 실측 발견한 것과 같은 근본 원인, PL-2D3184BC 참고). 대신
-    // gReactorParked(reactorTaskEntry가 parkCurrent() 호출 직전
-    // cli로 보호된 구간에서만 true로 세우는 전용 플래그)를 확인+
-    // 소비한다 - currentTask()가 무엇이든(틱 선점으로 바뀌었든 말든)
-    // 상관없이 "진짜로 명시적 wake가 필요한가"만 정확히 반영한다.
-    // 이 함수는 인터럽트 컨텍스트에서도 호출 가능하다고 문서화돼
-    // 있어(async_task.h) 무조건 sti로 끝내면 안 된다 - 원래 RFLAGS.IF
-    // 값을 저장해 뒀다가 그 값이었을 때만 되돌린다(호출 전 인터럽트가
-    // 꺼져 있던 컨텍스트라면 계속 꺼진 채로 반환).
-    uint64_t rflags;
-    asm volatile("pushfq; pop %0; cli" : "=r"(rflags));
-    const bool wasParked = gReactorParked[coreIndex];
-    gReactorParked[coreIndex] = false;
-    if (rflags & (1ULL << 9)) {
-        asm volatile("sti");
-    }
-    if (wasParked) {
-        Scheduler::scheduleImmediate(coreIndex, &gReactorTasks[coreIndex]);
+    // [재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]
+    // 리액터가 더 이상 Task가 아니므로(async_task.h 주석 참고) "파킹돼
+    // 있으면 강제 스케줄링" 판단 자체가 사라졌다 - preemptive==false
+    // (A)는 조치 없이 그냥 반환(다음 idle 분기에서 자연히 처리),
+    // preemptive==true(C)만 이 코어 자신에게 kAsyncDrainVector IPI를
+    // 보내 인터럽트가 다시 켜지는 즉시 drainOnce()가 반복 호출되게
+    // 한다. 이 함수는 인터럽트 컨텍스트에서도 호출 가능하다고
+    // 문서화돼 있어(async_task.h) self-IPI 발사 자체는 안전하다 -
+    // Lapic::sendFixedIpi()는 그저 ICR에 쓰는 것뿐이라 재진입 문제가
+    // 없다.
+    if (preemptive) {
+        Lapic::sendFixedIpi(Acpi::cpuApicId(coreIndex), static_cast<uint8_t>(kAsyncDrainVector));
     }
 }
 

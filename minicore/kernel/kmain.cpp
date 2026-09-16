@@ -468,8 +468,8 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Logger::info("minicore: scheduler tick ready (LAPIC, %xHz, vector=%x)", kernel::kSchedulerTickHz,
                           kernel::kSchedulerTickVector);
 
-    kernel::AsyncReactor::initForThisCore();
-    kernel::Logger::info("minicore: async reactor ready (core 0)");
+    kernel::AsyncReactor::init();
+    kernel::Logger::info("minicore: async reactor ready (BSP-only IDT registration)");
 
     // 전역 테이블 하나뿐이라 BSP에서 딜 한 번만 - AP(kApMain)는 이걸
     // 다시 부르지 않는다(SyscallRegistry::registerHandler가 이미 쓰인
