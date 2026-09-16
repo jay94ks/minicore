@@ -6,8 +6,9 @@
   trackingCode: SP-9DD4F3EA
   status: approved
   updatedAt: 2026-09-15T17:57:07.791Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 장치 자동 인식 및 핫플러그 프레임워크("PnP") — 설계 제안
 
 설계자 지시(2026-09-14, 메시지) - "AHCI와 PnP 그리고 USB도 설계
@@ -353,3 +354,4 @@ blacklist)을 devmgr 프로세스 하나의 실제 시작 시퀀스로 엮는다
 Channel IPC에 `exclusivePreemptive` 플래그만 얹으면 충분(Tier B).
 Tier A(전용 공유메모리 링버퍼)는 현재 실사용처 없음. 이 시퀀스는
 그대로 유효하다.
+

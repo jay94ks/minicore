@@ -6,8 +6,9 @@
   trackingCode: DC-D868D9EC
   status: archived
   updatedAt: 2026-09-15T05:47:11.419Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 ## 배경
 
 SP-04EE2A18(Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안)
@@ -32,3 +33,4 @@ SP-04EE2A18(Syscall 디스패치 및 비동기 처리 서브시스템 — 설계
 
 - SP-04EE2A18 - 이 결정들이 반영된 최종 설계.
 - SP-F682B889 - 2번 항목이 개정된 대상(반영 완료).
+

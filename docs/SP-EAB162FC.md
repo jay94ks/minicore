@@ -6,8 +6,9 @@
   trackingCode: SP-EAB162FC
   status: approved
   updatedAt: 2026-09-15T16:53:41.001Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안
 
 QU-E6D37232(SP-71DA77B3 §3 "미결" - exclusive 인터럽트 구독 자격
@@ -268,4 +269,5 @@ uint32_t kResurrectIntervalMinutes(uint32_t consecutiveFailures) {
 공유할 범용 메커니즘으로 설계할지는 이 문서 범위 밖 - **별도 SP
 필요**(PN-BEC8FB65로 후속 설계 과제 등록, CLAUDE.md 규칙 4 - 명시
 안 된 설계는 임의로 채우지 않음).
+
 

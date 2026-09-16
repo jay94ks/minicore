@@ -6,8 +6,9 @@
   trackingCode: DC-23AEA8B4
   status: archived
   updatedAt: 2026-09-15T05:47:30.465Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 — 요구분석
 
 ## 배경
@@ -43,3 +44,4 @@ C++20 코루틴을 실측 검증했다 - freestanding 환경(표준 라이브러
 스택풀과 코루틴 둘 다 구현 - 양자택일이 아니라 AsyncTaskHandler::onExec를 코루틴으로도 구현할 수 있게 만든다(코루틴 할당자가 실패하면 예외 대신 yield하며 대기). freestanding 코루틴 구현은 표준 이름과 달라도 참조에 문제가 없으므로 최소한의 호환 네이밍만 유지하고 나머지는 이 프로젝트 자체 컨벤션으로 변경한다.
 
 이 결정은 SP-F682B889 §7(코루틴 기반 onExec)로 반영됐고, 기반 libkenv/coroutine.h는 실측 검증까지 끝났다 - 실제 onExec 코루틴 경로 연결은 아직 미착수로 PN-C62F7908로 별도 추적 중이다.
+

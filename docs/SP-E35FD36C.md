@@ -6,8 +6,9 @@
   trackingCode: SP-E35FD36C
   status: approved
   updatedAt: 2026-09-15T17:56:39.202Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안
 
 설계자 지시(2026-09-14, 메시지) - "AHCI와 PnP 그리고 USB도 설계
@@ -261,3 +262,4 @@ USB 3.x 링크는 U0(활성)/U1/U2(저전력 대기)/U3(서스펜드) 상태를 
 
 이 두 항목은 "USB 클래스 드라이버는 v1 범위 밖"이라는 §1의 기존
 결정과 일관된 자연스러운 결과이지 새로운 판단이 필요한 부분이 아니다.
+

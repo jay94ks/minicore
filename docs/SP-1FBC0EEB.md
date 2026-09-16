@@ -6,8 +6,9 @@
   trackingCode: SP-1FBC0EEB
   status: approved
   updatedAt: 2026-09-15T18:09:07.248Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 ## 배경
 
 설계자 지시(2026-09-14):
@@ -307,3 +308,4 @@ struct BridgePipe {
 - **SP-04EE2A18(Syscall 디스패치 및 비동기 처리 서브시스템)** - 이
   문서의 모든 API가 구현되는 하부 계층, submit/wait 모델의 출처.
 - DC-B538A218 - 이 개정이 반영한 답변의 원본 질의.
+

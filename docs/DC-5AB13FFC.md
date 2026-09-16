@@ -6,8 +6,9 @@
   trackingCode: DC-5AB13FFC
   status: approved
   updatedAt: 2026-09-13T13:14:35.340Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 커널 서비스 내부 알고리즘 및 라이선스 — 요구분석
 
 ## 배경
@@ -40,3 +41,4 @@ SP/DS 문서가 추가로 필요할 만큼 큰 결정들이다.
 7. **라이선스**: 이 프로젝트(minicore) 전체에 적용할 오픈소스 라이선스 —
    외부 기여/배포 방식에 영향을 주므로 코드가 쌓이기 전에 정하는 편이
    낫다.
+

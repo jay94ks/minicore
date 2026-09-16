@@ -6,8 +6,9 @@
   trackingCode: PL-D65F49CC
   status: archived
   updatedAt: 2026-09-15T05:53:16.645Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 실행 계획: x2APIC 지원
 
 **[완료, 2026-09-14, 2026-09-14 재작업 반영 - 계획 PN-B39C2E12]** QA-26450C3E 체크됨. 아래는 완료 기록으로 남긴다.
@@ -114,3 +115,4 @@
 
 - 없음(x2APIC↔xAPIC 되돌리기 미지원은 최초 설계 범위에 이미 포함된
   결정이라 별도 질의 불필요).
+

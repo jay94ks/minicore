@@ -6,8 +6,9 @@
   trackingCode: SP-DABFCF9F
   status: approved
   updatedAt: 2026-09-16T04:15:01.976Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # QEMU gdb stub 기반 커널 디버깅 워크플로 — 설계 제안
 
 설계자 의견(2026-09-16, PN-1E7798AF에 남긴 Opinion): "QEMU -s -S +
@@ -142,3 +143,4 @@ PN-1E7798AF(completed) 참고.
 ## 착수 조건
 
 없음 - 설계/구현/실측 전부 완료(PN-1E7798AF).
+

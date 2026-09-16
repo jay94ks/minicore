@@ -6,8 +6,9 @@
   trackingCode: DC-0CC88ABB
   status: archived
   updatedAt: 2026-09-15T05:47:07.531Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 ## 배경
 
 PL-2D3184BC 5단계(LAPIC 틱 기반 선점) 구현 중 발견 - 스케줄러 완료
@@ -82,3 +83,4 @@ q35,hpet=off -smp 4`로 HPET을 실제로 끈 4코어 SMP 환경에서:
 임시 검증 코드는 확인 후 제거했다 - 영구 코드는 `timer.cpp`(LAPIC
 재프로그램 제거)와 `scheduler.cpp`(BSP 판별 + onTick의 조건부
 Timer::onTick() 호출)뿐이다. 자세한 구현 내역은 PL-2D3184BC 참고.
+

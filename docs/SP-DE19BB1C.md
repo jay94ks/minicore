@@ -6,8 +6,9 @@
   trackingCode: SP-DE19BB1C
   status: approved
   updatedAt: 2026-09-16T08:43:38.850Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안
 
 설계자 지시(2026-09-14, 메시지 2건) - "다른 코어에 invlpg를 전파하는
@@ -227,3 +228,4 @@ extern "C" void kTlbShootdownIsr() {
 - `KernelAddressSpaceManager`(SP-2AAD7C8D) - 이 샷다운의 유일한 v1
   소비자(커널 영역 매핑 변경 시 호출).
 - `Paging::currentPml4Phys()`(이미 구현 완료) - §5-A 확장 시 필요.
+

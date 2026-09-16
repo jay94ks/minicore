@@ -6,8 +6,9 @@
   trackingCode: PL-57CF86EF
   status: approved
   updatedAt: 2026-09-15T12:54:47.401Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 실행 계획: 4K 페이지의 2M 페이지 병합/분할
 
 **[설계 확정, 구현 대기, 2026-09-14 - 계획 PN-D28DD9F3]** DC-474EE823/QU-87D0CE15 답변으로
@@ -88,3 +89,4 @@ PN-D28DD9F3 참고.
 
 경로 (b)/재배치 - 설계만 확정됐고 코드는 없다. 스케줄러 설계
 (2026-09-14~)에 밀려 순서상 뒤로 미뤄짐(설계자 지시, 대화 중 확인).
+

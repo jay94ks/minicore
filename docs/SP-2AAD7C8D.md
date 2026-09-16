@@ -6,8 +6,9 @@
   trackingCode: SP-2AAD7C8D
   status: approved
   updatedAt: 2026-09-16T08:32:19.882Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안
 
 설계자 지시(2026-09-14, 메시지 3건, 모두 RM-9B8CA541에 대한 후속) -
@@ -600,3 +601,4 @@ offset이 필요한 `FileSystemDriver::read/write` 호출 시 fd 테이블의
 3. **`Open`의 `Create` 플래그 경합(동시에 두 프로세스가 같은 파일을
    O_CREAT|O_EXCL로 열 때)**: `fs` 서비스 쪽 드라이버의 원자성 보장
    범위 - 각 드라이버(ext4 등) 착수 시점의 구현 세부.
+

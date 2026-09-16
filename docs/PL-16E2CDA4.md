@@ -6,8 +6,9 @@
   trackingCode: PL-16E2CDA4
   status: archived
   updatedAt: 2026-09-15T05:53:27.054Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # 실행 계획: Slab 할당자(libkmm)
 
 **[구현 완료, 2026-09-14 - 계획 PN-DC75D601]** SP-D7013B26(2026-09-14 확정, QU-4F905C08)의
@@ -132,3 +133,4 @@ DC 논의 불필요, 설계자 명시).
 **AsyncTask 프레임워크(SP-F682B889, PL-1E247831)**가 이 Slab
 할당자의 첫 실제 소비자다 - `args`/`AsyncTask` 전용 스택 확보에
 `GenericSlabAllocator::alloc/free`를 재사용할 예정.
+

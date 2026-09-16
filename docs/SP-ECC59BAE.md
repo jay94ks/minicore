@@ -6,8 +6,9 @@
   trackingCode: SP-ECC59BAE
   status: approved
   updatedAt: 2026-09-16T02:55:51.632Z
-  갱신: node scripts/export-cnw-docs.mjs
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
 # Running Task 강제 이관(선점형 로드밸런싱) — 설계 제안
 
 설계자 지시(2026-09-15, PN-BAA0B460) - "Running Task의 강제 이관은
@@ -309,3 +310,4 @@ RT 클래스 자체의 존속 여부(설계자: "RT 자체가 필요할지 안�
 - RM-28225668(인터럽트 벡터 목록) - `0xE2` 신규 배정 필요(이 문서
   승인 시 함께 갱신).
 - `tlb_shootdown.cpp`(완료) - §3의 IPI 패턴 선례.
+
