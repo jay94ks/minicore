@@ -104,6 +104,19 @@ struct Task {
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
 
+    // [신규, PN-A74871F2, DC-8EA1E7F6/PL-2D3184BC "Task 자료구조" 절이
+    // 원래 요구했으나 구현에서 누락됐던 필드 - RM-F2DAFF66 §1-A 발견]
+    // 이 Task를 생성한 코어의 NUMA 노드(`Acpi::cpuNumaNode()`, SRAT
+    // 없으면 항상 0). `Task::init()`이 생성 시점에 한 번 채우고 이후
+    // 안 바뀐다 - 코어 이관이 일어나도 "원래 어디서 태어났는지"는
+    // 그대로 남긴다(커널 스택 실제 물리 메모리의 지역성과 일치,
+    // `PageFrameAllocator::allocOrder()`가 이미 "현재 코어 노드 우선"
+    // 정책이므로 이 필드는 그 사실을 사후에 기록만 할 뿐 새 할당
+    // 정책을 추가하지 않는다). Push/Pull 로드밸런싱의 같은-노드-우선
+    // 이관 정책(SP-9525C4C0 §2.3, PN-9DDFB774)이 실제로 참고하는
+    // 입력값 - 진단용에 그치지 않는다.
+    uint32_t numaNode = 0;
+
     // 이 Task가 ring3 유저 코드를 실행하는 UserThread면 true -
     // Process::execImage()가 그 UserThread 생성 시점에 직접 세팅한다
     // (PN-55D24891). 순수 커널 전용 Task는 항상 기본값 false로 남는다.

@@ -1,9 +1,11 @@
 #include "task.h"
 
+#include "acpi.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "scheduler.h"
 
 namespace {
 
@@ -52,6 +54,12 @@ kernel::uint64_t kReserveStackVirtRange(kernel::uint32_t pageCount) {
 namespace kernel {
 
 void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
+    // [신규, PN-A74871F2] 이 Task를 생성 중인 코어의 NUMA 노드를 사후
+    // 기록 - 할당 정책 자체는 이미 PageFrameAllocator::allocOrder()가
+    // "현재 코어 노드 우선"으로 하고 있으므로 여기서는 그 사실을 나중에
+    // 다시 조회할 수 있게 값만 남긴다.
+    numaNode = Acpi::cpuNumaNode(Scheduler::currentCoreIndex());
+
     const uint32_t order = kOrderForStackSize(stackSize);
     kernelStackPhys = PageFrameAllocator::allocOrder(order);
     kernelStackSize = 4096UL << order;
