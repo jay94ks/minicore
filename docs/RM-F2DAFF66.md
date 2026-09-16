@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T19:12:43.602Z
+  updatedAt: 2026-09-16T19:36:40.067Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -75,7 +75,33 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   minicore-88 착수 전(scheduled) - 완료되면 이 절을 "완전 해소"로
   갱신.
 
-### 1-B. `SP-8B6B8D25` §2-B(유저 페이지 폴트 정책) 문서 정체 (문서만 정정 - 코드 갭 아님)
+### 1-B. `SP-1FBC0EEB` Channel IPC `onCancel` 미구현 - 댕글링 포인터
+위험 (코드 갭, **미착수 - 가장 심각한 발견**)
+
+- **출처**: `SP-1FBC0EEB` "취소/실패 처리와 Syscall 제안의 연동" 절이
+  "`connectChannel` 취소 시 그 `Channel`의 대기열에서 자신의
+  `PendingConnectRequest`를 제거"해야 한다고 명시.
+- **실제**: `channel.cpp`의 7개 `AsyncTaskHandler` 전부
+  `onCancel(AsyncTask*, void*) override {}` - 예외 없이 완전한
+  no-op. `ConnectChannelHandler::onExec()`이 코루틴 **로컬 변수**
+  `PendingConnectRequest req`를 `channel->pendingConnects`에 매달아
+  둔 채 대기하는데, 대기 중 제출자가 죽으면(`PN-40E976F2`가 실제로
+  구현한 취소 경로) `onExec()`을 재개하지 않고 `onCancel()`만
+  호출한 뒤 그 AsyncTask(코루틴 스택 포함)를 반납한다 - 빈
+  `onCancel()`이라 `&req`가 제거되지 않고 **댕글링 포인터**로
+  `channel->pendingConnects`에 남는다(다음 `acceptFromChannel`이
+  이를 꺼내 역참조하면 UAF). `AcceptFromChannelHandler`도 자기 자신의
+  `AsyncTask*`를 `channel->pendingAccepters`에 매달아 두는 구조라
+  마찬가지 위험 - 설계 문서의 "acceptFromChannel 취소는 정리
+  불필요" 전제가 실제 자료구조와 안 맞는 것으로 보인다.
+- **조치**: **PN-C4611402**(scheduled) 등록 - 7개 핸들러 각각의
+  `onCancel` 본문 구현/재검증 + `SP-1FBC0EEB` 자체의 "정리 불필요"
+  서술 재검토.
+- **현재 상태(2026-09-17)**: 미착수. 실사용 소비자(devmgr 등)가
+  아직 없어 지금까지 실제로 안 터졌을 뿐 - devmgr 착수(PN-BD9AAE2F)
+  전에 처리하는 게 안전.
+
+### 1-C. `SP-8B6B8D25` §2-B(유저 페이지 폴트 정책) 문서 정체 (문서만 정정 - 코드 갭 아님)
 
 - **출처**: `SP-8B6B8D25` §2-B가 "유저 폴트 시 그 프로세스만
   블로킹시키고, 폴트 정보(주소/에러코드/명령어)를 PCB에 저장해
@@ -147,8 +173,6 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
 결과를 이 절에서 §1(발견) 또는 §2(갭 없음)로 옮긴다:
 
-- [ ] `SP-1FBC0EEB`(Channel IPC) - PN-9CC66142 이후 최신 상태 기준
-  재확인(이미 최근에 깊이 봤으나 §목차 방법론으로 재확인은 안 함).
 - [ ] `SP-9A6D579F`(DebugSession) - 이제 막 approved+scheduled
   (PN-87D6B615) - 착수 전이라 아직 코드와 대조할 게 없음, 착수 후
   점검.
