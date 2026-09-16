@@ -85,9 +85,16 @@ public:
     // 폴트를 그 프로세스의 PCB에 매다는 데 필요) - process.h가
     // UserThread를 참조하는 반대 방향 관계라 순환 include를 피하려고
     // 여기서는 전방 선언 포인터로만 갖는다(async_task.h의 `struct
-    // Task;`와 동일한 관례). 아직 프로세스 생성 경로 자체가 없어
-    // 항상 nullptr로 남는다.
+    // Task;`와 동일한 관례).
     Process* process = nullptr;
+
+    // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
+    // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든
+    // 필드가 0/nullptr NSDMI라 memset 결과가 실제 생성자 결과와 동일,
+    // 정의는 syscall.cpp 참고). 반환값은 아직 Task::init()을 부르지
+    // 않은 "빈 자리".
+    static UserThread* allocate();
+    static void release(UserThread* thread);
 };
 
 // endpointId(공개 ABI, 고정 슬롯) <-> AsyncTaskHandler 매핑 - 내부적으로

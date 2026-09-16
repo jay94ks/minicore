@@ -173,6 +173,22 @@ public:
     uint64_t heapStart = 0;
     uint64_t heapBrk = 0;
 
+    // [SP-6BEAE0C1 §5] 동적 Process 풀 - GenericSlabAllocator에서 이
+    // 구조체 하나 크기의 raw 메모리를 얻어 0으로 채운 뒤 Process*로
+    // 돌려준다(placement new 없이, 이 클래스의 모든 필드가 0/nullptr
+    // NSDMI라 memset 결과가 실제 생성자 결과와 동일함을 이용) - 실패
+    // (슬랩 고갈) 시 nullptr. **반환값은 아직 init()을 부르지 않은
+    // "빈 자리"** - 정적 전역 Process를 선언만 해 두고 별도로 init()을
+    // 부르는 기존 관례(kmain.cpp의 gInitProcess 등)와 동일하게, 호출부가
+    // 이어서 init()을 불러야 한다.
+    static Process* allocate();
+
+    // allocate()가 내준 슬랩 메모리를 반납한다 - 호출부가 먼저 destroy()
+    //로 이 프로세스가 소유한 자원(주소공간/VMA)을 전부 반납했다는
+    // 전제(순서를 안 지키면 자원 누수 - destroy()가 안전을 강제하지
+    // 않는다, Vma의 free() 관례와 동일).
+    static void release(Process* proc);
+
     // pml4Phys를 새로 확보하고 커널 상위 절반(higher-half)을 공유하는
     // 상태로 초기화한다(Paging::createAddressSpace 참고 - 하위 절반은
     // 전부 비어 있는 채로 시작, ELF 로더가 채울 자리). 실패(Slab/페이지

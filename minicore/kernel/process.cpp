@@ -2,6 +2,7 @@
 
 #include "gdt.h"
 #include "libelf/elf.h"
+#include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
@@ -102,6 +103,40 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
 }  // namespace
 
 namespace kernel {
+
+// [SP-6BEAE0C1 §5, PN-543C0CE9 착수 2번째 증분] 동적 Process 풀 - 지금까지
+// 모든 Process 인스턴스는 정적 전역(kmain.cpp의 gInitProcess/
+// gServiceProcess[])이라 컴파일러가 프로그램 시작 시 NSDMI(pml4Phys=0,
+// mainThread=nullptr, pendingSignals의 내부 _head=nullptr 등)를 전부
+// 실제로 적용해 준다 - 그래서 Resurrect(§6.2)가 그 위에 init()을 다시
+// 불러도(pendingSignals.clear() 등) 항상 "이미 한 번은 진짜로 생성된
+// 적 있는 객체" 상태였다.
+//
+// 이 GenericSlabAllocator 슬랩 메모리는 그런 보장이 전혀 없다(이
+// 프로젝트는 placement new를 쓰지 않는 관례라 실제 생성자를 부를
+// 방법도 없다) - 그대로 Process*로 캐스팅해 init()을 부르면
+// pendingSignals.clear()가 쓰레기 값인 _head를 유효한 Chunk*로 착각해
+// 걷다가 힙을 깨뜨린다(실측 전 코드 추적으로 발견 - Process의 거의
+// 모든 필드가 정확히 0/nullptr NSDMI이므로, 실제 생성자가 만들어 낼
+// 결과와 "전부 0으로 memset"이 비트 단위로 동일하다는 점을 이용해
+// 이 한 줄로 그 전제를 다시 세워 준다).
+Process* Process::allocate() {
+    void* raw = GenericSlabAllocator::alloc(sizeof(Process));
+    if (!raw) {
+        return nullptr;
+    }
+    memset(raw, 0, sizeof(Process));
+    return reinterpret_cast<Process*>(raw);
+}
+
+// 호출부가 먼저 destroy()로 이 프로세스가 소유한 자원(주소공간/VMA)을
+// 전부 반납한 뒤에만 불러야 한다(Process 구조체 자신의 슬랩 메모리만
+// 반납 - destroy()와 역할이 분리된 이유는 Vma/AsyncTask 등 이
+// 코드베이스의 다른 "소유 자원 반납 vs 컨테이너 메모리 반납" 분리
+// 관례와 동일).
+void Process::release(Process* proc) {
+    GenericSlabAllocator::free(proc, sizeof(Process));
+}
 
 bool Process::init() {
     pml4Phys = Paging::createAddressSpace();

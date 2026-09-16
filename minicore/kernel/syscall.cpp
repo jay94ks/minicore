@@ -1,6 +1,7 @@
 #include "syscall.h"
 
 #include "async_task.h"
+#include "libkenv/mem.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 #include "scheduler.h"
@@ -19,6 +20,26 @@ EndpointSlot gEndpointSlots[kMaxSyscallEndpoints];
 }  // namespace
 
 namespace kernel {
+
+// [SP-6BEAE0C1 §5, PN-543C0CE9] Process::allocate()/release()(process.cpp)
+// 와 완전히 같은 근거 - UserThread의 모든 필드(Task 상속분 포함)가
+// 0/nullptr NSDMI라 memset한 raw 슬랩 메모리가 placement new 없이도
+// "방금 생성된" 상태와 동일해진다. 이후 Task::init()이 안전하게
+// kernelStackPhys 등을 새로 채운다(기존 값을 읽지 않고 무조건 덮어쓰므로
+// 이 부분은 raw 메모리라도 원래 안전했다 - pendingSyscalls처럼 내부
+// 포인터를 먼저 걷는 필드만 이 memset이 실제로 막아 주는 대상).
+UserThread* UserThread::allocate() {
+    void* raw = GenericSlabAllocator::alloc(sizeof(UserThread));
+    if (!raw) {
+        return nullptr;
+    }
+    memset(raw, 0, sizeof(UserThread));
+    return reinterpret_cast<UserThread*>(raw);
+}
+
+void UserThread::release(UserThread* thread) {
+    GenericSlabAllocator::free(thread, sizeof(UserThread));
+}
 
 bool SyscallRegistry::registerHandler(SyscallEndpointId endpointId, AsyncTaskHandler* handler) {
     if (endpointId >= kMaxSyscallEndpoints || gEndpointSlots[endpointId].used) {
