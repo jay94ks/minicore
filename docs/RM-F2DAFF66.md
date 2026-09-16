@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T20:33:06.009Z
+  updatedAt: 2026-09-16T21:18:27.380Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -84,7 +84,8 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   1-A는 이제 완전히 닫힌 항목이다.
 
 ### 1-B. `SP-1FBC0EEB` Channel IPC `onCancel` 미구현 - 댕글링 포인터
-위험 (코드 갭, **미착수 - 가장 심각한 발견**)
+위험 (코드 갭, **[완전 해소, 2026-09-17, minicore-88 세션, commit
+5336b50/0d80959] 이 문서 최초의 가장 심각한 발견이었으나 지금은 해결됨**)
 
 - **출처**: `SP-1FBC0EEB` "취소/실패 처리와 Syscall 제안의 연동" 절이
   "`connectChannel` 취소 시 그 `Channel`의 대기열에서 자신의
@@ -102,12 +103,25 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   `AsyncTask*`를 `channel->pendingAccepters`에 매달아 두는 구조라
   마찬가지 위험 - 설계 문서의 "acceptFromChannel 취소는 정리
   불필요" 전제가 실제 자료구조와 안 맞는 것으로 보인다.
-- **조치**: **PN-C4611402**(scheduled) 등록 - 7개 핸들러 각각의
-  `onCancel` 본문 구현/재검증 + `SP-1FBC0EEB` 자체의 "정리 불필요"
-  서술 재검토.
-- **현재 상태(2026-09-17)**: 미착수. 실사용 소비자(devmgr 등)가
-  아직 없어 지금까지 실제로 안 터졌을 뿐 - devmgr 착수(PN-BD9AAE2F)
-  전에 처리하는 게 안전.
+- **조치**: **PN-C4611402**(completed, commit 5336b50) - 4개 핸들러
+  (`ConnectChannelHandler`/`AcceptFromChannelHandler`/
+  `ChannelReadHandler`/`ChannelWriteHandler`)의 `onCancel`에 실제
+  큐 제거 로직 구현(`AsyncTaskWaitQueue::remove()`/`Channel::
+  removePendingConnect()` 신설). `OpenChannelHandler`/
+  `CloseBridgeHandler`/`DestroyChannelHandler` 3개는 onExec에
+  yield 지점이 없어 no-op 유지가 맞음을 코드로 확인, 근거를 주석으로
+  남김. `SP-1FBC0EEB`의 "acceptFromChannel 취소는 정리 불필요"
+  서술이 실제로 틀렸음이 확인돼 정정 각주 추가(commit 0d80959) -
+  read/write 쪽도 같은 모양의 미서술 갭(`pendingReaders`/
+  `pendingWriters`)이 추가로 발견/수정됨.
+- **현재 상태(2026-09-17)**: **완전 해소.** QEMU 회귀(무-initrd
+  단일코어 + devmgr 포함 SMP4, 실제 Pnp/Channel IPC 정상 경로 포함)
+  무회귀 확인. **단, 실제 취소 레이스(대기 중인 제출자를 다른
+  스레드가 강제 종료) 자체는 재현 못 함** - 이 코드베이스에 아직
+  "임의의 다른 스레드를 강제 종료"시키는 수단이 없어(SelfTerminate는
+  자기 자신만, Signal 기반 취소는 PN-71E50394 미연동) 코드 검토로
+  대신 검증했다 - `PN-71E50394` 완료 후 재검증 가치 있음(§3에
+  후속 항목으로 등록).
 
 ### 1-C. `SP-8B6B8D25` §2-B(유저 페이지 폴트 정책) 문서 정체 (문서만 정정 - 코드 갭 아님)
 
@@ -214,9 +228,10 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - [ ] `SP-B1E258D8`(RCU) - `rejected`(도입 시점 보류)라 코드 갭
   대상 아님, 재개 조건(커널단 v1 완료)이 실제로 도래했는지만 주기적
   확인.
-- [ ] (신규, 2026-09-17) `PN-C4611402`(Channel onCancel 댕글링
-  포인터, §1-B) 완료되면 그 구현이 `SP-1FBC0EEB`의 "정리 불필요"
-  서술 재검토까지 실제로 반영했는지 재확인.
+- [ ] (신규, 2026-09-17) `PN-C4611402`(§1-B, 완전 해소) 취소 로직이
+  실제 취소 레이스로는 아직 검증 안 됨(코드 검토로만 확인) -
+  `PN-71E50394`(Signal 기반 강제 종료)가 실전 배선되면 그때 실제
+  멀티스레드 강제종료 시나리오로 재검증.
 - [ ] (신규, 2026-09-17) `PN-2008220B`(coroHandle.resume() CR3
   미동기화, RM-23F4B687에 원칙으로도 기록) 해소되면 그 수정이
   `SP-F682B889` §7.3(코루틴 재개 경로) 서술과 여전히 일치하는지
