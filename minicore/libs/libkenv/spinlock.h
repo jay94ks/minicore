@@ -45,79 +45,88 @@ private:
     Spinlock& _lock;
 };
 
-// SMP 기동 동기화(예: "몇 개 AP가 떴는지")에 쓸 최소 원자 카운터.
-class AtomicU32 {
+// [SP-201238BB §0, PN-68871BC9 착수 1번째 증분] 원래 여기 각자 따로
+// 있던 `AtomicU32`/`AtomicPtr<T>`를 하나의 템플릿으로 통합했다 -
+// 설계자 지시("AtomicU32 이런 종류도 Atomic<T>로 일반화하는 것을
+// 검토해봐")로 SP-201238BB의 SharedPtr/WeakPtr 참조 카운트가 내부적으로
+// 쓸 원자 원시 연산을 하나로 모으면서, 기존 두 클래스가 각자 갖고
+// 있던 연산 전부(합집합)를 그대로 옮겼다. **기존 호출부는 전혀 안
+// 바뀐다** - `AtomicU32`/`AtomicPtr<T>`라는 이름과 시그니처를 아래
+// 타입 별칭으로 그대로 유지하기 때문에(같은 헤더 경로에 그대로 둔
+// 이유도 이것 - 새 헤더로 옮기면 include 하는 13개 파일을 전부
+// 건드려야 해서, 이름만 별칭으로 유지하는 이 방식보다 위험이 크다).
+//
+// `T`가 정수(`uint32_t`)든 포인터(`T*`)든 멤버 함수 바디는 실제로
+// **호출되는 것만** 인스턴스화된다는 C++ 템플릿의 지연 인스턴스화
+// 규칙 덕분에, `fetchOr`/`fetchAnd`처럼 포인터엔 원래 의미가 없는
+// 연산도 안전하게 같은 클래스에 둘 수 있다 - `AtomicPtr<T>`로 쓰는
+// 코드가 그 연산들을 애초에 호출하지 않으므로 컴파일 자체가 걸릴
+// 일이 없다(포인터에 `__atomic_fetch_or` 등을 실제로 호출하려고
+// 시도하면 그때 비로소 컴파일 에러가 난다 - 방어가 필요 없는 이유).
+template <typename T>
+class Atomic {
 public:
-    uint32_t load() const {
+    Atomic() = default;
+    explicit Atomic(T initial) : _value(initial) {}
+
+    T load() const {
         return __atomic_load_n(&_value, __ATOMIC_ACQUIRE);
     }
 
-    void store(uint32_t value) {
+    void store(T value) {
         __atomic_store_n(&_value, value, __ATOMIC_RELEASE);
     }
 
-    uint32_t fetchAdd(uint32_t delta) {
+    // 원래 AtomicPtr<T> 전용이었으나(포인터 교체), 정수에도 동일하게
+    // 의미가 통해 그대로 합집합에 포함시켰다.
+    T exchange(T value) {
+        return __atomic_exchange_n(&_value, value, __ATOMIC_ACQ_REL);
+    }
+
+    // weak CAS(스퓨리어스 실패 가능) - lock-free 알고리즘 관례대로
+    // 루프 안에서 재시도하는 용도. 실패하면 expected가 현재 값으로
+    // 갱신된다(표준 CAS 관례).
+    bool compareExchange(T& expected, T desired) {
+        return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+
+    // 원래 AtomicU32 전용 - lock-free 자료구조(스케줄러 코어별 큐 등,
+    // PL-2D3184BC)의 기반.
+    T fetchAdd(T delta) {
         return __atomic_fetch_add(&_value, delta, __ATOMIC_ACQ_REL);
     }
 
     // kernel::string(libkenv/string.h)의 참조 카운트 감소에 쓴다 -
     // 반환값은 감소 전 값(호출부가 "이번에 0으로 떨어졌는지"를
     // fetchSub(1)==1로 판정할 수 있게).
-    uint32_t fetchSub(uint32_t delta) {
+    T fetchSub(T delta) {
         return __atomic_fetch_sub(&_value, delta, __ATOMIC_ACQ_REL);
-    }
-
-    // lock-free 자료구조(스케줄러 코어별 큐 등, PL-2D3184BC)의 기반 -
-    // *expected와 현재 값이 같으면 desired로 바꾸고 true, 다르면
-    // *expected를 현재 값으로 갱신하고 false(표준 CAS 관례, weak라
-    // 스퓨리어스 실패 가능 - 루프 안에서 재시도하는 용도로만 쓸 것).
-    bool compareExchange(uint32_t& expected, uint32_t desired) {
-        return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
 
     // 비트마스크 자료구조(PN-D132A1E9의 수신자별 Target Pending Mask
     // 등)가 락 없이 비트를 세우고/지우는 데 쓴다 - 반환값은 연산 전
     // 값(호출부가 "이번 호출로 실제로 바뀐 비트"를 알고 싶을 때 유용).
-    uint32_t fetchOr(uint32_t bits) {
+    T fetchOr(T bits) {
         return __atomic_fetch_or(&_value, bits, __ATOMIC_ACQ_REL);
     }
 
-    uint32_t fetchAnd(uint32_t bits) {
+    T fetchAnd(T bits) {
         return __atomic_fetch_and(&_value, bits, __ATOMIC_ACQ_REL);
     }
 
 private:
-    uint32_t _value = 0;
+    T _value{};
 };
+
+// SMP 기동 동기화(예: "몇 개 AP가 떴는지")에 쓸 최소 원자 카운터 -
+// 기존 이름 유지(위 통합 이전과 완전히 동일하게 계속 쓸 수 있음).
+using AtomicU32 = Atomic<uint32_t>;
 
 // lock-free 자료구조가 포인터를 원자적으로 교체할 때 쓴다(예: 큐의
-// head/tail, 스택 top) - AtomicU32와 같은 이유로 컴파일러 내장
-// 원자 빌트인만 쓴다. 초기값은 nullptr.
+// head/tail, 스택 top) - 기존 이름 유지. 초기값은 nullptr(Atomic<T*>
+// 의 `T _value{}`가 포인터에 대해 그대로 nullptr).
 template <typename T>
-class AtomicPtr {
-public:
-    T* load() const {
-        return __atomic_load_n(&_value, __ATOMIC_ACQUIRE);
-    }
-
-    void store(T* value) {
-        __atomic_store_n(&_value, value, __ATOMIC_RELEASE);
-    }
-
-    T* exchange(T* value) {
-        return __atomic_exchange_n(&_value, value, __ATOMIC_ACQ_REL);
-    }
-
-    // weak CAS(스퓨리어스 실패 가능) - lock-free 알고리즘 관례대로
-    // 루프 안에서 재시도하는 용도. 실패하면 expected가 현재 값으로
-    // 갱신된다.
-    bool compareExchange(T*& expected, T* desired) {
-        return __atomic_compare_exchange_n(&_value, &expected, desired, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    }
-
-private:
-    T* _value = nullptr;
-};
+using AtomicPtr = Atomic<T*>;
 
 }  // namespace kernel
 
