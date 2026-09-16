@@ -272,7 +272,30 @@ enum class SpawnProcessError : uint32_t {
     OutOfMemory,         // 커널 버퍼/Process·UserThread slab/페이지 고갈
     ElfParseFailed,      // elf::Image::parse 실패(BadMagic 등)
     ExecImageFailed,     // Process::execImage 실패(유저 스택 확보 등)
+    InvalidArgument,     // flags에 정의되지 않은 비트가 세팅됨(PN-A6E01B8A, QU-9585F6C4)
 };
+
+// [신규, 2026-09-16, QU-9585F6C4 답변("일반화된 정수로 플래그 셋을
+// 받는 형태로 설계해놔. (확장성)"), PN-A6E01B8A] SpawnProcess의
+// `flags` 비트마스크 - 단일 `debugStart: bool` 대신 확장 가능한
+// 비트마스크로 설계해, 앞으로 새 on/off 옵션이 필요해질 때마다
+// syscall 시그니처 자체를 바꾸지 않고 새 비트만 추가하면 되게 한다.
+enum SpawnProcessFlags : uint32_t {
+    kSpawnNone = 0,
+    // SP-9A6D579F §3.3 - 디버깅 대상으로 스폰된 자식은 첫 명령어 실행
+    // 전 정지 상태로 시작(TaskState::Blocked) - 디버거(부모)가 이
+    // 플래그를 세팅해 호출. **이 비트 자체의 실제 동작은 아직 미착수**
+    // (PN-A6E01B8A 항목4) - SP-9A6D579F 착수 시 함께 구현한다. 지금은
+    // 유효한 비트로만 인정되어 InvalidArgument를 피할 뿐, 세팅해도
+    // 아직 아무 효과가 없다.
+    kSpawnDebugStart = 1u << 0,
+    // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 1, ...).
+};
+
+// 현재 정의된 비트 전부의 OR - `flags`에 이 마스크 밖의 비트가 하나라도
+// 세팅되면 InvalidArgument(§3 "조용히 무시하지 않음, 표준 커널 syscall
+// 관례"). 새 비트를 추가할 때마다 이 마스크도 같이 넓혀야 한다.
+constexpr uint32_t kSpawnProcessFlagsMask = SpawnProcessFlags::kSpawnDebugStart;
 
 // [SP-6BEAE0C1 §3] SpawnProcess syscall 인자 - `imageBuffer`/`argv`/
 // `envp`는 전부 유저 포인터(untrusted, 핸들러 내부에서 Paging::
@@ -280,12 +303,15 @@ enum class SpawnProcessError : uint32_t {
 // `envp`는 아직 실제로 새 프로세스에 전달되지 않는다(§4 "인자/환경변수
 // 전달 규약"이 프로젝트 전체에서 아직 미착수 - execImage()가 지금은
 // 그런 스택 프레임을 구성하지 않는다, 이 syscall만의 제약이 아니다) -
-// ABI 자리만 미리 잡아 두고 §4가 준비되면 이어붙인다.
+// ABI 자리만 미리 잡아 두고 §4가 준비되면 이어붙인다. `flags`도 마찬가지로
+// `kSpawnDebugStart` 비트의 실제 소비는 SP-9A6D579F 착수 시로 미룬다
+// (PN-A6E01B8A) - 지금은 유효성 검증(kSpawnProcessFlagsMask)까지만.
 struct SpawnProcessArgs {
     const void* imageBuffer = nullptr;  // 유저 포인터 - ELF64 이미지 원본 바이트
     uint64_t imageSize = 0;
     char* const* argv = nullptr;  // 유저 포인터, NULL 종단 - 아직 미사용(위 참고)
     char* const* envp = nullptr;  // 유저 포인터, NULL 종단 - 아직 미사용(위 참고)
+    uint32_t flags = SpawnProcessFlags::kSpawnNone;  // SpawnProcessFlags 비트마스크
     // out
     SpawnProcessError error = SpawnProcessError::None;
     int64_t pid = -1;  // 성공 시 새 Process*를 재해석한 값(AsyncTaskManageCode의

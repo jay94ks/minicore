@@ -265,6 +265,17 @@ public:
     AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
         auto* args = static_cast<SpawnProcessArgs*>(argsRaw);
 
+        // 0단계 - [PN-A6E01B8A, QU-9585F6C4] flags 유효성 검증 - 정의
+        // 안 된 비트가 하나라도 세팅되면 조용히 무시하지 않고 거부한다
+        // (SP-6BEAE0C1 §3 "오타/버전 불일치를 바로 드러내기 위함" -
+        // 표준 커널 syscall 관례). kSpawnDebugStart 비트 자체의 실제
+        // 동작(자식을 Blocked로 시작)은 아직 미착수 - SP-9A6D579F
+        // 착수 시 함께 구현(지금은 유효한 비트로만 인정될 뿐 효과 없음).
+        if ((args->flags & ~kSpawnProcessFlagsMask) != 0) {
+            args->error = SpawnProcessError::InvalidArgument;
+            co_return;
+        }
+
         // 1단계 - imageBuffer/imageSize 검증(SP-6BEAE0C1 §3 "기본적으로
         // untrusted"). isUserRangeValid는 length==0도 true를 돌려주므로
         // imageSize==0은 별도로 걸러야 한다(빈 ELF는 어차피 파싱
