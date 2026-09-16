@@ -35,6 +35,15 @@ struct Node {
 Node gNodes[kernel::kPfaMaxNumaNodes];
 kernel::uint32_t gNodeCount = 1;
 
+// [SP-6BEAE0C1 §11-3] COW 공유 카운트 배열 - 프레임 개수는 실행 중
+// 실측한 Paging::directMapLimit()(4~512GiB 동적)에 맞춰 init()에서
+// 정해지므로 정적 배열이 아니라 커널 이미지 바로 뒤 물리 공간을
+// bump 방식으로 예약해 둔다(직접 매핑 범위 안이라 별도 매핑 없이
+// kPhysToVirt로 바로 접근 가능 - Paging::init()이 이 호출보다 먼저
+// 전체 direct map을 이미 확정해 둠).
+kernel::uint16_t* gCowRefCounts = nullptr;
+kernel::uint64_t gCowRefCountFrames = 0;
+
 kernel::uint64_t kAlignUp(kernel::uint64_t value, kernel::uint64_t align) {
     return (value + align - 1) & ~(align - 1);
 }
@@ -289,10 +298,24 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, uint32_t entryCount,
     const auto memmapArrayAddr = reinterpret_cast<uint64_t>(memmap);
     const auto memmapArrayEnd = memmapArrayAddr + static_cast<uint64_t>(entryCount) * sizeof(HvmMemmapEntry);
 
+    // [SP-6BEAE0C1 §11-3] COW 참조 카운트 배열을 커널 이미지 바로 뒤에
+    // bump 예약 - 프레임 개수는 실측한 direct map 범위(mappedLimit)
+    // 기준이라 커널마다/부팅마다 크기가 다를 수 있다.
+    gCowRefCountFrames = mappedLimit / kPageSize;
+    const uint64_t cowArrayBytes = gCowRefCountFrames * sizeof(uint16_t);
+    const uint64_t cowArrayStart = kAlignUp(kernelPhysEnd, kPageSize);
+    const uint64_t cowArrayEnd = kAlignUp(cowArrayStart + cowArrayBytes, kPageSize);
+
     kSubtractReservedFromList(ranges, count, 0, kLowReservedEnd);
     kSubtractReservedFromList(ranges, count, kernelPhysStart, kernelPhysEnd);
+    kSubtractReservedFromList(ranges, count, cowArrayStart, cowArrayEnd);
     kSubtractReservedFromList(ranges, count, startInfoAddr, startInfoAddr + startInfoSize);
     kSubtractReservedFromList(ranges, count, memmapArrayAddr, memmapArrayEnd);
+
+    gCowRefCounts = reinterpret_cast<uint16_t*>(kPhysToVirt(cowArrayStart));
+    for (uint64_t i = 0; i < gCowRefCountFrames; ++i) {
+        gCowRefCounts[i] = 0;
+    }
 
     const bool haveAffinityInfo = Acpi::memoryAffinityCount() > 0;
     for (int i = 0; i < count; ++i) {
@@ -340,7 +363,36 @@ uint64_t PageFrameAllocator::allocOrder(uint32_t order) {
     return 0;
 }
 
+void PageFrameAllocator::retain(uint64_t physAddr) {
+    const uint64_t idx = physAddr / kPageSize;
+    if (!gCowRefCounts || idx >= gCowRefCountFrames) {
+        return;  // 방어적 - direct map 밖 주소는 애초에 이 할당자가 준 적 없음
+    }
+    uint16_t& count = gCowRefCounts[idx];
+    count = (count == 0) ? 2 : static_cast<uint16_t>(count + 1);
+}
+
+uint32_t PageFrameAllocator::refCount(uint64_t physAddr) {
+    const uint64_t idx = physAddr / kPageSize;
+    if (!gCowRefCounts || idx >= gCowRefCountFrames) {
+        return 0;
+    }
+    return gCowRefCounts[idx];
+}
+
 void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
+    // COW로 공유된 적 있는 4KiB 페이지(order 0)는 카운트가 0으로
+    // 돌아올 때까지 실제로 반납하지 않는다 - retain()을 한 번도 안
+    // 받은 페이지는 항상 0이라 기존 호출부 전부 이 분기를 그대로
+    // 지나쳐 원래 동작과 동일하다(SP-6BEAE0C1 §11-3).
+    if (order == 0 && gCowRefCounts) {
+        const uint64_t idx = physAddr / kPageSize;
+        if (idx < gCowRefCountFrames && gCowRefCounts[idx] != 0) {
+            if (--gCowRefCounts[idx] != 0) {
+                return;
+            }
+        }
+    }
     const uint32_t node = kNodeForAddress(physAddr);
     Node& n = gNodes[node];
     SpinlockGuard guard(n.lock);

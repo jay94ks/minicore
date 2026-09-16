@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-6BEAE0C1
   status: approved
-  updatedAt: 2026-09-16T12:30:37.600Z
+  updatedAt: 2026-09-16T12:37:59.185Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -216,20 +216,42 @@ QU-52253384 답변이 큰 방향(§2/§3/§6)은 확정했지만, 실제 구현�
    설계자 답변("아니야 그냥 일반 syscall로 해도 되겠네")으로 별도
    준비 syscall/핸들 없이 `SpawnProcess` 단일 syscall로 확정 -
    RM-48E1E610 번호도 기존 예약(59)만으로 충분, 추가 예약 불필요.
-3. **[실측 완료, 2026-09-16] COW 참조 카운트 배치**(§2) -
+3. **[구현 완료, 2026-09-16]** COW 참조 카운트 배치(§2) -
    `page_frame_allocator.cpp` 전수 확인 결과 **프레임 단위 메타데이터
    자체가 지금 전혀 없다** - 이 buddy 할당자는 각 노드가 `freeListHeads
    [kMaxOrder+1]`(물리주소 기반 intrusive free list)만 갖고, "할당된"
    프레임에는 아무 사이드밴드 정보도 없다(free 상태일 때만 그 페이지
    자신의 메모리에 임시로 `FreeBlock::next`를 써 두는 것뿐 - 할당되면
-   그 공간은 온전히 호출자 것). 이 할당자는 이미 "커널이 정적으로
-   identity map해 둔 저지대 물리 메모리(1GiB)" 범위로만 관리 범위를
-   제한해 뒀으므로(page_frame_allocator.h 문서 주석), 그 기존 상한을
-   그대로 재사용해 **1GiB/4KiB = 262144 프레임 고정 크기의 별도
-   참조 카운트 배열**(`uint16_t refCount[262144]`류, 전역 정적 배열 -
-   프레임 번호 = physAddr >> 12)을 새로 추가하는 것으로 충분해
-   보인다 - 이미 이 할당자 자신이 확정해 둔 스코프 제약을 그대로
-   따르는 것이라 별도 확인 없이 착수 시 그대로 구현한다.
+   그 공간은 온전히 호출자 것).
+
+   **[정정]** 최초 이 절에 "관리 범위가 1GiB 고정이라 262144 프레임
+   고정 배열이면 충분하다"고 적었으나 이는 `page_frame_allocator.h`의
+   **오래된(stale) 문서 주석**만 보고 판단한 오류였다 - 실제로는
+   `paging.cpp`의 `Paging::init()`이 실측 물리 메모리 크기에 맞춰
+   `kMinDirectMapGib(4)`~`kMaxDirectMapGib(512)` 사이에서 동적으로
+   direct map 범위(`gDirectMapLimit`)를 정한다(부팅마다/머신마다
+   다름). 고정 262144 배열은 4GiB 미만 머신에서도 이미 부족해 잘못된
+   설계였다.
+
+   **실제 구현**: 정적 배열 대신, `PageFrameAllocator::init()`에서
+   `Paging::directMapLimit()`(이 시점엔 이미 `Paging::init()`이 확정해
+   둠) 기준으로 프레임 개수를 실측해 커널 이미지 바로 뒤 물리 공간에
+   `uint16_t` 배열을 bump 방식으로 예약(`kSubtractReservedFromList`로
+   그 범위를 usable range에서 제외 - 기존 kernelPhysStart/End 제외와
+   같은 패턴)하고, direct map이 이미 그 범위 전체를 매핑해 둔 상태라
+   별도 매핑 없이 `kPhysToVirt`로 바로 접근한다. `retain(physAddr)`/
+   `refCount(physAddr)` 두 정적 메서드를 추가했고, `freeOrder`는
+   order 0에서만 이 배열을 확인해 카운트가 0이 아니면 감소만 하다가
+   0이 되는 순간에만 실제 free 경로로 넘어간다 - `retain()`을 한 번도
+   안 부른 페이지는 항상 0이라 **기존 모든 호출부(retain을 안 쓰는
+   전부)는 완전히 동일하게 동작**한다(관계도 기록: 커밋 예정, 파일
+   `minicore/kernel/page_frame_allocator.{h,cpp}`).
+
+   **검증**: 클린 빌드 통과. QEMU 3개 시나리오(PVH 단일코어 무initrd/
+   PVH+initrd/GRUB multiboot2 SMP4) 전부 `page frame allocator ready`
+   이후 정상 부팅 확인, 회귀 없음 - synthetic 4-service initrd는 그
+   전용 아티팩트가 없어 이번 변경(PageFrameAllocator 내부 전용이라
+   프로세스 스폰 경로와 무관)에서는 생략.
 4. **`wait()` syscall ABI** - 반환값(exit code만? 종료 사유
    포함?), 여러 자식 중 아무나 기다리는 것도 지원할지(`waitpid(-1,
    ...)` 같은 것) - 순수 구현 세부, 착수하며 정한다.

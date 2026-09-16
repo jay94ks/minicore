@@ -41,6 +41,25 @@ public:
     static uint64_t freePageCount();  // 전체 노드 합
     static uint32_t numaNodeCount();
     static uint64_t freePageCountOnNode(uint32_t node);
+
+    // [SP-6BEAE0C1 §2/§11-3] Copy-on-Write 페이지 공유 카운트 - 4KiB
+    // 단일 페이지(order 0)에만 의미가 있다(COW로 공유되는 건 항상
+    // Vma가 매핑하는 개별 유저 페이지뿐, 커널 스택/테이블 같은 멀티
+    // 페이지 블록은 공유 대상이 아니다). retain()을 한 번도 안 부른
+    // 페이지는 항상 "추적 안 됨"(소유자 정확히 1개) 상태라 freePage/
+    // freeOrder의 기존 동작이 100% 그대로 유지된다 - 이 API를 실제로
+    // 쓰는 COW 코드가 생기기 전까지는 아무 호출부에도 영향이 없다.
+    //
+    // retain()은 이 페이지를 하나 더 공유하기 시작할 때(예: fork()가
+    // 부모 페이지를 자식과 읽기전용으로 공유) 부른다 - 처음 부르면
+    // 2(기존 소유자 + 새 소유자), 그 다음부터는 +1. freeOrder(order 0)
+    // 는 카운트가 0이 아니면 실제로 반납하지 않고 감소만 하다가 0이
+    // 되는 순간에만 진짜 free 경로로 넘어간다 - 그래서 카운트가 자연히
+    // 0으로 돌아온 뒤에야 free list에 들어가고, 새 소유자가 생기지
+    // 않는 한 다시 추적될 일이 없다(allocPage 쪽에서 별도로 리셋할
+    // 필요 없음).
+    static void retain(uint64_t physAddr);
+    static uint32_t refCount(uint64_t physAddr);  // 0 = 추적 안 됨(소유자 1개)
 };
 
 }  // namespace kernel
