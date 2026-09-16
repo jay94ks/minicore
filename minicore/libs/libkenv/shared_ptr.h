@@ -7,13 +7,29 @@
 #include "libkmm/slab.h"
 
 // libkenv: 커널용 lock-free 공유/약한/배타적 소유 포인터 템플릿
-// (SP-201238BB, PN-68871BC9 착수 2번째 증분) - 설계자 지시("lock-free
-// 기반으로 커널용 공유 포인터 템플릿들을 설계해봐")에 따라
-// AsyncTaskWeakRef(async_task.h/.cpp, PN-D01B7D07)가 이미 실제로
-// 검증해 둔 "대상 수명과 컨트롤 블록 수명을 분리"하는 패턴을 임의
-// 타입 T로 일반화한다. §2-B(IntrusiveControlBlock 등 침습적 변형)는
-// PN-68871BC9 자신이 "v1 적용 대상 미정이라 범위 밖"으로 명시해 둔
-// 항목이라 이 파일에는 포함하지 않는다.
+// (SP-201238BB, PN-68871BC9 착수 2번째 증분, PN-5FC484DF 2차 재설계) -
+// 설계자 지시("lock-free 기반으로 커널용 공유 포인터 템플릿들을
+// 설계해봐")에 따라 AsyncTaskWeakRef(async_task.h/.cpp, PN-D01B7D07)가
+// 이미 실제로 검증해 둔 "대상 수명과 컨트롤 블록 수명을 분리"하는
+// 패턴을 임의 타입 T로 일반화한다. §2-B(IntrusiveControlBlock 등
+// 침습적 변형)는 PN-68871BC9 자신이 "v1 적용 대상 미정이라 범위 밖"
+// 으로 명시해 둔 항목이라 이 파일에는 포함하지 않는다.
+//
+// **[2차 재설계, 2026-09-16, PN-5FC484DF, QU-4E449C65 답변("(B)
+// SharedPtr 별칭 생성자 추가")]** 컨트롤 블록의 참조 카운팅 부분을
+// 타입 소거된 `ControlBlockBase`로 분리했다(표준 std::shared_ptr의
+// 실제 내부 구조와 동일한 접근) - Task::blockedOn(Waitable*)을
+// WeakPtr<Waitable>로 바꾸려는데, 실제 Waitable 구현체(WaitQueue)가
+// Mutex/Semaphore에 임베디드라 컨테이너의 컨트롤 블록을 공유하면서
+// 멤버 하나만 가리키는 SharedPtr/WeakPtr(별칭, aliasing)이 필요해진
+// 것이 계기. `SharedPtr<T,Deleter>`/`WeakPtr<T,Deleter>`는 이제
+// `ControlBlockBase* _block`(타입 소거) + `T* _ptr`(이 핸들이 실제로
+// 가리키는 대상) 두 필드를 든다 - 인스턴스 크기가 8바이트에서
+// 16바이트(x86_64)로 늘었지만, `get()`이 `_block->target()` 간접
+// 호출 없이 `_ptr`을 바로 반환해 오히려 한 단계 빨라진다. 공개 API
+// (`get()`/`operator->`/`reset()`/`lock()` 등)는 리팩터 전과 동작이
+// 완전히 동일해야 한다는 게 이 재설계의 제약이었다(PN-68871BC9
+// 2번째 증분에서 이미 검증한 8개 항목 전부 재검증 필요).
 //
 // **소멸 관례**: 이 커널은 placement new/실제 소멸자 호출을 쓰지
 // 않고(chunked_list.h 등 기존 관례) 명시적 init()/destroy() 메서드
@@ -42,21 +58,16 @@ void kDestroyAndFree(T* ptr) {
     GenericSlabAllocator::free(ptr, sizeof(T));
 }
 
-// [SP-201238BB §2] `Deleter`를 템플릿 파라미터로 받는다(SharedPtr에도
-// 커스텀 삭제자를 템플릿 파라미터화하라는 설계자 Opinion 반영 -
-// ControlBlock/SharedPtr/WeakPtr/kMakeShared 전부 같은 Deleter로
-// 맞춰야 한다). AsyncTaskWeakRef::init()과 동일한 관례로 raw 슬랩
-// 메모리 위에 명시적으로 초기화한다(placement new 안 씀).
-template <typename T, typename Deleter = void (*)(T*)>
-class ControlBlock {
+// [신규, PN-5FC484DF] 참조 카운팅만 아는 타입 소거된 기반 클래스 -
+// `T`를 몰라도 카운트 증감/CAS 루프는 그대로 할 수 있다. 실제
+// 소멸/반납은 파생 클래스(`ControlBlock<T,Deleter>`)가 `init()`에서
+// 심어 둔 함수 포인터 트램폴린을 통해서만 한다(가상 함수 대신 -
+// `Deleter`와 같은 함수 포인터 타입 소거 패턴, vtable 오버헤드 없음).
+// 이 분리 덕분에 `SharedPtr<T,Deleter>`가 `ControlBlockBase*`만
+// 들면(=T를 몰라도) 되고, 실제로 가리키는 대상(`T* _ptr`)은 별도
+// 필드로 독립시킬 수 있어 별칭(aliasing) 생성자가 가능해진다.
+class ControlBlockBase {
 public:
-    void init(T* target, Deleter deleter = &kDestroyAndFree<T>) {
-        _target.store(target);
-        _strongCount.store(1);  // 최초 SharedPtr 생성자 몫
-        _weakCount.store(1);    // 강한 참조가 하나라도 있는 동안의 암묵적 몫(표준 shared_ptr 관례)
-        _deleter = deleter;
-    }
-
     // WeakPtr::lock()이 쓴다 - "0에서 다시 살아나지 않게" CAS 루프로
     // strongCount를 원자적으로 증가(0이면 실패, 이미 파괴된 대상을
     // 되살리지 않음 - AtomicU32::fetchAdd 단독으로는 이 보장이 안 됨).
@@ -72,38 +83,69 @@ public:
         return false;  // 이미 0 - 대상이 파괴됨, 되살릴 수 없음
     }
 
-    T* target() const { return _target.load(); }
-
-    // SharedPtr 소멸/재대입 시 호출 - init()이 저장해 둔 _deleter를
-    // 그대로 쓴다(파라미터로 매번 다시 받지 않음).
-    void releaseStrong() {
-        if (_strongCount.fetchSub(1) == 1) {
-            T* t = _target.load();
-            if (t) {
-                _deleter(t);
-            }
-            _target.store(nullptr);
-            releaseWeak();  // 강한 참조 전부 사라짐 - 암묵적 weak 1개도 해제
-        }
-    }
-
-    void releaseWeak() {
-        if (_weakCount.fetchSub(1) == 1) {
-            GenericSlabAllocator::free(this, sizeof(ControlBlock<T, Deleter>));
-        }
-    }
-
-    void addWeakRef() { _weakCount.fetchAdd(1); }
-
     // SharedPtr 복사 생성자 전용 - 호출자가 이미 강한 참조 1개를 쥔
     // 채로 부르므로(카운트가 0일 수 없음) tryAddStrongRef()의 CAS
     // 루프 없이 단순 fetchAdd로 충분하다.
     void addStrongRefUnchecked() { _strongCount.fetchAdd(1); }
+    void addWeakRef() { _weakCount.fetchAdd(1); }
 
-private:
-    AtomicPtr<T> _target;
+    void releaseStrong() {
+        if (_strongCount.fetchSub(1) == 1) {
+            _destroyOwned(this);  // 원래 소유 객체 소멸(파생 타입이 세팅한 트램폴린)
+            releaseWeak();        // 강한 참조 전부 사라짐 - 암묵적 weak 1개도 해제
+        }
+    }
+    void releaseWeak() {
+        if (_weakCount.fetchSub(1) == 1) {
+            _freeSelf(this);  // 컨트롤 블록 자신의 메모리 반납(파생 타입의 실제 크기를 아는 트램폴린)
+        }
+    }
+
+protected:
     AtomicU32 _strongCount;
     AtomicU32 _weakCount;
+    void (*_destroyOwned)(ControlBlockBase*) = nullptr;  // init()이 채움
+    void (*_freeSelf)(ControlBlockBase*) = nullptr;      // init()이 채움
+};
+
+// [SP-201238BB §2] `Deleter`를 템플릿 파라미터로 받는다(SharedPtr에도
+// 커스텀 삭제자를 템플릿 파라미터화하라는 설계자 Opinion 반영 -
+// ControlBlock/SharedPtr/WeakPtr/kMakeShared 전부 같은 Deleter로
+// 맞춰야 한다). AsyncTaskWeakRef::init()과 동일한 관례로 raw 슬랩
+// 메모리 위에 명시적으로 초기화한다(placement new 안 씀). `_target`/
+// `_deleter`만 그대로 갖는다 - 소멸 시 무엇을 해제할지는 컨트롤
+// 블록이 계속 안다(별칭은 "누가 가리키는지"만 분리할 뿐 "누가
+// 해제되는지"는 그대로 원래 소유 객체다).
+template <typename T, typename Deleter = void (*)(T*)>
+class ControlBlock : public ControlBlockBase {
+public:
+    void init(T* target, Deleter deleter = &kDestroyAndFree<T>) {
+        _target.store(target);
+        _strongCount.store(1);  // 최초 SharedPtr 생성자 몫
+        _weakCount.store(1);    // 강한 참조가 하나라도 있는 동안의 암묵적 몫(표준 shared_ptr 관례)
+        _deleter = deleter;
+        _destroyOwned = &kDestroyOwnedTrampoline;
+        _freeSelf = &kFreeSelfTrampoline;
+    }
+
+    // kMakeShared가 초기 SharedPtr::_ptr 값을 얻는 데만 쓴다 - 별칭
+    // 생성자가 만든 SharedPtr은 이 값을 안 거치고 자기 _ptr을 직접 든다.
+    T* target() const { return _target.load(); }
+
+private:
+    static void kDestroyOwnedTrampoline(ControlBlockBase* base) {
+        auto* self = static_cast<ControlBlock<T, Deleter>*>(base);
+        T* t = self->_target.load();
+        if (t) {
+            self->_deleter(t);
+        }
+        self->_target.store(nullptr);
+    }
+    static void kFreeSelfTrampoline(ControlBlockBase* base) {
+        GenericSlabAllocator::free(base, sizeof(ControlBlock<T, Deleter>));
+    }
+
+    AtomicPtr<T> _target;
     Deleter _deleter = &kDestroyAndFree<T>;  // init()이 실제 값으로 덮어씀
 };
 
@@ -120,15 +162,19 @@ public:
     SharedPtr() = default;
     ~SharedPtr() { reset(); }
 
-    SharedPtr(const SharedPtr& other) : _block(other._block) {
+    SharedPtr(const SharedPtr& other) : _block(other._block), _ptr(other._ptr) {
         if (_block) _block->addStrongRefUnchecked();
     }
-    SharedPtr(SharedPtr&& other) noexcept : _block(other._block) { other._block = nullptr; }
+    SharedPtr(SharedPtr&& other) noexcept : _block(other._block), _ptr(other._ptr) {
+        other._block = nullptr;
+        other._ptr = nullptr;
+    }
 
     SharedPtr& operator=(const SharedPtr& other) {
         if (this != &other) {
             reset();
             _block = other._block;
+            _ptr = other._ptr;
             if (_block) _block->addStrongRefUnchecked();
         }
         return *this;
@@ -137,35 +183,57 @@ public:
         if (this != &other) {
             reset();
             _block = other._block;
+            _ptr = other._ptr;
             other._block = nullptr;
+            other._ptr = nullptr;
         }
         return *this;
     }
 
-    T* get() const { return _block ? _block->target() : nullptr; }
-    T* operator->() const { return get(); }
-    T& operator*() const { return *get(); }
-    explicit operator bool() const { return get() != nullptr; }
+    // [신규, PN-5FC484DF, QU-4E449C65 답변] 별칭(aliasing) 생성자 -
+    // owner의 컨트롤 블록을 공유(강한 참조 +1)하면서, 그 컨트롤
+    // 블록이 실제로 소유한 타입(U)과 무관한 대상(T*, 대개 U의 멤버
+    // 하나)을 가리키는 SharedPtr을 만든다. owner가 살아있는 동안은
+    // aliasedPtr도 안전하다(표준 std::shared_ptr 별칭 생성자와 동일한
+    // 계약 - 예: Mutex에 임베디드된 Waitable을 가리키면서 Mutex
+    // 자신의 컨트롤 블록 참조 카운트를 공유).
+    template <typename U, typename UDeleter>
+    SharedPtr(const SharedPtr<U, UDeleter>& owner, T* aliasedPtr) : _block(owner._block), _ptr(aliasedPtr) {
+        if (_block) _block->addStrongRefUnchecked();
+    }
+
+    T* get() const { return _ptr; }
+    T* operator->() const { return _ptr; }
+    T& operator*() const { return *_ptr; }
+    explicit operator bool() const { return _ptr != nullptr; }
 
     void reset() {
         if (_block) {
-            _block->releaseStrong();  // 컨트롤 블록이 자기 몫 삭제자를 이미 알고 있다
+            _block->releaseStrong();  // 컨트롤 블록이 자기 몫 삭제자를 이미 안다
             _block = nullptr;
         }
+        _ptr = nullptr;
     }
 
 private:
-    friend class WeakPtr<T, Deleter>;
-    // [실측으로 발견한 초안의 버그] kMakeShared가 이 private 생성자를
-    // 직접 불러 컨트롤 블록을 SharedPtr로 감싸는데, 이 friend 선언이
-    // 없으면 "private 생성자 호출" 컴파일 에러가 난다 - 원안(SP-201238BB)
-    // 에 이 선언이 누락돼 있었다(EnableSharedFromThis 쪽엔 있었는데
-    // SharedPtr 자신엔 빠짐 - 실제 컴파일 전까지는 안 드러나는 종류의
-    // 실수). EnableSharedFromThis<T>의 friend 선언과 같은 패턴.
+    // [신규, PN-5FC484DF] 별칭 생성자가 다른 SharedPtr<U,D>/
+    // WeakPtr<U,D>의 _block을 읽을 수 있도록 - 타입이 다르면 서로
+    // private 멤버에 접근 못 하는 C++ 기본 규칙을 이 템플릿 friend로
+    // 풀어 준다(표준 shared_ptr 구현체들도 동일하게 이 패턴을 쓴다).
+    template <typename U, typename D>
+    friend class SharedPtr;
+    template <typename U, typename D>
+    friend class WeakPtr;
+    // [버그 수정, 2026-09-16, PN-68871BC9 착수 2번째 증분 실측 컴파일 중
+    // 발견] 이 friend 선언이 원안에 빠져 있었다 - kMakeShared가 이 아래
+    // private 생성자를 직접 부르는데, EnableSharedFromThis<T> 쪽엔 같은
+    // friend 선언이 있었으면서 SharedPtr 자신엔 없어 실제로 컴파일해
+    // 보기 전까지 안 드러났다("private 생성자 호출" 컴파일 에러).
     template <typename U, typename D>
     friend SharedPtr<U, D> kMakeShared(U*, D);
-    explicit SharedPtr(ControlBlock<T, Deleter>* block) : _block(block) {}
-    ControlBlock<T, Deleter>* _block = nullptr;
+    explicit SharedPtr(ControlBlockBase* block, T* ptr) : _block(block), _ptr(ptr) {}
+    ControlBlockBase* _block = nullptr;
+    T* _ptr = nullptr;  // [신규, PN-5FC484DF] 이 핸들이 실제로 가리키는 대상 - 별칭 지원을 위해 컨트롤 블록에서 분리
 };
 
 // 약한 참조 - AsyncTaskWeakRef와 동일한 역할이지만 임의 T에 대해.
@@ -175,19 +243,23 @@ template <typename T, typename Deleter = void (*)(T*)>
 class WeakPtr {
 public:
     WeakPtr() = default;
-    explicit WeakPtr(const SharedPtr<T, Deleter>& shared) : _block(shared._block) {
+    explicit WeakPtr(const SharedPtr<T, Deleter>& shared) : _block(shared._block), _ptr(shared._ptr) {
         if (_block) _block->addWeakRef();
     }
     ~WeakPtr() { if (_block) _block->releaseWeak(); }
 
-    WeakPtr(const WeakPtr& other) : _block(other._block) {
+    WeakPtr(const WeakPtr& other) : _block(other._block), _ptr(other._ptr) {
         if (_block) _block->addWeakRef();
     }
-    WeakPtr(WeakPtr&& other) noexcept : _block(other._block) { other._block = nullptr; }
+    WeakPtr(WeakPtr&& other) noexcept : _block(other._block), _ptr(other._ptr) {
+        other._block = nullptr;
+        other._ptr = nullptr;
+    }
     WeakPtr& operator=(const WeakPtr& other) {
         if (this != &other) {
             if (_block) _block->releaseWeak();
             _block = other._block;
+            _ptr = other._ptr;
             if (_block) _block->addWeakRef();
         }
         return *this;
@@ -196,9 +268,19 @@ public:
         if (this != &other) {
             if (_block) _block->releaseWeak();
             _block = other._block;
+            _ptr = other._ptr;
             other._block = nullptr;
+            other._ptr = nullptr;
         }
         return *this;
+    }
+
+    // [신규, PN-5FC484DF, QU-4E449C65 답변] SharedPtr과 동일한 별칭
+    // 생성자 - weak 쪽. Task::blockedOn처럼 "컨테이너가 살아있는 동안만
+    // 그 임베디드 멤버를 관찰"하려는 용도가 바로 이 생성자를 쓴다.
+    template <typename U, typename UDeleter>
+    WeakPtr(const SharedPtr<U, UDeleter>& owner, T* aliasedPtr) : _block(owner._block), _ptr(aliasedPtr) {
+        if (_block) _block->addWeakRef();
     }
 
     // AsyncTaskWeakRef::lock()과 동일한 역할이지만, "대상을 살려
@@ -206,13 +288,18 @@ public:
     // 이미 파괴됐으면(strongCount==0) 빈 SharedPtr.
     SharedPtr<T, Deleter> lock() const {
         if (_block && _block->tryAddStrongRef()) {
-            return SharedPtr<T, Deleter>(_block);
+            return SharedPtr<T, Deleter>(_block, _ptr);
         }
         return SharedPtr<T, Deleter>();
     }
 
 private:
-    ControlBlock<T, Deleter>* _block = nullptr;
+    template <typename U, typename D>
+    friend class SharedPtr;
+    template <typename U, typename D>
+    friend class WeakPtr;
+    ControlBlockBase* _block = nullptr;
+    T* _ptr = nullptr;
 };
 
 // 표준 enable_shared_from_this와 같은 역할 - 어떤 타입 T가 이걸
@@ -255,11 +342,18 @@ SharedPtr<T, Deleter> kMakeShared(T* preConstructed, Deleter deleter = &kDestroy
     if (!mem) return SharedPtr<T, Deleter>();  // 할당 실패 - 빈 SharedPtr(예외 없음, 이 프로젝트 관례)
     auto* block = reinterpret_cast<ControlBlock<T, Deleter>*>(mem);
     block->init(preConstructed, deleter);
-    SharedPtr<T, Deleter> result(block);
+    // [버그 수정, 2026-09-16, PN-5FC484DF 실측 컴파일 중 발견] SP-201238BB
+    // §2 원안의 이 줄은 `SharedPtr<T, Deleter> result(block);`(1개 인자)
+    // 였다 - 재설계로 SharedPtr의 private 생성자가 `(ControlBlockBase*,
+    // T*)` 2개 인자로 바뀌었는데 이 호출부만 갱신이 안 된 원안의
+    // 오탈자였다(문서 자체가 리팩터 도중 스스로 낸 불일치 - 실제
+    // 컴파일 전까지는 안 드러남, PN-68871BC9 2번째 증분의 friend 선언
+    // 누락과 같은 종류의 발견).
+    SharedPtr<T, Deleter> result(block, preConstructed);
     // T가 EnableSharedFromThis<T>를 상속하면 _weakThis를 채운다 -
     // if constexpr로 컴파일 타임 분기(런타임 비용 0, T가 상속 안
-    // 했으면 이 분기 자체가 인스턴스화되지 않는다). kIsBaseOf는 이
-    // 파일 위쪽의 freestanding 대체(<type_traits> 없음 - 위 주석 참고).
+    // 했으면 이 분기 자체가 인스턴스화되지 않는다). kIsBaseOf는
+    // libkenv/type_traits.h의 freestanding 대체(<type_traits> 없음).
     if constexpr (kIsBaseOf<EnableSharedFromThis<T>, T>) {
         preConstructed->_weakThis = WeakPtr<T>(result);
     }
@@ -271,7 +365,9 @@ SharedPtr<T, Deleter> kMakeShared(T* preConstructed, Deleter deleter = &kDestroy
 // 과 다른 선택 - 표준 unique_ptr<T, Deleter>와 동일한 이유: 컨트롤
 // 블록이 없어 타입 소거로 숨길 자리가 없고, 소유자가 정확히 하나뿐인
 // 배타적 소유는 애초에 "다른 삭제자로 만들어진 UniquePtr과 같은
-// 타입이어야 할" 이유도 없다).
+// 타입이어야 할" 이유도 없다). PN-5FC484DF의 별칭/타입 소거 재설계는
+// SharedPtr/WeakPtr 전용이다 - UniquePtr은 컨트롤 블록 자체가 없어
+// 영향을 받지 않는다.
 template <typename T, typename Deleter = void (*)(T*)>
 class UniquePtr {
 public:
