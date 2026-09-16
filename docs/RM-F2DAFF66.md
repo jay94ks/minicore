@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T20:28:39.735Z
+  updatedAt: 2026-09-16T20:33:06.009Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -75,8 +75,13 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   완료(commit 7347c47) - `Task::numaNode` 필드 반영 및 QEMU 단일/
   2노드 토폴로지 검증 완료(단, 부팅 시점 Task가 전부 BSP에서
   생성돼 `numaNode!=0` 실제 경로는 아직 미실측 - PN-A74871F2 본문
-  참고). PN-9DDFB774(Push/Pull 소비 로직)는 이제 착수 조건이
-  풀려 `scheduled` 상태로 착수 가능.
+  참고).
+- **[체인 완전 완료, 2026-09-17, minicore-88 세션]** PN-9DDFB774도
+  완료(commit 9057d08) - `kFindLeastLoadedCoreNumaAware`/
+  `kFindMostLoadedCoreNumaAware`로 Push/Pull이 실제로 같은 NUMA
+  노드를 우선하도록 배선, 단일/2노드 토폴로지 무회귀 확인. 이걸로
+  NUMA 갭 체인(발견→PN-A74871F2→PN-9DDFB774) 전부 완료 -
+  1-A는 이제 완전히 닫힌 항목이다.
 
 ### 1-B. `SP-1FBC0EEB` Channel IPC `onCancel` 미구현 - 댕글링 포인터
 위험 (코드 갭, **미착수 - 가장 심각한 발견**)
