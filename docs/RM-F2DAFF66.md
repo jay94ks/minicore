@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-16T19:36:40.067Z
+  updatedAt: 2026-09-16T19:59:14.649Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -138,6 +138,15 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **`RM-28225668`(인터럽트 벡터 목록)**: 0xE0-0xE3 전부 상태 최신,
   `PN-B3DD3D19`(인터럽트 구독)가 새 고정 IPI 벡터를 요구하지 않고
   기존 동적 벡터 위임 메커니즘을 재사용함을 확인 - 갭 없음.
+- **`SP-EAB162FC`(ProcessRole/Capability/Resurrect 체계)**:
+  §2.1(`Process::role` 필드)/§2.3(SubscribeInterrupt exclusive
+  자격 검증)/§6.1-6.4(Resurrect `essential`/`resurrect` 플래그,
+  3단계 분기, 백오프 상수·공식까지 정확히 일치) 전부 `process.h`/
+  `scheduler.cpp` 실제 코드와 대조 확인 - 갭 없음. §2.2(PnP 드라이버
+  자식도 KernelService 부여)/§2.3의 RequestIoPermission 소비는
+  그 상위 기능(PnP 드라이버 스폰, RequestIoPermission 자체)이 아직
+  코드로 없어 지금은 대조 불가 - devmgr 항목4/5 착수 후 재확인 필요
+  (§3에 다시 추가하지 않고 여기 각주로만 남김, 그때 가서 다시 봄).
 - **`SP-2AAD7C8D`(mmap/Maple Tree) §6**: 6개 항목 중 2(TLB
   샷다운)/4(파일 백킹 mmap)/6(COW)은 명시적 ~~취소선~~/"완료"
   표시로 해소 확인됐고, 1(RCU)/3(findGap 시작 지점)/5(노드 전환
@@ -173,11 +182,8 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
 결과를 이 절에서 §1(발견) 또는 §2(갭 없음)로 옮긴다:
 
-- [ ] `SP-9A6D579F`(DebugSession) - 이제 막 approved+scheduled
-  (PN-87D6B615) - 착수 전이라 아직 코드와 대조할 게 없음, 착수 후
-  점검.
-- [ ] `SP-EAB162FC`(ProcessRole/Capability 체계) - 필드/API 목록
-  vs 실제 `process.h`/`syscall.h` 대조 안 해봄.
+- [ ] `SP-9A6D579F`(DebugSession) - PN-87D6B615 여전히 착수 전(다른
+  버그 대응 중) - 착수 후 재확인.
 - [ ] `SP-F682B889`(AsyncTask 프레임워크) - §3 전체 API 목록 vs
   실제 구현 대조 안 해봄(부분적으로만 확인됨 - AsyncTaskCompletion/
   AsyncReactor 정도).
