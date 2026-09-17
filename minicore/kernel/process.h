@@ -252,6 +252,17 @@ public:
     // 이전 생애의 그룹 소속이 새 생애로 새어 들어가면 안 된다).
     ResourceGroup* group = nullptr;
 
+    // [신규, 2026-09-17, SP-245D130B §6/SP-B26CDBDD §6.2, PN-158B6B2F]
+    // 이 프로세스가 쓴 메모리의 coarse(정확한 페이지 단위 실시간 추적
+    // 아님) 계정 - `execImage()`가 로드된 이미지(PT_LOAD 세그먼트
+    // memsz 합) + 유저 스택 크기만큼 가산, `destroy()`가 전액 감산.
+    // 향후 mmap 서브시스템(SP-2AAD7C8D)이 실제로 페이지를 매핑/해제할
+    // 때의 가산/감산 배선은 이 문서 범위 밖(그 서브시스템을 직접
+    // 다루는 후속 계획이 결정). Resurrect(§6.2)가 같은 정적 Process를
+    // 재사용할 수 있으므로 init()에서도 명시적으로 0으로 리셋한다
+    // (group/frozenByGroup과 동일한 이유).
+    uint64_t memoryBytesUsed = 0;
+
     // [신규, 2026-09-17, SP-245D130B §4] `group->freeze()`가 이
     // 프로세스를 실제로 멈췄는지 - `ResourceGroup::thaw()`가 이 값이
     // true인 프로세스만 다시 깨운다(freeze() 호출 이후 새로 스폰돼

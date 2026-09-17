@@ -33,6 +33,12 @@ struct ResourceGroupCpuControl {
 // 아직 실제로 증가시키는 코드가 없다.
 struct ResourceGroupAccounting {
     uint64_t totalCpuTicks = 0;
+
+    // [신규, 2026-09-17, SP-B26CDBDD §6.2, PN-158B6B2F] 이 그룹 소속
+    // 프로세스들의 `Process::memoryBytesUsed` 단순 합 - `Process::
+    // execImage()`가 가산, `Process::destroy()`가 감산한다(coarse -
+    // 정확한 페이지 단위 실시간 추적이 아니라 큰 단위 이벤트에서만).
+    uint64_t totalMemoryBytesUsed = 0;
 };
 
 // [신규, 2026-09-17, SP-245D130B] 자원 그룹 - 프로세스 트리

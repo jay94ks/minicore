@@ -7,6 +7,7 @@
 #include "idt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
+#include "libkcont/intrusive_list.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
@@ -99,7 +100,70 @@ constexpr uint32_t kLoadBalanceWakeVector = 0xE1;
 // 표현하면 pushFront 같은 순서 트릭 없이 자명해진다.
 TaskQueue gImmediateQueues[kMaxCores];
 TaskQueue gRtQueues[kMaxCores];
-TaskQueue gNormalQueues[kMaxCores];
+
+// [신규, 2026-09-17, SP-B26CDBDD §3.1, PN-158B6B2F] `gNormalQueues`의
+// 정렬 키 - vruntime 오름차순(작을수록 "덜 받았다" -> 먼저 뽑힘).
+struct TaskVruntimeTraits {
+    using Key = uint64_t;
+    static Key keyOf(const Task& t) { return t.vruntime; }
+    static constexpr Node Task::* Link = &Task::vruntimeLink;
+};
+
+// [신규, 2026-09-17, SP-B26CDBDD §3.1] `libkcont::OrderedList<Task,
+// TaskVruntimeTraits>` 위에 `TaskQueue`(위)가 이미 갖고 있던 두 가지를
+// 그대로 얹은 얇은 래퍼 - **자체 Spinlock**(Pull이 "다른 코어"의 이
+// 큐를 직접 훔쳐가므로 그 코어 자신의 `cli`만으로는 보호되지 않는다.
+// `OrderedList` 자신은 침습적 컨테이너일 뿐 동시성 보호를 전혀
+// 제공하지 않는다는 게 libkcont의 명시적 계약 - `TaskQueue`가 원래
+// 이 이유로 `Spinlock`을 갖고 있었던 것과 정확히 동일한 근거라, 이
+// 교체가 기존에 이미 성립해 있던 "코어 간 큐 접근은 항상 락으로
+// 보호된다"는 불변조건을 조용히 깨지 않도록 그대로 이어받는다 -
+// SP-B26CDBDD 자신은 이 점을 명시하지 않았지만, 새 설계 결정이
+// 아니라 기존 안전성 보장을 유지하기 위한 구현 세부로 판단해 별도
+// 확인 없이 추가했다) + `approxLength()`(TaskQueue와 동일한 근사치
+// 원자 카운터 관례, Push/Pull 임계치 판정이 그대로 재사용).
+class NormalQueue {
+public:
+    void init() { _list.init(); }
+
+    void insert(Task* task) {
+        SpinlockGuard guard(_lock);
+        _list.insert(task);
+        _approxLength.fetchAdd(1);
+    }
+
+    // §2.3 굶주림 방지 보정용 - 삽입 없이 현재 최솟값 vruntime만 읽는다.
+    // 비어 있으면 true(호출부가 보정을 건너뛰게).
+    bool minVruntime(uint64_t* outValue) const {
+        SpinlockGuard guard(_lock);
+        Task* task = _list.first();
+        if (!task) {
+            return false;
+        }
+        *outValue = task->vruntime;
+        return true;
+    }
+
+    // 최솟값(vruntime)을 큐에서 제거하며 반환 - 비어 있으면 nullptr.
+    Task* popMin() {
+        SpinlockGuard guard(_lock);
+        Task* task = _list.first();
+        if (task) {
+            OrderedList<Task, TaskVruntimeTraits>::remove(task);
+            _approxLength.fetchSub(1);
+        }
+        return task;
+    }
+
+    uint32_t approxLength() const { return _approxLength.load(); }
+
+private:
+    mutable Spinlock _lock;
+    OrderedList<Task, TaskVruntimeTraits> _list;
+    AtomicU32 _approxLength;
+};
+
+NormalQueue gNormalQueues[kMaxCores];
 uint32_t gCoreCount = 1;
 
 // retireCurrentTask()가 넣고 runLoop()이 드레인하는 "종료된 Task"
@@ -535,6 +599,29 @@ uint32_t kPushThresholdLength() {
     return (kEffectiveNormalQueueMaxLength() * kPushThresholdPercent) / 100;
 }
 
+// [신규, 2026-09-17, SP-B26CDBDD §2.1] 표면 가중치([-100,100], 기본 0)를
+// vruntime 나눗셈에 쓸 수 있는 실효 가중치(항상 양수)로 바꾼다 -
+// 선형 변환(effectiveWeight = 100 + weight), 0으로 나누기 방지를 위해
+// 최솟값 1로 클램프.
+constexpr int32_t kEffectiveWeightBase = 100;   // weight=0(기본값)일 때의 실효 가중치
+constexpr int32_t kMinEffectiveWeight = 1;
+int32_t kEffectiveWeightOf(int32_t weight) {
+    const int32_t raw = kEffectiveWeightBase + weight;  // [-100,100] -> [0,200]
+    return raw < kMinEffectiveWeight ? kMinEffectiveWeight : raw;
+}
+
+// [신규, 2026-09-17, SP-B26CDBDD §2.1, QU-DA6C52BA 답변 "수학적 동치값"
+// 고정소수점 스케일] `kEffectiveWeightBase / kEffectiveWeightOf(weight)`를
+// 스케일 없이 정수 나눗셈하면 실효 가중치가 100보다 큰 모든 경우
+// (weight > 0 - 이 기능이 존재하는 이유인 바로 그 경우)에 몫이 0으로
+// 버려져 vruntime이 전혀 안 늘어나는 실질적 버그가 된다(그 Task가
+// 무한정 우선 실행됨, 의도와 정반대). 분자를 미리 이 배율만큼 키워
+// 정수 나눗셈이어도 원래 실수 몫의 정보를 보존한다 - 모든 Task가
+// 항상 같은 스케일을 쓰므로 OrderedList(§3)의 상대 순서 비교에는
+// 전혀 영향 없다(값 자체가 아니라 값들 사이의 순서만 의미가 있다는
+// CFS 불변조건과 정확히 부합).
+constexpr uint64_t kVruntimeScale = 1024;  // 2^10 - 실효 가중치 최댓값(200)까지도 몫의 소수부를 충분히 보존
+
 // SP-9525C4C0 §5.3/§6-항목3(2026-09-15 설계자 확정) - 코어 간 이관
 // 앞에서 FPU 소유권을 안전하게 넘길 수 있는지 판정한다. **여기서
 // 실제로 FXSAVE를 하지 않는다** - §5.3이 밝힌 대로 FXSAVE는 항상
@@ -830,6 +917,43 @@ public:
 
 SelfTerminateHandler gSelfTerminateHandler;
 
+// [신규, 2026-09-17, SP-B26CDBDD §7, PN-158B6B2F] `SetTaskWeight` -
+// 이번 증분은 `targetPid == kSelfTaskWeightPid`(자기 자신) 경로만
+// 구현한다. 직계 자식 대상 경로는 `SP-30FCC8AE`(uid/gid, 아직 review)
+// 승인 이후 `Uid`/`kIsDescendantUser`가 실제 코드로 존재해야만 착수
+// 가능한 하드 의존성이라(§7.1) 그 전까지는 항상 거부(ok=false)한다.
+class SetTaskWeightHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<SetTaskWeightArgs*>(argsRaw);
+        if (args->weight < Task::kMinTaskWeight || args->weight > Task::kMaxTaskWeight) {
+            args->ok = false;  // 범위 밖 - 조용히 clamp하지 않고 거부(표준 커널 syscall 관례)
+            co_return;
+        }
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        if (!submitter) {
+            args->ok = false;
+            co_return;
+        }
+        if (args->targetPid == kSelfTaskWeightPid) {
+            submitter->weight = args->weight;  // 다음 vruntime 갱신(§2.2)부터 즉시 반영
+            args->ok = true;
+            co_return;
+        }
+        // [SP-30FCC8AE 승인 이후 구현 - §7.1 하드 의존성] 직계 자식 대상
+        // 경로는 Kill(PN-71E50394)과 동일한 스코프(Process::children
+        // 순회, kResolveProcessId 불필요)로 uid 권한 검사(caller.uid==
+        // root || kIsDescendantUser(target.uid, caller.uid))를 통과해야만
+        // 허용된다 - 그 인프라가 아직 없어 지금은 항상 거부.
+        args->ok = false;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}  // onExec에 정지 지점 없음 - SP-71DA77B3/PN-BD276A24가 확립한 판단 기준과 동일
+};
+
+SetTaskWeightHandler gSetTaskWeightHandler;
+
 }  // namespace
 
 void Scheduler::init() {
@@ -839,6 +963,23 @@ void Scheduler::init() {
     }
     if (gCoreCount > kMaxCores) {
         gCoreCount = kMaxCores;
+    }
+    // [신규, 2026-09-17, x86_64-elf-gcc 툴체인 전환 중 실측 발견,
+    // PN-158B6B2F] `gNormalQueues[]`(NormalQueue, 내부에 자기 자신을
+    // 가리키는 `Node _sentinel` 포함)의 정적 생성이 컴파일러에 따라
+    // 신뢰할 수 없다는 것을 실측으로 확인했다 - clang은 이 self-참조
+    // NSDMI(`prev = this`)를 링크 타임 상수로 해석해 문제없이 동작했지만,
+    // GCC는 같은 코드에서 `.bss`에 전부 0으로만 배치하고 `.init_array`
+    // 항목도 만들지 않아(둘 다 확인) 실제로는 아무 초기화도 일어나지
+    // 않았다 - `Scheduler::runLoop()`이 첫 `pickNext()`를 부르자마자
+    // `Node::unlink()`가 널/쓰레기 포인터를 역참조해 크래시했다(GPF).
+    // 컴파일러의 정적 초기화 추론에 기대지 않고 부팅 시 명시적으로
+    // `init()`을 불러 이 클래스가 원래 `List::init()` 문서 주석이
+    // 이미 경고해 둔 "슬랩 재사용 메모리 위에 얹을 때"와 똑같은 상황
+    // (실제로는 "정적 배열 생성 자체가 컴파일러별로 신뢰 불가"라는
+    // 새로운 이유)에 놓였다고 보고 방어적으로 고친다.
+    for (uint32_t i = 0; i < kMaxCores; ++i) {
+        gNormalQueues[i].init();
     }
     // 이 시점은 아직 어느 프로세스도 없어(kSpawnInitProcess()는 이보다
     // 한참 뒤) CR3가 여전히 Paging::init()이 만든 커널 전용 PML4다 -
@@ -851,6 +992,8 @@ void Scheduler::init() {
     // 예약해 둔 고정 슬롯(PN-71C3D483 완료 전까지는 핸들러 없이
     // 비어 있었다).
     SyscallRegistry::registerHandler(kSyscallEndpointSelfTerminate, &gSelfTerminateHandler);
+    // [신규, 2026-09-17, SP-B26CDBDD §7, RM-48E1E610 그룹0 call5]
+    SyscallRegistry::registerHandler(kSyscallEndpointSetTaskWeight, &gSetTaskWeightHandler);
     // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §4) - idle 코어
     // 기상 IPI. Push 분기(§2)는 아직 미구현(QU-9325BD40 답변 대기)
     // 이라 지금은 이 벡터를 보내는 호출부가 없지만, 벡터 등록 자체는
@@ -973,7 +1116,18 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
                 }
             }
         }
-        gNormalQueues[targetCore].pushBack(task);
+        // [신규, 2026-09-17, SP-B26CDBDD §2.3] 굶주림 방지 - 이 지점은
+        // task->inRunQueue가 false->true로 바뀌는 "새로 큐에 들어가는"
+        // 경로 그 자체다(위에서 이미 true였으면 조기 반환했다) - 방금
+        // 깨어났거나 막 생성된 Task의 vruntime이 대상 큐의 현재
+        // 최솟값보다 작으면(오래 블로킹돼 있었거나 갓 생성돼 0인 경우)
+        // 그 최솟값까지만 끌어올린다(CFS 표준 "min_vruntime 보정"의
+        // 축소판) - 더 뒤처지게(크게) 만들지는 않는다.
+        uint64_t minVruntime;
+        if (gNormalQueues[targetCore].minVruntime(&minVruntime) && task->vruntime < minVruntime) {
+            task->vruntime = minVruntime;
+        }
+        gNormalQueues[targetCore].insert(task);
         if (targetCore != coreIndex) {
             kWakeCoreIfIdle(targetCore);
         }
@@ -1006,7 +1160,7 @@ Task* Scheduler::pickNext(uint32_t coreIndex) {
         task = gRtQueues[coreIndex].popFront();
     }
     if (!task) {
-        task = gNormalQueues[coreIndex].popFront();
+        task = gNormalQueues[coreIndex].popMin();
     }
     if (task) {
         // 큐에서 실제로 빠져나온 순간 inRunQueue를 내려야 한다 -
@@ -1191,7 +1345,27 @@ void Scheduler::onTick(InterruptFrame* frame) {
                 kSaveDebugRegistersSnapshot(current, frame);
             }
         } else {
-            enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
+            // [신규, 2026-09-17, SP-B26CDBDD §3.2/§5, PN-158B6B2F] vruntime/
+            // cpuTicksUsed 갱신 + ResourceGroup CPU 계정 - 반드시 enqueue()
+            // (그 vruntime을 정렬 키로 삽입 위치를 정한다) 호출보다 먼저다.
+            // isUserLevel 조건은 커널 자신의 Normal Task(있다면)까지 공정
+            // 스케줄링/계정 대상으로 끌어들이지 않기 위함(SP-B26CDBDD §3.2 -
+            // 실제로 지금은 이 코드 경로에 도달하는 Normal Task가 전부
+            // UserThread뿐이라 이 조건이 당장 무언가를 걸러내진 않지만,
+            // 설계가 명시한 조건이라 그대로 반영한다).
+            if (current->taskClass == TaskClass::Normal && current->isUserLevel) {
+                current->vruntime += (kEffectiveWeightBase * kVruntimeScale) / kEffectiveWeightOf(current->weight);
+                current->cpuTicksUsed += 1;
+                if (SharedPtr<Process> proc = static_cast<UserThread*>(current)->process.lock()) {
+                    if (ResourceGroup* group = proc->group) {
+                        group->accounting.totalCpuTicks += 1;  // 쿼터 없어도 항상 집계(SP-245D130B §5)
+                        if (group->cpu.periodTicks != 0) {      // 쿼터 활성 그룹만
+                            group->cpu.usedTicksInPeriod += 1;
+                        }
+                    }
+                }
+            }
+            enqueue(coreIndex, current);  // 라운드로빈(vruntime 정렬) - Ready로 재삽입
         }
     }
     {
@@ -1385,7 +1559,7 @@ void Scheduler::runLoop() {
             // 시도 - O(코어 수) 스캔 한 번뿐이라 비용이 낮다).
             const uint32_t victimCore = kFindMostLoadedCoreNumaAware(coreIndex);
             if (victimCore != coreIndex) {
-                Task* stolen = gNormalQueues[victimCore].popFront();
+                Task* stolen = gNormalQueues[victimCore].popMin();
                 if (stolen) {
                     if (kCanMigrateFpuSafely(stolen, victimCore)) {
                         // pickNext()와 동일한 관례 - 큐에서 실제로
@@ -1394,11 +1568,13 @@ void Scheduler::runLoop() {
                         next = stolen;
                     } else {
                         // FPU 소유권이 아직 살아있다(§5.3/§6-항목3) -
-                        // 이번엔 보류하고 원래 큐 끝으로 돌려놓는다.
-                        // popFront와 이 pushBack 사이 inRunQueue를
-                        // 건드리지 않으므로(계속 true) 그 사이 다른
-                        // 코어가 같은 Task를 이중 스케줄링할 수 없다.
-                        gNormalQueues[victimCore].pushBack(stolen);
+                        // 이번엔 보류하고 원래 큐로 되돌려 놓는다(vruntime
+                        // 정렬 큐라 원래와 같은 자리로 돌아간다 - vruntime
+                        // 자체를 안 건드렸으므로). popMin과 이 insert
+                        // 사이 inRunQueue를 건드리지 않으므로(계속 true)
+                        // 그 사이 다른 코어가 같은 Task를 이중 스케줄링할
+                        // 수 없다.
+                        gNormalQueues[victimCore].insert(stolen);
                     }
                 }
             }

@@ -192,6 +192,10 @@ bool Process::init() {
     // 상태로 되돌려 둔다.
     group = nullptr;
     frozenByGroup = false;
+    // [신규, 2026-09-17, SP-B26CDBDD §6.2] group/frozenByGroup과 동일한
+    // 이유 - Resurrect가 같은 정적 Process를 재사용할 수 있으므로
+    // 이전 생애의 메모리 사용량이 새 생애로 새어 들어가면 안 된다.
+    memoryBytesUsed = 0;
     addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
     // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로,
     // 이전 생애의 신호 상태가 새 생애로 새어 들어가지 않도록 매번
@@ -229,6 +233,13 @@ bool Process::init() {
 }
 
 void Process::destroy() {
+    // [신규, 2026-09-17, SP-B26CDBDD §6.2] execImage()가 가산해 둔 몫을
+    // 그룹 합계에서 감산 - 다른 어떤 정리보다도 먼저(이 시점 이후로는
+    // group이 바뀌지 않는다는 보장이 없으므로 가장 먼저 확실히 처리).
+    if (group) {
+        group->accounting.totalMemoryBytesUsed -= memoryBytesUsed;
+    }
+    memoryBytesUsed = 0;
     if (pml4Phys) {
         // PN-71C3D483 항목 3 - execImage()가 registerFixedRegion으로
         // 장부에 남겨 둔 코드/데이터/스택 VMA를 전부 찾아 실제 페이지를
@@ -444,6 +455,26 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
     // 될 뿐 프로세스 기동 자체는 그 없이도 가능했던 기존 동작이다.
     thread->ensureSelfRef();
     mainThread = thread;
+
+    // [신규, 2026-09-17, SP-B26CDBDD §6.2, PN-158B6B2F] 메모리 사용량
+    // coarse 계정 - PT_LOAD 세그먼트 memsz 합 + 유저 스택 크기(위에서
+    // 이미 매핑 완료). 모든 execImage() 호출부(SpawnProcessHandler/
+    // kSpawnInitProcess/kSpawnServiceProcesses) 전부가 여기 하나로
+    // 자동 커버된다 - 설계 문서(§6.2)는 SpawnProcessHandler::onExec
+    // 쪽에 붙이는 스케치였으나, 세 호출부가 전부 이 함수를 거치므로
+    // 여기 한 곳에 두는 편이 중복 없이 더 확실하다(구현 세부 판단).
+    uint64_t imageBytes = kUserStackSize;
+    for (uint32_t i = 0; i < image.segmentCount(); ++i) {
+        const elf::ProgramHeader seg = image.segment(i);
+        if (seg.type == elf::kSegmentTypeLoad) {
+            imageBytes += seg.memsz;
+        }
+    }
+    memoryBytesUsed += imageBytes;
+    if (group) {
+        group->accounting.totalMemoryBytesUsed += imageBytes;
+    }
+
     return thread;
 }
 

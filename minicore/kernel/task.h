@@ -150,6 +150,34 @@ struct Task {
     // (intrusive) 다음-포인터 - 이 Task가 큐에 들어있을 때만 유효.
     AtomicPtr<Task> next;
 
+    // [신규, 2026-09-17, SP-B26CDBDD §2/§3, PN-158B6B2F] `gNormalQueues`가
+    // `libkcont::OrderedList<Task, TaskVruntimeTraits>`(vruntime 오름차순)
+    // 로 바뀌며 필요해진 전용 침습적 링크 - `next`(위, 즉시/RT 큐가 계속
+    // 쓰는 단일 연결)와 별개다(`waitQueueLink`가 이미 확립한 것과 같은
+    // "서로 다른 컨테이너는 서로 다른 링크 필드" 원칙).
+    Node vruntimeLink;
+
+    // [신규, 2026-09-17, SP-B26CDBDD §2.1] 상대 가중치 - 기본값(0)이
+    // "기준"이고 음수면 덜, 양수면 더 받는다. `TaskClass::Normal`에만
+    // 의미가 있다(RT/Immediate는 공정 스케줄링 개념 자체와 무관 -
+    // SP-9525C4C0 §6-항목4와 동일한 구분). vruntime 계산 시에는 이
+    // 표면값을 직접 쓰지 않고 `kEffectiveWeightOf(weight)`(scheduler.cpp)
+    // 로 항상 양수인 실효 가중치로 변환한 뒤 쓴다.
+    static constexpr int32_t kMinTaskWeight = -100;
+    static constexpr int32_t kMaxTaskWeight = 100;
+    static constexpr int32_t kDefaultTaskWeight = 0;
+    int32_t weight = kDefaultTaskWeight;
+
+    // [신규, 2026-09-17, SP-B26CDBDD §2] CFS류 vruntime - 작을수록
+    // "덜 받았다"는 뜻이라 다음 `pickNext()`에서 먼저 뽑힌다
+    // (`TaskVruntimeTraits::keyOf`가 이 필드를 그대로 정렬 키로 쓴다).
+    uint64_t vruntime = 0;
+
+    // [신규, 2026-09-17, SP-B26CDBDD §1] 이 Task가 실제로 Running이었던
+    // 스케줄러 틱 누적 수(100Hz) - 순수 진단/계정용, 스케줄링 결정
+    // 자체에는 쓰이지 않는다(그 역할은 vruntime이 담당).
+    uint64_t cpuTicksUsed = 0;
+
     // [신규, 2026-09-17, PN-73E61BD1 항목1, SP-FAF768AB §1/§2]
     // `WaitQueue`(Mutex/Semaphore 공유 대기열) 전용 침습적 링크 -
     // 예전엔 위 `next`(스케줄러 큐 전용 필드)를 "파킹된 Task는 어느

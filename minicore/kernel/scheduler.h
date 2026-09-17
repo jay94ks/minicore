@@ -4,6 +4,7 @@
 #include "interrupt_frame.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "syscall.h"
 #include "task.h"
 
 namespace kernel {
@@ -25,6 +26,24 @@ constexpr uint32_t kSchedulerTickHz = 100;
 // (동적 핸들러 테이블의 "핸들러 반환 후 EOI" 관례를 타면 안 됨 -
 // `onForcedMigration()` 문서 주석 참고).
 constexpr uint32_t kForcedMigrationVector = 0xE2;
+
+// [신규, 2026-09-17, SP-B26CDBDD §7, RM-48E1E610 그룹0 call5] Task/
+// 스케줄러 개념(우선순위)이지만 유저가 보기엔 "내 프로세스의 우선순위를
+// 바꾼다"는 Process 단위 동작이라 `Wait`/`Kill`과 같은 관례로 그룹 0에
+// 합류한다(process.h/signal.h의 그룹 0 상수들과 같은 자리).
+constexpr SyscallEndpointId kSyscallEndpointSetTaskWeight = kMakeSyscallEndpointId(0, 5);
+
+// targetPid는 이번 증분에서 `kSelfTaskWeightPid`(자기 자신)만 실제로
+// 허용된다 - 직계 자식 대상 경로는 `SP-30FCC8AE`(uid/gid, 아직 review)
+// 승인 이후 별도 후속 증분(SP-B26CDBDD §7.1).
+constexpr int64_t kSelfTaskWeightPid = -1;
+
+struct SetTaskWeightArgs {
+    int64_t targetPid = kSelfTaskWeightPid;
+    int32_t weight = 0;
+    // out
+    bool ok = false;
+};
 
 // PL-2D3184BC 4단계 - 코어별 개별 큐(DS-D4E5C451이 이미 확정한 상위
 // 구조). 큐 자체는 Task::next 침습적 포인터를 재사용하는 단일 연결
