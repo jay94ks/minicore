@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T16:13:15.223Z
+  updatedAt: 2026-09-17T17:24:41.103Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -895,6 +895,44 @@ approved 전환되는 문서 위주로 전환한다.
   (두 개의 독립 유저랜드 프로세스 간 실제 connect/accept/read/write
   전체 핸드셰이크 실측은 아직 미완료로 명시적으로 남음) - 이건 이
   발견과 무관한 별개의 잔여 범위.
+
+### 1-I. `SP-4DCD0E6A`(Lock-free/Concurrent 컨테이너) §3 `ConcurrentRbtree` -
+실제 채택된 동시성 메커니즘이 문서에 반영 안 됨 (문서만 정정 - 코드
+갭 아님, 2026-09-18)
+
+- **출처**: 이번 스윕에서 아직 이 방법론이 다루지 않았던 approved
+  SP 문서(`SP-4DCD0E6A`)를 처음 대입 - `minicore/kernel/
+  concurrent_rbtree.h`(`PN-A8EF29F7`)와 대조.
+- **문제**: §3 서두 산문은 `ConcurrentRbtree`의 트리 변경을 "새
+  서브트리를 먼저 구성한 뒤 마지막에 원자적 포인터 1회 교체로 게시"
+  (RCU식 copy-then-republish)하는 방식이어야 한다고 서술하는데, 바로
+  아래 코드 스케치는 `find()`를 그냥 "락 없음"이라고만 적어 재시도
+  로직조차 없다(서로 다른 두 이야기가 같은 절 안에 공존). 실제 구현
+  (`PN-A8EF29F7`)은 **이 문서의 산문에도 코드 스케치에도 없는 세 번째
+  방식**을 채택했다 - 착수 세션이 `RbCore::rotateLeft/rotateRight`가
+  원자적 교체가 아니라 CLRS 표준 in-place 다중 필드 mutate임을 코드
+  감사로 발견하고 등록한 `QU-B5CA4008`에서, 설계자가 "(A) 읽기
+  seqlock류 검증/재시도"를 명시적으로 선택했다 - §3이 서술하는 "원자적
+  교체"(선택 안 된 (B))는 채택되지 않았다. 실제 구현은 버전 카운터
+  (홀수=쓰기 중)로 `find`/`first`/`next`가 순회 전후 버전을 비교해
+  다르면 재시도(`kMaxRetries=64`)하고, `Rbtree::insert/remove`(회전
+  포함) 자체는 전혀 수정하지 않는다.
+- **부수 발견**: 같은 절이 "`ConcurrentRbtree`/`ConcurrentMap` 둘 다
+  §1(`LockFreeList`)과 같은 논리적 마킹 삭제 방식이라 RCU가 노드 회수
+  안전성 때문에 필요하다"고도 서술하는데, 실제 `concurrent_map.h`는
+  마킹이 아니라 스트라이프 락을 쥔 채 직접 unlink한 뒤
+  `Rcu::callAfterGracePeriod()`로 반납만 미루는 방식이고,
+  `ConcurrentRbtree`가 RCU를 쓰는 이유도 노드 회수가 아니라 순수
+  "읽기 도중 이 코어의 선점을 막는" 보조 용도다(이 컨테이너는
+  `Rbtree`와 동일하게 `T`의 메모리를 전혀 소유/회수하지 않는 완전
+  침습형이라 애초에 그런 회수 자체가 없음).
+- **조치**: `SP-4DCD0E6A`에 정정 각주 추가(원문 보존) -
+  `document_patch`로 §3 `ConcurrentRbtree` 코드 스케치 직후와 "착수
+  불가" 문단 뒤 두 곳에 실제 채택된 seqlock 방식/RCU의 실제 용도를
+  명시. 코드 쪽은 이미 `concurrent_rbtree.h` 자신의 클래스 주석이
+  정확하고 정직하게(잔여 위험까지) 기록해 뒀으므로 조치 불필요 -
+  **문서만 낡아 있던 것.**
+- **현재 상태**: 완전 해소(문서 정정).
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
