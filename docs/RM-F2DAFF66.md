@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T12:12:28.368Z
+  updatedAt: 2026-09-17T12:25:35.162Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -527,6 +527,41 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   전부 실재 확인 - 여러 세션에 걸친 다수 증분(PN-543C0CE9 등)이
   전부 정확히 교차 참조돼 있다. 갭 없음 - 대형 기능이 이 정도로
   빈틈없이 추적된 드문 사례.
+
+- **`SP-CCACB192`(libjson)**: `minicore/libs/`에 `libjson`/`libutf8`
+  디렉터리 자체가 없어(git_tree 확인) `SP-B071E628`(pubreg)와 같은
+  이유로 코드 대조가 성립하지 않는 순수 설계 단계 - 갭 판정 불가,
+  착수 시 재점검 대상으로 남김.
+
+- **`SP-F15B4A63`(지연 실행/타이머 인프라)**: 이 문서 자신이 "리액터가
+  전용 Task에서 `runLoop()` 인라인 idle 경로로 재설계됐으니
+  `pump()` 호출 배선도 재작업 대상"이라고 명시해 둔 항목 - 실제로
+  `async_task.cpp`(`AsyncReactor::drainOnce()`의 idle 분기, ~594행)가
+  `DelayedExecutionQueue::pump()`를 정확히 그 재설계된 인라인 경로에서
+  호출하도록 배선돼 있음을 확인(§3의 최종 방향 그대로). 연결 리스트
+  기반 `DelayedExecutionQueue`(§2, 고정 배열 폐기), Resurrect 백오프
+  소비 지점(scheduler.cpp)도 실재. 갭 없음.
+
+- **`SP-DF89897F`(커널 로깅 인프라)**: `logger.h`/`.cpp`에
+  `Logger`/`LoggingDriver`/`LogLevel`/`SerialLoggingDriver`/전체
+  지원 포맷터 전부 구현 확인, `kmain.cpp`(151개 호출부)/`panic.cpp`
+  전부 `Logger::*`로 마이그레이션 완료 확인(`kernel::Logger::` 실제
+  호출 다수 grep 확인). 유일한 미구현(`BufferedFileLoggingDriver`)은
+  `PN-32696F0F` 자신이 "미착수, 범위 밖 유지 - fs 서비스 준비 후
+  진행"으로 이미 공개 추적 중 - 숨은 갭 아니다. 갭 없음.
+
+- **`SP-DABFCF9F`(QEMU gdb stub 디버깅 워크플로)**: 도구/스크립트
+  문서(커널 C++ 코드 아님) - `run-qemu-gdb.sh`/`run-grub-gdb.sh`/
+  `kernel.gdb` 전부 `scripts/`에 실재 확인. 문서 자신이 "설계/구현/
+  실측 전부 완료"로 명시한 그대로. 갭 없음.
+
+**[2026-09-17] approved 상태 SP 문서 후보 풀 소진** - 이 시점까지
+확인 안 한 `approved` SP 문서가 더 없음(document_list로 재확인
+필요시 다음 틱에). 다음부터는 §3에 이미 등록된 재검증 대기 항목
+(`PN-2008220B` - `coroHandle.resume()` CR3 동기화 수정 후 `SP-F682B889`
+§7.3 서술과 일치하는지, `SP-B1E258D8` 재개 조건 등)이나 PL/DC류
+문서, 또는 새로 `approved` 전환되는 문서(예: 이번 세션이 만든
+`SP-B26CDBDD`가 승인되면 그 구현 시점에) 위주로 전환한다.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
