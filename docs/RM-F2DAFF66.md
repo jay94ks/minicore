@@ -5,11 +5,11 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T19:13:30.144Z
+  updatedAt: 2026-09-17T19:24:02.335Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
-﻿# Minicore 설계공백 검수
+﻿﻿# Minicore 설계공백 검수
 
 설계자 지시(2026-09-17, 메시지) - "NUMA 관련 문서 찾아보고 반영된게
 있는지 없는지 파악해" → "응 갭을 다 매꿔야해" → "계속 더 넓혀서
@@ -1021,6 +1021,11 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   지점이었음을 커밋이 스스로 인용. **갭 없음** - 설계가 스스로 예고한
   공백이 정확히 그 설계 의도대로 메워진 사례(SP-9525C4C0/§1-F와 같은
   급 - 원안의 "확인 필요" 각주가 후속 세션에 정확히 전달돼 작동함).
+  **[추가, 2026-09-18] `PN-238FD331`(Stat, §9.3/§9.4 call 10)도 같은 날
+  후속 커밋으로 확인** - fd 없이 경로만으로 동작하는 것까지 §9.4
+  규칙 그대로(ResolvePathHandler와 거의 동형), MountKind::Channel은
+  Open과 동일한 스코프 결정으로 NotSupported 유지. 갭 없음, 같은
+  패턴의 반복이라 별도 하위 절 없이 여기 한 줄로만 추가 기록.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
