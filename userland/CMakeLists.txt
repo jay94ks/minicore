@@ -32,3 +32,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BI
 # devmgr(SP-9DD4F3EA §6, PN-BD9AAE2F) - init과 동일한 이유의 out-of-tree
 # add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/devmgr ${CMAKE_CURRENT_BINARY_DIR}/minicore-devmgr)
+
+# pubreg(SP-B071E628, PN-185406F6) - init/devmgr과 동일한 이유의
+# out-of-tree add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/pubreg ${CMAKE_CURRENT_BINARY_DIR}/minicore-pubreg)

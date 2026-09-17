@@ -32,15 +32,17 @@ cmake --build "${BUILD_USERLAND_DIR}" >/dev/null
 rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}"
 # 파일명은 kmain.cpp의 kLogCpioEntry가 정확히 매치하는 이름 그대로여야
-# 한다(경로 접두어 없이 "init"/"devmgr") - cpio 아카이브 안에도 이
-# 이름 그대로 들어가도록 스테이징 디렉터리 안에서 상대경로로 넘긴다.
+# 한다(경로 접두어 없이 "init"/"devmgr"/"pubreg") - cpio 아카이브 안에도
+# 이 이름 그대로 들어가도록 스테이징 디렉터리 안에서 상대경로로 넘긴다.
+# pubreg(PN-185406F6, 2026-09-17) 추가 - init/devmgr과 동일한 이유.
 cp "${BUILD_USERLAND_DIR}/minicore-init/init" "${STAGE_DIR}/init"
 cp "${BUILD_USERLAND_DIR}/minicore-devmgr/devmgr" "${STAGE_DIR}/devmgr"
+cp "${BUILD_USERLAND_DIR}/minicore-pubreg/pubreg" "${STAGE_DIR}/pubreg"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\ndevmgr\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\ndevmgr\npubreg\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+devmgr)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+devmgr+pubreg)"
