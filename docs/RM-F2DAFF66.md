@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T13:41:19.905Z
+  updatedAt: 2026-09-17T13:52:31.968Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -363,6 +363,29 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   으로 이미 정확히 등록돼 있음을 `plan_get`으로 확인 - 디스패치
   핫패스를 건드리는 위험도 때문에 의도적으로 미착수 상태(minicore-88
   세션이 이미 인지하고 보류 중) - openly 추적 중, 숨은 갭 아님.
+  **[갱신, 2026-09-17] 툴체인 자체가 원인이었던 것으로 최종 확정 -
+  x86_64-elf-gcc 크로스컴파일러로 전면 교체 완료(commit e7943e0)**:
+  이 문서가 여러 틱에 걸쳐 추적해 온 `PN-22E5E9E7`의 lld PT_TLS
+  결함 조사(QU-58D13EAE~QU-90A616DA 5라운드, lld 18/19/20 전수 기각→
+  gcc 혼입/오브젝트 신선도/PT_LOAD 구조/higher-half 전환 전부 배제→
+  "실제 오브젝트 세트 조합에 의존하는 lld 다중 오브젝트 TLS 크기
+  합산 결함"으로 좁혀짐)가 설계자 직접 지시로 해결됐다 - 호스트
+  배포판 clang+lld 대신 `/opt/cross`의 `x86_64-elf-gcc 13.2.0 + GNU
+  Binutils 2.42`(이 타깃 전용 진짜 크로스컴파일 툴체인)로 전면 교체,
+  같은 오브젝트 세트로 `PT_TLS.p_memsz`가 정확히 계산됨을 실측
+  확인. `DS-D4E5C451`(핵심 결정 문서, "컴파일러: WSL clang")에 정정
+  각주가 이미 정확히 반영돼 있음을 독립 확인(원문 보존, 교체 사실+
+  근거+영향받은 플래그 3종 명시). 코드젠 차이로 `-fcoroutines`/
+  `-fno-threadsafe-statics` 플래그 추가, `.init_array` 출력 섹션
+  신설+`kmain.cpp`의 `kRunGlobalConstructors()`(BSP 극초반 1회 순회)
+  배선까지 확인 - GCC가 clang과 달리 일부 전역 객체를 진짜 동적
+  초기화로 코드젠한다는 사실이 새로 드러난 것으로, 앞으로 이
+  프로젝트의 "정적 초기화만으로 충분하다"는 암묵적 전제를 쓰는 전역
+  객체가 있다면 재검토 가치 있음(당장 코드 갭은 아님 - 일반 방어
+  메커니즘이 이미 배선됨). `PN-22E5E9E7` 자신의 원래 구현 범위(항목
+  1-7, TLS 배선)는 이 블로커 해소로 이제 착수 가능하나 아직 미착수
+  (계획 status 여전히 scheduled, 2026-09-17 기준) - 숨은 갭 아님,
+  다음 착수 시 재대조 필요.
 - **`SP-C2670F69`(AHCI)**: §4 항목2("fs 서비스 설계가 아직 없음")가
   낡은 교차 참조였음을 발견 - `SP-7CC5693A`(fs/VFS)가 그 사이
   approved되며 §3.2 `FileSystemDriver::mount(BlockDevice*)`가 정확히
