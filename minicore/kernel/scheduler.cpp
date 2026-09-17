@@ -14,6 +14,7 @@
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "panic.h"
+#include "debug_session.h"
 #include "process.h"
 #include "resource_group.h"
 #include "serial.h"
@@ -339,6 +340,64 @@ void kSyncFpu(Task* task, uint32_t coreIndex) {
     uint64_t cr0;
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
     asm volatile("mov %0, %%cr0" : : "r"(cr0 | (1ULL << 3)) : "memory");
+}
+
+// [신규, 2026-09-17, SP-9A6D579F §3.4] kSyncCr3/kSyncFpu와 같은 다섯
+// 지점(SP-83A07867 §3.2가 확립한 "코어 소유가 아니라 Task 소유
+// 레지스터는 디스패치 시점에 동기화" 패턴의 네 번째 훅)에서 호출된다 -
+// DR0-3/DR7은 CPU 코어 레지스터이지 Task별 저장 슬롯이 아니므로,
+// 이 Task가 소유한 `Process::debugSession`이 요구하는 값으로 매
+// 디스패치마다 다시 실어야 한다.
+//
+// kSyncCr3의 "달라졌을 때만 쓰는" skip-if-same 최적화를 의도적으로
+// 안 쓴다 - 직전에 실행됐던 다른 Task가 걸어 둔 하드웨어 브레이크
+// 포인트가 코어 레지스터에 그대로 남아 있으면, 이번에 디스패치되는
+// Task의 코드/데이터가 우연히 같은 가상주소에 있을 때 전혀 무관한
+// 프로세스에 #DB가 잘못 전달될 위험이 있다(레지스터 값이 진짜로
+// 코어에 남기 때문) - 그래서 디버그 세션이 없는 흔한 경우를
+// 포함해서 항상 명시적으로(디버그 세션이 없으면 전부 0으로) 다시
+// 쓴다. `mov to/from dr*`가 다른 레지스터보다 비싼 연산이라는 점은
+// 알고 있으나, 디스패치 경계(스케줄러 퀀텀 단위)에서만 일어나는
+// 빈도라 지금은 정확성을 우선한다(실측 후 조정 가능, RM-23F4B687 §4).
+void kSyncDebugRegs(Task* task) {
+    uint64_t dr0 = 0, dr1 = 0, dr2 = 0, dr3 = 0, dr7 = 0;
+    if (task->isUserLevel) {
+        auto* thread = static_cast<UserThread*>(task);
+        if (SharedPtr<Process> proc = thread->process.lock()) {
+            if (proc->debugSession.active) {
+                uint64_t* const slots[kMaxDebugBreakpoints] = {&dr0, &dr1, &dr2, &dr3};
+                for (uint32_t i = 0; i < kMaxDebugBreakpoints; ++i) {
+                    const DebugBreakpoint& bp = proc->debugSession.breakpoints[i];
+                    if (!bp.enabled) {
+                        continue;
+                    }
+                    *slots[i] = bp.address;
+                    dr7 |= (1ULL << (i * 2));  // Li(로컬 인에이블)
+                    uint64_t rw = 0;
+                    switch (bp.condition) {
+                        case DebugBreakpoint::Condition::Execute:
+                            rw = 0b00;
+                            break;
+                        case DebugBreakpoint::Condition::Write:
+                            rw = 0b01;
+                            break;
+                        case DebugBreakpoint::Condition::ReadWrite:
+                            rw = 0b11;
+                            break;
+                    }
+                    dr7 |= rw << (16 + i * 4);   // R/Wi
+                    // LENi = 00(1바이트) 고정 - v1은 폭 확장을 다루지
+                    // 않는다(SP-9A6D579F가 명시하지 않은 세부, 필요해지면
+                    // DebugBreakpoint에 길이 필드 추가).
+                }
+            }
+        }
+    }
+    asm volatile("mov %0, %%dr0" : : "r"(dr0));
+    asm volatile("mov %0, %%dr1" : : "r"(dr1));
+    asm volatile("mov %0, %%dr2" : : "r"(dr2));
+    asm volatile("mov %0, %%dr3" : : "r"(dr3));
+    asm volatile("mov %0, %%dr7" : : "r"(dr7));
 }
 
 // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §3) - excludeCore를
@@ -1027,8 +1086,20 @@ void Scheduler::onTick(InterruptFrame*) {
     // 안 함" 분기 하나를 더 두되, 이쪽은 대신 Blocked로 남겨 나중에
     // ResourceGroup::thaw()가 다시 enqueue()하게 한다(Zombie는 영원히
     // 안 돌아오지만 이쪽은 그룹이 풀리면 돌아온다는 차이).
+    //
+    // [신규, 2026-09-17, SP-9A6D579F §3.5/§4] 디버그 정지도 같은 지점
+    // 에서 같이 확인한다 - #DB 콜백(kHandleUserBreakpointHit,
+    // debug_session.cpp)이 `pausedByDebugger`를 세워 뒀으면
+    // `kIsPausedByDebugger()`가 그걸 읽어 이 재삽입 결정에 반영한다
+    // (그 콜백 자신은 이 Task를 당장 멈추지 못한다는 한계가 있어 -
+    // 그 문서 주석 참고 - 이 지점이 실제로 멈추는 유일한 장소다).
+    // 두 사유 중 하나라도 있으면 Blocked - `||` 대신 두 함수를 각각
+    // 부르는 이유는 `kCheckAndMarkFrozen()`이 부수효과(frozenByGroup
+    // 세팅)가 있어 단락 평가로 건너뛰면 안 되기 때문.
     if (current->state != TaskState::Zombie) {
-        if (kCheckAndMarkFrozen(current)) {
+        const bool frozenByGroup = kCheckAndMarkFrozen(current);
+        const bool pausedByDebugger = kIsPausedByDebugger(current);
+        if (frozenByGroup || pausedByDebugger) {
             current->state = TaskState::Blocked;
         } else {
             enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
@@ -1042,6 +1113,7 @@ void Scheduler::onTick(InterruptFrame*) {
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
+    kSyncDebugRegs(next);
     // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
@@ -1095,6 +1167,16 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     // FPU 강제 반납(§4) - kContextSwitch 전에 반드시 먼저.
     kEvictFpuBeforeMigration(current, coreIndex);
 
+    // [알려진 갭, 2026-09-17] 이 재삽입 결정은 onTick()과 달리
+    // kCheckAndMarkFrozen()/kIsPausedByDebugger()를 확인하지 않는다 -
+    // ResourceGroup freeze(SP-245D130B §4)/디버그 정지(SP-9A6D579F
+    // §3.5) 둘 다 이 문서 작성 시점엔 onTick()의 재스케줄 결정
+    // 지점만 명시적으로 지목했다. `requestForcedMigration()`이
+    // "호출부가 하나뿐인 수동/진단 API"(이 파일 위쪽 문서 주석)라
+    // 지금 당장 자동으로 트리거될 경로가 없어 실질적 위험은 낮지만,
+    // 이론적으로는 group-frozen/디버그 정지된 Task를 강제 이관하면서
+    // 실수로 재큐잉(=재개)할 수 있다 - 별도 세션이 onTick()과
+    // 동일한 체크를 여기도 추가할지 판단.
     if (current->state != TaskState::Zombie) {
         enqueue(targetCore, current);  // <- onTick()과 유일하게 다른 한
                                         // 줄: 같은 코어가 아니라 targetCore에 재삽입.
@@ -1122,6 +1204,7 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
+    kSyncDebugRegs(next);
     kContextSwitch(&current->savedRsp, next->savedRsp);
 }
 
@@ -1332,6 +1415,7 @@ void Scheduler::yieldCurrent() {
     // yieldCurrent를 타지 않아 관찰되지 않았을 뿐이다).
     kSyncCr3(current);
     kSyncFpu(current, coreIndex);
+    kSyncDebugRegs(current);
     // **실측으로 발견한 버그(2026-09-14, Channel IPC 스트레스
     // 테스트)**: 위 kContextSwitch의 pushfq는 방금 실행한 cli 때문에
     // IF=0인 RFLAGS를 이 Task 자신의 저장 슬롯에 그대로 담아 버린다 -
@@ -1386,6 +1470,7 @@ void Scheduler::parkCurrent() {
     // 전까지는 아직 발현되지 않았던 공백이었다).
     kSyncCr3(current);
     kSyncFpu(current, coreIndex);
+    kSyncDebugRegs(current);
     // 누군가 깨워 runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰
     // 있다가, 다시 선택되면 이 지점부터 재개된다 - yieldCurrent()와
     // 같은 이유로(위 주석 참고) 여기서도 명시적으로 다시 켜야 한다 -
@@ -1522,6 +1607,7 @@ extern "C" void kSyncCr3OnTaskStart() {
         // 하나"라는 §3.2의 단위이지 CR3 전용 훅이 아니었다는 것이 원래
         // 설계 의도였으므로 새 심볼을 만들지 않는다).
         kernel::kSyncFpu(self, kernel::Scheduler::currentCoreIndex());
+        kernel::kSyncDebugRegs(self);
     }
 }
 

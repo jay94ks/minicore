@@ -572,11 +572,18 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Logger::info("minicore: pnp EnumerateDevices syscall endpoint registered");
 
     // SP-9A6D579F §3.2/§3.3 - 위와 같은 이유(BSP에서 한 번만). 이번
-    // 증분은 DebugAttach/Detach만(부모->직계자식 권한 모델) - 브레이크
-    // 포인트/싱글스텝/#DB ISR 등 하드웨어 디버그 레지스터를 건드리는
-    // 나머지는 PN-87D6B615의 후속 증분.
+    // 증분은 DebugAttach/Detach + DebugSetBreakpoint(항목3/4) - 싱글
+    // 스텝/Continue/GetRegisters/SetRegisters/ReadMemory/WriteMemory
+    // (항목5/6)는 여전히 PN-87D6B615의 후속 증분.
     kernel::DebugSessionService::registerSyscallEndpoints();
-    kernel::Logger::info("minicore: debug attach/detach syscall endpoints registered");
+    kernel::Logger::info("minicore: debug attach/detach/set-breakpoint syscall endpoints registered");
+    // [신규, 2026-09-17, SP-9A6D579F §4] #DB ISR 소비자 등록 -
+    // Idt::init()이 IDT 게이트 자체는 이미 부팅 초반에 다 만들어 뒀고
+    // (SP-677210E6), 이건 그 위에 얹는 커널 내부 콜백 슬롯 하나만
+    // 채우는 것뿐이라 특정 순서 의존성이 없다 - 위 syscall 등록
+    // 직후에 자연스럽게 이어 붙인다.
+    kernel::DebugSessionService::registerDebugCallback();
+    kernel::Logger::info("minicore: #DB (hardware breakpoint) exception callback registered");
 
     // `/sys/live/kernel/` 예약 테이블(SP-00CA7175 §2.0, PN-7AC01E6E) -
     // Channel 서브시스템(위) 이후, kSpawnServiceProcesses()가 이 테이블에

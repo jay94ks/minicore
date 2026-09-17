@@ -18,16 +18,24 @@ class Process;  // 포인터로만 참조(DebugSession::debuggerProcess) - 전�
 // [갱신, 2026-09-17, SP-E9B44929] Debug 그룹(7).
 constexpr SyscallEndpointId kSyscallEndpointDebugAttach = kMakeSyscallEndpointId(7, 0);
 constexpr SyscallEndpointId kSyscallEndpointDebugDetach = kMakeSyscallEndpointId(7, 1);
+// [신규, 2026-09-17, SP-9A6D579F §3.4/§4, RM-48E1E610 7.2] 이번
+// 증분(항목3/4)이 실제로 구현하는 유일한 새 syscall - SetSingleStep/
+// Continue/GetRegisters/SetRegisters/ReadMemory/WriteMemory(항목5/6)
+// 는 여전히 미착수라 그 번호(7.3-7.8)는 아직 예약만(RM-48E1E610).
+constexpr SyscallEndpointId kSyscallEndpointDebugSetBreakpoint = kMakeSyscallEndpointId(7, 2);
 
 // [SP-9A6D579F §3.1] DR0-DR3 하드웨어 슬롯 수와 동일 - 스레드마다
 // 별도 슬롯이 아니라 프로세스당(사실상 mainThread 고정, 멀티스레드
-// 디버깅은 PN-2E4E9D79 완료 전까지 범위 밖) 공유. 이번 증분에서는
-// 자리만 확보해 둘 뿐 아직 아무도 채우지 않는다(§3.4가 실제 소비자).
+// 디버깅은 PN-2E4E9D79 완료 전까지 범위 밖) 공유.
 constexpr uint32_t kMaxDebugBreakpoints = 4;
 
 struct DebugBreakpoint {
+    // [신규, 2026-09-17, SP-9A6D579F §3.4] DR7의 R/Wi 필드와 대응
+    // (Read 단독 조건은 §7이 명시적으로 범위 밖으로 뺌).
+    enum class Condition : uint8_t { Execute, Write, ReadWrite };
     bool enabled = false;
     uint64_t address = 0;
+    Condition condition = Condition::Execute;
 };
 
 // [SP-9A6D579F §3.1, 구현 세부 확정] 원 설계 pseudocode는 이걸 전역
@@ -81,11 +89,43 @@ struct DebugDetachArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-17, SP-9A6D579F §3.4] targetThread 파라미터는 넣지
+// 않는다 - §1-A(멀티스레드 유저 프로세스 지원, PN-2E4E9D79)가 아직
+// 없어 "프로세스당 스레드 하나"가 사실상 불변조건이므로, 그 필드가
+// 있어도 항상 mainThread 고정일 수밖에 없다(과설계 방지,
+// RM-23F4B687 §4) - 그 계획이 완료되면 이 struct에 추가한다.
+struct DebugSetBreakpointArgs {
+    int64_t targetProcessId = -1;
+    uint32_t slot = 0;  // 0..kMaxDebugBreakpoints-1
+    uint64_t address = 0;
+    DebugBreakpoint::Condition condition = DebugBreakpoint::Condition::Execute;
+    bool enable = false;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 class DebugSessionService {
 public:
-    // 부팅 시 한 번 - 위 2개 endpoint를 SyscallRegistry에 등록한다.
+    // 부팅 시 한 번 - 위 syscall들을 SyscallRegistry에 등록한다.
     static void registerSyscallEndpoints();
+
+    // [신규, 2026-09-17, SP-9A6D579F §4] 부팅 시 한 번 -
+    // Idt::registerDebugCallback()으로 #DB ISR 소비자를 등록한다.
+    // registerSyscallEndpoints()와 별도 함수로 분리한 이유는 하나가
+    // SyscallRegistry, 다른 하나가 Idt라는 완전히 다른 등록 대상을
+    // 다루기 때문(호출부는 둘 다 kmain.cpp에서 순서 무관하게 부른다).
+    static void registerDebugCallback();
 };
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, resource_group.h의
+// kCheckAndMarkFrozen()과 대칭] Scheduler::onTick()의 재스케줄 결정
+// 지점에서 호출한다 - task가 유저 프로세스에 속하고 그 디버그 세션이
+// 방금 그 task를 정지시켰으면(#DB 콜백이 pausedByDebugger를 세워
+// 뒀으면) true. 커널 전용 Task나 디버그 세션이 없으면 항상 false.
+// kCheckAndMarkFrozen()과 달리 이 함수 자신은 아무것도 "세우지"
+// 않는다 - 세우는 주체는 #DB 콜백(kHandleUserBreakpointHit,
+// debug_session.cpp)이고, 이 함수는 그 결과를 그저 읽기만 한다.
+bool kIsPausedByDebugger(Task* task);
 
 }  // namespace kernel
 

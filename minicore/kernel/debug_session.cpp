@@ -1,9 +1,23 @@
 #include "debug_session.h"
 
+#include "idt.h"
+#include "interrupt_frame.h"
 #include "process.h"
 #include "scheduler.h"
 
 namespace kernel {
+
+bool kIsPausedByDebugger(Task* task) {
+    if (!task->isUserLevel) {
+        return false;
+    }
+    auto* thread = static_cast<UserThread*>(task);
+    SharedPtr<Process> proc = thread->process.lock();
+    if (!proc) {
+        return false;
+    }
+    return proc->debugSession.pausedByDebugger;
+}
 
 namespace {
 
@@ -126,11 +140,127 @@ public:
 
 DebugDetachHandler gDebugDetachHandler;
 
+// [신규, 2026-09-17, SP-9A6D579F §3.4] DebugSetBreakpoint 본체 -
+// DebugDetachHandler와 정확히 같은 권한 검증 패턴(§6 "호출자가 그
+// pid의 활성 세션의 debuggerProcess가 아니면 PermissionDenied, 세션
+// 자체가 없으면 InvalidState류" - 이 코드베이스엔 ChannelError::
+// InvalidState가 없어 기존 관례대로 NotFound로 대체) - 검증을
+// 공유 헬퍼로 뽑지 않은 이유는 DebugDetachHandler가 검증 직후 하는
+// 일(세션 전체 초기화)과 이 핸들러가 하는 일(슬롯 하나만 갱신)이
+// 갈라져 공유해봐야 몸통 자체는 안 줄어들기 때문(RM-23F4B687 §4).
+class DebugSetBreakpointHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugSetBreakpointArgs*>(argsRaw);
+
+        if (args->slot >= kMaxDebugBreakpoints) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+
+        DebugBreakpoint& slot = target->debugSession.breakpoints[args->slot];
+        slot.enabled = args->enable;
+        slot.address = args->address;
+        slot.condition = args->condition;
+        // [중요] 여기서는 하드웨어 DR0-3/DR7에 아무것도 쓰지 않는다 -
+        // 이 syscall을 호출한 스레드(디버거 자신)가 지금 이 코어에서
+        // 실행 중이라 DR 레지스터를 건드리면 디버거 자신에게 영향을
+        // 준다. 실제 하드웨어 반영은 대상(target->mainThread)이 다음
+        // 디스패치될 때 `Scheduler::onTick()` 등이 부르는
+        // `kSyncDebugRegs()`(scheduler.cpp, SP-83A07867 §3.2 네 번째
+        // 훅)가 그 시점에 대상 자신의 코어에서 대신 한다 - §5가 이미
+        // "다음 디스패치에서 반영, 최악의 경우 한 타임퀀텀 지연"이라고
+        // 명시해 둔 그대로.
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugSetBreakpointHandler gDebugSetBreakpointHandler;
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5/§4] #DB ISR(idt.cpp의
+// kHandleDebugException)이 하드웨어 브레이크포인트 적중 시 부르는
+// 콜백 - Idt::registerDebugCallback()으로 등록한다.
+//
+// **이 함수 자신은 이 Task를 당장 멈추지 못한다(중요, 정직하게
+// 기록)** - #DB는 트랩이라 이 함수가 반환한 뒤 CPU는 iretq로 그대로
+// ring3 실행을 재개한다(TaskState는 CPU 실행 흐름에 아무 영향을
+// 주지 않는 순수 스케줄러 장부일 뿐). 대신 `pausedByDebugger`만 세워
+// 두고, 실제로 "재큐잉하지 않는다"는 결정은 `Scheduler::onTick()`의
+// 재스케줄 결정 지점(`kIsPausedByDebugger()`를 확인하도록 이미
+// 배선됨, scheduler.cpp)이 **다음 스케줄러 틱**(최대 한 타임퀀텀,
+// ~10ms)에 내린다 - `ResourceGroup::freeze()`가 이미 겪고 있는 것과
+// 정확히 같은 종류의 한계(§4 "이미 Ready 상태로 대기 중이던 Task는
+// 당장 멈추지 못한다")를 여기서도 그대로 받아들인다 - 이 지연을
+// 없애려면 #DB ISR 자신이 IST4(고정 per-core 스택)에서 직접
+// kContextSwitch로 다른 Task로 전환해야 하는데, 그건 이 세션이
+// 안전하게 검증할 수 없다고 판단해 명시적으로 범위 밖으로 뺐다(다음
+// 세션 후보 - "남은 범위" 참고).
+bool kHandleUserBreakpointHit(InterruptFrame*, uint64_t dr6) {
+    constexpr uint64_t kDr6BreakpointMask = 0xF;  // B0-B3
+    if ((dr6 & kDr6BreakpointMask) == 0) {
+        // BS(싱글스텝)류 - DebugSetSingleStep이 아직 미구현이라 이
+        // 콜백은 하드웨어 브레이크포인트(B0-B3)만 다룬다. false를
+        // 반환해 idt.cpp가 기존처럼 로그만 남기고 계속 실행하게 둔다.
+        return false;
+    }
+
+    Task* task = Scheduler::currentTask();
+    if (!task || !task->isUserLevel) {
+        // 유저 프로세스 대상만(SP-9A6D579F §2, 커널 자체 디버깅은
+        // SP-DABFCF9F의 별개 QEMU gdb stub 워크플로) - 이론상 도달
+        // 불가(DR 레지스터는 kSyncDebugRegs가 유저 Task에만 실어
+        // 두므로 커널 전용 Task 실행 중엔 항상 0) - 방어적으로만.
+        return false;
+    }
+    auto* thread = static_cast<UserThread*>(task);
+    SharedPtr<Process> proc = thread->process.lock();
+    if (!proc || !proc->debugSession.active) {
+        // 세션이 그 사이 Detach됐을 수 있음(kSyncDebugRegs가 다음
+        // 디스패치에서야 DR7을 0으로 되돌리므로, 그 틈에 우연히 남아
+        // 있던 하드웨어 브레이크포인트가 한 번 더 걸릴 수 있다) - 무해,
+        // 그냥 계속 실행.
+        return false;
+    }
+    proc->debugSession.pausedByDebugger = true;
+    return true;
+}
+
 }  // namespace
 
 void DebugSessionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointDebugAttach, &gDebugAttachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugDetach, &gDebugDetachHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugSetBreakpoint, &gDebugSetBreakpointHandler);
+}
+
+void DebugSessionService::registerDebugCallback() {
+    Idt::registerDebugCallback(&kHandleUserBreakpointHit);
 }
 
 }  // namespace kernel
