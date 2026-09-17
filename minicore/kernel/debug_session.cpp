@@ -241,6 +241,56 @@ public:
 
 DebugSetBreakpointHandler gDebugSetBreakpointHandler;
 
+// [구현 완료, 2026-09-17, SP-9A6D579F §3.4, PN-87D6B615 "남은 범위"
+// 1번] DebugSetSingleStep - DebugSetBreakpointHandler와 동일한 권한
+// 검증에 더해, 대상이 지금 정지 상태(`pausedByDebugger`)여야 한다
+// (GetRegisters/SetRegisters와 동일한 이유 - 정지 상태가 아니면 다음
+// DebugContinue 자체가 존재하지 않아 이 플래그를 세워도 적용될 자리가
+// 없다). 하드웨어는 전혀 건드리지 않는다 - `singleStepPending`만
+// 세우거나 내리고, 실제 RFLAGS.TF 반영은 DebugContinue의 write-back
+// 몫이다(debug_session.h `singleStepPending` 문서 주석 참고).
+class DebugSetSingleStepHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugSetSingleStepArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.pausedByDebugger) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        target->debugSession.singleStepPending = args->enable;
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugSetSingleStepHandler gDebugSetSingleStepHandler;
+
 // [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615 항목5] DebugContinue -
 // 정지된 대상을 Blocked에서 다시 Ready로. 레지스터 상태를 전혀
 // 건드리지 않으므로(그건 GetRegisters/SetRegisters의 몫이자 아직
@@ -308,7 +358,23 @@ public:
             frame->r15 = snap.r15;
             frame->rip = snap.rip;
             frame->cs = snap.cs;
-            frame->rflags = snap.rflags;
+            // [구현 완료, 2026-09-17, SP-9A6D579F §3.4] RFLAGS.TF(비트
+            // 8, 0x100)는 savedRegisters.rflags 사본을 그대로 되쓰지
+            // 않고 singleStepPending에 따라 이 자리에서 명시적으로
+            // 세우거나 지운다 - 정지 사유가 싱글스텝 트랩 자신이었을
+            // 경우 snap.rflags에 TF=1이 이미 들어있어(트랩 시점의
+            // 실제 EFLAGS를 그대로 스냅숏했으므로) 그걸 무비판적으로
+            // 되쓰면 다음 명령에서 또 트랩해 무한 싱글스텝에 빠진다 -
+            // DebugSetSingleStep을 다시 호출하지 않는 한 정상 실행으로
+            // 돌아가야 하므로 매번 명시적으로 판단한다(debug_session.h
+            // singleStepPending 문서 주석과 대칭).
+            constexpr uint64_t kRflagsTrapFlag = 0x100;
+            uint64_t rflags = snap.rflags & ~kRflagsTrapFlag;
+            if (target->debugSession.singleStepPending) {
+                rflags |= kRflagsTrapFlag;
+                target->debugSession.singleStepPending = false;  // 한 번 쓰이면 소비됨
+            }
+            frame->rflags = rflags;
             frame->rspOld = snap.rsp;
             frame->ssOld = snap.ss;
             // 재사용/댕글링 방지 - 이 Task가 다시 정지하기 전까지 무효.
@@ -603,11 +669,18 @@ DebugWriteMemoryHandler gDebugWriteMemoryHandler;
 // 안전하게 검증할 수 없다고 판단해 명시적으로 범위 밖으로 뺐다(다음
 // 세션 후보 - "남은 범위" 참고).
 bool kHandleUserBreakpointHit(InterruptFrame*, uint64_t dr6) {
-    constexpr uint64_t kDr6BreakpointMask = 0xF;  // B0-B3
-    if ((dr6 & kDr6BreakpointMask) == 0) {
-        // BS(싱글스텝)류 - DebugSetSingleStep이 아직 미구현이라 이
-        // 콜백은 하드웨어 브레이크포인트(B0-B3)만 다룬다. false를
-        // 반환해 idt.cpp가 기존처럼 로그만 남기고 계속 실행하게 둔다.
+    constexpr uint64_t kDr6BreakpointMask = 0xF;      // B0-B3(하드웨어 브레이크포인트)
+    // [구현 완료, 2026-09-17, SP-9A6D579F §3.4, PN-87D6B615 "남은
+    // 범위" 1번] BS(비트 14) - RFLAGS.TF로 유발된 싱글스텝 트랩. 이
+    // 콜백이 실제로 "왜 멈췄는지"를 구분할 필요는 없다(하드웨어
+    // 브레이크포인트든 싱글스텝이든 아래 로직은 완전히 동일 -
+    // pausedByDebugger를 세우고 true 반환) - 그래서 두 마스크를 OR로
+    // 합쳐 하나의 조건으로 취급한다.
+    constexpr uint64_t kDr6SingleStepMask = 0x4000;   // BS
+    if ((dr6 & (kDr6BreakpointMask | kDr6SingleStepMask)) == 0) {
+        // 이 두 비트 다 없는 다른 DR6 상태(예: 태스크 스위치 트랩류,
+        // 이 커널에서 쓰지 않음) - false를 반환해 idt.cpp가 기존처럼
+        // 로그만 남기고 계속 실행하게 둔다.
         return false;
     }
 
@@ -638,6 +711,7 @@ void DebugSessionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointDebugAttach, &gDebugAttachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugDetach, &gDebugDetachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugSetBreakpoint, &gDebugSetBreakpointHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugSetSingleStep, &gDebugSetSingleStepHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugContinue, &gDebugContinueHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugGetRegisters, &gDebugGetRegistersHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugSetRegisters, &gDebugSetRegistersHandler);

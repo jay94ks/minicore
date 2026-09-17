@@ -20,11 +20,17 @@ class Process;  // 포인터로만 참조(DebugSession::debuggerProcess) - 전�
 constexpr SyscallEndpointId kSyscallEndpointDebugAttach = kMakeSyscallEndpointId(7, 0);
 constexpr SyscallEndpointId kSyscallEndpointDebugDetach = kMakeSyscallEndpointId(7, 1);
 constexpr SyscallEndpointId kSyscallEndpointDebugSetBreakpoint = kMakeSyscallEndpointId(7, 2);
-// [SP-9A6D579F §3.4] DebugSetSingleStep(call 3) - RFLAGS.TF가 코어
-// 레지스터가 아니라 그 Task 자신의 저장된 인터럽트 프레임/popfq 값
-// 안에 있어(kSyncDebugRegs류 "디스패치 시점에 다시 쓰기" 패턴을 그대로
-// 못 씀) 그 프레임을 어디서 찾아 고칠지 별도 설계가 필요하다 - 번호만
-// 예약, 미구현(PN-87D6B615 "남은 범위" 참고).
+// [구현 완료, 2026-09-17, SP-9A6D579F §3.4, PN-87D6B615 "남은 범위"
+// 1번] DebugSetSingleStep(call 3) - RFLAGS.TF는 코어 레지스터가
+// 아니라 그 Task 자신의 저장된 인터럽트 프레임/popfq 값 안에 있어
+// kSyncDebugRegs류 "디스패치 시점에 다시 쓰기" 패턴을 못 쓴다고
+// 봤으나, 실제로는 DC-47000304 (A)가 이미 만든 `savedRegisters`/
+// `liveFramePtr` 인프라(§3.5, DebugGetRegisters/SetRegisters/
+// DebugContinue)를 그대로 재사용하면 된다는 게 드러났다 - 이 syscall은
+// 하드웨어를 전혀 건드리지 않고 `DebugSession::singleStepPending`
+// 플래그만 세우고, 실제 RFLAGS.TF 반영은 `DebugContinue`가 write-back
+// 하는 시점에 한다(아래 DebugSetSingleStepArgs/구현 주석 참고).
+constexpr SyscallEndpointId kSyscallEndpointDebugSetSingleStep = kMakeSyscallEndpointId(7, 3);
 //
 // [신규, 2026-09-17, SP-9A6D579F §3.5/§4, PN-87D6B615, RM-48E1E610
 // 7.4/7.7/7.8] `DebugContinue`(레지스터 접근 불필요, 그룹 freeze
@@ -108,6 +114,15 @@ struct DebugSession {
     // 않는다).
     WeakPtr<Process> debuggerProcess;
     DebugBreakpoint breakpoints[kMaxDebugBreakpoints];
+    // [구현 완료, 2026-09-17, SP-9A6D579F §3.4] `DebugSetSingleStep`이
+    // 세우는(또는 내리는) 요청 플래그 - 이름 그대로 "한 번 쓰이면
+    // 소비되는" 값이다. `DebugContinue`가 재개 직전 write-back할 때
+    // 이 값이 true면 `savedRegisters.rflags`의 TF 비트(0x100)를 세운
+    // 뒤 이 플래그를 즉시 false로 되돌리고(한 번의 DebugSetSingleStep
+    // 호출은 정확히 한 번의 다음 DebugContinue에만 적용), false면 TF
+    // 비트를 강제로 지운다(정지 사유가 싱글스텝 트랩 자신이었을 때
+    // `savedRegisters.rflags`에 TF=1이 그대로 남아 있어 그걸 그냥
+    // 되쓰면 무한 싱글스텝에 빠지는 것을 막는다).
     bool singleStepPending = false;
 
     // [신규, 2026-09-17, SP-245D130B §9-4 답변("정지 사유 구분 플래그를
@@ -162,6 +177,18 @@ struct DebugSetBreakpointArgs {
     uint32_t slot = 0;  // 0..kMaxDebugBreakpoints-1
     uint64_t address = 0;
     DebugBreakpoint::Condition condition = DebugBreakpoint::Condition::Execute;
+    bool enable = false;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [구현 완료, 2026-09-17, SP-9A6D579F §3.4] targetThread 없음 - 위
+// DebugSetBreakpointArgs와 동일한 이유. 이 호출 자체는 재개하지 않고
+// `DebugSession::singleStepPending`만 세우거나 내린다 - 실제 RFLAGS.TF
+// 반영은 그다음 `DebugContinue`가 write-back할 때 한다(debug_session.h
+// 상단 `singleStepPending` 문서 주석 참고).
+struct DebugSetSingleStepArgs {
+    int64_t targetProcessId = -1;
     bool enable = false;
     // out
     ChannelError error = ChannelError::None;
