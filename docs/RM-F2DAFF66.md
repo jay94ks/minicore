@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T15:30:55.318Z
+  updatedAt: 2026-09-17T15:41:06.277Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -759,7 +759,8 @@ approved 전환되는 문서 위주로 전환한다.
   결정→구현→실측 검증까지 전 사슬이 정확히 일치하는 좋은 사례.
 
 ### 1-G. `SP-CCACB192`(libjson) §3 "double까지 지원" - 컴파일러 제약으로
-실제 구현 불가능함이 착수 중 드러남 (설계 갭, **답변 대기 중**)
+실제 구현 불가능함이 착수 중 드러남 (설계 갭, **[완전 해소,
+2026-09-17, commit 586dcfc]**)
 
 - **출처**: §3이 "(b) 정수+부동소수점 전부 지원... 이 프로젝트는
   이미 FPU 지연 컨텍스트(`PN-F258698E`)가 구현돼 있어 커널 코드에서
@@ -789,12 +790,26 @@ approved 전환되는 문서 위주로 전환한다.
   막는 게 아니라 MMX/SSE/SSE2를 인라인/외부 어셈블러 경로로만 국한
   시키는 것이라, 일반 C++ 코드의 `double` 산술은 컴파일러가 x87로
   처리하게 될 것으로 보인다.
-- **현재 상태**: 방향 확정, **구현은 아직 착수 전** - `cmake/
-  toolchain-x86_64.cmake` 플래그 교체 + 실제 double 컴파일 성공
-  여부 + 기존 FPU 지연 컨텍스트(`PN-F258698E`)의 lazy save/restore가
-  x87 경로에서도 안전한지(x87 MMX/FPU 상태와 SSE/XMM 상태 저장
-  범위가 다를 수 있음 - 재검증 필요) 실측이 남아 있다. minicore-88
-  영역(코드/빌드) - 이 문서는 착수되면 재대조.
+- **[완료, 2026-09-17, commit 586dcfc]** `-mno-mmx -mno-sse -mno-sse2
+  -mcmodel=large`로 실제 교체 완료 - **실측으로 제약이 애초 예상보다
+  더 정밀하게 좁혀졌다**: x86-64 SysV ABI가 `double` 반환을 항상
+  XMM0로 강제하므로, SSE 비활성 상태에서도 "함수가 double을 값으로
+  반환"하는 경우만 여전히 컴파일 에러다 - `double`을 매개변수로
+  받거나 함수 내부에서 계산하는 것은 x87 명령어(fldl/fadd/fstpl)로
+  완전히 정상 컴파일됨을 objdump로 직접 확인. 독립 코드 검증 -
+  `json.h`가 이 제약을 정확히 문서화해 뒀고(42-53행 주석), `onNumber`
+  콜백/`JsonWriter::value(double)`/`kAppendDouble` 전부 `double`을
+  매개변수로만 받고 반환하지 않는 관례로 실제 구현됨(§3 원안대로
+  정수+부동소수점 전부 지원 복원, `rawNumber()` 임시 우회는 걷어냄).
+  **갭 완전 해소.**
+- **부수 발견**: 이 변경과 무관하게, SMP4+실제 3-ELF initrd(init/
+  devmgr/pubreg) 조합에서 간헐적으로 여러 코어가 동시에 NMI로
+  강제정지되며 Serial 출력이 섞이는 크래시가 발견됐다 - 구 플래그로
+  되돌려도 동일 재현되는 사전 존재 버그로 차등 테스트로 확정,
+  `PN-907C5289`/`PN-3081704A`(같은 "여러 코어 동시 kPanic" 결함
+  클래스로 보이나 init+devmgr+pubreg 3-ELF 조합에서만 남은 잔여
+  재현일 가능성)와 관계 확인 필요 - `PN-F7EBD6F5`로 별도 등록, 아직
+  미착수(§3 다음 후보로 추가 가치 있음).
 
 - **[신규, 2026-09-17] `DC-21647E46`(커널 전역 포인터 SharedPtr/
   WeakPtr 전환) - 5-Phase 로드맵 전체 완료 확인**: 이 문서 자체가
