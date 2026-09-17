@@ -648,6 +648,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Smp::startApCores();
 
     // 이 지점부터 BSP 자신도 스케줄러 디스패치 루프에 들어간다 -
-    // 절대 반환하지 않는다(PL-2D3184BC 5/6단계).
-    kernel::Scheduler::runLoop();
+    // 절대 반환하지 않는다(PL-2D3184BC 5/6단계). runLoop()을 직접
+    // 부르지 않는다 - enterIdleLoop()이 이 함수의 지금 이 저지대
+    // 부팅 스택에서 코어 전용 안전한 idle 스택으로 먼저 옮겨 앉은
+    // 뒤 그 위에서 runLoop()을 시작한다(PN-2008220B, scheduler.h
+    // 문서 주석 참고).
+    kernel::Scheduler::enterIdleLoop();
 }

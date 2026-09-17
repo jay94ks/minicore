@@ -49,8 +49,21 @@ extern "C" void kTaskStartTrampoline();
 // 스택풀 방식보다 가벼운 핵심 이유" 주석 참고), `drainOnce()`가
 // `Scheduler::runLoop()`의 idle 인라인 호출에서 불렸다면 그 스택이 바로
 // 위 "위험한 부트 스택"일 수 있어 여기와 같은 방식으로 안전하게 CR3를
-// 바꿀 수 없다 - 별도 설계가 필요한 남은 범위로 PN-523B779F에 기록해
-// 둔다.
+// 바꿀 수 없었다 - 별도 설계가 필요한 남은 범위로 PN-523B779F에 기록해
+// 뒀다.
+//
+// **[정정, 2026-09-17, PN-2008220B]** 그 "위험한 부트 스택" 자체가
+// 이제는 없다 - `Scheduler::enterIdleLoop()`이 이 코어의 idle
+// 컨텍스트를 higher-half 전용 스택(`gIdleStack`, 모든 PML4에 공유)
+// 으로 영구히 옮겨 놓았으므로, `coroHandle.resume()`이 그 스택 위에서
+// CR3를 바꿔도 더 이상 "다음 스택 접근이 즉시 폴트"라는 위험은 없다.
+// **다만 이 함수(CR3 동기화 로직)를 그 재개 경로에도 적용하는 작업
+// 자체는 아직 하지 않았다** - 스택 안전성이라는 유일한 장애물은
+// 사라졌지만 "resume() 전에 어느 Task 기준으로 동기화할지 / resume()
+// 이 끝나고 drainOnce()로 돌아온 뒤 CR3를 어떻게 원복할지"는 이 함수를
+// 그대로 재사용할 수 없는 별도의 설계가 필요해 PN-523B779F "남은 범위"
+// 에 그대로 열어 두고 그 계획에도 이 사실을 교차 기록해 뒀다 - 이번
+// 수정의 스코프는 "스택을 안전하게 만드는 것"까지다.
 kernel::uint64_t kSyncCr3ForAsyncExecEntry(kernel::AsyncTask* task) {
     const kernel::uint64_t original = kernel::Paging::currentPml4Phys();
     kernel::SharedPtr<kernel::Task> submitter = task->submitterTask.lock();

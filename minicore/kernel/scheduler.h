@@ -136,10 +136,27 @@ public:
     // 동일하게 EOI를 이 함수 맨 앞에서 직접 보내는 것으로 수정했다.
     static void onForcedMigration(InterruptFrame* frame);
 
-    // 이 코어의 디스패치 루프 - 절대 반환하지 않는다. kMain/kApMain이
-    // 기존 hlt 루프 대신 마지막에 호출한다. 이 코어의 큐가 비어 있는
-    // 동안은 sti+hlt로 다음 인터럽트(틱 포함)까지 대기한다.
+    // 이 코어의 디스패치 루프 - 절대 반환하지 않는다. 이 코어의 큐가
+    // 비어 있는 동안은 sti+hlt로 다음 인터럽트(틱 포함)까지 대기한다.
+    // **[신규, 2026-09-17, PN-2008220B] kMain/kApMain이 직접 부르지
+    // 않는다 - 대신 `enterIdleLoop()`을 불러야 한다** (아래 참고).
     [[noreturn]] static void runLoop();
+
+    // [신규, 2026-09-17, PN-2008220B, QU-BDE72785 답변 "(b)
+    // Scheduler::runLoop()을 재구조화"] kMain/kApMain이 기존 hlt 루프
+    // 대신 마지막에 호출하는 진짜 진입점 - `runLoop()`을 직접 부르지
+    // 않고, 이 코어 전용의 **항상 안전한**(higher-half, 모든 프로세스
+    // PML4에 공유되는 정적 스택) idle 스택으로 한 번(코어당) 옮겨 앉은
+    // 뒤 그 위에서 `runLoop()`을 시작한다. 이전엔 `runLoop()`이 그냥
+    // 호출자(BSP의 kMain()/AP의 kApMain())의 스택 위에서 그대로
+    // 돌았는데, 그 스택은 부팅 초기 **저지대 identity map** 스택이라
+    // 유저 프로세스 PML4 어디에도 안 들어있다 - `AsyncReactor::
+    // drainOnce()`의 `coroHandle.resume()`(코루틴 재개, 스택 전환 없이
+    // 지금 서 있는 스택 위에서 직접 실행)이 바로 이 스택 위에서
+    // 돌아가는 게 확정돼 있어(scheduler.cpp `runLoop()` 문서 주석
+    // 참고), 위험을 근본적으로 없앤다. 절대 반환하지 않는다
+    // (내부적으로 `runLoop()`으로 진입).
+    [[noreturn]] static void enterIdleLoop();
 
     // 이 코어에서 지금 실행 중인 Task - 없으면(idle) nullptr.
     static Task* currentTask();

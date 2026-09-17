@@ -112,8 +112,13 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     // 들어간다 - 절대 반환하지 않는다(BSP의 kMain과 동일한 패턴,
     // PL-2D3184BC 5/6단계). AP는 아직 인터럽트가 비활성 상태로 여기
     // 도달하므로(ap_trampoline.S가 sti를 하지 않음), runLoop 자신의
-    // "sti; hlt" idle 경로가 이 코어의 첫 sti 지점이 된다.
-    kernel::Scheduler::runLoop();
+    // "sti; hlt" idle 경로가 이 코어의 첫 sti 지점이 된다 -
+    // enterIdleLoop()이 이 스택 전환 과정에서 지금의(IF=0) RFLAGS를
+    // 그대로 보존해 넘기므로 이 순서는 그대로 유지된다(PN-2008220B,
+    // scheduler.cpp의 enterIdleLoop() 문서 주석 참고). runLoop()을
+    // 직접 부르지 않는다 - enterIdleLoop()이 이 지금의 저지대 부팅
+    // 스택에서 코어 전용 안전한 idle 스택으로 먼저 옮겨 앉는다.
+    kernel::Scheduler::enterIdleLoop();
 }
 
 namespace kernel {

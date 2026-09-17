@@ -170,6 +170,21 @@ uint32_t kOrderForCleanup(uint64_t stackSize) {
 // (idle을 거치지 않고 바로 다음 Task로 가므로).
 uint64_t gIdleSavedRsp[kMaxCores] = {};
 
+// [신규, 2026-09-17, PN-2008220B] 코어별 idle 컨텍스트 전용 스택 -
+// `enterIdleLoop()`이 부팅 극초반(BSP의 kMain()/AP의 kApMain()이
+// 아직 저지대 identity map 스택 위에 있는 시점)에 이 스택으로 딱
+// 한 번 옮겨 앉은 뒤로는 이 코어의 idle 컨텍스트가 영구히 여기서만
+// 산다. 정적 배열이라 커널 이미지/BSS 안에 위치해(gCallSlotPool과
+// 같은 이유로 슬랩/페이지 할당자 초기화 순서에 의존하지 않는다,
+// SP-E9B44929 §6-A가 겪은 바로 그 함정을 피함) higher-half 공유
+// 매핑을 통해 **모든** 프로세스 PML4에서 항상 유효하다 - 예전 부팅
+// 스택(어느 PML4에도 안 들어있던 lower-half identity map)과 정확히
+// 대비되는 지점. 크기는 `Task`의 기본 커널 스택 크기와 동일하게
+// 맞췄다(`kTaskDefaultKernelStackSize`, task.h) - 특별한 근거로 고른
+// 값이 아니라 이 프로젝트의 기존 커널 스택 기본값을 그대로 재사용한
+// 것뿐(실측 후 조정 가능, RM-23F4B687 §4).
+alignas(16) uint8_t gIdleStack[kMaxCores][kTaskDefaultKernelStackSize];
+
 // 이 코어에서 지금 실행 중인 Task - runLoop()/onTick()/yieldCurrent()
 // 만 갱신한다. nullptr이면 idle(runLoop이 pickNext/hlt를 돌고 있음).
 Task* gCurrentTask[kMaxCores] = {};
@@ -242,6 +257,21 @@ void kSyncRsp0ForDispatch(Task* next) {
 // 스택 접근에서 즉시 폴트/트리플 폴트가 난다 - 그래서 UserThread의
 // "첫 진입" CR3 설정은 이 함수가 아니라(runLoop()이 호출하는 자리라)
 // kEnterRing3 자신이(이미 그 Task 고유의 안전한 스택으로 넘어온 뒤) 맡는다.
+//
+// **[정정, 2026-09-17, PN-2008220B]** 위 문단의 "runLoop()의 idle이
+// 저지대 부팅 스택 위에 있을 수 있다"는 전제 자체가 이제는 사실이
+// 아니다 - `Scheduler::enterIdleLoop()`이 부팅 극초반에 이 코어의
+// idle 컨텍스트를 higher-half 전용 스택(`gIdleStack`, 모든 PML4에
+// 공유)으로 영구히 옮겨 놓는다(아래 `enterIdleLoop()` 문서 주석
+// 참고) - 그래서 이제는 runLoop()에서 CR3를 바꿔도 "다음 스택
+// 접근이 즉시 폴트"라는 위험 자체는 사라졌다. **그래도 이 함수를
+// runLoop()에서 부르지 않는다는 정책은 그대로 유지한다** - SP-83A07867
+// 이 CR3 동기화 지점을 onTick()/kTaskStartTrampoline/yieldCurrent/
+// parkCurrent 넷으로 신중하게 통합해 둔 기존 아키텍처를 이 무관한
+// 수정(스택 안전성) 하나 때문에 재검토하는 건 별도의(그리고 더 위험한)
+// 설계 결정이라 이 계획의 범위 밖으로 남겨 둔다 - "이제 안전해졌다"는
+// 사실만 기록해 두고, 실제로 정책을 바꿀지는 필요해질 때 별도로
+// 판단한다.
 //
 // **next가 커널 전용 Task일 때는 `gBootPml4Phys`로 되돌린다**(PN-63BCFE45
 // 후속 발견, 2026-09-15 실측) - 예전엔 이 분기가 없어(if만 있고 else
@@ -1095,6 +1125,57 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     kContextSwitch(&current->savedRsp, next->savedRsp);
 }
 
+// [신규, 2026-09-17, PN-2008220B] kTaskStartTrampoline과 동일한
+// "가짜 kContextSwitch 프레임 위장" 기법(context_switch.S 참고) -
+// CR3 동기화만 없을 뿐 레이아웃은 완전히 같다.
+extern "C" void kIdleLoopTrampoline();
+
+void Scheduler::enterIdleLoop() {
+    const uint32_t coreIndex = currentCoreIndex();
+
+    // [중요, Task::init()과의 차이] RFLAGS를 0x202(IF=1) 같은 고정값
+    // 으로 하드코딩하지 않는다 - `Task::init()`은 "새로 태어나는
+    // 독립된 실행 흐름"이라 IF=1로 시작하는 게 정책적으로 항상
+    // 맞지만, 이 함수는 그게 아니라 **호출자(kMain/kApMain)의 부팅
+    // 흐름을 다른 스택 위로 그대로 이어가는 것**이다 - 평범한 C++
+    // 함수 호출이었다면 RFLAGS는 호출 전후로 전혀 안 바뀌었을 것.
+    // BSP는 이 호출 전에 이미 `sti`를 해 둔 상태(IF=1)로, AP는
+    // 아직 `sti` 전(IF=0, ap_trampoline.S 관례 - smp.cpp의 이 함수
+    // 호출부 문서 주석 참고)으로 도착한다 - 이 둘을 실수로
+    // 하드코딩된 값으로 덮어쓰면 AP가 zombie 정리/pickNext/
+    // drainOnce()를 실행하는 동안 인터럽트가 계획보다 일찍 켜지는
+    // (또는 BSP가 반대로 꺼지는) 회귀가 생긴다 - 그래서 지금 이
+    // 순간의 실제 RFLAGS를 그대로 읽어 프레임에 실어 되돌려 준다.
+    uint64_t currentRflags;
+    asm volatile("pushfq; pop %0" : "=r"(currentRflags));
+
+    uint8_t* stackTop = gIdleStack[coreIndex] + sizeof(gIdleStack[coreIndex]);
+    // task.cpp의 Task::init()과 정확히 같은 레이아웃(그 함수 문서
+    // 주석 참고) - rbx에 &runLoop을 실어 kIdleLoopTrampoline이 그대로
+    // call한다. runLoop()은 인자를 받지 않으므로 r12(트램폴린이
+    // rdi로 옮기는 kTaskStartTrampoline과 달리 이 트램폴린은 그 mov도
+    // 안 함)는 그냥 0으로 채운다.
+    auto* sp = reinterpret_cast<uint64_t*>(stackTop);
+    *(--sp) = reinterpret_cast<uint64_t>(&kIdleLoopTrampoline);  // "return address"
+    *(--sp) = currentRflags;                                      // RFLAGS: 호출 시점 그대로 보존
+    *(--sp) = 0;                                                  // rbp
+    *(--sp) = reinterpret_cast<uint64_t>(&runLoop);               // rbx -> 트램폴린이 call
+    *(--sp) = 0;                                                  // r12 (미사용)
+    *(--sp) = 0;                                                  // r13
+    *(--sp) = 0;                                                  // r14
+    *(--sp) = 0;                                                  // r15
+
+    // 지금 서 있는 스택(BSP의 kMain()/AP의 kApMain()이 쓰던 부팅
+    // 스택)은 다시는 돌아오지 않으므로 그 RSP를 저장할 슬롯이 진짜로
+    // 필요하지는 않지만, kContextSwitch의 시그니처를 그대로 재사용하기
+    // 위해 버리는 지역 변수를 하나 둔다.
+    uint64_t discardedOldRsp = 0;
+    kContextSwitch(&discardedOldRsp, reinterpret_cast<uint64_t>(sp));
+    // runLoop()은 [[noreturn]]이라 여기로 절대 돌아오지 않는다 -
+    // 컴파일러에게도 그렇게 알려 둔다(이 함수 자신도 [[noreturn]]).
+    __builtin_unreachable();
+}
+
 void Scheduler::runLoop() {
     const uint32_t coreIndex = currentCoreIndex();
     for (;;) {
@@ -1171,8 +1252,10 @@ void Scheduler::runLoop() {
             gCurrentTask[coreIndex] = next;
         }
         next->state = TaskState::Running;
-        // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - 이 idle
-        // 컨텍스트의 스택이 안전하지 않을 수 있다). **SP-83A07867로
+        // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - PN-2008220B
+        // 이후로는 "이 idle 컨텍스트의 스택이 안전하지 않을 수 있다"는
+        // 이유가 아니라, SP-83A07867이 확정한 CR3 동기화 지점 통합
+        // 정책을 그대로 지키는 것뿐이다). **SP-83A07867로
         // 더 이상 여기서 신경 쓸 필요가 없다** - 이 kContextSwitch가
         // 도착하는 지점(최초 실행이면 kTaskStartTrampoline의
         // kSyncCr3OnTaskStart 호출, yieldCurrent/parkCurrent로

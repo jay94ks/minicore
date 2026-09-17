@@ -70,3 +70,23 @@ kTaskFallingToEnd:
 kTaskFallingToEndHalt:
     hlt
     jmp kTaskFallingToEndHalt
+
+/* [신규, 2026-09-17, PN-2008220B] Scheduler::enterIdleLoop()이 이
+ * 코어 전용 idle 스택으로 "돌아오는 것처럼" 꾸며 둔 프레임을 이
+ * 트램폴린으로 받는다 - kTaskStartTrampoline과 똑같은 위장이지만,
+ * CR3 동기화(kSyncCr3OnTaskStart)를 부르지 않는다는 점만 다르다 -
+ * 이 스택으로 처음 들어오는 시점(부팅 극초반)엔 CR3가 이미
+ * Paging::init()이 만든 커널 전용 PML4 그대로라 동기화할 게 없다
+ * (scheduler.cpp의 enterIdleLoop() 문서 주석 참고). rbx=
+ * &Scheduler::runLoop(인자 없음, r12는 그냥 0으로 채워 안 씀).
+ * runLoop()은 [[noreturn]]이라 정상적으로는 이 아래로 절대 안
+ * 떨어진다 - kTaskFallingToEndHalt와 같은 이유로 방어적 hlt 루프만
+ * 남겨 둔다.
+ */
+.global kIdleLoopTrampoline
+kIdleLoopTrampoline:
+    call rbx
+
+kIdleLoopTrampolineHalt:
+    hlt
+    jmp kIdleLoopTrampolineHalt
