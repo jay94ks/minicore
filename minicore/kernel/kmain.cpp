@@ -642,7 +642,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 지킨다(다른 registerSyscallEndpoints() 호출들과 같은 이유로
     // BSP에서 한 번만).
     kernel::VfsSyscallService::registerSyscallEndpoints();
-    kernel::Logger::info("minicore: vfs mount/unmount/resolve-path syscall endpoints registered");
+    kernel::Logger::info("minicore: vfs mount/unmount/resolve-path/open/close/read/write syscall endpoints registered");
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).

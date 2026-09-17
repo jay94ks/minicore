@@ -22,6 +22,10 @@ constexpr SyscallEndpointId kSyscallEndpointUnmount = kMakeSyscallEndpointId(3, 
 constexpr SyscallEndpointId kSyscallEndpointResolvePath = kMakeSyscallEndpointId(3, 2);
 constexpr SyscallEndpointId kSyscallEndpointSignalUserlandReady = kMakeSyscallEndpointId(3, 3);
 constexpr SyscallEndpointId kSyscallEndpointWaitForUserlandReady = kMakeSyscallEndpointId(3, 4);
+constexpr SyscallEndpointId kSyscallEndpointOpen = kMakeSyscallEndpointId(3, 5);
+constexpr SyscallEndpointId kSyscallEndpointClose = kMakeSyscallEndpointId(3, 6);
+constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
+constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
 
 struct MountArgs {
     const char* path = nullptr;
@@ -54,6 +58,53 @@ struct SignalUserlandReadyArgs {
 
 struct WaitForUserlandReadyArgs {
     // out
+    ChannelError error = ChannelError::None;
+};
+
+// [SP-2AAD7C8D §9.3, PN-EA4EE935] MountKind::KernelDriver 마운트
+// (livefs 등)만 지원 - Channel 경로(유저랜드 fs 서비스)는 와이어
+// 포맷 미정이라 아직 NotSupported로만 응답한다(커널 쪽 vfs_syscall.h
+// 주석 참고).
+enum class OpenFlags : uint32_t {
+    ReadOnly = 1 << 0,
+    WriteOnly = 1 << 1,
+    ReadWrite = ReadOnly | WriteOnly,
+    Create = 1 << 2,
+    Truncate = 1 << 3,
+    Append = 1 << 4,
+    Directory = 1 << 5,
+};
+
+struct OpenArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    uint32_t flags = 0;
+    // out
+    int32_t fd = -1;
+    ChannelError error = ChannelError::None;
+};
+
+struct CloseArgs {
+    int32_t fd = -1;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+struct ReadArgs {
+    int32_t fd = -1;
+    void* buf = nullptr;
+    uint32_t len = 0;
+    // out
+    uint32_t bytesRead = 0;
+    ChannelError error = ChannelError::None;
+};
+
+struct WriteArgs {
+    int32_t fd = -1;
+    const void* buf = nullptr;
+    uint32_t len = 0;
+    // out
+    uint32_t bytesWritten = 0;
     ChannelError error = ChannelError::None;
 };
 

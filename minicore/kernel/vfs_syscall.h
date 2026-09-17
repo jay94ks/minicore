@@ -75,16 +75,63 @@ struct WaitForUserlandReadyArgs {
     ChannelError error = ChannelError::None;  // 항상 None(문서 그대로 - 실패 케이스 없음)
 };
 
+// [SP-2AAD7C8D §9.3, PN-EA4EE935] 표준 파일 API 4종(Open/Close/Read/
+// Write) - RM-48E1E610 그룹3 call 5-8에 이미 예약된 번호 그대로.
+// **스코프**: `MountTable::resolve()`가 `MountKind::Channel`을 내는
+// 마운트(유저랜드 fs 서비스 대상)는 아직 지원하지 않는다 - §9.1의
+// "그 Channel로 Open IPC 메시지 전송"의 실제 와이어 포맷이 어디에도
+// 정의돼 있지 않아(설계 문서 자체의 공백), 이를 임의로 정하지 않고
+// `ChannelError::NotSupported`로 정직하게 응답한다(CLAUDE.md 규칙 4,
+// PN-EA4EE935 "범위 밖" 절 참고) - `MountKind::KernelDriver`(livefs 등,
+// Channel/IPC 없이 커널이 직접 호출) 마운트만 실제로 동작한다.
+// Lseek/Stat/Readdir/Mkdir/Unlink(call 9-13)는 이번 증분 범위 밖.
+struct OpenArgs {
+    const char* path = nullptr;  // in: 절대 경로
+    uint32_t pathLen = 0;
+    uint32_t flags = 0;  // in: mount_table.h의 KernelFsOpenArgs::flags로 그대로 전달(§9.3 OpenFlags)
+    // out
+    int32_t fd = -1;      // 실패 시 -1
+    ChannelError error = ChannelError::None;
+};
+
+struct CloseArgs {
+    int32_t fd = -1;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+struct ReadArgs {
+    int32_t fd = -1;
+    void* buf = nullptr;
+    uint32_t len = 0;
+    // out
+    uint32_t bytesRead = 0;  // 0이면 EOF
+    ChannelError error = ChannelError::None;
+};
+
+struct WriteArgs {
+    int32_t fd = -1;
+    const void* buf = nullptr;
+    uint32_t len = 0;
+    // out
+    uint32_t bytesWritten = 0;
+    ChannelError error = ChannelError::None;
+};
+
 // [갱신, SP-E9B44929] Vfs 그룹(3).
 constexpr SyscallEndpointId kSyscallEndpointMount = kMakeSyscallEndpointId(3, 0);
 constexpr SyscallEndpointId kSyscallEndpointUnmount = kMakeSyscallEndpointId(3, 1);
 constexpr SyscallEndpointId kSyscallEndpointResolvePath = kMakeSyscallEndpointId(3, 2);
 constexpr SyscallEndpointId kSyscallEndpointSignalUserlandReady = kMakeSyscallEndpointId(3, 3);
 constexpr SyscallEndpointId kSyscallEndpointWaitForUserlandReady = kMakeSyscallEndpointId(3, 4);
+constexpr SyscallEndpointId kSyscallEndpointOpen = kMakeSyscallEndpointId(3, 5);
+constexpr SyscallEndpointId kSyscallEndpointClose = kMakeSyscallEndpointId(3, 6);
+constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
+constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 5개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 9개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 

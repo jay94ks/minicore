@@ -5,6 +5,7 @@
 #include "debug_session.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
+#include "mount_table.h"  // MountKind/KernelFsDriver/FileHandle - Process::fileDescriptors(SP-2AAD7C8D §9.2)용
 #include "signal.h"
 #include "syscall.h"
 
@@ -213,6 +214,30 @@ public:
     // 대신한다.
     static constexpr uint32_t kMaxOpenBridgesChunkCapacity = 8;
     ChunkedList<SharedPtr<BridgePipe>, kMaxOpenBridgesChunkCapacity> openBridges;
+
+    // [신규, SP-2AAD7C8D §9.2, PN-EA4EE935] 표준 파일 API의 프로세스별
+    // fd 테이블. §9.2 원안은 `ownerChannelId`/`fsHandle`/`offset`/
+    // `isDirectory`만 뒀지만, `PN-ABD23ACE` 항목2가 지적한 대로 그것만으론
+    // 이 fd가 Channel 소비자인지 커널 드라이버 소비자인지 구분할 수 없어
+    // `kind`(`MountKind` 재사용, mount_table.h §2.1)를 추가로 싣는다.
+    // `fd` 자신을 값 안에 함께 저장해 두는 이유는 `BridgeHandle`과 같은
+    // 이유 - openBridges처럼 포인터 동일성이 아니라 정수 하나로
+    // 찾아야 하므로, `find([fd](...){ return e.fd == fd; })`가 "호출자
+    // 자신의 이 목록에 실제로 존재하는 fd인지"를 검증하는 유일한
+    // 진입점이 된다(임의의 정수를 그냥 믿지 않음 - BridgeHandle 검증과
+    // 동일한 보안 원칙, PN-CE6A04AB 참고).
+    struct FileDescriptor {
+        int32_t fd = -1;
+        MountKind kind = MountKind::Channel;
+        uint64_t ownerChannelId = 0;        // kind==Channel일 때만 유효 - [미구현] Channel 경로는 아직 없음(PN-EA4EE935 스코프 결정)
+        KernelFsDriver* kernelDriver = nullptr;  // kind==KernelDriver일 때만 유효
+        FileHandle fsHandle;
+        uint64_t offset = 0;
+        bool isDirectory = false;
+        bool used = false;
+    };
+    static constexpr uint32_t kMaxFileDescriptorsChunkCapacity = 8;
+    ChunkedList<FileDescriptor, kMaxFileDescriptorsChunkCapacity> fileDescriptors;
 
     // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
     // 좀비 상태 - self-terminate 시(SelfTerminateHandler::onExec)
