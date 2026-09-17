@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T13:52:31.968Z
+  updatedAt: 2026-09-17T14:39:11.465Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -668,6 +668,63 @@ Syscall::wait 파킹 대상에 미도달, 해법 미착수) 두 항목만 남았
   그 계획 자신이 이미 "현재 스케줄러는 코어별 독립 LAPIC 타이머로
   선점을 잘 처리 중이라 실질 가치는 실측으로 필요성이 드러날 때"로
   스스로 재평가해 둔 정당한 저우선순위 백로그 - 숨은 갭 아님. 갭 없음.
+
+- **[신규, 2026-09-17] `SP-B26CDBDD`(CPU 가중치 스케줄링/vruntime) -
+  `PN-158B6B2F` 구현 완료(commit 01f5c591) 후 설계 대 코드 즉시 대조**:
+  approved 직후(이 세션이 직접 설계해 4차 개정 끝에 승인받은 문서)
+  구현까지 완료된 걸 확인해 바로 독립 검증 - `scheduler.cpp`를 §
+  전체와 한 줄씩 대조. `TaskVruntimeTraits`(§3.1)/`kEffectiveWeightOf`
+  (§2.1, clamp(100+weight,1,...))/`kVruntimeScale=1024` 고정소수점
+  스케일(§2.1, `(kEffectiveWeightBase*kVruntimeScale)/kEffectiveWeightOf`
+  - 이 세션이 설계 단계에서 잡은 "스케일 없으면 weight>0에서 몫이
+  0으로 버려지는" 바로 그 버그의 수정이 정확히 그대로 구현됨)/§2.3
+  굶주림 방지(새로 큐에 들어가는 Task의 vruntime을 큐의 현재 최솟값
+  아래로는 못 내려가게 `minVruntime()`으로 보정, `OrderedList::insert`
+  전에 적용)/`SetTaskWeight`(§7, `kSelfTaskWeightPid` 자기 자신
+  경로만 허용, 직계 자식 경로는 `SP-30FCC8AE` 승인 전까지 항상
+  `ok=false`로 명시적 거부 - 설계가 확정한 스코프 그대로)/
+  `Process::memoryBytesUsed`(§6.2, `execImage()`/`destroy()`/
+  Resurrect 재사용 시점 3곳 모두 그룹 합계와 함께 가산·감산) 전부
+  실재 확인. **갭 없음** - 설계-승인-구현-검증이 한 세션 안에서
+  전부 정확히 맞아떨어진 사례(SP-B1E258D8/RCU와 같은 급).
+
+- **[신규, 2026-09-17] `PL-57CF86EF`(4K/2M 페이지 병합/분할)**: 경로
+  (a)/(c)+분할(`Paging::mapRange`/`mergeRange`/`kSplitTwoMegabyte`,
+  paging.cpp) 전부 실재 확인. 유일하게 남은 경로 (b)(임계치 기반
+  사후 컴팩션)+재배치는 `PN-D28DD9F3`가 "실제 대량 4K 매핑 소비자가
+  아직 없어 의미있는 임계치 계측 불가"로 정당하게 유예 - 숨은 갭
+  아님. 갭 없음.
+
+- **[신규, 2026-09-17] `PL-C8648D4D`(Channel IPC 구현) - 대칭/불변조건
+  생존 점검**: 이 문서 자체(2026-09-14~16)의 "남은 것" 절은 이미
+  전부 취소선으로 완료 표시돼 있어 문서 자체는 갱신이 잘 돼 있다 -
+  대신 이 문서가 실측으로 발견/수정한 5개 스케줄러 동시성 버그 중
+  근본 수정(버그 5, `Task::inRunQueue` 구조적 이중 스케줄링 방지
+  플래그)이 그 이후 크게 재작성된 `gNormalQueues`(FIFO→vruntime
+  정렬 `OrderedList`, `PN-158B6B2F`)에서도 여전히 정확히 유지되는지
+  대조 - `enqueue()`/`scheduleImmediate()`의 cli-보호 확인+세팅,
+  `pickNext()`의 `popMin()` 직후 해제, Pull 경로의 `insert()` 전
+  해제(도둑질 실패 시 재`insert()`까지는 계속 `true` 유지) 전부
+  정확히 원래 불변조건 그대로 보존됨을 확인. 갭 없음 - 대규모 스케줄러
+  리팩터를 거치고도 과거에 실측으로 잡은 동시성 불변조건이 깨지지
+  않은 좋은 사례.
+
+- **[신규, 2026-09-17] `PL-21344323`(Syscall 디스패치 구현) - 문서
+  정정 발견**: "남은 것" 절의 onCancel 실제 호출 경로 항목이
+  "`PN-40E976F2`, Task/프로세스 종료 절차가 없어 아직 연결 불가"라고
+  낡은 채 남아 있었으나, 실제로는 그 계획이 이미 2026-09-15/16에
+  `completed`(commit eae13a9, `AsyncTaskState::Cancelled`+
+  `AsyncTask::ownerTask`+`SelfTerminateHandler::onExec`의
+  `pendingSyscalls` 사망 전파 목록 재사용)로 마무리돼 있었다 - 정정
+  완료. 코드 갭 아님, 문서만 낡아 있었음.
+- **[신규, 2026-09-17] `PL-1E247831`(AsyncTask 프레임워크 구현) -
+  같은 낡은 서술 하나 더 발견**: PL-21344323과 완전히 동일한 문구가
+  이 문서에도 그대로 복제돼 있었다(§5 기록 규칙이 경고하는 "하나
+  고칠 때 다른 문서의 복제본도 확인" 패턴의 실제 사례) - 정정 완료.
+  참고로 `SP-04EE2A18`(같은 계보의 설계 문서)는 이미
+  "[해소, 2026-09-16, 재확인]" 절로 정확히 갱신돼 있었음(cross-check
+  결과 이 세 문서 중 SP만 최신이었던 셈) - 갭 없음, PL 두 건만 문서
+  정정.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
