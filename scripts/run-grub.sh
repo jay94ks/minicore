@@ -12,6 +12,13 @@ BUILD_DIR="${ROOT_DIR}/build"
 ISO_ROOT="${BUILD_DIR}/grub-iso"
 ISO_PATH="${BUILD_DIR}/minicore-grub.iso"
 TIMEOUT_SECS="${MINICORE_QEMU_TIMEOUT:-8}"
+SMP="${MINICORE_QEMU_SMP:-1}"  # SMP4 재현 시 MINICORE_QEMU_SMP=4(run-grub-gdb.sh와 동일 관례)
+# [신규, 2026-09-17] run-grub-gdb.sh의 MINICORE_QEMU_INITRD와 동일한
+# 관례 - 실제 initrd(init/devmgr 등이 든 CPIO newc 아카이브, 호스트
+# 경로)를 GRUB module2로 함께 실어 부팅한다. 미지정 시 기존 동작
+# 그대로(initrd 없음, "modules=0") - 이 스크립트를 쓰던 기존 호출부
+# 전부 그대로 호환.
+INITRD="${MINICORE_QEMU_INITRD:-}"
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/cmake/toolchain-x86_64.cmake" \
@@ -21,24 +28,31 @@ cmake --build "${BUILD_DIR}" >/dev/null
 rm -rf "${ISO_ROOT}"
 mkdir -p "${ISO_ROOT}/boot/grub"
 cp "${BUILD_DIR}/minicore.elf" "${ISO_ROOT}/boot/minicore.elf"
-cat > "${ISO_ROOT}/boot/grub/grub.cfg" <<'EOF'
-set timeout=0
-set default=0
-menuentry "minicore" {
-    multiboot2 /boot/minicore.elf
-    boot
-}
-EOF
+{
+    echo 'set timeout=0'
+    echo 'set default=0'
+    echo 'menuentry "minicore" {'
+    if [[ -n "${INITRD}" ]]; then
+        cp "${INITRD}" "${ISO_ROOT}/boot/initrd.cpio"
+        echo '    multiboot2 /boot/minicore.elf'
+        echo '    module2 /boot/initrd.cpio initrd.cpio'
+    else
+        echo '    multiboot2 /boot/minicore.elf'
+    fi
+    echo '    boot'
+    echo '}'
+} > "${ISO_ROOT}/boot/grub/grub.cfg"
 
 grub-mkrescue -o "${ISO_PATH}" "${ISO_ROOT}" >/dev/null 2>&1
 
-echo "--- QEMU(-cdrom GRUB ISO) 시리얼 출력 (최대 ${TIMEOUT_SECS}초) ---"
+echo "--- QEMU(-cdrom GRUB ISO) 시리얼 출력 (최대 ${TIMEOUT_SECS}초, SMP=${SMP}) ---"
 set +e
 timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -cdrom "${ISO_PATH}" \
     -serial stdio \
     -display none \
     -no-reboot \
+    -smp "${SMP}" \
     -d cpu_reset,guest_errors \
     -D "${BUILD_DIR}/qemu-grub.log"
 status=$?
