@@ -227,47 +227,159 @@ void Process::destroy() {
     }
 }
 
-// [신규, PN-6D497EB0/PN-543C0CE9, SP-6BEAE0C1 §4] System V AMD64 ABI
-// 관례대로 유저 스택 최상단에 argc/argv/envp(+빈 auxv)를 배치하고
-// `_start` 진입 시 기대되는 초기 RSP를 계산한다. **v1 범위** - 이
-// 호출부(execImage())가 아직 실제 argv/envp를 안 받으므로(그건
-// SpawnProcess가 유저 포인터에서 검증+복사해 넘겨야 하는 후속
-// 증분 - 이 함수 자신은 그 파싱을 하지 않는다) 지금은 항상
-// `argc=0, argv=[NULL], envp=[NULL]`을 쓴다 - 그래도 모든 프로세스
-// (init/devmgr/SpawnProcess 전부)가 처음부터 표준 레이아웃을 갖게
-// 해 두는 게 이번 증분의 목적이다. **한 페이지(4KiB) 안에 들어가는
-// 스택 프레임만 지원**(실제 argv/envp 문자열이 실려야 하는 다음
-// 증분에서 여러 페이지로 확장할 근거가 생기면 재검토).
-bool kSetupInitialUserStack(uint64_t stackTop, uint64_t pml4Phys, uint64_t* outInitialRsp) {
-    const uint64_t stackPageStart = stackTop - 4096UL;
-    const uint64_t phys = Paging::translatePage(stackPageStart, pml4Phys);
-    if (!phys) {
-        return false;  // execImage()가 이 페이지를 이미 매핑해 뒀어야 함 - 실패하면 호출부 버그
+// [PN-E35294B8 항목2, QU-B9EB45E4 답변 그대로 반영] argv 또는 envp
+// 하나(유저 포인터, NULL 종단 `char* const[]`)를 검증하며 걷는다 -
+// 배열 길이를 미리 모르므로 슬롯을 하나씩 `isUserRangeValid`로 확인한
+// 뒤에만 읽고, 각 문자열도 남은 예산(`kMaxSpawnArgsTotalSize -
+// *ioUsed`) 안에서만 페이지 경계 단위로 나눠 NUL을 찾는다(문자열
+// 길이 자체도 미리 모르므로 무한정 읽지 않기 위함 - 이 검증 자체가
+// 이 코드베이스에 없던 새 유형이라는 QU-B9EB45E4의 지적에 대한 답).
+// 검증을 통과한 문자열은 그 자리에서 `scratch + *ioUsed`로 복사하고
+// 오프셋을 `outOffsets[i]`에 남긴다(최종 유저 주소는 프레임 배치가
+// 끝나야 정해지므로 지금은 스크래치 버퍼 안 상대 위치만).
+bool kCopyUserStringArray(char* const* userArray, uint8_t* scratch, uint64_t* ioUsed, uint64_t* outOffsets,
+                           uint32_t* outCount) {
+    uint32_t count = 0;
+    for (;;) {
+        if (count >= kMaxSpawnArgsEntryCount) {
+            return false;  // 항목 수 상한(구현 세부, process.h 문서 참고)
+        }
+        const auto* slot = reinterpret_cast<char* const*>(userArray) + count;
+        if (!Paging::isUserRangeValid(reinterpret_cast<uint64_t>(slot), sizeof(char*))) {
+            return false;
+        }
+        char* strPtr = *slot;
+        if (!strPtr) {
+            break;  // NULL 종단
+        }
+
+        const uint64_t remaining = kMaxSpawnArgsTotalSize - *ioUsed;
+        uint64_t scanned = 0;
+        bool foundNul = false;
+        while (scanned < remaining) {
+            const uint64_t addr = reinterpret_cast<uint64_t>(strPtr) + scanned;
+            const uint64_t pageEnd = (addr & ~0xFFFULL) + 0x1000ULL;
+            const uint64_t untilPageEnd = pageEnd - addr;
+            const uint64_t chunk = untilPageEnd < (remaining - scanned) ? untilPageEnd : (remaining - scanned);
+            if (!Paging::isUserRangeValid(addr, chunk)) {
+                return false;
+            }
+            const auto* chunkPtr = reinterpret_cast<const char*>(addr);
+            for (uint64_t i = 0; i < chunk; ++i) {
+                if (chunkPtr[i] == '\0') {
+                    scanned += i;
+                    foundNul = true;
+                    break;
+                }
+            }
+            if (foundNul) {
+                break;
+            }
+            scanned += chunk;
+        }
+        if (!foundNul) {
+            return false;  // 예산(kMaxSpawnArgsTotalSize) 안에서 NUL을 못 찾음 - 거부
+        }
+
+        const uint64_t strBytes = scanned + 1;  // NUL 포함
+        if (*ioUsed + strBytes > kMaxSpawnArgsTotalSize) {
+            return false;
+        }
+        memcpy(scratch + *ioUsed, strPtr, strBytes);
+        outOffsets[count] = *ioUsed;
+        *ioUsed += strBytes;
+        ++count;
     }
-    auto* pageVirt = reinterpret_cast<uint8_t*>(kPhysToVirt(phys));
-
-    uint64_t offsetFromTop = 4096UL;
-    auto pushU64 = [&](uint64_t value) {
-        offsetFromTop -= 8;
-        *reinterpret_cast<uint64_t*>(pageVirt + offsetFromTop) = value;
-    };
-
-    pushU64(0);  // auxv: AT_NULL 값(이 커널은 아직 aux 벡터 항목을 안 만듦)
-    pushU64(0);  // auxv: AT_NULL 타입(auxv 배열 종단)
-    pushU64(0);  // envp[0] = NULL(envp 배열 종단, envc=0)
-    pushU64(0);  // argv[0] = NULL(argv 배열 종단, argc=0이라 문자열 포인터 없음)
-    pushU64(0);  // argc = 0
-
-    // 16바이트 정렬 - _start 진입 시점 RSP는 16의 배수여야 한다(SysV
-    // 초기 프로세스 스택 규약 - "call 이후 -8"이 아니라 진입 자체가
-    // 16-정렬).
-    offsetFromTop &= ~static_cast<uint64_t>(15);
-
-    *outInitialRsp = stackPageStart + offsetFromTop;
+    *outCount = count;
     return true;
 }
 
-UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
+// [신규, PN-6D497EB0/PN-543C0CE9, SP-6BEAE0C1 §4] System V AMD64 ABI
+// 관례대로 유저 스택 최상단에 argc/argv/envp(+빈 auxv)를 배치하고
+// `_start` 진입 시 기대되는 초기 RSP를 계산한다.
+//
+// [확장, PN-E35294B8 항목2, QU-B9EB45E4 답변] `argCount`/`envCount`가
+// 0이면(기존 `kEnterInitProcess`/`kSpawnServiceProcesses` 호출부)
+// 예전과 완전히 동일하게 `argc=0, argv=[NULL], envp=[NULL]`만 쓴다.
+// 0보다 크면(`SpawnProcessHandler`가 이미 `kCopyUserStringArray`로
+// 검증+복사해 둔 문자열들) 그 문자열 데이터까지 포함한 완전한 프레임을
+// 짓는다 - 전체 프레임을 커널 스크래치에 먼저 조립한 뒤(문자열이 여러
+// 물리 페이지에 걸칠 수 있어 한 번에 못 쓰므로), 대상 스택의 이미
+// 매핑된 물리 페이지들에 페이지 경계마다 나눠 복사한다(PN-E35294B8
+// 계획 문서가 미리 요구해 둔 방식 그대로 - elf 로더의 세그먼트 복사와
+// 같은 결). 프레임 전체가 `kUserStackSize`(64KiB, 이미 execImage()가
+// 전부 매핑해 둔 범위)를 넘으면 실패 - 새 매핑을 만들지 않는다.
+bool kSetupInitialUserStack(uint64_t stackTop, uint64_t pml4Phys, const uint8_t* stringsData, uint64_t stringsSize,
+                             const uint64_t* argOffsets, uint32_t argCount, const uint64_t* envOffsets,
+                             uint32_t envCount, uint64_t* outInitialRsp) {
+    const uint64_t argvPtrsSize = static_cast<uint64_t>(argCount + 1) * 8;  // +1 = NULL 종단
+    const uint64_t envpPtrsSize = static_cast<uint64_t>(envCount + 1) * 8;
+    constexpr uint64_t kAuxvSize = 16;  // AT_NULL 값+타입(이 커널은 아직 aux 벡터 항목을 안 만듦)
+    constexpr uint64_t kArgcSize = 8;
+    const uint64_t stringsAligned = (stringsSize + 7) & ~7ULL;
+
+    uint64_t total = kArgcSize + argvPtrsSize + envpPtrsSize + kAuxvSize + stringsAligned;
+    total = (total + 15) & ~15ULL;  // _start 진입 RSP는 16-정렬이어야 함(SysV 관례)
+    if (total > kUserStackSize) {
+        return false;  // 호출부가 ArgsTooLarge로 보고
+    }
+
+    void* frameMem = GenericSlabAllocator::alloc(total);
+    if (!frameMem) {
+        return false;  // 호출부가 OutOfMemory로 보고(QU-B9EB45E4 "할당 실패해도 거부")
+    }
+    auto* frame = reinterpret_cast<uint8_t*>(frameMem);
+    memset(frame, 0, total);
+
+    const uint64_t frameBaseUserAddr = stackTop - total;
+    const uint64_t stringsFrameOffset = total - stringsSize;
+    if (stringsSize) {
+        memcpy(frame + stringsFrameOffset, stringsData, stringsSize);
+    }
+    auto stringUserAddr = [&](uint64_t offsetInStrings) { return frameBaseUserAddr + stringsFrameOffset + offsetInStrings; };
+
+    uint64_t pos = 0;
+    auto writeU64 = [&](uint64_t value) {
+        *reinterpret_cast<uint64_t*>(frame + pos) = value;
+        pos += 8;
+    };
+    writeU64(argCount);
+    for (uint32_t i = 0; i < argCount; ++i) {
+        writeU64(stringUserAddr(argOffsets[i]));
+    }
+    writeU64(0);  // argv[] NULL 종단
+    for (uint32_t i = 0; i < envCount; ++i) {
+        writeU64(stringUserAddr(envOffsets[i]));
+    }
+    writeU64(0);  // envp[] NULL 종단
+    writeU64(0);  // auxv: AT_NULL 타입
+    writeU64(0);  // auxv: AT_NULL 값
+
+    uint64_t copied = 0;
+    while (copied < total) {
+        const uint64_t destUserAddr = frameBaseUserAddr + copied;
+        const uint64_t pageAddr = destUserAddr & ~0xFFFULL;
+        const uint64_t phys = Paging::translatePage(pageAddr, pml4Phys);
+        if (!phys) {
+            GenericSlabAllocator::free(frameMem, total);
+            return false;  // execImage()가 이 범위를 이미 전부 매핑해 뒀어야 함 - 실패하면 호출부 버그
+        }
+        auto* pageVirt = reinterpret_cast<uint8_t*>(kPhysToVirt(phys));
+        const uint64_t offsetInPage = destUserAddr - pageAddr;
+        const uint64_t untilPageEnd = 4096UL - offsetInPage;
+        const uint64_t chunk = untilPageEnd < (total - copied) ? untilPageEnd : (total - copied);
+        memcpy(pageVirt + offsetInPage, frame + copied, chunk);
+        copied += chunk;
+    }
+    GenericSlabAllocator::free(frameMem, total);
+
+    *outInitialRsp = frameBaseUserAddr;
+    return true;
+}
+
+UserThread* Process::execImage(const elf::Image& image, UserThread* thread, const uint8_t* argvEnvpScratch,
+                                uint64_t stringsSize, const uint64_t* argOffsets, uint32_t argCount,
+                                const uint64_t* envOffsets, uint32_t envCount) {
     if (!elf::loadIntoAddressSpace(image, pml4Phys, &addressSpace)) {
         return nullptr;
     }
@@ -302,7 +414,8 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread) {
     thread->userPml4Phys = pml4Phys;
     thread->ring3EntryPoint = image.entryPoint();
     uint64_t initialRsp = kUserStackTop;
-    if (!kSetupInitialUserStack(kUserStackTop, pml4Phys, &initialRsp)) {
+    if (!kSetupInitialUserStack(kUserStackTop, pml4Phys, argvEnvpScratch, stringsSize, argOffsets, argCount,
+                                 envOffsets, envCount, &initialRsp)) {
         return nullptr;
     }
     thread->ring3UserStackTop = initialRsp;
@@ -434,14 +547,78 @@ public:
             co_return;
         }
 
+        // 3.5단계 - [신규, PN-E35294B8 항목2, QU-B9EB45E4 답변] argv/envp
+        // 유저 포인터 배열을 검증+복사한다. 오프셋 추적 배열
+        // (kMaxSpawnArgsEntryCount*8바이트, 최대 32KiB)까지 스택에
+        // 두면 이 코루틴의 전용 스택(kAsyncTaskStackSize=4KiB, PN-D01B7D07)
+        // 을 즉시 넘치므로 반드시 Slab에 둔다 - args->argv/envp 둘 다
+        // nullptr이면(호출자가 인자 없이 스폰) 상한 검사 자체를 생략하고
+        // 항목 수 0으로 그대로 진행(execImage()가 기존과 동일한 빈
+        // 프레임을 만든다 - kEnterInitProcess/kSpawnServiceProcesses와
+        // 동일한 결과).
+        constexpr uint64_t kOffsetsBytes = static_cast<uint64_t>(kMaxSpawnArgsEntryCount) * sizeof(uint64_t);
+        uint8_t* argsScratch = nullptr;
+        uint64_t* argOffsets = nullptr;
+        uint64_t* envOffsets = nullptr;
+        uint64_t stringsUsed = 0;
+        uint32_t argCount = 0;
+        uint32_t envCount = 0;
+        bool argsOk = true;
+
+        if (args->argv || args->envp) {
+            argsScratch = static_cast<uint8_t*>(GenericSlabAllocator::alloc(kMaxSpawnArgsTotalSize));
+            argOffsets = static_cast<uint64_t*>(GenericSlabAllocator::alloc(kOffsetsBytes));
+            envOffsets = static_cast<uint64_t*>(GenericSlabAllocator::alloc(kOffsetsBytes));
+            if (!argsScratch || !argOffsets || !envOffsets) {
+                argsOk = false;
+                args->error = SpawnProcessError::OutOfMemory;  // QU-B9EB45E4 "할당 실패해도 거부"
+            } else if (args->argv &&
+                       !kCopyUserStringArray(args->argv, argsScratch, &stringsUsed, argOffsets, &argCount)) {
+                argsOk = false;
+                args->error = SpawnProcessError::ArgsTooLarge;
+            } else if (args->envp &&
+                       !kCopyUserStringArray(args->envp, argsScratch, &stringsUsed, envOffsets, &envCount)) {
+                argsOk = false;
+                args->error = SpawnProcessError::ArgsTooLarge;
+            }
+        }
+
+        if (!argsOk) {
+            if (argsScratch) {
+                GenericSlabAllocator::free(argsScratch, kMaxSpawnArgsTotalSize);
+            }
+            if (argOffsets) {
+                GenericSlabAllocator::free(argOffsets, kOffsetsBytes);
+            }
+            if (envOffsets) {
+                GenericSlabAllocator::free(envOffsets, kOffsetsBytes);
+            }
+            UserThread::release(thread);
+            procShared.reset();
+            GenericSlabAllocator::free(kernelImage, args->imageSize);
+            co_return;  // args->error는 위에서 이미 채움
+        }
+
         // 4단계 - kEnterInitProcess/kSpawnServiceProcesses와 동일한
         // execImage 경로. **elf::Image는 원본 버퍼를 복사하지 않고
         // 그대로 가리키므로(elf.h 문서 주석) kernelImage는 execImage가
         // 끝난 뒤에만 반납한다** - loadIntoAddressSpace가 이 버퍼에서
         // 새 주소공간으로 실제 페이지 복사를 끝내는 지점이 execImage
-        // 안이다.
-        UserThread* started = procShared->execImage(image, thread);
+        // 안이다. argsScratch/argOffsets/envOffsets도 마찬가지로
+        // execImage()가 그 안에서 kSetupInitialUserStack으로 다 읽어
+        // 프레임을 짓고 난 뒤에만 반납한다.
+        UserThread* started =
+            procShared->execImage(image, thread, argsScratch, stringsUsed, argOffsets, argCount, envOffsets, envCount);
         GenericSlabAllocator::free(kernelImage, args->imageSize);
+        if (argsScratch) {
+            GenericSlabAllocator::free(argsScratch, kMaxSpawnArgsTotalSize);
+        }
+        if (argOffsets) {
+            GenericSlabAllocator::free(argOffsets, kOffsetsBytes);
+        }
+        if (envOffsets) {
+            GenericSlabAllocator::free(envOffsets, kOffsetsBytes);
+        }
 
         if (!started) {
             UserThread::release(thread);

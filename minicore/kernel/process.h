@@ -316,7 +316,15 @@ public:
     //   반드시 `int 0x80`으로만 트랩해야 한다(PN-124C105B 남은 항목).
     // - 프로세스당 스레드 하나 전제(위 클래스 주석과 동일) - thread는
     //   호출부가 소유(동적 할당/해제는 이번 범위 밖, PN-40E976F2).
-    UserThread* execImage(const elf::Image& image, UserThread* thread);
+    // [확장, PN-E35294B8 항목2, QU-B9EB45E4 답변] argvEnvpScratch가
+    // 있으면(SpawnProcessHandler가 이미 유저 argv/envp를 검증+복사해
+    // 넘긴 것) 그 문자열 데이터까지 실은 완전한 SysV 초기 스택 프레임을
+    // 짓는다 - 기본값(nullptr/0)이면 기존 그대로(빈 argc=0/argv=[NULL]/
+    // envp=[NULL]) 동작해 kEnterInitProcess/kSpawnServiceProcesses
+    // 호출부는 전혀 안 바뀐다.
+    UserThread* execImage(const elf::Image& image, UserThread* thread, const uint8_t* argvEnvpScratch = nullptr,
+                          uint64_t stringsSize = 0, const uint64_t* argOffsets = nullptr, uint32_t argCount = 0,
+                          const uint64_t* envOffsets = nullptr, uint32_t envCount = 0);
 
     // Signal 전달(SP-0666DB3C §4.4, PN-71E50394 항목 2) - number를
     // pendingSignals에 기록하고, mainThread가 지금 대기 중이면
@@ -370,6 +378,14 @@ enum class SpawnProcessError : uint32_t {
     ElfParseFailed,      // elf::Image::parse 실패(BadMagic 등)
     ExecImageFailed,     // Process::execImage 실패(유저 스택 확보 등)
     InvalidArgument,     // flags에 정의되지 않은 비트가 세팅됨(PN-A6E01B8A, QU-9585F6C4)
+    // [신규, PN-E35294B8 항목2, QU-B9EB45E4 답변("상한을 두되, huge
+    // page 1개만큼으로 제한해. 이 상한을 넘어서면 거부하고, 할당을
+    // 시도했는데 실패해도 거부")] argv/envp 문자열 총합이
+    // kMaxSpawnArgsTotalSize를 넘거나, 항목 수가 kMaxSpawnArgsEntryCount
+    // 를 넘거나, 실제 대상 스택(kUserStackSize)에 다 안 들어갈 때.
+    // 스크래치 버퍼 확보 실패는 (답변이 명시한 대로) 기존
+    // OutOfMemory로 함께 처리한다 - 별도 코드 불필요.
+    ArgsTooLarge,
 };
 
 // [신규, 2026-09-16, QU-9585F6C4 답변("일반화된 정수로 플래그 셋을
@@ -397,24 +413,43 @@ constexpr uint32_t kSpawnProcessFlagsMask = SpawnProcessFlags::kSpawnDebugStart;
 
 // [SP-6BEAE0C1 §3] SpawnProcess syscall 인자 - `imageBuffer`/`argv`/
 // `envp`는 전부 유저 포인터(untrusted, 핸들러 내부에서 Paging::
-// isUserRangeValid로 검증 후에만 역참조). **이번 증분 한계**: `argv`/
-// `envp`는 아직 실제로 새 프로세스에 전달되지 않는다(§4 "인자/환경변수
-// 전달 규약"이 프로젝트 전체에서 아직 미착수 - execImage()가 지금은
-// 그런 스택 프레임을 구성하지 않는다, 이 syscall만의 제약이 아니다) -
-// ABI 자리만 미리 잡아 두고 §4가 준비되면 이어붙인다. `flags`는
-// `kSpawnDebugStart` 비트까지 실제로 소비한다(PN-87D6B615 항목8) -
-// 유효성 검증(kSpawnProcessFlagsMask)과 실제 동작 둘 다 구현 완료.
+// isUserRangeValid로 검증 후에만 역참조). **[완료, PN-E35294B8 항목2,
+// QU-B9EB45E4 답변]** `argv`/`envp`는 이제 실제로 새 프로세스에
+// 전달된다 - SpawnProcessHandler::onExec이 각 배열을 NULL 종단까지
+// 걸으며 문자열을 검증+커널 스크래치 버퍼로 복사하고(총합
+// kMaxSpawnArgsTotalSize 초과 시 거부), `Process::execImage()`가 그
+// 결과로 SysV AMD64 초기 스택 프레임(argc/argv/envp/auxv 전부 실제
+// 값)을 짓는다(§4). `flags`는 `kSpawnDebugStart` 비트까지 실제로
+// 소비한다(PN-87D6B615 항목8) - 유효성 검증(kSpawnProcessFlagsMask)과
+// 실제 동작 둘 다 구현 완료.
 struct SpawnProcessArgs {
     const void* imageBuffer = nullptr;  // 유저 포인터 - ELF64 이미지 원본 바이트
     uint64_t imageSize = 0;
-    char* const* argv = nullptr;  // 유저 포인터, NULL 종단 - 아직 미사용(위 참고)
-    char* const* envp = nullptr;  // 유저 포인터, NULL 종단 - 아직 미사용(위 참고)
+    char* const* argv = nullptr;  // 유저 포인터, NULL 종단 - PN-E35294B8 항목2에서 실제 소비
+    char* const* envp = nullptr;  // 유저 포인터, NULL 종단 - PN-E35294B8 항목2에서 실제 소비
     uint32_t flags = SpawnProcessFlags::kSpawnNone;  // SpawnProcessFlags 비트마스크
     // out
     SpawnProcessError error = SpawnProcessError::None;
     int64_t pid = -1;  // 성공 시 새 Process*를 재해석한 값(AsyncTaskManageCode의
                         // "포인터를 그대로 토큰으로" 관례와 동일) - 실패 시 -1 유지.
 };
+
+// [신규, PN-E35294B8 항목2, QU-B9EB45E4 설계자 답변 그대로] argv+envp
+// 문자열 데이터 총합의 v1 상한 - "huge page 1개만큼으로 제한해"를
+// 그대로 반영(x86_64의 2MiB 대형 페이지 크기). 이 상한을 넘으면
+// ArgsTooLarge로 거부한다 - isUserRangeValid만으로는 "길이를 모르는
+// NULL 종단 배열을 얼마나 걸을지"를 결정할 수 없어(QU-B9EB45E4가
+// 지적한 이 코드베이스의 새로운 검증 유형) 이 상한이 스캔 자체를
+// 유한하게 만드는 역할도 한다.
+constexpr uint64_t kMaxSpawnArgsTotalSize = 2UL * 1024 * 1024;
+
+// [신규, PN-E35294B8 항목2, 구현 세부 - RM-23F4B687 §4 취지, 답변이
+// 직접 정하지 않은 순수 구현 상수] argv/envp 항목 "개수"의 v1 상한 -
+// kMaxSpawnArgsTotalSize(바이트)와는 별개 차원이다(빈 문자열만 잔뜩
+// 넣으면 바이트 예산 안에서도 수백만 개까지 만들 수 있어, 오프셋
+// 추적 배열 자체가 비대해지는 것을 막는 별도 방어). 현실적인 실행
+// 인자 개수보다 넉넉히 크다.
+constexpr uint32_t kMaxSpawnArgsEntryCount = 4096;
 
 // 단일 요청 안에서 커널 버퍼로 복사하는 이미지 바이트의 상한 -
 // GenericSlabAllocator::alloc()이 2048B 초과 요청을 PageFrameAllocator::
