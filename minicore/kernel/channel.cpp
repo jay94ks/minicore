@@ -369,6 +369,18 @@ class OpenChannelHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<OpenChannelArgs*>(argsRaw);
+        // [신규, 2026-09-17, PN-EAB3A9AE 착수 중 실측 발견] 이 syscall만
+        // 유일하게 name/nameLength가 kValidateUserBuffer 검증 없이 곧바로
+        // kCreateNamedChannel() -> NamedObjectTable::reserve()/memcpy로
+        // 역참조되고 있었다 - ChannelRead/Write가 PN-B552E75F로 이미
+        // 겪은 것과 같은 종류의 보안 공백(임의 커널 메모리 읽기로 이어질
+        // 수 있음)이 Open/Connect 두 곳은 그때 놓쳤다. 이 프로젝트 최초의
+        // 진짜 유저랜드 Channel 호출부(pubreg, PN-EAB3A9AE)를 준비하다가
+        // 코드 감사로 발견했다.
+        if (args->nameLength > 0 && !kValidateUserBuffer(task, args->name, args->nameLength)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
         Channel* channel = kCreateNamedChannel(args->name, args->nameLength, &args->error);
         if (!channel) {
             co_return;
@@ -406,6 +418,13 @@ public:
                 co_return;
             }
         } else if (args->nameLength > 0) {
+            // [신규, 2026-09-17, PN-EAB3A9AE 착수 중 실측 발견 - 위
+            // OpenChannelHandler와 동일한 이유] name/nameLength도
+            // NamedObjectTable::resolve()에 넘기기 전에 검증한다.
+            if (!kValidateUserBuffer(task, args->name, args->nameLength)) {
+                args->error = ChannelError::InvalidPointer;
+                co_return;
+            }
             NamedObjectKind kind{};
             uint64_t objectId = 0;
             if (!NamedObjectTable::resolve(args->name, args->nameLength, &kind, &objectId) ||

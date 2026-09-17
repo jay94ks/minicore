@@ -28,6 +28,10 @@ struct DeviceDescriptor {
 // EnumerateDevices는 이 중 InvalidPointer만 실제로 돌려주지만, 나중에
 // Channel IPC 유저랜드 래퍼를 추가할 때 그대로 재사용할 수 있도록
 // enum 전체를 거울 복사해 둔다.
+// [갱신, 2026-09-17, PN-EAB3A9AE] libmc/channel.h 착수 - 그 사이
+// 커널 쪽에 추가된 4개 값(InvalidArgument/NotSupported/
+// PermissionDenied/AlreadyExists, PN-71E50394/PN-87D6B615)을 마저
+// 거울 복사해 커널과 다시 완전히 일치시켰다.
 enum class ChannelError : uint32_t {
     None = 0,
     NameInUse,
@@ -37,6 +41,10 @@ enum class ChannelError : uint32_t {
     HugePageUnsupported,
     BrokenPipe,
     InvalidPointer,
+    InvalidArgument,
+    NotSupported,
+    PermissionDenied,
+    AlreadyExists,
 };
 
 struct EnumerateDevicesArgs {
