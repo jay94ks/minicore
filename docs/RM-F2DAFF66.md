@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T02:43:25.796Z
+  updatedAt: 2026-09-17T02:49:32.245Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -191,6 +191,29 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **`RM-28225668`(인터럽트 벡터 목록)**: 0xE0-0xE3 전부 상태 최신,
   `PN-B3DD3D19`(인터럽트 구독)가 새 고정 IPI 벡터를 요구하지 않고
   기존 동적 벡터 위임 메커니즘을 재사용함을 확인 - 갭 없음.
+- **`PN-CE6A04AB`/`SP-CA3C3E57`(Channel 보안 취약점)**: minicore-88이
+  구현 완료(commit 74f0f75) 보고, 이번 틱에 코드 독립 확인 -
+  `channel.h:293`(`ownerProcess`), `channel.cpp`의 `kResolveChannelId`
+  (:166)/세 호출부 교체(:403/:472/:501/:612/:835)/소유자 검증
+  (:510-512, :843-845) 전부 실측 확인, `gChannelTable[65536]` 크기도
+  §2 확정값과 일치. RM-F2DAFF66이 추적하던 항목 중 실제로 완전히
+  닫힌 사례(PN-C4611402/NUMA와 같은 급) - 잔여 항목은 §6-A
+  `DontDeref<T>` 타입 승격(`PN-18FDBFF3`)/SharedPtr 마이그레이션
+  (`PN-260D7D73`) 둘 다 별도 계획으로 openly 추적 중이라 갭 아님.
+- **`SP-9CB55C5B`(Kill 안전한 ProcessId 해석)**: `kResolveProcessId()`/
+  `gProcessTable[]` 자체는 아직 코드에 없음(`process.h` grep 0건) -
+  다만 이건 문서 §7이 스스로 "제안(확정 아님)"이라고 명시한 것과
+  일치하고, `PN-88E62419`(Kill 임의 대상 구현, in_review)가
+  `PN-C39882D0`/`PN-AA30E4C8`/`PN-617F4E52` 세 선행 계획으로 이미
+  openly 추적 중이라 "조용히 빠진" 사례는 아니다(§4 예방조치 패턴과
+  동일). **부수 발견**: `PN-C39882D0`(pid ABI 마이그레이션 승인)의
+  자체 선행 조건("SP-9CB55C5B approved + QU-78E4159E 해소")이 이미
+  충족돼 있었는데도 `planned` 상태로 방치돼 있었음 - 착수 전 확인
+  사항(유저랜드 pid 소비자 존재 여부, `docs git grep` 결과 0건)을
+  이번 틱에 완료하고 `QU-AB5247DD`로 명시적 승인 요청 등록,
+  `pending_approval`로 전환(이 발견 자체는 코드 갭이 아니라 계획
+  진행 누락이라 이 문서보다 일반 루프 절차 2번에 해당하지만, "설계는
+  확정됐는데 후속 조치가 멈춰 있었다"는 성격이 같아 여기 기록).
 - **`SP-1DB13F61`(vtable 타입 placement new 예외)**: `shared_ptr.h`에
   `kMakeSharedNew<T>()`/`kDestroyCtorAndFree<T>()`(§3 제안 그대로)가
   실제로 구현돼 있고, `mutex_core.h`/`semaphore_core.h` 둘 다 예전

@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CA3C3E57
   status: approved
-  updatedAt: 2026-09-17T02:41:41.934Z
+  updatedAt: 2026-09-17T02:49:23.448Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -340,5 +340,16 @@ private:
   위임(§3 원안대로 진행).
 - **이 문서 범위 밖으로 분리**: `Channel`을 `BridgePipe`처럼 완전한
   `SharedPtr` 관리로 마이그레이션해 §6.1의 raw 포인터 동일성 비교
-  (좁은 범위의 잔여 위험)까지 없애는 작업 - 별도 계획 등록 예정.
+  (좁은 범위의 잔여 위험)까지 없애는 작업 - **`PN-260D7D73`**으로
+  등록 완료(우선순위 낮음).
+- **[구현 완료, 2026-09-17, commit 74f0f75, minicore-88]** 이 문서
+  전체(§2/§4/§5/§6.1)가 실제 코드로 구현됨 - QEMU 무-initrd+SMP4
+  무회귀 확인(실제 syscall 왕복을 통한 `PermissionDenied` 거부
+  경로는 유저랜드 소비자가 아직 없어 end-to-end 미검증, 정직하게
+  기록됨). §6-A의 `DontDeref<T>` 타입 승격(§6.1의 raw `Process*`를
+  `DontDeref<Process>`로 교체)은 별도 후속으로 `PN-18FDBFF3`
+  (scheduled)에 좁혀 등록 - `DontDeref<T>`는 ref-counting이 없어
+  §6.1이 겪은 `WeakPtr::operator=` 문제와 무관하게 안전하게 적용
+  가능, `PN-260D7D73`의 전체 SharedPtr 마이그레이션 없이도 지금
+  바로 착수 가능.
 
