@@ -188,6 +188,13 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
+    // [PN-BD276A24 검토, RM-F2DAFF66 §1-E] no-op이 맞다 - onExec에
+    // co_await/AsyncTask::yield() 같은 실제 정지 지점이 없어 이
+    // 코루틴은 매번 시작하자마자 co_return까지 한 번에 끝난다(다른
+    // 스레드가 이 AsyncTask를 취소하려 할 시점엔 이미 완료돼 있어
+    // onCancel 자체가 호출될 일이 없음) - WaitInterruptHandler(아래,
+    // 큐에 파킹돼 여러 틱에 걸쳐 살아있을 수 있음)와의 차이가 바로
+    // 이 지점이다.
     void onCancel(AsyncTask*, void*) override {}
 };
 
@@ -214,6 +221,8 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
+    // [PN-BD276A24 검토] SubscribeInterruptHandler와 동일한 이유로
+    // no-op이 맞다 - onExec에 정지 지점이 없음.
     void onCancel(AsyncTask*, void*) override {}
 };
 
@@ -259,7 +268,35 @@ public:
         }
     }
     void onFailure(AsyncTask*) override {}
-    void onCancel(AsyncTask*, void*) override {}
+    // [구현, 2026-09-17, PN-BD276A24] 이 onExec은 이벤트가 없으면
+    // 자기 자신(`task`)을 그 구독자 슬롯의 `waiters`(InterruptWaiterQueue,
+    // 침습적 FIFO)에 매달아 둔 채 여러 틱에 걸쳐 파킹될 수 있다 -
+    // 제출자가 그사이 죽으면(강제 종료 등) 프레임워크가 onExec을
+    // 재개하는 대신 이 onCancel만 부르고 이 AsyncTask 자체(코루틴
+    // 스택 포함)를 반납한다. 이전엔 no-op이라 그 매달린 포인터가
+    // 댕글링으로 남아 다음 인터럽트가 `kInterruptSubscriptionIsr`의
+    // `popFront()`로 그걸 꺼내 쓰는 UAF였다(SP-1FBC0EEB Channel IPC의
+    // `PN-C4611402`와 정확히 같은 결함 클래스).
+    //
+    // `task->submitterTask.lock()`으로 owner를 다시 찾는 대신(취소
+    // 시점엔 이미 비어 있을 수 있음 - ConnectChannelHandler류 기존
+    // onCancel 구현들이 args만으로 식별하는 것과 같은 이유) 이 벡터의
+    // 구독자 슬롯(최대 kMaxSubscribersPerVector=8개) 전부를 훑어 이
+    // `task`가 들어있을 수 있는 자리를 제거한다 - 실제로는 한 슬롯의
+    // `waiters`에만 들어있을 수 있지만 "어느 슬롯인지"를 다시 알아낼
+    // 손쉬운 방법이 없어 전부 시도한다(`remove()`는 못 찾으면 그냥
+    // 무해).
+    void onCancel(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<WaitInterruptArgs*>(argsRaw);
+        if (args->vector >= 256) {
+            return;
+        }
+        InterruptSubscription& sub = gSubscriptions[args->vector];
+        SpinlockGuard guard(sub.lock);
+        for (auto& subscriber : sub.subscribers) {
+            subscriber.waiters.remove(task);
+        }
+    }
 };
 
 class GetInterruptDumpHandler : public AsyncTaskHandler {
@@ -286,6 +323,8 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
+    // [PN-BD276A24 검토] SubscribeInterruptHandler와 동일한 이유로
+    // no-op이 맞다 - onExec에 정지 지점이 없음.
     void onCancel(AsyncTask*, void*) override {}
 };
 

@@ -84,6 +84,33 @@ struct InterruptWaiterQueue {
         }
         return task;
     }
+
+    // [구현, PN-BD276A24] channel.h의 AsyncTaskWaitQueue::remove()와
+    // 정확히 같은 이유/구현 - 취소(onCancel) 전용. FIFO 순서를 지키는
+    // pushBack/popFront와 달리 임의 위치의 항목 하나를 제거해야 한다
+    // (그 AsyncTask 자신이 곧 반납될 예정이라 이 큐에 댕글링 포인터로
+    // 남으면 안 됨 - WaitInterruptHandler::onCancel이 이걸 부른다).
+    // 선형 탐색 - 이 큐들의 길이가 짧다는 전제(kMaxSubscribersPerVector
+    // 당 대기자 소수). target이 큐에 없으면(이미 정상적으로 popFront된
+    // 뒤였거나 애초에 이 슬롯 소속이 아니었던 경우) 아무 일도 하지
+    // 않는다.
+    void remove(AsyncTask* target) {
+        AsyncTask* prev = nullptr;
+        for (AsyncTask* cur = head; cur; prev = cur, cur = cur->next.load()) {
+            if (cur == target) {
+                AsyncTask* nextNode = cur->next.load();
+                if (prev) {
+                    prev->next.store(nextNode);
+                } else {
+                    head = nextNode;
+                }
+                if (cur == tail) {
+                    tail = prev;
+                }
+                return;
+            }
+        }
+    }
 };
 
 // [SP-71DA77B3 §4] 구독자 슬롯 - 모든 필드가 POD/raw 포인터라 값
