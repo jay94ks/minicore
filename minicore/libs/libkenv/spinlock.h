@@ -118,6 +118,73 @@ private:
     T _value{};
 };
 
+// [SP-9F1DB1D8, QU-68D76FC4/QU-E847DB03] 읽기 다수/쓰기 희소 패턴
+// 전용의 최소 스핀 기반 RW락 - 첫 소비자는 Scheduler의 gCurrentTask[]
+// 크로스코어 접근 보호(scheduler.cpp). 쓰기 우선순위(anti-starvation)
+// 없음 - 리더가 계속 몰리면 라이터가 무기한 대기할 수 있다. 첫
+// 소비자는 라이터가 극히 드물고(스케줄러 디스패치 지점 몇 곳) 리더도
+// 드물어(TLB 샷다운/강제 이관/로드밸런싱 진단 API) 실질적 스타베이션
+// 위험이 없다고 판단해 생략했다(RM-23F4B687 §4 과설계 방지) - 이후
+// 다른 소비자가 리더 폭주 패턴이면 그때 티켓 기반 등으로 재검토.
+class RwSpinlock {
+public:
+    void lockRead() {
+        for (;;) {
+            uint32_t v = _state.load();
+            if (v != kWriteLocked && _state.compareExchange(v, v + 1)) {
+                return;
+            }
+            asm volatile("pause");
+        }
+    }
+
+    void unlockRead() {
+        _state.fetchSub(1);
+    }
+
+    void lockWrite() {
+        uint32_t expected = 0;
+        while (!_state.compareExchange(expected, kWriteLocked)) {
+            expected = 0;
+            asm volatile("pause");
+        }
+    }
+
+    void unlockWrite() {
+        _state.store(0);
+    }
+
+private:
+    static constexpr uint32_t kWriteLocked = 0xFFFFFFFFu;
+    Atomic<uint32_t> _state{0};
+};
+
+// lockRead()/unlockRead()를 스코프에 맞춰 자동으로 걸고 푸는 RAII 래퍼.
+class RwSpinlockReadGuard {
+public:
+    explicit RwSpinlockReadGuard(RwSpinlock& lock) : _lock(lock) { _lock.lockRead(); }
+    ~RwSpinlockReadGuard() { _lock.unlockRead(); }
+
+    RwSpinlockReadGuard(const RwSpinlockReadGuard&) = delete;
+    RwSpinlockReadGuard& operator=(const RwSpinlockReadGuard&) = delete;
+
+private:
+    RwSpinlock& _lock;
+};
+
+// lockWrite()/unlockWrite()를 스코프에 맞춰 자동으로 걸고 푸는 RAII 래퍼.
+class RwSpinlockWriteGuard {
+public:
+    explicit RwSpinlockWriteGuard(RwSpinlock& lock) : _lock(lock) { _lock.lockWrite(); }
+    ~RwSpinlockWriteGuard() { _lock.unlockWrite(); }
+
+    RwSpinlockWriteGuard(const RwSpinlockWriteGuard&) = delete;
+    RwSpinlockWriteGuard& operator=(const RwSpinlockWriteGuard&) = delete;
+
+private:
+    RwSpinlock& _lock;
+};
+
 // SMP 기동 동기화(예: "몇 개 AP가 떴는지")에 쓸 최소 원자 카운터 -
 // 기존 이름 유지(위 통합 이전과 완전히 동일하게 계속 쓸 수 있음).
 using AtomicU32 = Atomic<uint32_t>;

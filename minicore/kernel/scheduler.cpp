@@ -173,6 +173,13 @@ uint64_t gIdleSavedRsp[kMaxCores] = {};
 // 만 갱신한다. nullptr이면 idle(runLoop이 pickNext/hlt를 돌고 있음).
 Task* gCurrentTask[kMaxCores] = {};
 
+// [SP-9F1DB1D8, QU-68D76FC4/QU-E847DB03] gCurrentTask[]의 모든 접근을
+// 보호한다 - 슬롯마다 하나(코어 간 경합 자체가 없으므로 전역 락 하나로
+// 묶을 이유 없음). 쓰기는 항상 그 코어 자신만 하지만(같은 코어 접근은
+// 레이스가 아니라는 §1/§3 논증에도 불구하고, 설계자 답변으로 예외 없이
+// 전부 이 락을 타도록 확정 - SP-9F1DB1D8 §7).
+RwSpinlock gCurrentTaskLock[kMaxCores];
+
 // 이 코어의 하드웨어 FPU/SSE 레지스터가 지금 어느 Task의 상태를 담고
 // 있는지(SP-83A07867 §8, PN-F258698E) - kSyncFpu/Scheduler::handleFpuTrap
 // 만 갱신한다. nullptr이면 아직 아무도 이 코어에서 FPU/SSE를 쓴 적이
@@ -493,6 +500,7 @@ void kLoadBalanceWakeIsr(InterruptFrame*) {}
 // (기존 스케줄러 틱과 동일하게 EOI 후 즉시 반환)이라 false positive
 // 비용이 낮다.
 void kWakeCoreIfIdle(uint32_t coreIndex) {
+    RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
     if (gCurrentTask[coreIndex] == nullptr) {
         Lapic::sendFixedIpi(Acpi::cpuApicId(coreIndex), static_cast<uint8_t>(kLoadBalanceWakeVector));
     }
@@ -962,7 +970,11 @@ void Scheduler::onTick(InterruptFrame*) {
         return;  // 선점 금지 구간 - 인터럽트 자체는 처리됐으니 그냥 계속 실행
     }
 
-    Task* current = gCurrentTask[coreIndex];
+    Task* current;
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+        current = gCurrentTask[coreIndex];
+    }
     if (!current) {
         return;  // idle 상태 - runLoop의 hlt가 이 인터럽트로 깨어나 pickNext를 다시 확인한다
     }
@@ -980,7 +992,10 @@ void Scheduler::onTick(InterruptFrame*) {
     if (current->state != TaskState::Zombie) {
         enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
     }
-    gCurrentTask[coreIndex] = next;
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = next;
+    }
     next->state = TaskState::Running;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
@@ -997,7 +1012,10 @@ void Scheduler::requestForcedMigration(uint32_t fromCore, uint32_t targetCore) {
     // tlb_shootdown.cpp와 동일한 이유로 요청 슬롯 채우기 자체는
     // 직렬화가 필요하다(PN-D132A1E9 경고 동일 적용) - v1은 호출부가
     // 하나뿐인 수동/진단 API라 별도 락 없이 그대로 채운다.
-    gForcedMigrationRequest.target = gCurrentTask[fromCore];  // 요청 시점
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[fromCore]);
+        gForcedMigrationRequest.target = gCurrentTask[fromCore];  // 요청 시점
+    }
     // 스냅샷 - IPI 도착 시점에 이미 다른 Task로 바뀌어 있을 수 있다
     // (onForcedMigration()의 current != target 방어가 이 경쟁을 무해하게
     // 처리한다).
@@ -1014,7 +1032,11 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     Lapic::sendEoi();
 
     const uint32_t coreIndex = currentCoreIndex();
-    Task* current = gCurrentTask[coreIndex];
+    Task* current;
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+        current = gCurrentTask[coreIndex];
+    }
 
     // 경쟁 방어: IPI가 도착했을 때 이미 이 코어가 idle이거나(current==
     // nullptr) 요청 시점과 다른 Task를 실행 중이면(그 사이 이 Task가
@@ -1040,14 +1062,20 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
         // 분기로 자연스럽게 떨어지도록 gCurrentTask만 비운다(이 ISR
         // 자신은 인터럽트 컨텍스트라 여기서 직접 hlt하지 않는다,
         // onTick()의 idle 분기 "return"과 동일한 원칙).
-        gCurrentTask[coreIndex] = nullptr;
+        {
+            RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+            gCurrentTask[coreIndex] = nullptr;
+        }
         // current 자신의 kContextSwitch는 필요하다 - 원래 실행 흐름
         // (이 인터럽트가 끼어든 지점)으로 다시는 돌아오지 않고 idle
         // 스택으로 넘어가야 하기 때문이다.
         kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
         return;
     }
-    gCurrentTask[coreIndex] = next;
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = next;
+    }
     next->state = TaskState::Running;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
@@ -1126,7 +1154,10 @@ void Scheduler::runLoop() {
         // 독립적으로 재개되므로 next 쪽으로 "인터럽트 꺼짐"이 새어
         // 나가지 않는다.
         asm volatile("cli");
-        gCurrentTask[coreIndex] = next;
+        {
+            RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+            gCurrentTask[coreIndex] = next;
+        }
         next->state = TaskState::Running;
         // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - 이 idle
         // 컨텍스트의 스택이 안전하지 않을 수 있다). **SP-83A07867로
@@ -1146,15 +1177,23 @@ void Scheduler::runLoop() {
         // 꺼져 있음)이므로, 아래에서 다시 준비 없이 바로 다음
         // pickNext/전환으로 넘어가도 안전하다 - sti는 "정말 대기할
         // 때"(위 hlt 분기)에만 한다.
-        gCurrentTask[coreIndex] = nullptr;
+        {
+            RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+            gCurrentTask[coreIndex] = nullptr;
+        }
     }
 }
 
+// [SP-9F1DB1D8 §7] 설계자 답변으로 같은 코어 락-프리 절충을 철회 -
+// 이 접근도 예외 없이 읽기 락을 탄다.
 Task* Scheduler::currentTask() {
-    return gCurrentTask[currentCoreIndex()];
+    const uint32_t coreIndex = currentCoreIndex();
+    RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+    return gCurrentTask[coreIndex];
 }
 
 Task* Scheduler::taskOnCore(uint32_t coreIndex) {
+    RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
     return gCurrentTask[coreIndex];
 }
 
@@ -1169,12 +1208,19 @@ void Scheduler::yieldCurrent() {
     // 종류 경쟁과 동일한 이유로 cli를 사용한다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
-    Task* current = gCurrentTask[coreIndex];
+    Task* current;
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+        current = gCurrentTask[coreIndex];
+    }
     if (!current) {
         asm volatile("sti");
         return;  // idle 컨텍스트에서 잘못 호출된 경우 - 할 일 없음
     }
-    gCurrentTask[coreIndex] = nullptr;
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = nullptr;
+    }
     enqueue(coreIndex, current);
     // PN-57CF48DB - idle로 떠나기 전, 아직 current 자신의 안전한
     // 스택 위에 있을 때 CR3를 미리 gBootPml4Phys로 되돌린다(위
@@ -1217,12 +1263,19 @@ void Scheduler::parkCurrent() {
     // 어긋난 상태로 kContextSwitch를 부를 위험을 없앤다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
-    Task* current = gCurrentTask[coreIndex];
+    Task* current;
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+        current = gCurrentTask[coreIndex];
+    }
     if (!current) {
         asm volatile("sti");
         return;  // idle 컨텍스트에서 잘못 호출된 경우 - 할 일 없음
     }
-    gCurrentTask[coreIndex] = nullptr;
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = nullptr;
+    }
     current->state = TaskState::Blocked;
     // yieldCurrent()와의 유일한 차이 - 어느 큐에도 넣지 않는다. 다시
     // 실행되려면 누군가 scheduleImmediate()/enqueue()로 명시적으로
@@ -1253,7 +1306,11 @@ void Scheduler::retireCurrentTask() {
     // 시도할 위험이 있다.
     asm volatile("cli");
     const uint32_t coreIndex = currentCoreIndex();
-    Task* current = gCurrentTask[coreIndex];
+    Task* current;
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+        current = gCurrentTask[coreIndex];
+    }
     if (!current) {
         // idle 컨텍스트에서 잘못 호출된 경우 - 이론상 도달 불가(이
         // 함수는 항상 kTaskFallingToEnd -> kTaskOnFallingToEnd를 거쳐
@@ -1264,7 +1321,10 @@ void Scheduler::retireCurrentTask() {
             asm volatile("hlt");
         }
     }
-    gCurrentTask[coreIndex] = nullptr;
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = nullptr;
+    }
     current->state = TaskState::Zombie;
     // parkCurrent()와 달리 "누군가 깨워주길" 기다리는 게 아니라 다시는
     // 선택되지 않는다 - 이 Task의 커널 스택은 지금 이 kContextSwitch
@@ -1319,7 +1379,11 @@ void Scheduler::enablePreemption() {
 void Scheduler::handleFpuTrap() {
     asm volatile("clts");
     const uint32_t coreIndex = currentCoreIndex();
-    Task* current = gCurrentTask[coreIndex];
+    Task* current;
+    {
+        RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+        current = gCurrentTask[coreIndex];
+    }
     if (!current) {
         return;  // idle 컨텍스트는 FPU/SSE를 사용하지 않는다 - 이론상 도달 불가
     }
