@@ -30,6 +30,8 @@ add_subdirectory(minicore/libs/libcpio)
 add_subdirectory(minicore/libs/libkmm)
 add_subdirectory(minicore/libs/libelf)
 add_subdirectory(minicore/libs/libkcont)
+add_subdirectory(minicore/libs/libutf8)
+add_subdirectory(minicore/libs/libjson)
 add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
@@ -42,6 +44,8 @@ target_link_libraries(minicore.elf PRIVATE
     libcpio
     libkmm
     libelf
+    libutf8
+    libjson
     minicore_libs_x86_64
 )
 
