@@ -540,6 +540,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Scheduler::initCoreIndexForThisCore();
 
     kernel::Scheduler::startTickOnThisCore();
+    // [신규, 2026-09-17, PN-907C5289] AP의 kApMain()과 대칭되는 지점 -
+    // Nmi::stopAllOtherCores()가 아직 기동 안 된 코어를 NMI 대상에서
+    // 제외할 수 있도록 BSP 자신도 "온라인"으로 표시해 둔다.
+    kernel::Smp::markThisCoreOnline();
     kernel::Logger::info("minicore: scheduler tick ready (LAPIC, %xHz, vector=%x)", kernel::kSchedulerTickHz,
                           kernel::kSchedulerTickVector);
 

@@ -18,6 +18,7 @@
 #include "process.h"
 #include "resource_group.h"
 #include "serial.h"
+#include "smp.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
 #include "timer.h"
@@ -1040,7 +1041,14 @@ void Scheduler::onTick(InterruptFrame*) {
             gWatchdogTickCounter = 0;
             const uint32_t cpuCount = Acpi::cpuCount();
             for (uint32_t i = 0; i < cpuCount; ++i) {
-                if (i == gBspCoreIndex || gWatchdogTriggered[i]) {
+                // [수정, 2026-09-17, PN-907C5289 실측 확인] 아직 SIPI
+                // 트램폴린 도중(유효한 IDT 없음)이라 gHeartbeat[i]가
+                // 한 번도 안 늘어난 코어를 "먹통"으로 오판해 NMI를
+                // 보내면 그 코어가 트리플 폴트를 일으킨다 - 기동을
+                // 아직 안 마친 코어는 애초에 감시 대상이 아니므로
+                // Smp::isCoreOnline()으로 걸러낸다(Nmi::stopAllOtherCores()
+                // 에 적용한 것과 동일한 근거/수정).
+                if (i == gBspCoreIndex || gWatchdogTriggered[i] || !Smp::isCoreOnline(i)) {
                     continue;
                 }
                 const uint32_t current = gHeartbeat[i].load();

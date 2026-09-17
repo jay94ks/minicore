@@ -45,6 +45,16 @@ constexpr kernel::uint64_t kApReadyTimeoutTicks = 50;
 
 kernel::AtomicU32 gApStartedCount;
 
+// [신규, 2026-09-17, PN-907C5289] 코어 인덱스별 "온라인" 플래그 -
+// nmi.cpp의 gNmiReason[kAcpiMaxCpus]와 동일한 "코어별 슬롯" 관례.
+// gApStartedCount(단순 카운트)만으로는 Nmi::stopAllOtherCores()가
+// "그 순간 정확히 어느 인덱스들이 이미 기동을 마쳤는지"를 알 수
+// 없다 - AP는 순차 기동이라 실제로는 항상 인덱스 오름차순으로
+// 완료되지만, BSP 자신의 MADT 인덱스가 항상 0이라는 보장이 없어
+// "카운트만큼의 낮은 인덱스가 곧 온라인"이라고 가정하는 대신 실제
+// 인덱스별 상태를 직접 기록한다.
+kernel::AtomicU32 gCoreOnline[kernel::kAcpiMaxCpus];
+
 // ap_trampoline.S의 BSP-AP 핸드오프 스크래치 - Smp::startApCores가
 // SIPI를 보내기 직전에 채운다(순차 기동이라 공유해도 안전하다).
 extern "C" kernel::uint64_t ap_boot_stack_top;
@@ -107,6 +117,7 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     // AsyncReactor::initForThisCore()는 삭제됐다.
 
     gApStartedCount.fetchAdd(1);
+    kernel::Smp::markThisCoreOnline();
 
     // 이 지점부터 이 AP도 자기 코어의 스케줄러 디스패치 루프에
     // 들어간다 - 절대 반환하지 않는다(BSP의 kMain과 동일한 패턴,
@@ -180,6 +191,17 @@ void Smp::startApCores() {
 
 uint32_t Smp::startedCount() {
     return gApStartedCount.load();
+}
+
+void Smp::markThisCoreOnline() {
+    const uint32_t index = Scheduler::currentCoreIndex();
+    if (index < kAcpiMaxCpus) {
+        gCoreOnline[index].store(1);
+    }
+}
+
+bool Smp::isCoreOnline(uint32_t coreIndex) {
+    return coreIndex < kAcpiMaxCpus && gCoreOnline[coreIndex].load() != 0;
 }
 
 }  // namespace kernel

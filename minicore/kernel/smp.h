@@ -26,6 +26,22 @@ public:
 
     // 진단/로그용 - 실제로 기동에 성공한 AP 수(BSP 제외).
     static uint32_t startedCount();
+
+    // [신규, 2026-09-17, PN-907C5289] 이 코어 자신을 "온라인"으로
+    // 표시한다 - BSP는 kmain.cpp가 Scheduler::startTickOnThisCore()
+    // 직후 한 번, AP는 kApMain()이 같은 시점에 한 번 부른다.
+    // Nmi::stopAllOtherCores()가 아직 SIPI 트램폴린 도중(유효한
+    // IDT조차 없는 16/32비트 과도기 상태)인 코어에까지 NMI를 보내면
+    // 그 코어가 트리플 폴트를 일으키는 실측 확인된 버그의 수정
+    // 근거다 - AP는 순차 기동이라(smp.cpp) startApCores()의 대기
+    // 루프 도중에도 이미 기동을 마친 AP들은 정확히 가려낼 수 있어야
+    // 하므로, 단순 카운트가 아니라 코어 인덱스별 상태로 추적한다.
+    static void markThisCoreOnline();
+
+    // targetCoreIndex가 이미 markThisCoreOnline()을 호출했는지 -
+    // Nmi::stopAllOtherCores()가 이 함수로 실제 온라인 코어만 골라
+    // NMI 대상에서 나머지를 제외한다.
+    static bool isCoreOnline(uint32_t coreIndex);
 };
 
 }  // namespace kernel
