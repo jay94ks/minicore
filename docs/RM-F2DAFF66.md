@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T14:39:11.465Z
+  updatedAt: 2026-09-17T14:54:56.334Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -725,6 +725,38 @@ Syscall::wait 파킹 대상에 미도달, 해법 미착수) 두 항목만 남았
   "[해소, 2026-09-16, 재확인]" 절로 정확히 갱신돼 있었음(cross-check
   결과 이 세 문서 중 SP만 최신이었던 셈) - 갭 없음, PL 두 건만 문서
   정정.
+
+- **[신규, 2026-09-17] `PL-FC38956C`(multiboot2+GRUB 부팅) - PL 스윕
+  마지막 항목, 또 다른 낡은 문서 발견**: "이번엔 안 한 것" 절이
+  "CPIO를 실제 initrd 마운트에 연결(PN-71C2B857) - 아직 안 함"이라고
+  적혀 있었으나, 실제로는 그 계획이 2026-09-16에 `completed`(livefs
+  마운트, `/sys/live/initrd.cpio` 노출) - 게다가 그 후속
+  `PN-BC04D3DC`(KernelFsDriver 비동기 인터페이스 마이그레이션)까지
+  완료돼 있었다. 정정 완료 - 유일하게 남은 하위 항목(실제 Open/Read
+  syscall 배선, `PN-ABD23ACE`)은 `SP-2AAD7C8D` §9 착수와 함께 진행
+  예정으로 이미 openly 추적 중. 코드 갭 아님, 문서만 정정.
+
+**[2026-09-17] PL류 문서 스윕 완료** - PL-65C20380/PL-2D149D8F/
+PL-E68894CD/PL-57CF86EF/PL-C8648D4D/PL-21344323/PL-1E247831/
+PL-FC38956C 전부 점검(3건은 문서만 낡아 있던 정정, 나머지는 갭 없음
+확인). 다음 스윕은 DC류 문서(요구분석/결정 문서) 또는 새로
+approved 전환되는 문서 위주로 전환한다.
+
+- **[신규, 2026-09-17] `DC-FB38F86F`(Paging::mapPage 동시성 락 전략
+  결정) - DC류 스윕 첫 사례, 결정→구현 체인 전체 검증**: 설계자가
+  (A) 주소공간별 전용 락 + higher-half 전역 락을 확정한 결정이
+  `PN-90BD044E`로 실제 구현됐는지 코드 대조(`paging.cpp`의
+  `gHigherHalfPagingLock`/`kLockForAddressSpaceOp`/
+  `kMapPageUnlocked` 전부 실재, 재진입 회피까지 설계 그대로) - 갭
+  없음. 그 검증 과정에서 파생된 두 후속 발견도 함께 확인: **①
+  `PN-907C5289`**(SMP4+initrd 시나리오에서 콘솔에 안 보이는 실제
+  Triple Fault - 아직 부팅 안 끝난 AP에 NMI가 도달하는 문제,
+  `Smp::isCoreOnline()` 필터로 96% 감소) **② `PN-3081704A`**(남은
+  4%의 근본 원인 - 두 코어가 동시에 `kPanic()`에 진입해 서로의
+  stop-the-world NMI에 끼어들어 Serial 출력이 섞이는 경합,
+  `kTryClaimFirstPanic()` CAS 래치로 40/40 완전 해소) - 둘 다
+  `panic.cpp`/`paging.cpp`에 실제 구현 확인. 세 계획 모두 completed,
+  결정→구현→실측 검증까지 전 사슬이 정확히 일치하는 좋은 사례.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
