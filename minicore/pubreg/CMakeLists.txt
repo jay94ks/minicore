@@ -12,4 +12,7 @@ set_target_properties(pubreg PROPERTIES
 )
 
 target_link_options(pubreg PRIVATE -T ${MINICORE_USERLAND_LINKER_SCRIPT})
-target_link_libraries(pubreg PRIVATE libmc)
+# libcenv(신규, PN-185406F6 항목4) - 연결/등록 테이블 관리 코드가
+# 컴파일러 생성 memcpy/memset 호출을 필요로 한다(userland/libs/libcenv
+# 참고).
+target_link_libraries(pubreg PRIVATE libmc libcenv)

@@ -21,6 +21,7 @@ add_compile_options(-Wall -Wextra)
 set(MINICORE_USERLAND_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/linker-userland-x86_64.ld)
 
 add_subdirectory(libs/libmc)
+add_subdirectory(libs/libcenv)
 add_subdirectory(tests/userlandtest)
 
 # minicore/init(SP-68182FBD §2.4) - userland/ 밖에 있지만 다른 유저
