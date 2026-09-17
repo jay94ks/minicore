@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T02:12:26.816Z
+  updatedAt: 2026-09-17T02:20:07.749Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -236,6 +236,11 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   read/write/TRIM 등 정확한 시그니처)는 여전히 미정이지만 코드가
   전혀 없는 순수 설계 단계 세부라 별도 PN 등록은 보류(AHCI 실착수
   시 자연히 확정될 항목, RM-23F4B687 §4 취지) - 갭 없음(정정만).
+- **`SP-E35FD36C`(USB 스택)**: xHCI 위주 v1 설계 + 레거시(UHCI/OHCI/
+  EHCI)/SuperSpeed 확장 초안까지 전부 명시적으로 유예 조건과 함께
+  기록돼 있고, 코드가 전혀 없어(devmgr 자식 프로세스로 실행 예정,
+  아직 착수 전) 코드-문서 불일치 자체가 성립하지 않는다 - 교차
+  참조(SP-9DD4F3EA/SP-39F18E30)도 최신 상태와 일치. 갭 없음.
 - **`SP-DE19BB1C`(커널 영역 TLB 샷다운)**: 이 문서 자체가 이미
   `PN-D132A1E9`(§5-1, 유저 영역 확장 - 요청자별 슬롯+수신자별
   Target Pending Mask) 완료를 상세히 기록해 뒀고, `tlb_shootdown.cpp`
