@@ -81,15 +81,38 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
     const kernel::uint64_t entryPoint = self->ring3EntryPoint;
     const kernel::uint64_t userStackTop = self->ring3UserStackTop;
 
-    // 세그먼트 레지스터는 유저 데이터 셀렉터로 미리 맞춰 두고(SS
-    // 자체는 iretq 프레임이 담당), iretq 프레임(SS/RSP/RFLAGS/CS/RIP)
-    // 을 쌓은 뒤 iretq로 실제 특권 레벨 전환을 일으킨다.
+    // 세그먼트 레지스터는 유저 데이터 셀렉터로 먼저 맞춘다(SS 자체는
+    // iretq 프레임이 담당).
     asm volatile(
         "mov $0x1b, %%ax\n\t"
         "mov %%ax, %%ds\n\t"
         "mov %%ax, %%es\n\t"
         "mov %%ax, %%fs\n\t"
         "mov %%ax, %%gs\n\t"
+        :
+        :
+        : "rax", "memory");
+
+    // [신규, 2026-09-18, PN-22E5E9E7 항목7, 실측 수정] `self`는 이
+    // 함수의 유일한 호출부(execImage()의 `thread->init(kEnterRing3,
+    // nullptr)`)가 항상 UserThread에만 거는 entry라 안전하게
+    // 캐스팅할 수 있다(kSyncDebugRegs 등 기존 `static_cast<UserThread*>
+    // (task)` 관례와 동일). **반드시 위 세그먼트 셀렉터 reload
+    // 다음에** 와야 한다 - `mov %%ax, %%fs`(FS 셀렉터 재적재)가 x86_64
+    // 에서도 그 세그먼트의 숨은 base를 GDT 디스크립터 값(평범한 플랫
+    // 데이터 세그먼트라 0)으로 되돌린다는 것을 QEMU 실측으로 처음
+    // 발견했다 - 이 wrmsr을 셀렉터 reload **이전에** 뒀더니 방금 세운
+    // FS_BASE가 즉시 0으로 도로 지워져, ring3 첫 명령(`%fs:0x0` 읽기,
+    // clang이 thread_local 접근에 쓰는 self-pointer 관례)이 cr2=0
+    // 페이지 폴트로 죽었다(TEMP 트레이스로 확인). 이 wrmsr이 없으면
+    // FS_BASE가 이전 커널 TCB(`kSyncCr3OnTaskStart`가 방금 맞춘
+    // kernelFsBase) 값으로 남아 유저 thread_local 접근이 커널 메모리를
+    // 가리키게 된다.
+    kernel::kSyncFsBaseToUser(static_cast<kernel::UserThread*>(self));
+
+    // iretq 프레임(SS/RSP/RFLAGS/CS/RIP)을 쌓은 뒤 iretq로 실제 특권
+    // 레벨 전환을 일으킨다.
+    asm volatile(
         "pushq $0x1b\n\t"
         "pushq %0\n\t"
         "pushq $0x202\n\t"
@@ -98,7 +121,7 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
         "iretq\n\t"
         :
         : "r"(userStackTop), "r"(entryPoint)
-        : "rax", "memory");
+        : "memory");
     __builtin_unreachable();
 }
 

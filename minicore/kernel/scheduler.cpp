@@ -466,25 +466,6 @@ void kSyncDebugRegs(Task* task) {
     asm volatile("mov %0, %%dr7" : : "r"(dr7));
 }
 
-// [신규, 2026-09-18, PN-22E5E9E7 항목3, SP-29D652AA §4.4] kSyncCr3/
-// kSyncFpu/kSyncDebugRegs와 정확히 같은 다섯 지점(SP-83A07867 §3.2가
-// 확립한 "코어 소유가 아니라 Task 소유 레지스터는 디스패치 시점에
-// 동기화" 패턴)에서 호출된다 - FS_BASE(MSR 0xC0000100)는 CR3와 똑같이
-// `kContextSwitch`(콜리세이브+RFLAGS만 저장/복원)도 `iretq`(InterruptFrame)
-// 도 건드리지 않는 순수 코어 레지스터라, Task 전환마다 이 훅이 명시적으로
-// 다시 실어야 진짜 컴파일러 `thread_local`(%fs-상대 접근, task.cpp의
-// `Task::init()`이 만든 `kernelFsBase` TCB 블록)이 "지금 실행 중인
-// Task 것"을 가리킨다. kSyncCr3의 skip-if-same 최적화(TLB flush 회피가
-// 목적)는 여기 해당 없다 - wrmsr(FS_BASE)는 TLB를 건드리지 않아 매번
-// 무조건 다시 쓴다(kSyncDebugRegs와 동일한 판단, 정확성 우선).
-void kSyncFsBase(Task* task) {
-    constexpr uint32_t kIa32FsBaseMsr = 0xC0000100u;
-    const uint64_t target = task->kernelFsBase;
-    const uint32_t lo = static_cast<uint32_t>(target);
-    const uint32_t hi = static_cast<uint32_t>(target >> 32);
-    asm volatile("wrmsr" : : "c"(kIa32FsBaseMsr), "a"(lo), "d"(hi) : "memory");
-}
-
 // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §3) - excludeCore를
 // 뺀 나머지 코어 중 gNormalQueues 근사 길이가 가장 긴 코어를 O(코어
 // 수) 선형 스캔으로 찾는다(Pull이 "훔쳐올 대상"을 고를 때 쓴다).
@@ -937,6 +918,51 @@ public:
 SetTaskWeightHandler gSetTaskWeightHandler;
 
 }  // namespace
+
+// [신규, 2026-09-18, PN-22E5E9E7 항목3, SP-29D652AA §4.4] kSyncCr3/
+// kSyncFpu/kSyncDebugRegs와 정확히 같은 다섯 지점(SP-83A07867 §3.2가
+// 확립한 "코어 소유가 아니라 Task 소유 레지스터는 디스패치 시점에
+// 동기화" 패턴)에서 호출된다 - FS_BASE(MSR 0xC0000100)는 CR3와 똑같이
+// `kContextSwitch`(콜리세이브+RFLAGS만 저장/복원)도 `iretq`(InterruptFrame)
+// 도 건드리지 않는 순수 코어 레지스터라, Task 전환마다 이 훅이 명시적으로
+// 다시 실어야 진짜 컴파일러 `thread_local`(%fs-상대 접근, task.cpp의
+// `Task::init()`이 만든 `kernelFsBase` TCB 블록)이 "지금 실행 중인
+// Task 것"을 가리킨다. kSyncCr3의 skip-if-same 최적화(TLB flush 회피가
+// 목적)는 여기 해당 없다 - wrmsr(FS_BASE)는 TLB를 건드리지 않아 매번
+// 무조건 다시 쓴다(kSyncDebugRegs와 동일한 판단, 정확성 우선).
+//
+// [갱신, 2026-09-18, PN-22E5E9E7 항목7] 익명 네임스페이스(이 파일
+// 내부 전용)에서 꺼내 `kernel::` 진짜 심볼로 승격 - `idt.cpp`의
+// `kDispatchSyscallVerb`(syscall/int 0x80 공용 디스패치)가 ring3에서
+// 진입한 직후 FS_BASE를 이 Task 자신의 커널 TCB로 되돌리는 데 이
+// 함수를 그대로 재사용한다(scheduler.h에 선언 추가).
+void kSyncFsBase(Task* task) {
+    constexpr uint32_t kIa32FsBaseMsr = 0xC0000100u;
+    const uint64_t target = task->kernelFsBase;
+    const uint32_t lo = static_cast<uint32_t>(target);
+    const uint32_t hi = static_cast<uint32_t>(target >> 32);
+    asm volatile("wrmsr" : : "c"(kIa32FsBaseMsr), "a"(lo), "d"(hi) : "memory");
+}
+
+// [신규, 2026-09-18, PN-22E5E9E7 항목7, SP-29D652AA §5.3] 위 kSyncFsBase
+// 의 유저(ring3) 대응 - 이 UserThread가 실제로 ring3 코드를 실행하려는
+// 순간(kEnterRing3의 최초 진입, syscall/int 0x80 처리를 마치고 ring3로
+// 돌아가기 직전)에 FS_BASE를 그 스레드 자신의 유저 thread_local
+// 인스턴스(`UserThread::userFsBase`, 항목6)로 되돌린다. kSyncFsBase와
+// 달리 다섯 디스패치 지점이 아니라 "커널→유저 전환" 지점 전용이다 -
+// Task 디스패치(onTick 등)는 여전히 kSyncFsBase만 부른다(그 시점엔
+// 아직 ring0이므로 커널 TCB가 맞다) - 이 함수는 그 이후 실제로 ring3에
+// 진입/복귀하는 좁은 지점에서만 추가로 불린다. `hasTlsTemplate`이
+// false인 v1 유저 바이너리 전부는 `userFsBase`가 0으로 남아 있어
+// 그대로 wrmsr(0)이 실리지만, 그 바이너리는 애초에 %fs-상대 접근을
+// 컴파일하지 않으므로 무해하다.
+void kSyncFsBaseToUser(UserThread* thread) {
+    constexpr uint32_t kIa32FsBaseMsr = 0xC0000100u;
+    const uint64_t target = thread->userFsBase;
+    const uint32_t lo = static_cast<uint32_t>(target);
+    const uint32_t hi = static_cast<uint32_t>(target >> 32);
+    asm volatile("wrmsr" : : "c"(kIa32FsBaseMsr), "a"(lo), "d"(hi) : "memory");
+}
 
 void Scheduler::init() {
     gCoreCount = Acpi::cpuCount();

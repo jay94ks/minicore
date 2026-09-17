@@ -81,6 +81,20 @@ private:
     AtomicU32 _approxLength;
 };
 
+// [신규, 2026-09-18, PN-22E5E9E7 항목3/7] Task 디스패치 시점마다
+// FS_BASE를 이 Task 자신의 커널 TCB(`Task::kernelFsBase`)로 되돌린다 -
+// kSyncCr3/kSyncFpu/kSyncDebugRegs와 정확히 같은 다섯 지점(scheduler.cpp
+// 참고)에서, 그리고 `idt.cpp`의 `kDispatchSyscallVerb`가 syscall/
+// int 0x80 진입 직후에도 재사용한다. 정의는 scheduler.cpp.
+void kSyncFsBase(Task* task);
+
+// [신규, 2026-09-18, PN-22E5E9E7 항목7] 위 kSyncFsBase의 유저(ring3)
+// 대응 - `process.cpp`의 `kEnterRing3`(최초 ring3 진입)와 `idt.cpp`의
+// `kDispatchSyscallVerb`(syscall/int 0x80 처리를 마치고 ring3로 복귀
+// 직전)가 FS_BASE를 `UserThread::userFsBase`(항목6)로 되돌리는 데
+// 쓴다. 정의는 scheduler.cpp.
+void kSyncFsBaseToUser(UserThread* thread);
+
 // 코어별 TaskQueue를 관리한다(DS-D4E5C451 "코어별 개별 큐"). Acpi::init()
 // 이후에 init()을 호출해야 한다(코어 수를 Acpi::cpuCount()에서 얻음).
 // 아직 이 클래스를 실제로 소비하는 디스패치 루프는 없다(LAPIC 틱

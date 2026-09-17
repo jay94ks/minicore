@@ -595,7 +595,15 @@ namespace kernel {
 // 디스패치. **PN-124C105B("syscall 명령 경로") 신설 시 int 0x80
 // 핸들러 하나에만 있던 이 로직을 그대로 옥겨 온 것뿐** - 동작 자체는
 // 전혀 바뀌지 않았다.
-uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
+// [신규, 2026-09-18, PN-22E5E9E7 항목7] kDispatchSyscallVerb의 실제
+// 스위치 로직 - 원래 이름 그대로였던 것을 FS_BASE 진입/반환 스왑을
+// 감싸기 위해 내부 헬퍼로 뺐다(아래 kDispatchSyscallVerb 참고). 여러
+// return 지점(각 verb 분기)이 있어 "돌아가기 직전 매번 되돌린다"는
+// 방식은 하나만 빠뜨려도 조용히 깨지는 함정이라, 단일 호출 지점을
+// 감싸는 래퍼 하나로 통일했다 - self-terminate(kSyscallVerbSubmit
+// 분기의 sti+hlt 루프)만 유일하게 이 함수 밖으로 반환하지 않는다.
+namespace {
+uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1) {
     // [PN-71E50394 항목3 나머지] 어떤 verb든 실제로 처리하기 전에
     // 먼저 체크포인트를 통과해야 한다 - Kill/Terminate가 걸려 있으면
     // 이 호출에서 반환하지 않는다(아래 kCheckSignalCheckpoint 참고).
@@ -663,6 +671,33 @@ uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
         default:
             return 0;  // 알 수 없는 verb - 실패로 취급(v1, 새 DC 불필요 수준)
     }
+}
+
+}  // namespace
+
+// [신규, 2026-09-18, PN-22E5E9E7 항목7, SP-29D652AA §5.3] syscall.h
+// 선언 그대로의 공개 진입점 - int 0x80(아래 kHandleSyscallTrap)과
+// `syscall` 명령(syscall_fastpath.cpp) 양쪽이 여전히 이 이름으로
+// 부른다. 실제 진입 시점 FS_BASE는 아직 이 UserThread의 ring3 값
+// (`UserThread::userFsBase`)이다 - swapgs/syscall 진입도 int 게이트
+// 진입도 FS_BASE를 안 건드리기 때문(syscall_entry.S 문서 주석 참고) -
+// 그래서 위 kDispatchSyscallVerbBody가 실행되기 전에 먼저 이 Task
+// 자신의 커널 TCB(`kSyncFsBase`, 항목3에서 Task 디스패치용으로 만든
+// 그 함수를 여기서도 재사용)로 되돌리고, 처리가 끝나 ring3로 돌아가기
+// 직전에 다시 유저 값으로 되돌린다(`kSyncFsBaseToUser`, 항목6이 만든
+// `userFsBase`를 소비하는 첫 지점). self-terminate(kSyscallVerbSubmit
+// 분기)만 이 함수 밖으로 반환하지 않아 유저 복원이 실행되지 않는데,
+// 그 Task는 어차피 다시는 ring3로 안 돌아가므로 정확히 의도한 동작이다.
+uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
+    Task* current = Scheduler::currentTask();
+    if (current) {
+        kSyncFsBase(current);
+    }
+    const uint64_t result = kDispatchSyscallVerbBody(verb, arg0, arg1);
+    if (current && current->isUserLevel) {
+        kSyncFsBaseToUser(static_cast<UserThread*>(current));
+    }
+    return result;
 }
 
 }  // namespace kernel
