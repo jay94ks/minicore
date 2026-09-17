@@ -7,6 +7,7 @@
 #include "logger.h"
 #include "nmi.h"
 #include "paging.h"
+#include "panic.h"
 #include "process.h"
 #include "scheduler.h"
 #include "serial.h"
@@ -416,6 +417,21 @@ void kPanic(kernel::InterruptFrame* frame) {
         // 위 kHandleNmi()가 자체적으로 처리(정지든 계속이든)를 끝낸다.
         kHandleNmi(frame);
         return;
+    }
+
+    // [PN-3081704A] "최초 1회만" 래치 - panic.cpp의 kPanic(const char*)
+    // 와 공유한다. 서로 다른 코어가 거의 동시에 각자 진짜 패닉을
+    // 발견하면(예: 서로 다른 essential 서비스가 비슷한 시점에 죽음)
+    // 가장 먼저 도달한 쪽만 실제로 진행하고, 나머지는 즉시 cli 후
+    // 조용히 멈춘다 - 먼저 패닉한 코어가 보낼 stop-the-world NMI에
+    // 자신이 한창 진행 중이던 로그 출력/NMI 발신 도중 끼어드는 경합을
+    // 막는다(실측 확인, PN-907C5289 - 두 PANIC 메시지가 문자 단위로
+    // 뒤섞인 로그).
+    if (!kernel::kTryClaimFirstPanic()) {
+        asm volatile("cli");
+        for (;;) {
+            asm volatile("hlt");
+        }
     }
 
     // [SP-677210E6 "디버그 강제 정지(stop the world)"] 이 코어가 진짜로
