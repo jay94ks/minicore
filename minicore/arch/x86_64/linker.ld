@@ -93,6 +93,26 @@ SECTIONS
         *(.data .data.*)
     } :kdata
 
+    /* [신규, 2026-09-17, x86_64-elf-gcc 크로스컴파일 툴체인 교체(PN-22E5E9E7
+     * 대응) 중 실측 발견] 전역 C++ 생성자(.init_array) - 지금까지 clang은
+     * self-참조 포인터 초기화(예: libkcont::Node의 `prev = this;`)를
+     * 정적 재배치(non-PIE라 링크 타임에 절대주소로 확정 가능)로 처리해
+     * .init_array 콜백 자체가 아예 생기지 않았지만, GCC는 같은 패턴을
+     * "동적 초기화가 필요함"으로 판단해 .init_array 항목을 만든다 - 이
+     * 커널이 지금까지 .init_array를 전혀 실행한 적이 없어서(부팅 시퀀스
+     * 어디에도 순회 코드가 없었음) 그 항목들이 그냥 방치돼 해당 전역
+     * 객체가 초기화되지 않은 채로(.bss 그대로 0) 남을 위험이 있었다.
+     * 링커 스크립트에 출력 섹션 자체가 없었던 게 진짜 원인 - 이제 명시적으로
+     * 만들고, kmain.cpp가 부팅 극초반(다른 어떤 코드보다도 먼저) 순회해
+     * 호출한다(kRunGlobalConstructors). */
+    .init_array ALIGN(8) : AT(ADDR(.init_array) - KERNEL_VMA)
+    {
+        __init_array_start = .;
+        KEEP(*(SORT_BY_INIT_PRIORITY(.init_array.*)))
+        KEEP(*(.init_array))
+        __init_array_end = .;
+    } :kdata
+
     .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VMA)
     {
         __bss_start = .;

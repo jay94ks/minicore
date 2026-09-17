@@ -402,7 +402,24 @@ void kSpawnServiceProcesses() {
 // (HvmMemmapEntry 배열 + 물리주소)로 통일하고 나면, 그 뒤부터는 완전히
 // 프로토콜 무관 공통 경로다. 이 시점에는 커널(ring 0)만 실행 중이다 -
 // devmgr 등 "커널 서비스"는 아직 존재하지 않는다(SP-8B6B8D25 §2-A).
+// [신규, 2026-09-17, x86_64-elf-gcc 크로스컴파일 툴체인 교체 중 실측
+// 발견] 전역 C++ 생성자(.init_array) 순회 - linker.ld의 .init_array
+// 출력 섹션 문서 주석 참고. BSP에서 다른 어떤 코드보다도 먼저 정확히
+// 한 번만 호출해야 한다(AP는 절대 다시 부르면 안 됨 - 전역 객체를
+// 두 번 생성하면 안 되므로).
+extern "C" void (*__init_array_start[])();
+extern "C" void (*__init_array_end[])();
+
+namespace {
+void kRunGlobalConstructors() {
+    for (void (**ctor)() = __init_array_start; ctor != __init_array_end; ++ctor) {
+        (*ctor)();
+    }
+}
+}  // namespace
+
 extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProtocol) {
+    kRunGlobalConstructors();
     kernel::Serial::init();
     kernel::Logger::init();
 
