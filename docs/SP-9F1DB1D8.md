@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9F1DB1D8
-  status: review
-  updatedAt: 2026-09-17T02:10:57.597Z
+  status: approved
+  updatedAt: 2026-09-17T02:18:05.726Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -148,9 +148,14 @@ class RwSpinlockWriteGuard { /* lockWrite/unlockWrite RAII */ };
 Task* gCurrentTask[kMaxCores] = {};
 RwSpinlock gCurrentTaskLock[kMaxCores];  // 슬롯마다 하나 - 코어 간 경합 자체가 없으므로 전역 락 하나로 묶을 이유 없음
 
-// 동일 코어 핫패스 - 변경 없음, 락 없음(§1 결론 - 애초에 레이스가 아님)
+// [갱신, 2026-09-17, §7 QU-E847DB03] 설계자 답변이 이 절충을
+// 명시적으로 확인해 주지 않아 보수적으로 철회 - currentTask()도
+// 예외 없이 읽기 락을 탄다(§1의 "레이스가 아니다" 논증 자체는
+// 유효하지만, 확인 안 된 최적화를 임의로 유지하지 않는다).
 Task* Scheduler::currentTask() {
-    return gCurrentTask[currentCoreIndex()];
+    const uint32_t coreIndex = currentCoreIndex();
+    RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
+    return gCurrentTask[coreIndex];
 }
 
 // 크로스코어, 드묾 - 이제 보호됨
@@ -221,10 +226,10 @@ Task* Scheduler::taskOnCore(uint32_t coreIndex) {
   `RwSpinlockWriteGuard` 추가.
 - `scheduler.cpp`: `gCurrentTaskLock[kMaxCores]` 추가, 쓰기 4곳
   (`onTick`/`onForcedMigration`×2/`runLoop`×2/`yieldCurrent`/
-  `parkCurrent`, 정확한 개수는 착수 시 재확인) + 읽기 **3곳**
-  (`taskOnCore`/`requestForcedMigration`/`kWakeCoreIfIdle` - 세
-  번째는 minicore-f8 검토로 추가 발견, §1 참고)에 가드 삽입.
-  `currentTask()` 자체는 변경 없음.
+  `parkCurrent`, 정확한 개수는 착수 시 재확인) + 읽기 **4곳**
+  (`currentTask`/`taskOnCore`/`requestForcedMigration`/
+  `kWakeCoreIfIdle`)에 가드 삽입 - **[갱신, 2026-09-17, §7]**
+  `currentTask()`도 예외 없이 포함(같은 코어 락-프리 절충 철회).
 - 기존 `cli` 임계구역과 겹치는 쓰기 지점들은 **`cli` 구간 안에서
   락을 잡고 푼다** - `cli`가 이미 그 코어의 인터럽트를 막고 있어
   락 자체가 실제로 경합할 일은 없지만(라이터는 코어당 하나뿐),
@@ -234,28 +239,54 @@ Task* Scheduler::taskOnCore(uint32_t coreIndex) {
   착수 시 QEMU 회귀로 반드시 재확인한다(단순 원자 연산 2회 수준이라
   낙관적으로는 무해할 것으로 예상).
 
-## 7. [열린 확인 — minicore-f8/설계자] 이 스케치에 대한 질문
+## 7. [해소, 2026-09-17, QU-E847DB03] 답변 및 설계 갱신
 
-1. §3의 "동일 코어 읽기는 락-프리로 남긴다" 절충이 QU 답변의
-   "쓰는 동안에만 lock"이라는 문구를 문자 그대로 지키면서도 정신을
-   왜곡하지 않는 해석인지 - 아니면 모든 읽기도 락을 타야 한다는
-   뜻이었는지 확인 필요.
-2. §5에서 기각한 "AtomicPtr로 치환, 락 자체를 없앰" 대안이 사실
-   더 간단한데, QU가 "RW-lock을 설계"하라고 명시한 이상 이 문서는
-   RW-lock 쪽으로 진행했다 - 원자 변수 치환으로 충분하다고 판단되면
-   그쪽으로 방향을 바꿔도 되는지.
-3. §0에서 밝힌 대로 이 설계는 PN-5BBD4301류(onExec() currentTask()
-   오용) 재발 자체를 막지 못한다 - 그 문제는 여전히 미해결로 남는데,
-   이번 QU로 그 문제 자체를 종결 처리해도 되는지, 아니면 별도로
-   다시 다뤄야 하는지.
+**설계자 답변**: "1. lock 카운팅 자체를 lockRead, lockWrite로 해서,
+읽기 락이 걸리면 쓰기가 대기하고, 쓰기 락이 걸리면 읽기가
+대기하게 만들되, 같은 read끼리는 카운터만 증분되게 만들고, write는
+배타적 락으로 유지해. 2. onExec() 안에서 currentTask() 오용문제는
+spinlock이 아니라, 락을 소유한 task가 누구인지, core가 누구인지를
+함께 관리하여 여러번 호출해도 안전한 구현을 만드는게 맞을것 같네."
+
+**질문1(동일 코어 락-프리 절충) 판정**: 답변은 표준 RW-lock의
+일반적 동작(읽기끼리는 카운터만, 쓰기는 배타적)을 재확인했을 뿐,
+§3이 제안한 "동일 코어는 애초에 락 자체를 생략" 절충을 명시적으로
+승인하지도 거부하지도 않았다 - minicore-f8도 같은 결론(모호함).
+**보수적으로 해석해 §3의 절충(예외)을 철회하고, `currentTask()`를
+포함한 모든 접근을 예외 없이 `RwSpinlock`을 거치도록 갱신한다**
+(아래 §2/§6 갱신) - CLAUDE.md 규칙 4 정신상, 명시적으로 확인 안 된
+최적화를 계속 우겨넣지 않는다. §3의 논증 자체(같은 코어 접근은
+레이스가 아니다)는 사실로서는 여전히 유효하므로 근거 기록으로만
+남겨 둔다 - 만약 이 균일 적용이 실측으로 핫패스에 유의미한
+오버헤드를 낸다고 나중에 측정되면, 그 실측 데이터를 들고 다시
+질의해 §3 절충의 재도입을 요청할 수 있다(지금은 추측만으로 재질의
+하지 않는다).
+
+**질문2(PN-5BBD4301류 재발 방지) 판정**: 답변이 명확하다 - 단순
+`RwSpinlock`으로는 부족하고, **"락을 소유한 task/core를 함께
+추적해 여러 번 호출해도 안전한" 새 프리미티브**가 필요하다는
+뜻으로 읽힌다. 이건 이 문서(§2의 `RwSpinlock`)로 끝나는 게 아니라
+**별도의 새 설계 작업**이다 - `RwSpinlock`이 "동시 접근으로부터
+값을 보호"하는 것과 별개로, "지금 이 호출이 의미론적으로 올바른
+context에서 이뤄지는지"(소유자 추적)까지 검증하는 다른 층위의
+문제다. **PN-C536F352로 분리 등록**(task/core 소유자
+추적형 접근자 설계) - 이 문서(SP-9F1DB1D8)는 §2의
+`RwSpinlock` 메커니즘만 마무리하고, 소유자 추적 설계는 그 계획이
+별도로 다룬다. 우선순위는 낮음(PN-CE6A04AB 보안 취약점이 더
+급함 - minicore-f8/이 세션 합의, 2026-09-17).
 
 ## 8. 이 문서가 확정 짓는 것 / 안 짓는 것
 
-- **제안(비판적 검토 대기)**: §2의 `RwSpinlock` 설계와 gCurrentTask
-  슬롯별 크로스코어 전용 적용.
+- **확정(§7, QU-E847DB03 답변 반영)**: §2의 `RwSpinlock` 설계 -
+  `currentTask()` 포함 모든 gCurrentTask 접근에 예외 없이 적용.
 - **실측으로 확정**: §1의 접근부 전수 조사(쓰기 전부 동일 코어,
-  진짜 레이스는 크로스코어 읽기 3곳 - `taskOnCore`/
-  `requestForcedMigration`/`kWakeCoreIfIdle`).
-- **확정 안 함**: §7의 세 질문 - 특히 "동일 코어 락-프리 절충이
-  맞는 해석인지"는 minicore-f8/설계자 확인 전엔 착수하지 않는다.
+  읽기는 4곳 - `currentTask`/`taskOnCore`/`requestForcedMigration`/
+  `kWakeCoreIfIdle`).
+- **이 문서 범위 밖으로 분리**: PN-5BBD4301류(onExec() currentTask()
+  오용) 재발 방지는 `RwSpinlock`이 아니라 별도의 "task/core 소유자
+  추적형 접근자" 설계가 필요하다는 게 설계자 답변(§7) - **PN-C536F352**
+  로 분리 등록. 착수 우선순위는 PN-CE6A04AB(Channel IPC 보안
+  취약점)보다 낮다.
+- **착수 가능**: §2/§6이 이제 확정됐으므로 실제 구현(PN-D3597800)은
+  착수 가능 상태 - 다만 PN-CE6A04AB가 우선.
 
