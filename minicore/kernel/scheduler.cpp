@@ -1071,6 +1071,40 @@ void Scheduler::onTick(InterruptFrame*) {
 
     Task* next = pickNext(coreIndex);
     if (!next) {
+        // [수정, 2026-09-17, PN-9A5C0FC2 실측 발견] `current`가 Zombie면
+        // 그냥 return하지 않는다 - Zombie는 `kTaskOnFallingToEnd()`가
+        // self-terminate/Kill/폴트 종료 지점에서 표시해 둔 뒤 자기
+        // 자신의 커널 스택 위에서 "sti; for(;;) hlt;"를 영원히 도는
+        // 상태(idt.cpp `kDispatchSyscallVerb`/`kCheckSignalCheckpoint`/
+        // `kTerminateFaultingUserTask` 전부 동일 패턴) - 이 Task를 이
+        // 자리에서 실제로 몰아내는 유일한 방법은 **다른 Task로의
+        // task-to-task 직접 전환뿐**이다(아래 Zombie 스킵 분기가
+        // 그 전환을 담당). 그런데 마침 이 순간 이 코어에 대신 돌릴
+        // Task가 하나도 없으면(SMP에서 Pull 로드밸런싱이 원래 이
+        // 코어 몫이었던 Task를 다른 코어로 훔쳐가 버린 경우 등)
+        // 이 Zombie는 **영원히** 이 코어를 점유한 채 hlt만 반복하고,
+        // 이 코어는 다시는 `runLoop()`의 idle 분기(`AsyncReactor::
+        // drainOnce()` 포함)로 돌아가지 못한다 - self-terminate가
+        // 제출해 둔 정리용 AsyncTask(예: "essential 서비스 사망"
+        // 판정)조차 리액터가 못 돌아 영원히 처리되지 않는 실측
+        // 확인된 결함(SMP 2코어 이상에서 100% 재현, 단일 코어는
+        // 이 코어의 큐가 절대 안 비므로 우연히 안 터졌을 뿐). 그래서
+        // Zombie일 때만 예외적으로 `onForcedMigration()`의 idle
+        // 전환과 동일한 방식으로 이 자리에서 강제로 idle 컨텍스트로
+        // 넘긴다 - 그래야 이 코어가 다시 `pickNext`/`drainOnce`를
+        // 돌 기회를 얻는다. Zombie가 아닌 보통의 "그냥 할 일이
+        // 없을 뿐인" Task는 여전히 그대로 계속 실행한다(불필요한
+        // 컨텍스트 전환 방지, 기존 동작 그대로).
+        if (current->state == TaskState::Zombie) {
+            {
+                RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+                gCurrentTask[coreIndex] = nullptr;
+            }
+            kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+            // Zombie는 다시 깨어나 이 지점으로 돌아오지 않는다(아무도
+            // 이 savedRsp로 kContextSwitch하지 않음) - 방어적으로만.
+            return;
+        }
         return;  // 대기 중인 다른 Task 없음 - 그대로 계속 실행(타임퀵텀 소진 안 함)
     }
 
