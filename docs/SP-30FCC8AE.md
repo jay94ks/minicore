@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-30FCC8AE
   status: review
-  updatedAt: 2026-09-17T04:33:57.305Z
+  updatedAt: 2026-09-17T04:40:01.793Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -345,11 +345,23 @@ authmgr 전용이 아니라 **범용 Key-Value DB 라이브러리**로 설계하
    실제 양 당사자는 유저 프로세스인" 프로토콜(예: `pubreg`의
    tool 등록/조회 - 등록자/조회자 모두 임의 유저 프로세스, `SP-CCACB192`
    `libjson` 채택 이미 확정)과는 무관하다 - 서로 다른 관계라 충돌
-   아님. **열린 질문(결정 안 함)**: `SP-00CA7175` Tier B처럼 이미
-   구현된 커널-서비스 프로토콜(raw struct 직접 사용)을 `libkproto`
-   등장 이후 소급 리팩터링할지는 이 문서가 결정하지 않는다 - 별도
-   판단 필요(과설계/불필요한 리스크 가능성도 있어 임의로 정하지
-   않음, RM-23F4B687 §4).
+   아님.
+
+   **[정정, 2026-09-17, 설계자 의견] `libkproto`와 이 문서의 관계 -
+   질문의 방향 자체가 잘못됐었다**: "이 문서가 정하는 것은 `libkproto`
+   (응용 계층 라이브러리)의 `부모`격이야. 저 `부모`격 구현이 없으면
+   `kproto` 라이브러리가 존재하는 의미가 없어" - `SP-00CA7175` Tier B는
+   이 관계와 무관하다(소급 리팩터링 여부를 저울질할 비교 대상이
+   애초에 아니었음). `libkproto`는 authmgr의 이 프로토콜(§1-D,
+   Request/Response/Notification + discriminator)을 실제로 구현한
+   뒤 그걸 일반화해 뽑아내는 라이브러리다 - **부모격인 이 프로토콜
+   구현이 먼저 있어야 `libkproto` 자체가 존재할 이유가 생긴다**.
+   즉 착수 순서는 "authmgr 프로토콜(이 문서 §1-D) 구현 → 그 구현을
+   일반화해 `libkproto`로 뽑아냄"이지, "이미 있는 Tier B와 새로
+   생길 authmgr 프로토콜 두 실사용처를 비교해 공통점을 찾는" 방향이
+   아니다. Tier B를 나중에 이 라이브러리로 갈아탈지는 이 부모-자식
+   관계와 무관한 별개의(그리고 지금 답할 필요 없는) 질문 - 착수 시
+   판단은 `PN-24A2B6F5`에 정리.
 
 ## 2. 권한 비트 - `Permission`(재사용 가능한 범용 타입)
 

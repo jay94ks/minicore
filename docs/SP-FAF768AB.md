@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-FAF768AB
   status: approved
-  updatedAt: 2026-09-17T07:50:25.947Z
+  updatedAt: 2026-09-17T08:31:49.844Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -185,6 +185,23 @@ struct Node {
 되고, 한 `T`가 서로 다른 리스트 두 개에 동시에 속해야 하는 경우
 (예: 전역 프로세스 목록 + 그룹별 목록)도 `Node` 멤버를 두 개 두는
 것만으로 자연스럽게 지원된다(다중 상속/vtable 문제 없음).
+
+**[정정, 2026-09-17, PN-73E61BD1 착수 세션 실측 발견] `Node`(또는
+`RbNode`/`LockFreeNode` 등 이 문서의 다른 침습적 링크)를 값(value)
+단위로 통째로 대입/스왑/복사하는 컨테이너의 원소로는 쓰면 안 된다** -
+`T`가 고정 배열의 슬롯처럼 `T tmp = arr[i]; arr[i] = arr[j]; ...`류
+memberwise 대입을 겪으면, `Node`의 self-reference 불변조건(빈
+상태에서 `prev`/`next`가 자기 자신을 가리킴, §1)이 그 대입 순간
+깨진다 - 복사된 포인터가 여전히 "예전 주소"(스왑 전 슬롯 또는 사라진
+임시 객체)를 가리키게 되기 때문이다. 실제로 `InterruptSubscriber`
+(고정 배열 슬롯, 우선순위 정렬 시 `kSortSubscribers()`가 슬롯 전체를
+3-way swap)에 `Queue<AsyncTask, Traits>`를 적용하려다 이 함정을
+발견해 착수를 보류했다(`PN-73E61BD1` 항목2 정정 기록 참고) - **포인터/
+인덱스로 참조되고 그 자리(슬롯) 자체는 절대 값으로 복사되지 않는
+대상**(슬랩에서 개별 할당된 노드, 배열이어도 원소가 다른 곳에서
+포인터로만 다뤄지는 경우)에만 침습적 `Node`류를 쓴다 - 값 의미론이
+필요한 슬롯에는 기존처럼 포인터/인덱스 기반(`AtomicPtr` 등) 구현을
+유지한다.
 
 ## 2. `List<T>` - 침습적 이중 연결 리스트 (기본, zero-alloc)
 

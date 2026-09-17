@@ -2,7 +2,12 @@
 
 #include "idt.h"
 #include "interrupt_frame.h"
+#include "libkenv/mem.h"
+#include "libkmm/slab.h"
+#include "logger.h"
+#include "paging.h"
 #include "process.h"
+#include "resource_group.h"
 #include "scheduler.h"
 
 namespace kernel {
@@ -203,6 +208,213 @@ public:
 
 DebugSetBreakpointHandler gDebugSetBreakpointHandler;
 
+// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615 항목5] DebugContinue -
+// 정지된 대상을 Blocked에서 다시 Ready로. 레지스터 상태를 전혀
+// 건드리지 않으므로(그건 GetRegisters/SetRegisters의 몫이자 아직
+// 미해결 설계 자리, debug_session.h 상단 주석 참고) DebugSetBreakpoint
+// 와 동일한 권한 검증만 거치면 구현 가능하다.
+class DebugContinueHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugContinueArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.pausedByDebugger) {
+            // 정지된 적이 없거나 이미 재개됨 - InvalidState가 없는 이
+            // 코드베이스 관례대로 NotFound로 대체(§6/DebugSetBreakpoint
+            // 문서 주석과 동일한 이유).
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        // [SP-245D130B §9-4 교차 기록, ResourceGroup::thaw()와 대칭]
+        // pausedByDebugger는 항상 내려놓지만(디버거가 정지를 풀기로
+        // 결정했으므로), 그룹이 아직 frozen이면 실제로 깨우지 않는다 -
+        // frozenByGroup이 이미 서 있어(kCheckAndMarkFrozen) 나중에
+        // ResourceGroup::thaw()가 대신 깨운다.
+        target->debugSession.pausedByDebugger = false;
+        if (target->mainThread && !(target->group && target->group->frozen)) {
+            Scheduler::enqueue(Scheduler::currentCoreIndex(), target->mainThread);
+        }
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugContinueHandler gDebugContinueHandler;
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615 항목6] 디버기의
+// [pageBase, pageBase+4096) 구간 하나를 Paging::translatePage()로
+// 직접 물리 프레임을 찾아 direct map 경유로 읽거나 쓴다(대행 복사 -
+// 디버기 주소공간을 디버거 쪽에 매핑하지 않음, §3.5 그대로) - 여러
+// 페이지에 걸친 [addr, addr+length) 구간은 호출부가 페이지 경계마다
+// 나눠 반복 호출한다. 매핑 안 된 페이지를 만나면 false(이미 복사된
+// 앞부분은 되돌리지 않음 - 호출부가 어차피 에러로 실패 보고).
+bool kCopyDebuggeeMemory(uint64_t targetPml4Phys, uint64_t addr, uint64_t length, uint8_t* kernelBuf,
+                          bool fromDebuggee) {
+    uint64_t remaining = length;
+    uint64_t cur = addr;
+    uint8_t* buf = kernelBuf;
+    while (remaining > 0) {
+        const uint64_t pageBase = cur & ~0xFFFULL;
+        const uint64_t pageOffset = cur - pageBase;
+        uint64_t chunk = 4096ULL - pageOffset;
+        if (chunk > remaining) {
+            chunk = remaining;
+        }
+        const uint64_t phys = Paging::translatePage(pageBase, targetPml4Phys);
+        if (!phys) {
+            return false;
+        }
+        uint8_t* kernelPagePtr = reinterpret_cast<uint8_t*>(kPhysToVirt(phys)) + pageOffset;
+        if (fromDebuggee) {
+            memcpy(buf, kernelPagePtr, chunk);
+        } else {
+            memcpy(kernelPagePtr, buf, chunk);
+        }
+        buf += chunk;
+        cur += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615 항목6] DebugReadMemory.
+class DebugReadMemoryHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugReadMemoryArgs*>(argsRaw);
+
+        // 디버거 자신의 출력 버퍼 검증 - 기본 pml4Phys(현재 CR3)가
+        // 곧 호출자 자신의 주소공간이라는 이 코드베이스 전역 관례
+        // (paging.h의 isUserRangeValid 문서 주석 그대로).
+        if (!Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->out), args->length)) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+
+        if (args->length > 0) {
+            if (!Paging::isUserRangeValid(args->address, args->length, target->pml4Phys)) {
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+            if (!kCopyDebuggeeMemory(target->pml4Phys, args->address, args->length,
+                                      static_cast<uint8_t*>(args->out), /*fromDebuggee=*/true)) {
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+        }
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugReadMemoryHandler gDebugReadMemoryHandler;
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615 항목6] DebugWriteMemory -
+// DebugReadMemoryHandler와 완전히 대칭(방향만 반대).
+class DebugWriteMemoryHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugWriteMemoryArgs*>(argsRaw);
+
+        if (!Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->in), args->length)) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+
+        if (args->length > 0) {
+            if (!Paging::isUserRangeValid(args->address, args->length, target->pml4Phys)) {
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+            if (!kCopyDebuggeeMemory(target->pml4Phys, args->address, args->length,
+                                      const_cast<uint8_t*>(static_cast<const uint8_t*>(args->in)),
+                                      /*fromDebuggee=*/false)) {
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+        }
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugWriteMemoryHandler gDebugWriteMemoryHandler;
+
 // [신규, 2026-09-17, SP-9A6D579F §3.5/§4] #DB ISR(idt.cpp의
 // kHandleDebugException)이 하드웨어 브레이크포인트 적중 시 부르는
 // 콜백 - Idt::registerDebugCallback()으로 등록한다.
@@ -257,6 +469,9 @@ void DebugSessionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointDebugAttach, &gDebugAttachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugDetach, &gDebugDetachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugSetBreakpoint, &gDebugSetBreakpointHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugContinue, &gDebugContinueHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugReadMemory, &gDebugReadMemoryHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugWriteMemory, &gDebugWriteMemoryHandler);
 }
 
 void DebugSessionService::registerDebugCallback() {

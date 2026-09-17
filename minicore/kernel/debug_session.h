@@ -18,11 +18,30 @@ class Process;  // 포인터로만 참조(DebugSession::debuggerProcess) - 전�
 // [갱신, 2026-09-17, SP-E9B44929] Debug 그룹(7).
 constexpr SyscallEndpointId kSyscallEndpointDebugAttach = kMakeSyscallEndpointId(7, 0);
 constexpr SyscallEndpointId kSyscallEndpointDebugDetach = kMakeSyscallEndpointId(7, 1);
-// [신규, 2026-09-17, SP-9A6D579F §3.4/§4, RM-48E1E610 7.2] 이번
-// 증분(항목3/4)이 실제로 구현하는 유일한 새 syscall - SetSingleStep/
-// Continue/GetRegisters/SetRegisters/ReadMemory/WriteMemory(항목5/6)
-// 는 여전히 미착수라 그 번호(7.3-7.8)는 아직 예약만(RM-48E1E610).
 constexpr SyscallEndpointId kSyscallEndpointDebugSetBreakpoint = kMakeSyscallEndpointId(7, 2);
+// [SP-9A6D579F §3.4] DebugSetSingleStep(call 3) - RFLAGS.TF가 코어
+// 레지스터가 아니라 그 Task 자신의 저장된 인터럽트 프레임/popfq 값
+// 안에 있어(kSyncDebugRegs류 "디스패치 시점에 다시 쓰기" 패턴을 그대로
+// 못 씀) 그 프레임을 어디서 찾아 고칠지 별도 설계가 필요하다 - 번호만
+// 예약, 미구현(PN-87D6B615 "남은 범위" 참고).
+//
+// [신규, 2026-09-17, SP-9A6D579F §3.5/§4, PN-87D6B615, RM-48E1E610
+// 7.4/7.7/7.8] 이번 증분(항목5 일부/6)이 구현하는 syscall -
+// `DebugContinue`(레지스터 접근 불필요, 그룹 freeze 교차 확인만
+// 필요)와 `DebugReadMemory`/`DebugWriteMemory`(대상 주소공간을
+// Paging::translatePage()로 직접 순회하는 커널 대행 복사 - 레지스터
+// 프레임 위치와 무관). `DebugGetRegisters`/`DebugSetRegisters`(call
+// 5/6)는 DebugSetSingleStep과 동일한 이유로 미구현 - "정지된 유저
+// Task의 전체 레지스터 상태(콜러세이브 아닌 것 포함)가 정확히 그
+// 커널 스택의 어느 InterruptFrame에 있는지"가 아직 설계되지 않은
+// 자리라(SP-83A07867이 다루는 건 CR3/RSP0/FPU/디버그 레지스터처럼
+// "코어 소유" 상태뿐, "이 Task가 트랩 당시 갖고 있던 전체 유저
+// 레지스터 스냅숏의 정확한 스택 오프셋"은 아직 어떤 문서도 확정한
+// 적이 없음) - DC-47000304/QU-C82E903B로 별도 질의 등록, 설계자
+// 답변 대기 중(아래 참고).
+constexpr SyscallEndpointId kSyscallEndpointDebugContinue = kMakeSyscallEndpointId(7, 4);
+constexpr SyscallEndpointId kSyscallEndpointDebugReadMemory = kMakeSyscallEndpointId(7, 7);
+constexpr SyscallEndpointId kSyscallEndpointDebugWriteMemory = kMakeSyscallEndpointId(7, 8);
 
 // [SP-9A6D579F §3.1] DR0-DR3 하드웨어 슬롯 수와 동일 - 스레드마다
 // 별도 슬롯이 아니라 프로세스당(사실상 mainThread 고정, 멀티스레드
@@ -100,6 +119,40 @@ struct DebugSetBreakpointArgs {
     uint64_t address = 0;
     DebugBreakpoint::Condition condition = DebugBreakpoint::Condition::Execute;
     bool enable = false;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5] targetThread 없음 - 위
+// DebugSetBreakpointArgs와 동일한 이유(PN-2E4E9D79 완료 전까지
+// mainThread 고정).
+struct DebugContinueArgs {
+    int64_t targetProcessId = -1;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5] 디버기의 [address, address+length)
+// 구간을 커널이 direct map 경유로 대행 복사해 디버거의 `out` 버퍼(호출자
+// 자신의 유저 포인터)에 채운다 - 디버기 주소공간을 디버거 쪽에 매핑하지
+// 않는다(설계 그대로).
+struct DebugReadMemoryArgs {
+    int64_t targetProcessId = -1;
+    uint64_t address = 0;
+    uint64_t length = 0;
+    void* out = nullptr;  // 유저 포인터(호출자=디버거 소유 버퍼)
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// DebugReadMemoryArgs와 대칭 - 디버거의 `in` 버퍼(호출자 자신의 유저
+// 포인터)에서 읽어 디버기의 [address, address+length) 구간에 대행
+// 복사로 써 넣는다.
+struct DebugWriteMemoryArgs {
+    int64_t targetProcessId = -1;
+    uint64_t address = 0;
+    uint64_t length = 0;
+    const void* in = nullptr;  // 유저 포인터(호출자=디버거 소유 버퍼)
     // out
     ChannelError error = ChannelError::None;
 };
