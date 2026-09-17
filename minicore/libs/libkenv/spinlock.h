@@ -189,6 +189,12 @@ private:
 // 기존 이름 유지(위 통합 이전과 완전히 동일하게 계속 쓸 수 있음).
 using AtomicU32 = Atomic<uint32_t>;
 
+// [신규, 2026-09-17, PN-495C11B7, SP-B1E258D8 §5.2] RCU grace-period
+// 시퀀스 번호(64비트 - 32비트로는 장기 가동 시 랩어라운드 여지가
+// 있어 애초에 64비트로 확정, SP-B1E258D8 §5.2의 `RcuGraceperiodSeq
+// = uint64_t` 그대로) 전용 - `AtomicU32`와 동일한 관례.
+using AtomicU64 = Atomic<uint64_t>;
+
 // lock-free 자료구조가 포인터를 원자적으로 교체할 때 쓴다(예: 큐의
 // head/tail, 스택 top) - 기존 이름 유지. 초기값은 nullptr(Atomic<T*>
 // 의 `T _value{}`가 포인터에 대해 그대로 nullptr).

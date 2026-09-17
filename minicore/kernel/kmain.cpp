@@ -26,6 +26,7 @@
 #include "pci.h"
 #include "pnp.h"
 #include "process.h"
+#include "rcu.h"
 #include "resource_group.h"
 #include "scheduler.h"
 #include "serial.h"
@@ -544,6 +545,9 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // Nmi::stopAllOtherCores()가 아직 기동 안 된 코어를 NMI 대상에서
     // 제외할 수 있도록 BSP 자신도 "온라인"으로 표시해 둔다.
     kernel::Smp::markThisCoreOnline();
+    // [신규, 2026-09-17, PN-495C11B7] RCU quiescent state 추적 시작 -
+    // AP의 kApMain()과 대칭되는 지점.
+    kernel::Rcu::initOnThisCore();
     kernel::Logger::info("minicore: scheduler tick ready (LAPIC, %xHz, vector=%x)", kernel::kSchedulerTickHz,
                           kernel::kSchedulerTickVector);
 

@@ -16,6 +16,7 @@
 #include "panic.h"
 #include "debug_session.h"
 #include "process.h"
+#include "rcu.h"
 #include "resource_group.h"
 #include "serial.h"
 #include "smp.h"
@@ -1589,6 +1590,13 @@ void Scheduler::enablePreemption() {
     uint32_t& count = gPreemptDisableCount[currentCoreIndex()];
     if (count > 0) {
         --count;
+        // [신규, 2026-09-17, PN-495C11B7, SP-B1E258D8 §5.1] 카운터가
+        // 방금 0으로 돌아온 바로 이 순간이 RCU의 quiescent state다 -
+        // 호출부(RcuReadGuard/PreemptionGuard 사용자)가 RCU를 몰라도
+        // 되도록 여기서 대신 기록한다.
+        if (count == 0) {
+            Rcu::noteQuiescentStateOnThisCore();
+        }
     }
 }
 

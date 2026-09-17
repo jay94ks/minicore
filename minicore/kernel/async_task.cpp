@@ -10,6 +10,7 @@
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 #include "paging.h"
+#include "rcu.h"
 #include "scheduler.h"
 #include "syscall.h"
 #include "task.h"
@@ -561,6 +562,14 @@ void AsyncReactor::init() {
 }
 
 bool AsyncReactor::drainOnce(uint32_t coreIndex) {
+    // [신규, 2026-09-17, PN-495C11B7, SP-B1E258D8 §5.3] RCU call_rcu
+    // 콜백 드레인 - "콜백 실행은 반드시 리액터 컨텍스트에서"라는
+    // §3.5 인터럽트 통합 규칙 그대로, 이 함수가 실제 리액터 드레인
+    // 지점이므로 AsyncTask 재진입 가드(gDraining, 아래)와 무관하게
+    // 매 호출마다 먼저 확인한다(AsyncTask 코루틴 재개 상태를 전혀
+    // 건드리지 않아 재진입 중에도 안전).
+    Rcu::drainCallbacksOnThisCore();
+
     if (gDraining[coreIndex]) {
         // 이미 이 코어에서(runLoop() 인라인 호출이든 §4 (C) IPI
         // 핸들러든) 드레인이 진행 중 - gReactorSavedRsp[coreIndex]를

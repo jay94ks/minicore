@@ -10,6 +10,7 @@
 #include "libkenv/types.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "rcu.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "syscall_fastpath.h"
@@ -118,6 +119,9 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
 
     gApStartedCount.fetchAdd(1);
     kernel::Smp::markThisCoreOnline();
+    // [신규, 2026-09-17, PN-495C11B7] RCU quiescent state 추적 시작 -
+    // BSP의 kMain()과 대칭되는 지점.
+    kernel::Rcu::initOnThisCore();
 
     // 이 지점부터 이 AP도 자기 코어의 스케줄러 디스패치 루프에
     // 들어간다 - 절대 반환하지 않는다(BSP의 kMain과 동일한 패턴,
