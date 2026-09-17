@@ -5,11 +5,11 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T18:02:10.447Z
+  updatedAt: 2026-09-17T19:13:30.144Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
-# Minicore 설계공백 검수
+﻿# Minicore 설계공백 검수
 
 설계자 지시(2026-09-17, 메시지) - "NUMA 관련 문서 찾아보고 반영된게
 있는지 없는지 파악해" → "응 갭을 다 매꿔야해" → "계속 더 넓혀서
@@ -994,6 +994,33 @@ approved 전환되는 문서 위주로 전환한다.
 갭 발견/정정, 2건 갭 없음). 다음 스윕은 새로 approved 전환되는
 문서 위주로 계속한다(SP-30FCC8AE(사용자/권한 체계)가 review에서
 approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
+
+- **[신규, 2026-09-18] `SP-2AAD7C8D` §9(표준 파일 API) - `PN-EA4EE935`**
+  **(Open/Close/Read/Write, KernelDriver 경로)와 즉시 대조**: §9.1이 이미
+  스스로 "비판적 재검토로 발견한 공백"(`MountKind::KernelDriver`가 §9.2
+  `FileDescriptor`에 원래 없던 판별자를 요구)으로 명시적으로 열어 둔
+  자리 - `PN-ABD23ACE`(전신, PL-FC38956C의 후속) 항목2가 그 요구사항을
+  이어받았고, 이번 커밋(`vfs_syscall.h/.cpp`+`process.h`)이 정확히 그대로
+  구현했다. `Process::FileDescriptor::kind`(MountKind, process.h:231)가
+  §9.1이 예고한 확장 그대로 실재 - 심지어 그 옆 주석이 `PN-CE6A04AB`(이
+  문서가 이전에 다룬 Channel 핸들 위조 방지 보안 패턴, §2 참고)를 직접
+  인용해 "임의의 정수를 그냥 믿지 않는다"는 같은 원칙을 재사용했음을
+  밝혀 둠 - 이 감사 문서의 과거 발견이 실제로 후속 설계에 참조되는
+  사례. `OpenArgs`/`CloseArgs`/`ReadArgs`/`WriteArgs`(vfs_syscall.h)
+  전부 §9.3과 필드 단위로 일치, offset 소유권도 §9.2 그대로("offset은
+  커널(fd 테이블)이 갖고 FileSystemDriver::read/write는 매번 명시적
+  offset을 받는 무상태 오퍼레이션" - 코드가 `slot->value.offset +=
+  bytesRead/bytesWritten`로 정확히 구현). `MountKind::Channel` 마운트는
+  §9.1이 스스로 "아직 미확정, 착수 시점에 정한다"고 이미 열어 둔 대로
+  `NotSupported`로 정직하게 응답(임의 결정 아님, CLAUDE.md 규칙4 코드
+  주석 직접 인용) - 숨은 갭 아니다. **부수 발견**: 실측 중
+  `submitterTask`를 내부 재제출 AsyncTask(KernelFsDriver 대상)에
+  전파하지 않으면 `ProcFs::open()`의 "proc/self" 해석이 실패하는 실제
+  버그를 찾아 4개 핸들러 전부에 전파 코드를 추가해 수정 -
+  `async_task.h`의 `submitterTask` 문서 주석이 이미 예견해 둔 확장
+  지점이었음을 커밋이 스스로 인용. **갭 없음** - 설계가 스스로 예고한
+  공백이 정확히 그 설계 의도대로 메워진 사례(SP-9525C4C0/§1-F와 같은
+  급 - 원안의 "확인 필요" 각주가 후속 세션에 정확히 전달돼 작동함).
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
