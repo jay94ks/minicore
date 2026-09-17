@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T12:25:35.162Z
+  updatedAt: 2026-09-17T12:28:00.644Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -491,7 +491,7 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   가치 있음, 아래 이동 없이 여기 기록만).
 
 ### 1-F. `SP-9525C4C0`(Push/Pull 로드밸런싱) Push 경로에 §5.3 FPU 안전
-가드 누락 (코드 갭, **신규 발견, 조치 중**)
+가드 누락 (코드 갭, **완전 해소**)
 
 - **출처**: 이번 스윕에서 `SP-9525C4C0`를 처음 대입 - `scheduler.cpp`와
   대조하던 중 이 문서 §5.3("이번 설계의 핵심 기여")이 확립한
@@ -504,18 +504,27 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   v1 절충안(`kCanMigrateFpuSafely` 확인 후 안전하지 않으면 이관 스킵)을
   그대로 구현했지만 Push는 그 가드 없이 무조건 이관한다 - 타이밍
   의존적이라 드물게만 발현되는 데이터 손상.
-- **조치**: **`PN-F55FB154`**(scheduled) 등록 - Push도 Pull과 동일한
-  가드를 추가(안전하지 않으면 이번 이관을 건너뛰고 원래 코어 유지).
-  `enqueue()`의 `coreIndex` 파라미터가 항상 그 Task의 실제 lazy FPU
-  소유 코어와 일치하는지는 호출부 전수 조사가 필요해 착수 세션이
-  확인하도록 남겨 둠. `SP-9525C4C0`에 정정 각주 추가 완료,
-  minicore-88 통보 완료.
-- **현재 상태**: 미해소 - §1-B/§1-E와 같은 "onCancel 미구현" 계열과는
-  다른 새 결함 클래스(비대칭 가드 누락)이지만, 같은 교훈("한쪽
-  경로에만 적용된 안전장치가 대칭 경로에서 빠질 수 있다")을 보여줌 -
-  앞으로 Push/Pull처럼 "같은 자원을 다루는 대칭 경로 쌍"을 볼 때마다
-  한쪽만 보고 끝내지 않고 반대쪽도 대조하는 습관을 이 문서의 표준
-  절차에 추가할 가치가 있다.
+- **[완료, 2026-09-17, minicore-88 세션, commit f753d19]** 원안이
+  스스로 남긴 미결 질문("`coreIndex`가 항상 Task의 실제 FPU 소유
+  코어와 일치하는가")을 착수 세션이 직접 조사 - `Scheduler::enqueue(`
+  호출부 5곳(`debug_session.cpp`/`kmain.cpp`×2/`process.cpp`/
+  `resource_group.cpp`) 전수 확인 결과 **전부 waker 자신의 코어일
+  뿐 Task의 실제 FPU 소유 코어와 무관**함을 확인 - 원안의
+  `kCanMigrateFpuSafely(task, coreIndex)` 재사용 방식은 채택하지
+  않고, `gFpuOwner[]` 전체를 스캔해 Task의 실제 살아있는 FPU 소유
+  코어를 찾는 `kFindFpuOwnerCore(const Task*)`를 신설 - Push 이관
+  후보 코어가 그 소유 코어와 다르면 이번 이관을 스킵(Pull과 동일한
+  보류 정책)한다. QEMU PVH(sentinel-only 경로)/GRUB SMP4(실제 스캔
+  경로) 양쪽 TEMP 격리 검증 완료. `SP-9525C4C0`에도 최종 구현 반영
+  완료.
+- **의미**: §1-B/§1-E("onCancel 미구현")와는 다른 결함 클래스(비대칭
+  가드 누락)이지만, 같은 교훈("한쪽 경로에만 적용된 안전장치가 대칭
+  경로에서 빠질 수 있다")을 보여줌 - 이번 3-B 표준 절차에 "대칭 경로
+  쌍은 양쪽 다 확인"이 추가된 계기. 원안이 열어 둔 미결 질문을
+  착수 세션이 끝까지 추적해 원안과 다른(더 정확한) 해법으로
+  귀결된 사례이기도 하다 - 설계 문서의 "확인 필요" 각주가 실제로
+  후속 세션에게 정확히 전달돼 작동한 경우.
+- **현재 상태**: 완전 해소.
 
 - **`SP-6BEAE0C1`(fork/exec, SpawnProcess syscall)**: 매우 큰 문서 -
   `process.cpp`의 `SpawnProcessHandler`/`WaitHandler`와 전면 대조.
