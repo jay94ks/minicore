@@ -84,6 +84,10 @@ public:
     // Blocked인 Task(디버그 정지 등)는 건드리지 않는다.
     void freeze();
     // freeze()가 실제로 멈춘(Process::frozenByGroup) 것만 다시 깨운다.
+    // [신규, 2026-09-17, SP-245D130B §9-4] `debugSession.pausedByDebugger`
+    // 도 함께 서 있으면 `frozenByGroup`만 내리고 실제로 깨우지는
+    // 않는다(debug_session.h 문서 주석 참고) - 사유가 여러 개면 전부
+    // 풀려야만 실제로 재개된다는 원칙.
     void thaw();
 };
 

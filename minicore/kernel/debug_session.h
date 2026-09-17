@@ -51,6 +51,22 @@ struct DebugSession {
     WeakPtr<Process> debuggerProcess;
     DebugBreakpoint breakpoints[kMaxDebugBreakpoints];
     bool singleStepPending = false;
+
+    // [신규, 2026-09-17, SP-245D130B §9-4 답변("정지 사유 구분 플래그를
+    // 둬야해")] §3.4/§3.5(브레이크포인트/싱글스텝/kSpawnDebugStart,
+    // 전부 아직 미착수)가 이 디버기를 `TaskState::Blocked`로 세울 때
+    // 함께 세워야 하는 "이 정지는 디버그 사유다"라는 표시 -
+    // `ResourceGroup::thaw()`(resource_group.cpp)가 그룹 freeze를
+    // 풀면서 실수로 디버그 정지까지 같이 풀어버리지 않도록 이 값을
+    // 확인한다(`Process::frozenByGroup`과 대칭 - 그쪽은 "그룹이 나를
+    // 세웠다", 이건 "디버거가 나를 세웠다"). **아직 아무도 이 값을
+    // true로 세우지 않는다** - §3.4/§3.5 착수 세션이 실제로 Blocked로
+    // 전환하는 지점(및 `kSpawnDebugStart` 소비 지점, process.cpp
+    // `SpawnProcessHandler::onExec`)에서 함께 세워야 한다. 반대 방향
+    // (`DebugContinue`가 그룹 freeze까지 실수로 풀어버리는 경우)은
+    // `DebugContinue` 구현 시점에 `!proc->group->frozen`을 먼저
+    // 확인해야 한다 - 이 주석이 그 요구사항을 미리 남겨 둔다.
+    bool pausedByDebugger = false;
 };
 
 struct DebugAttachArgs {

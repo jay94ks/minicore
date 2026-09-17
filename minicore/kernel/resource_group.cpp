@@ -75,9 +75,16 @@ void ResourceGroup::thaw() {
     }
     // 락 밖에서 실제로 깨운다(Scheduler::enqueue 자체가 별도 cli
     // 임계구역을 쓰므로 lock을 쥔 채 부를 이유가 없다 - 락 중첩 최소화).
+    //
+    // [신규, 2026-09-17, SP-245D130B §9-4 답변] `frozenByGroup`은 항상
+    // 내려놓지만(그룹 자신은 실제로 풀렸으므로), `debugSession.
+    // pausedByDebugger`가 함께 서 있으면 실제로 깨우지는 않는다 -
+    // 디버거가 이 프로세스를 세워 둔 이유는 그룹과 무관하게 독립적으로
+    // 남아 있어야 한다(debug_session.h의 `pausedByDebugger` 문서 주석
+    // 참고 - 반대 방향은 미래의 `DebugContinue`가 책임진다).
     toWake.forEach([](SharedPtr<Process>& proc, auto*) {
         proc->frozenByGroup = false;
-        if (proc->mainThread) {
+        if (proc->mainThread && !proc->debugSession.pausedByDebugger) {
             Scheduler::enqueue(Scheduler::currentCoreIndex(), proc->mainThread);
         }
     });

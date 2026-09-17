@@ -728,6 +728,14 @@ public:
         // Ready에 올려야만 실행을 시작한다.
         if (args->flags & SpawnProcessFlags::kSpawnDebugStart) {
             started->state = TaskState::Blocked;
+            // [신규, 2026-09-17, SP-245D130B §9-4 답변] 이 정지도
+            // "디버그 사유"로 표시해 둔다 - 지금 당장은 이 자식이
+            // ResourceGroup::thaw()의 대상이 될 수 없어(한 번도
+            // Running이었던 적이 없어 frozenByGroup이 절대 안 세워짐,
+            // resource_group.cpp 참고) 실질적 효과는 없지만, `pausedByDebugger`
+            // 가 "이 Task가 지금 디버그 사유로 멈춰 있다"를 항상
+            // 정확히 반영해야 한다는 불변조건을 처음부터 지킨다.
+            procShared->debugSession.pausedByDebugger = true;
         } else {
             Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
         }
