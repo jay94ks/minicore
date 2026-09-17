@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9CB55C5B
-  status: review
-  updatedAt: 2026-09-17T01:56:57.670Z
+  status: approved
+  updatedAt: 2026-09-17T02:03:13.827Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -55,7 +55,7 @@ pid→Process* 안전 해석 인프라가 필요하다"고 지적해 둔 것과 
 using ProcessId = int64_t;  // 이제 포인터가 아니라 커널이 발급하는 불투명 핸들
 constexpr ProcessId kInvalidProcessId = -1;
 
-constexpr uint32_t kMaxProcessTableSlots = 4096;  // [열린 결정, §5] 상한 근거는 설계자 확인 필요
+constexpr uint32_t kMaxProcessTableSlots = 65535;  // [확정, 2026-09-17, QU-78E4159E 답변] UINT16_MAX
 
 struct ProcessTableSlot {
     WeakPtr<Process> proc;   // lock() 실패 = 이미 죽어 반납됨(안전 - 역참조 없이 판정)
@@ -116,7 +116,31 @@ KillHandler::onExec:
   3. target->raiseSignal(args->signal)  (기존 로직 그대로)
 ```
 
-## 4. [열린 결정 — 설계자 확인 필요] Kill의 권한 스코프
+## 4. [확정, 2026-09-17, QU-78E4159E 답변] Kill의 권한 스코프 - 전면 확장, Linux 유사 권한 체계 신설 필요
+
+설계자 답변: "조상-자손 + 커널/커널서비스는 예외로 두되, 시스템
+사용자를 의미하는 사용자의 권한 체계를 구성하고(그룹 RWX, 소유자
+RWX, 그 외 RWX, 그리고 특수 비트 S) root(uid = 0)라는 특별한
+사용자라는 개념을 만들어야해. 권한 모델 자체가 linux와 유사해야해.
+시스템 전체 동시 생존 프로세스 갯수의 상한은 UINT16_MAX로
+수정하자."
+
+제시했던 (A)/(B)/(C) 중 어느 것도 그대로 채택되지 않았다 - 답변은
+(A)의 "조상-자손+커널 예외"를 **기반**으로 유지하되, 그 위에
+**완전히 새로운 축**(Linux 유사 uid/gid + 소유자/그룹/기타 RWX +
+setuid류 특수 비트 S + `root`=uid 0 특권 사용자)을 얹으라는
+지시다. 이 커널에는 지금까지 "사용자(user)" 개념 자체가 전혀 없다
+(`ProcessRole::Normal`/`KernelService`만 있음, SP-EAB162FC) - 즉
+이건 Kill 하나의 권한 스코프 결정이 아니라 **커널 전체에 새 신원
+축(uid/gid)을 도입하는 훨씬 큰 설계 작업**이다. 이 문서(SP-9CB55C5B)
+범위를 넘으므로, 별도의 새 SP 문서("Minicore 사용자/권한 체계 -
+uid/gid + RWX 권한 비트 + root" 류)로 분리해 설계해야 한다 - 이
+문서는 §2/§3(안전한 pid 해석 메커니즘)만 확정하고, §4(권한 판정
+자체)는 그 새 문서가 나올 때까지 `kCheckProcessControlPermission`
+자리만 남겨 둔 채 미착수로 유지한다.
+
+**[확정] `kMaxProcessTableSlots`**: `4096` → **`UINT16_MAX`(65535)**
+로 수정(§2/§5의 열린 파라미터도 함께 해소).
 
 QU-764C5624 답변("임의 프로세스 대상이 필요함")은 **해석(resolve)**
 범위가 임의여야 한다는 요구까지는 확실하지만, **권한(permission)**
@@ -145,9 +169,8 @@ QU-764C5624 답변("임의 프로세스 대상이 필요함")은 **해석(resolv
 
 ## 5. 그 외 열린 파라미터
 
-- `kMaxProcessTableSlots = 4096`(§2 예시값)은 **추측값** - 시스템
-  전체 동시 생존 프로세스 상한으로 적절한지 설계자 확인 필요(같은
-  QU에 묶어 확인).
+- **[해소, 2026-09-17]** `kMaxProcessTableSlots`는 `UINT16_MAX`
+  (65535)로 확정됨(§4 참고).
 - 테이블 동시성 보호 방식(§2의 read-write-lock 언급)은 이 문서
   범위 밖 - 별도 계획으로 분리 예정(PN-90BD044E가 이미 다루고 있는
   "커널 전역 테이블류 동시성 보호 부재" 계열 문제와 같은 종류라
