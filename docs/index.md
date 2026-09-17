@@ -47,14 +47,14 @@
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-15T12:46:23.061Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-16T23:05:05.544Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-17T03:43:11.994Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-17T03:54:07.809Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-16T00:01:24.894Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-17T02:50:12.359Z |
 | [SP-1DB13F61](./SP-1DB13F61.md) | 가상 함수(vtable) 타입의 슬랩 할당 초기화 관례 - placement new 예외 설계 제안 | approved | 2026-09-16T16:48:17.214Z |
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-17T02:48:34.443Z |
 | [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
-| [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | review | 2026-09-17T03:04:20.458Z |
+| [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | review | 2026-09-17T03:57:47.450Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-16T07:36:40.243Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-16T03:13:54.308Z |
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved | 2026-09-16T14:29:59.188Z |
@@ -72,7 +72,7 @@
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved | 2026-09-17T02:26:07.789Z |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | review | 2026-09-16T19:03:02.131Z |
 | [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-16T18:58:41.608Z |
-| [SP-9A6D579F](./SP-9A6D579F.md) | 프로세스 디버깅(브레이크포인트/싱글스텝) 서브시스템 — 설계 제안 | approved | 2026-09-16T16:48:19.575Z |
+| [SP-9A6D579F](./SP-9A6D579F.md) | 프로세스 디버깅(브레이크포인트/싱글스텝) 서브시스템 — 설계 제안 | approved | 2026-09-17T03:58:07.114Z |
 | [SP-9CB55C5B](./SP-9CB55C5B.md) | Kill 대상 확장 — 안전한 ProcessId 해석 메커니즘 설계 제안 | approved | 2026-09-17T02:03:13.827Z |
 | [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved | 2026-09-16T15:00:00.989Z |
 | [SP-9F1DB1D8](./SP-9F1DB1D8.md) | gCurrentTask 크로스코어 접근 보호 — RwSpinlock 설계 스케치 (QU-68D76FC4) | approved | 2026-09-17T02:18:05.726Z |

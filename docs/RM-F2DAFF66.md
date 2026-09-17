@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T03:43:11.994Z
+  updatedAt: 2026-09-17T03:54:07.809Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -473,6 +473,16 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   확인한다.
 - §2/§3 사이를 오갈 때 이 문서 자체를 `plan_set`이 아니라
   `document_patch`로 갱신(문서이지 계획이 아니므로).
+- **계획이 스스로 건 "착수 조건"(예: "QU-XXXXXXXX 해소 대기")을
+  다시 확인할 땐 `docs pending`/`pending_list`가 아니라
+  `question_list`(status=all) 또는 대상 문서의 전체 질의 스레드로
+  확인한다** - `pending_list`는 설계상 미해결(open+pending)만
+  보여주고 이미 `resolved`로 확인 처리된 질의는 제외하므로, "그
+  질의로는 안 보인다"가 "그 질의가 애초에 없었다"를 뜻하지 않는다
+  (2026-09-17 사례: minicore-88이 `PN-4190BBD3`의 "QU-C10BAA06 해소
+  대기"를 `docs pending`으로만 확인해 "한 번도 등록된 적 없었다"고
+  잘못 결론 - 실제로는 minicore-f8이 이미 그 답변을 확인·ack까지
+  마친 상태였다, PN-4190BBD3에 정정 기록).
 - 이 문서 자체는 "완결"되는 문서가 아니다 - §3이 빌 때까지, 그리고
   그 이후로도 새 SP 문서가 승인될 때마다 계속 대상에 추가한다(루프
   표준 절차 0-3번에 편입, 별도 지시 참고).
