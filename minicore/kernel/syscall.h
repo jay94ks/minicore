@@ -146,6 +146,21 @@ public:
     // 나온다는 뜻이 아니다.
     WeakPtr<Process> process;
 
+    // [신규, 2026-09-18, PN-22E5E9E7 항목6, SP-29D652AA §5.2] 이
+    // UserThread 전용 유저 thread_local 인스턴스의 FS_BASE 값 -
+    // `Process::makeUserTlsInstance()`(process.cpp)가 그 프로세스의
+    // PT_TLS 템플릿(항목5, `Process::hasTlsTemplate`)을 복사해 이
+    // UserThread 소유 주소공간 안에 만든다. `Task::kernelFsBase`
+    // (task.h)와 정확히 같은 x86_64 TLS variant II 관례(값 자체가
+    // 템플릿 복사본 바로 뒤의 self-pointer 헤더 주소) - 다만 이건
+    // 커널 슬랩이 아니라 **이 프로세스 자신의 유저 주소공간**(ring3
+    // 코드가 %fs-상대로 직접 역참조하므로 PAGE_USER 매핑 필수)에 있다.
+    // 프로세스에 템플릿이 없으면(`hasTlsTemplate=false`, v1 유저
+    // 바이너리 전부 해당) 0으로 남는다. **아직 FS_BASE MSR에 실제로
+    // 싣는 배선(syscall 진입/이탈, ring3 첫 진입)은 항목7 몫** - 이
+    // 필드는 값을 마련해 두기만 한다.
+    uint64_t userFsBase = 0;
+
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든
     // 필드가 0/nullptr NSDMI라 memset 결과가 실제 생성자 결과와 동일,

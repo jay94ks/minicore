@@ -409,6 +409,71 @@ bool kSetupInitialUserStack(uint64_t stackTop, uint64_t pml4Phys, const uint8_t*
     return true;
 }
 
+// [신규, 2026-09-18, PN-22E5E9E7 항목6, SP-29D652AA §5.2] 이 프로세스의
+// PT_TLS 템플릿(항목5)이 있으면 그 프로세스 주소공간 안에 `thread` 전용
+// TLS 인스턴스를 만든다 - x86_64 TLS variant II 레이아웃, task.cpp의
+// `kMakeTaskTlsBlock()`(커널 쪽 Task TCB)과 정확히 같은 이유로 템플릿
+// 복사본 바로 뒤에 8바이트 self-pointer 헤더를 붙인다: `-ftls-model=
+// local-exec`라도 extern thread_local(여러 TU에서 접근)에는 Itanium
+// C++ ABI가 강제하는 TLS 래퍼 함수가 모델과 무관하게 항상 FS:0을
+// self-pointer로 역참조한다는 것을 커널 쪽에서 실측으로 확인했다
+// (task.cpp 문서 주석 참고) - 유저랜드 자체는 아직 그 패턴을 촉발하는
+// 소비자(여러 TU에서 접근하는 extern thread_local)가 없어 독립적으로
+// 재확인하지 못했지만, 8바이트 비용이 미미해 선제적으로 같은 방어를
+// 넣는다.
+//
+// v1은 템플릿+헤더가 한 페이지(4KiB) 안에 들어간다고 가정한다 -
+// `tlsTemplateVaddr`는 `userland/cmake/linker-userland-x86_64.ld`의
+// `.tdata ALIGN(4K)` 덕에 항상 페이지 경계에서 시작하고(항목5 문서
+// 주석의 정렬 함정 참고), `mapRegion()`이 고르는 목적지 주소도 항상
+// 페이지 경계다 - 그래서 각각 `Paging::translatePage()` 한 번으로 전체
+// 템플릿/인스턴스를 담은 물리 페이지를 얻을 수 있다. 4KiB를 넘는
+// thread_local 총량이 실제로 필요해지면 이 함수를 페이지 단위 다중
+// 청크 복사로 확장해야 한다(RM-23F4B687 §4 원칙, 실측 후 조정).
+//
+// [PN-71C3D483 항목 3] `mapRegion()`으로 만든 VMA는 `addressSpace`의
+// 장부에 등록되므로 `Process::destroy()`의 `addressSpace.unmapAll()`이
+// 이 인스턴스도 자동으로 반납한다 - v1(멀티스레딩 미구현, 프로세스당
+// UserThread 하나)에는 이걸로 충분하다. 나중에 UserThread를 프로세스
+// 생존 중에 개별적으로 종료하는 경로가 생기면(PN-543C0CE9) 그 경로가
+// 이 함수가 만든 영역을 개별적으로 `addressSpace.unmapRegion()`해야
+// 한다 - 지금은 그런 경로 자체가 없어 구현하지 않는다.
+bool Process::makeUserTlsInstance(UserThread* thread) {
+    if (!hasTlsTemplate) {
+        return true;
+    }
+    constexpr uint64_t kTcbHeaderSize = 8;
+    const uint64_t allocSize = tlsTemplateMemsz + kTcbHeaderSize;
+    if (allocSize > 4096UL) {
+        return false;  // v1 한계 초과 - 위 문서 주석의 다중 페이지 확장 필요
+    }
+
+    uint64_t regionAddr = 0;
+    if (!addressSpace.mapRegion(allocSize, PAGE_WRITABLE, VmaBacking::Anonymous, 0, &regionAddr)) {
+        return false;
+    }
+
+    const uint64_t dstPhys = Paging::translatePage(regionAddr, pml4Phys);
+    auto* dst = reinterpret_cast<uint8_t*>(kPhysToVirt(dstPhys));
+    memset(dst, 0, allocSize);
+
+    if (tlsTemplateFilesz > 0) {
+        // 원본 .tdata 바이트는 이미 elf::loadIntoAddressSpace()가
+        // PT_LOAD(:udata)의 일부로 이 프로세스 자신의 주소공간에 매핑해
+        // 뒀다(linker-userland-x86_64.ld가 .tdata/.tbss를 :udata에도
+        // 이중 소속시킴, 항목5 참고) - 원본 ELF 버퍼를 다시 참조할
+        // 필요 없이 이미 매핑된 가상주소를 통해 그대로 읽는다.
+        const uint64_t srcPhys = Paging::translatePage(tlsTemplateVaddr, pml4Phys);
+        const auto* src = reinterpret_cast<const uint8_t*>(kPhysToVirt(srcPhys));
+        memcpy(dst, src, tlsTemplateFilesz);
+    }
+
+    const uint64_t fsBase = regionAddr + tlsTemplateMemsz;
+    *reinterpret_cast<uint64_t*>(dst + tlsTemplateMemsz) = fsBase;  // FS:0 self-pointer
+    thread->userFsBase = fsBase;
+    return true;
+}
+
 UserThread* Process::execImage(const elf::Image& image, UserThread* thread, const uint8_t* argvEnvpScratch,
                                 uint64_t stringsSize, const uint64_t* argOffsets, uint32_t argCount,
                                 const uint64_t* envOffsets, uint32_t envCount) {
@@ -476,8 +541,9 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
         if (seg.type == elf::kSegmentTypeLoad) {
             imageBytes += seg.memsz;
         } else if (seg.type == elf::kSegmentTypeTls) {
-            // [신규, 2026-09-18, PN-22E5E9E7 항목5] 순수 저장만 - 실제
-            // 인스턴스 생성/FS_BASE 배선은 항목6/7(아직 미구현).
+            // [신규, 2026-09-18, PN-22E5E9E7 항목5] 파싱/저장 - 실제
+            // 인스턴스 생성은 아래 makeUserTlsInstance() 호출(항목6),
+            // FS_BASE MSR 배선은 여전히 항목7(아직 미구현).
             tlsTemplateVaddr = seg.vaddr;
             tlsTemplateFilesz = seg.filesz;
             tlsTemplateMemsz = seg.memsz;
@@ -488,6 +554,13 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
     memoryBytesUsed += imageBytes;
     if (group) {
         group->accounting.totalMemoryBytesUsed += imageBytes;
+    }
+
+    // [신규, 2026-09-18, PN-22E5E9E7 항목6] 위 스캔이 hasTlsTemplate를
+    // 채운 뒤에만 호출 가능 - 템플릿이 없으면(v1 유저 바이너리 전부
+    // 해당) 즉시 true라 사실상 no-op.
+    if (!makeUserTlsInstance(thread)) {
+        return nullptr;
     }
 
     return thread;

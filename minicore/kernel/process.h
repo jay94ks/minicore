@@ -437,6 +437,18 @@ public:
                           uint64_t stringsSize = 0, const uint64_t* argOffsets = nullptr, uint32_t argCount = 0,
                           const uint64_t* envOffsets = nullptr, uint32_t envCount = 0);
 
+    // [신규, 2026-09-18, PN-22E5E9E7 항목6, SP-29D652AA §5.2] 이
+    // 프로세스의 PT_TLS 템플릿(항목5, `hasTlsTemplate`)이 있으면 그
+    // 프로세스 주소공간 안에 `thread` 전용 TLS 인스턴스를 만들어
+    // `thread->userFsBase`를 채운다("새 UserThread를 만들 때마다"의
+    // 범용 루틴 - v1의 유일한 호출부는 execImage() 안이지만, 프로세스가
+    // 아니라 UserThread 생성에 결부돼 있어 나중에 멀티스레딩 syscall
+    // (PN-543C0CE9류)이 새 UserThread를 여러 개 만들어도 코드 변경
+    // 없이 재사용한다). 템플릿이 없으면(v1 유저 바이너리 전부 해당)
+    // 즉시 true, `userFsBase`는 0으로 남는다. 실패(할당/매핑 고갈)
+    // 시 false - 호출부(execImage())가 OOM으로 취급.
+    bool makeUserTlsInstance(UserThread* thread);
+
     // Signal 전달(SP-0666DB3C §4.4, PN-71E50394 항목 2) - number를
     // pendingSignals에 기록하고, mainThread가 지금 대기 중이면
     // (blockedOn != nullptr) 그 자리에서 즉시 강제로 깨운다(§9.5,
