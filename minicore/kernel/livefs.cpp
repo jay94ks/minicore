@@ -83,7 +83,9 @@ bool KernelReservedTable::reserveForKernelService(const char* name, uint32_t nam
     memcpy(entry.name, name, nameLen);
     entry.nameLen = nameLen;
     entry.tierA = ring;
-    entry.tierBChannelId = reinterpret_cast<uint64_t>(channel);
+    // [수정, PN-CE6A04AB] 더 이상 raw 포인터가 아니다 - kCreateNamedChannel()
+    // 이 이미 안전한 ChannelId를 발급해 channel->channelId에 담아 뒀다.
+    entry.tierBChannelId = channel->channelId;
     entry.used = true;
     return true;
 }

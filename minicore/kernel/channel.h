@@ -17,12 +17,19 @@ namespace kernel {
 // **이름은 전부 제안**(설계 문서 "배경" 1번 그대로) - 확정된 이름이
 // 아니다.
 
-// ChannelId/BridgeHandle 둘 다 실제로는 그 오브젝트 구조체 자신의
-// 포인터 값이다(Syscall 서브시스템의 토큰=포인터 관례와 동일 -
-// PL-21344323 참고, 별도 전역 ID/핸들 테이블 불필요 - 새 DC 불필요
-// 수준의 구현 세부). 프로세스 모델이 아직 없어 "ChannelId는 다른
-// 프로세스에게 전달, BridgeHandle은 로컬 참조"라는 설계 문서의 구분이
-// 지금은 의미가 없다 - v1은 둘을 같은 값으로 채운다(openChannel 참고).
+// [정정, 2026-09-17, PN-CE6A04AB/SP-CA3C3E57] 예전엔 ChannelId/
+// BridgeHandle 둘 다 그 오브젝트 구조체 자신의 포인터 값이었다 -
+// 유저 syscall 인자로 그 값을 받아 검증 없이 reinterpret_cast로
+// 역참조하는 보안 취약점으로 이어져(임의 포인터 역참조), 실제로는
+// 그렇게 두면 안 됐다. **`BridgeHandle`은 여전히 `BridgePipe*` 값
+// 그대로다** - `BridgePipe`는 `Process::openBridges`(호출자 소유
+// 목록)에서만 검증되므로(`kResolveOwnedBridge`, PN-9CC66142) 값
+// 자체가 무엇이든 상관없다. **`ChannelId`는 이제 커널이 발급하는
+// 불투명 핸들이다** - 세대 태그 슬롯 테이블(`gChannelTable`,
+// channel.cpp)의 인덱스+세대를 인코딩한 값으로, `kResolveChannelId()`
+// 를 거쳐야만 실제 `Channel*`로 해석된다(SP-9CB55C5B의 `ProcessId`와
+// 동일한 패턴 - Channel은 SharedPtr이 아니라 슬랩 할당이라 WeakPtr
+// 대신 슬롯의 `ptr==nullptr` 여부로 생존을 판정한다).
 using ChannelId = uint64_t;
 using BridgeHandle = uint64_t;
 
@@ -68,6 +75,7 @@ constexpr uint64_t kHugeChannelRingBufferSize = 2 * 1024 * 1024;  // allocOrder(
 constexpr uint32_t kHugeChannelRingBufferOrder = 9;
 
 class Channel;
+class Process;
 struct BridgePipe;
 
 // Channel 생성 로직 팩터링(SP-00CA7175 §2.0a) - alloc+init+
@@ -272,6 +280,18 @@ public:
     uint64_t nameLength = 0;
     char name[kMaxNamedObjectNameLength] = {};
 
+    // [신규, PN-CE6A04AB/SP-CA3C3E57 §2] kCreateNamedChannel()이 발급한
+    // 이 채널 자신의 ChannelId(세대 태그 슬롯 테이블 인코딩) - 해제
+    // 시(kFreeChannelId) 이 값에서 인덱스를 역산해 O(1)로 슬롯을 비운다.
+    ChannelId channelId = 0;
+
+    // [신규, PN-CE6A04AB/SP-CA3C3E57 §6.1] 이 채널을 만든 프로세스 -
+    // **절대 역참조하지 않는다**, AcceptFromChannel/DestroyChannel의
+    // 호출자가 이 값과 포인터 동일성만 비교하는 용도(raw 포인터인
+    // 이유와 잔여 위험은 SP-CA3C3E57 §6.1 참고 - Channel이 아직
+    // SharedPtr 관리 대상이 아니라 WeakPtr을 안전하게 못 씀).
+    Process* ownerProcess = nullptr;
+
     // Tier B(SP-00CA7175 §2.2, "ExclusivePreemptiveChannel") - true면
     // 이 Channel의 accept/read/write에서 파생된 AsyncTask가 그 코어의
     // AsyncReactor 실행 큐에서 일반 우선순위보다 앞서 처리돼야 한다.
@@ -300,6 +320,8 @@ public:
         destroyed = false;
         hasName = false;
         nameLength = 0;
+        channelId = 0;
+        ownerProcess = nullptr;
         exclusivePreemptive = false;
         pendingHead = nullptr;
         pendingTail = nullptr;

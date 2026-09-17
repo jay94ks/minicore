@@ -127,6 +127,74 @@ bool BridgePipe::createPair(bool useHugePage, SharedPtr<BridgePipe>* outA, Share
     return true;
 }
 
+namespace {
+
+// [신규, PN-CE6A04AB/SP-CA3C3E57] Channel의 세대 태그 슬롯 테이블 -
+// 유저 syscall이 넘기는 ChannelId를 검증 없이 reinterpret_cast하던
+// 취약점(channel.h 상단 주석 참고)을 막는다. `Channel`은 SharedPtr이
+// 아니라 `GenericSlabAllocator`로 직접 관리되는 순수 포인터 객체라
+// SP-9CB55C5B의 `WeakPtr::lock()` 생존 판정을 그대로 못 쓴다 - 대신
+// 슬롯의 `ptr == nullptr` 여부로 생존을 수동 판정한다(SP-CA3C3E57 §2).
+struct ChannelTableSlot {
+    Channel* ptr = nullptr;
+    uint32_t generation = 0;
+};
+
+constexpr uint32_t kMaxChannelTableSlots = 65536;  // [확정, 2026-09-17,
+// QU-1AF2C16B 답변] "채널의 전역 상한은 64K".
+ChannelTableSlot gChannelTable[kMaxChannelTableSlots];
+Spinlock gChannelTableLock;  // 발급/해제만 보호(드묾) - 조회는 락 없이
+                             // 인덱스+세대만 비교한다(SP-CA3C3E57 §3 -
+                             // 최악의 경우도 안전하게 NotFound로 실패).
+
+ChannelId kAllocateChannelId(Channel* channel) {
+    SpinlockGuard guard(gChannelTableLock);
+    for (uint32_t i = 0; i < kMaxChannelTableSlots; ++i) {
+        if (gChannelTable[i].ptr == nullptr) {
+            gChannelTable[i].generation++;
+            gChannelTable[i].ptr = channel;
+            return (static_cast<uint64_t>(gChannelTable[i].generation) << 32) | i;
+        }
+    }
+    return 0;  // 슬롯 고갈 - 호출부가 ResourceExhausted로 매핑
+}
+
+// 안전 해석 - 이 함수를 거치지 않고는 어디서도 유저 제공 ChannelId를
+// Channel*로 캐스팅하지 않는다. 유저가 어떤 값을 넘기든 인덱스 범위
+// 검사 + 세대 일치 확인만으로 끝난다 - reinterpret_cast<Channel*>를
+// 실제 살아있는 객체가 아닌 값에 대해 절대 성립시키지 않는다.
+Channel* kResolveChannelId(ChannelId id) {
+    if (id == 0) {
+        return nullptr;
+    }
+    const uint32_t index = static_cast<uint32_t>(id & 0xFFFFFFFFu);
+    const uint32_t generation = static_cast<uint32_t>(id >> 32);
+    if (index >= kMaxChannelTableSlots) {
+        return nullptr;
+    }
+    ChannelTableSlot& slot = gChannelTable[index];
+    if (slot.generation != generation || slot.ptr == nullptr) {
+        return nullptr;
+    }
+    return slot.ptr;
+}
+
+// DestroyChannelHandler::onExec의 GenericSlabAllocator::free 직전에
+// 호출한다 - id 자체에서 인덱스를 역산하므로 O(1).
+void kFreeChannelId(ChannelId id) {
+    if (id == 0) {
+        return;
+    }
+    const uint32_t index = static_cast<uint32_t>(id & 0xFFFFFFFFu);
+    if (index >= kMaxChannelTableSlots) {
+        return;
+    }
+    SpinlockGuard guard(gChannelTableLock);
+    gChannelTable[index].ptr = nullptr;  // generation은 그대로 - 다음 재사용 때 +1
+}
+
+}  // namespace
+
 void BridgePipe::destroy() {
     // [수정, 2026-09-17, PN-9CC66142] huge/4K 분기는 RingBufferDeleter
     // 안에 있다 - `data.reset()`이 그 삭제자를 그대로 부른다. 이
@@ -153,14 +221,27 @@ Channel* kCreateNamedChannel(const char* name, uint64_t nameLength, ChannelError
     auto* channel = reinterpret_cast<Channel*>(mem);
     channel->init();
 
+    // [신규, PN-CE6A04AB/SP-CA3C3E57 §5] 이 채널의 안전한 ChannelId를
+    // 여기서 한 번만 발급한다 - OpenChannelHandler/KernelReservedTable
+    // (livefs.cpp) 양쪽 호출부가 전부 이 함수를 거치므로 여기서 발급
+    // 하면 두 소비자 모두 자동으로 새 인코딩을 쓰게 된다.
+    channel->channelId = kAllocateChannelId(channel);
+    if (channel->channelId == 0) {
+        GenericSlabAllocator::free(mem, sizeof(Channel));
+        *outError = ChannelError::ResourceExhausted;
+        return nullptr;
+    }
+
     if (nameLength > 0) {
         if (nameLength > kMaxNamedObjectNameLength) {
+            kFreeChannelId(channel->channelId);  // 슬롯 누수 방지
             GenericSlabAllocator::free(mem, sizeof(Channel));
             *outError = ChannelError::NameInUse;  // 길이 초과도 "사용 불가"로 뭉뚱그림 - 세분화 불필요
             return nullptr;
         }
         if (!NamedObjectTable::reserve(name, nameLength, NamedObjectKind::Channel,
                                         reinterpret_cast<uint64_t>(channel))) {
+            kFreeChannelId(channel->channelId);  // 슬롯 누수 방지
             GenericSlabAllocator::free(mem, sizeof(Channel));
             *outError = ChannelError::NameInUse;
             return nullptr;
@@ -286,13 +367,17 @@ bool kValidateUserBuffer(AsyncTask* task, const void* ptr, uint64_t length) {
 
 class OpenChannelHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<OpenChannelArgs*>(argsRaw);
         Channel* channel = kCreateNamedChannel(args->name, args->nameLength, &args->error);
         if (!channel) {
             co_return;
         }
-        args->channelId = reinterpret_cast<uint64_t>(channel);
+        // [수정, PN-CE6A04AB] 더 이상 raw 포인터가 아니다 - channel->
+        // channelId는 kCreateNamedChannel()이 이미 안전하게 발급해 둔
+        // 값이다(channel.h §ChannelId 주석 참고).
+        channel->ownerProcess = kProcessFromSubmitter(task).get();
+        args->channelId = channel->channelId;
         args->channelHandle = args->channelId;
         co_return;
     }
@@ -312,7 +397,14 @@ public:
 
         Channel* channel = nullptr;
         if (args->target != 0) {
-            channel = reinterpret_cast<Channel*>(args->target);
+            // [수정, PN-CE6A04AB] 유저가 준 target을 더 이상 직접
+            // reinterpret_cast하지 않는다 - 위조/이미 소멸된 값이면
+            // 안전하게 NotFound.
+            channel = kResolveChannelId(args->target);
+            if (!channel) {
+                args->error = ChannelError::NotFound;
+                co_return;
+            }
         } else if (args->nameLength > 0) {
             NamedObjectKind kind{};
             uint64_t objectId = 0;
@@ -377,7 +469,7 @@ public:
         auto* args = static_cast<ConnectChannelArgs*>(argsRaw);
         Channel* channel = nullptr;
         if (args->target != 0) {
-            channel = reinterpret_cast<Channel*>(args->target);
+            channel = kResolveChannelId(args->target);  // [수정, PN-CE6A04AB]
         } else if (args->nameLength > 0) {
             NamedObjectKind kind{};
             uint64_t objectId = 0;
@@ -405,7 +497,23 @@ class AcceptFromChannelHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<AcceptFromChannelArgs*>(argsRaw);
-        auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
+        // [수정, PN-CE6A04AB] 더 이상 검증 없이 역참조하지 않는다.
+        auto* channel = kResolveChannelId(args->channelHandle);
+        if (!channel) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        // [신규, PN-CE6A04AB/SP-CA3C3E57 §6] 소유자만 accept할 수 있다 -
+        // ownerProcess==nullptr(커널이 만든 예약 채널, livefs.cpp)는
+        // 예외적으로 무제한 허용(SP-9A6D579F §3.2의 "커널 자신은 예외"
+        // 와 같은 패턴, 실사용처 없음 - RM-C65F7760 참고).
+        if (channel->ownerProcess) {
+            SharedPtr<Process> caller = kProcessFromSubmitter(task);
+            if (!caller || caller.get() != channel->ownerProcess) {
+                args->error = ChannelError::PermissionDenied;
+                co_return;
+            }
+        }
 
         for (;;) {
             PendingConnectRequest* req = nullptr;
@@ -501,7 +609,7 @@ public:
     // 넘기면 UAF다(SP-1FBC0EEB §"취소/실패 처리"에 정정 각주 추가함).
     void onCancel(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<AcceptFromChannelArgs*>(argsRaw);
-        auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
+        auto* channel = kResolveChannelId(args->channelHandle);  // [수정, PN-CE6A04AB]
         if (!channel) {
             return;
         }
@@ -721,9 +829,24 @@ public:
 
 class DestroyChannelHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<DestroyChannelArgs*>(argsRaw);
-        auto* channel = reinterpret_cast<Channel*>(args->channelHandle);
+        // [수정, PN-CE6A04AB] 더 이상 검증 없이 역참조하지 않는다.
+        auto* channel = kResolveChannelId(args->channelHandle);
+        if (!channel) {
+            args->error = ChannelError::NotFound;  // 기존엔 널체크조차 없었음
+            co_return;
+        }
+        // [신규, PN-CE6A04AB/SP-CA3C3E57 §6] 소유자만 destroy할 수
+        // 있다 - AcceptFromChannelHandler와 동일한 예외(ownerProcess==
+        // nullptr는 커널 예약 채널).
+        if (channel->ownerProcess) {
+            SharedPtr<Process> caller = kProcessFromSubmitter(task);
+            if (!caller || caller.get() != channel->ownerProcess) {
+                args->error = ChannelError::PermissionDenied;
+                co_return;
+            }
+        }
 
         AsyncTaskWaitQueue accepters;
         PendingConnectRequest* rejectedHead = nullptr;
@@ -761,6 +884,7 @@ public:
         if (channel->hasName) {
             NamedObjectTable::release(channel->name, channel->nameLength);
         }
+        kFreeChannelId(channel->channelId);  // [신규, PN-CE6A04AB] 슬롯 해제
         GenericSlabAllocator::free(channel, sizeof(Channel));
         args->error = ChannelError::None;
         co_return;
