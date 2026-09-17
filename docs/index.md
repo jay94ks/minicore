@@ -31,7 +31,7 @@
 | [PL-21344323](./PL-21344323.md) | Syscall 디스패치 서브시스템 구현 | approved | 2026-09-15T12:37:29.083Z |
 | [PL-2D149D8F](./PL-2D149D8F.md) | IOAPIC 외부 인터럽트 라우팅 | approved | 2026-09-14T11:55:42.763Z |
 | [PL-2D3184BC](./PL-2D3184BC.md) | 스케줄러 (프로세스/태스크/컨텍스트 스위칭) | approved | 2026-09-15T15:11:45.472Z |
-| [PL-4BA2B446](./PL-4BA2B446.md) | 멀티 프로세스 실행 기반 완성 (ring3 오염 버그 + 프로세스 생명주기) | approved | 2026-09-15T12:21:24.111Z |
+| [PL-4BA2B446](./PL-4BA2B446.md) | 멀티 프로세스 실행 기반 완성 (ring3 오염 버그 + 프로세스 생명주기) | approved | 2026-09-17T13:10:49.332Z |
 | [PL-57CF86EF](./PL-57CF86EF.md) | 4K 페이지의 2M 페이지 병합/분할 | approved | 2026-09-15T12:54:47.401Z |
 | [PL-65C20380](./PL-65C20380.md) | SMP AP(나머지 코어) 기동 | approved | 2026-09-14T11:57:16.636Z |
 | [PL-99562483](./PL-99562483.md) | 물리 메모리 관리 범위를 1GiB 한도 밖으로 확장 | archived | 2026-09-15T05:53:24.391Z |
@@ -49,7 +49,7 @@
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-15T12:46:23.061Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-16T23:05:05.544Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-17T12:28:00.644Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-17T13:22:04.245Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-16T00:01:24.894Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-17T07:59:55.854Z |

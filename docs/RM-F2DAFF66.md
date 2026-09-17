@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T12:28:00.644Z
+  updatedAt: 2026-09-17T13:22:04.245Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -564,13 +564,73 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   `kernel.gdb` 전부 `scripts/`에 실재 확인. 문서 자신이 "설계/구현/
   실측 전부 완료"로 명시한 그대로. 갭 없음.
 
+- **[재검증, 2026-09-17] `SP-B1E258D8`(RCU) - approved 전환 +
+  `PN-495C11B7` 구현 완료 후 §5 확정 설계 대 코드 대조**: 재개 조건이
+  도래한 정도가 아니라 이미 구현까지 완료됐음을 이번 틱에 확인 -
+  `rcu.h`/`rcu.cpp`를 §5와 한 줄씩 대조. `RcuReadGuard`/`RcuCallback`/
+  `RcuCallbackTraits`/`Rcu` 클래스 전부 실재, `noteQuiescentStateOnThisCore`
+  /`startGracePeriod`/`isGracePeriodComplete`/`callAfterGracePeriod`/
+  `drainCallbacksOnThisCore` 메서드 시그니처 그대로, `PerCpu<AtomicU64>
+  _lastObservedSeq`/`AtomicU64 _currentSeq`/`PerCpu<List<RcuCallback,
+  RcuCallbackTraits>> _pendingList`(libkcont 재사용, 손짜기 연결
+  리스트 아님) 필드 구성도 일치. 소비 지점 두 곳도 직접 확인 -
+  `scheduler.cpp`(preemption 카운터 0 도달 시 `Rcu::
+  noteQuiescentStateOnThisCore()` 호출, ~1644행), `async_task.cpp`
+  (`AsyncReactor::drainOnce()` 진입부에서 `Rcu::
+  drainCallbacksOnThisCore()` 호출, ~571행 - 계획 본문이 스스로 정정한
+  대로 원안의 `reactorTaskEntry()`가 아니라 `drainOnce()`로 배선됨).
+  **갭 없음** - 드물게 설계-구현-검증까지 한 틱 안에 전부 정확히
+  맞아떨어진 사례.
+
+- **[재검증, 2026-09-17] `PN-2008220B`(§3 이관 항목) 해소 후
+  `SP-F682B889` §7.3 재대조**: `PN-2008220B`가 completed로 전환됨에
+  따라(코어당 전용 idle 스택 + `Scheduler::enterIdleLoop()` 트램폴린
+  구현, commit 7e83ff1) 그 수정이 §7.3의 코루틴 재개 경로 서술과
+  여전히 일치하는지 재확인. **결론: 일치, 갭 없음** - PN-2008220B의
+  수정은 `runLoop()`의 idle 분기가 서 있는 **스택 자체**를 안전한
+  전용 스택으로 옮긴 것일 뿐, §7.3이 서술하는 "`drainOnce()`가
+  `coroHandle`이 설정돼 있으면 `coroHandle.resume()`을 직접 호출한다"
+  는 호출 메커니즘 자체는 전혀 바뀌지 않았다 - §7.3은 스택 안전성을
+  전제/서술한 적이 없어(그 위험 서술은 `scheduler.cpp`/`async_task.cpp`
+  코드 주석에만 있었고, `PN-2008220B`가 이미 그 주석들에 정정 각주를
+  남김) 애초에 낡아질 내용이 없었다. 단, §7.3이 드러내지 못했던
+  "실제 CR3 값 동기화"(스택 안전성과 별개 문제)는 `PN-387C18A5`로,
+  실제 co_await 핸들러 재개 시나리오 실측은 `PN-929CE93E`로 각각
+  분리 추적 중 - 둘 다 openly 추적이라 숨은 갭 아님.
+
 **[2026-09-17] approved 상태 SP 문서 후보 풀 소진** - 이 시점까지
 확인 안 한 `approved` SP 문서가 더 없음(document_list로 재확인
-필요시 다음 틱에). 다음부터는 §3에 이미 등록된 재검증 대기 항목
-(`PN-2008220B` - `coroHandle.resume()` CR3 동기화 수정 후 `SP-F682B889`
-§7.3 서술과 일치하는지, `SP-B1E258D8` 재개 조건 등)이나 PL/DC류
-문서, 또는 새로 `approved` 전환되는 문서(예: 이번 세션이 만든
-`SP-B26CDBDD`가 승인되면 그 구현 시점에) 위주로 전환한다.
+필요시 다음 틱에). **[갱신, 2026-09-17]** §3에 있던 두 재검증 대기
+항목(`PN-2008220B`/`SP-B1E258D8`) 전부 §2로 이관 완료 - §3은 이제
+`SP-9A6D579F`(부분 착수 중, 완료되면 재대조)/`PN-B5C2845A`(Kill이
+Syscall::wait 파킹 대상에 미도달, 해법 미착수) 두 항목만 남았다.
+다음부터는 PL/DC류 문서, 또는 새로 `approved` 전환되는 문서(예:
+`SP-B26CDBDD`가 구현되면 그 시점에) 위주로 전환한다.
+
+- **[신규, 2026-09-17] `PL-4BA2B446`(멀티 프로세스 실행 기반 완성) -
+  PL류 문서 스윕 첫 사례**: 방법론을 SP/DC뿐 아니라 PL(실행 계획)류
+  문서에도 처음 적용 - 이 문서는 2026-09-15 이후 자체 갱신이 멈춰
+  있었지만, 그 시점에 "착수 가능"으로만 적어 둔 4단계 계획
+  (`PN-0367CDBA`/`PN-B3DD3D19`/`PN-268F062B`/`PN-6D497EB0`) 전부
+  이미 `completed`임을 `plan_get`으로 확인 - 코드 갭은 아니지만
+  문서가 진행 상황을 못 따라간 사례(§5 기록 규칙과 같은 패턴).
+  문서에 "진행 상황 갱신 3" 절을 추가해 4단계 완료 + 5단계(devmgr/fs
+  등 하드웨어 착수 순서)가 이미 개별 SP 문서로 분리 추적 중임을
+  반영 완료. 갭 없음(문서만 정정).
+
+- **[신규, 2026-09-17] `PL-65C20380`(SMP AP 기동) - kApMain/kMain
+  대칭 경로 점검**: 이 문서 자체는 2026-09-14 완료 기록이라 오래됐지만,
+  §5(대칭 경로 확인 규칙)에 따라 그 이후 생긴 새 진입점
+  (`Scheduler::enterIdleLoop()`, `PN-2008220B`)이 AP 경로(`kApMain`,
+  실제로는 `smp.cpp`에 있음 - `kmain.cpp`가 아님, 문서의 오래된 서술과
+  달리 파일이 옮겨진 상태이나 이건 문서 갱신 대상이라기보다 단순
+  위치 정보라 각주 없이 기록만 함)에도 대칭으로 적용됐는지 직접 대조.
+  `kApMain()`이 `runLoop()`을 직접 안 부르고 `Scheduler::
+  enterIdleLoop()`을 부르는 것 확인, `Smp::markThisCoreOnline()`/
+  `Rcu::initOnThisCore()`(`PN-907C5289`/`PN-495C11B7`가 각각 "BSP의
+  kMain()과 대칭되는 지점"이라고 스스로 명시해 둔 두 호출) 둘 다
+  `kApMain()`에도 실재 - **갭 없음**, 세 신규 메커니즘 전부 BSP/AP
+  양쪽에 정확히 대칭 적용됨.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
@@ -588,9 +648,8 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   싱글스텝/#DB ISR/메모리 대행/이벤트 통지/멀티스레드)는 여전히
   미착수이나 계획 자신의 체크리스트로 이미 openly 추적 중** - 전부
   완료되면 그때 전체를 §목차 방법론으로 재대조.
-- [ ] `SP-B1E258D8`(RCU) - `rejected`(도입 시점 보류)라 코드 갭
-  대상 아님, 재개 조건(커널단 v1 완료)이 실제로 도래했는지만 주기적
-  확인.
+(`SP-B1E258D8`(RCU) 항목은 approved 전환 + `PN-495C11B7` 구현
+완료까지 끝나 아래 §2로 이동했다.)
 - [ ] (2026-09-17 재정정) `PN-C4611402`(§1-B, 완전 해소) 취소 로직이
   실제 취소 레이스로는 아직 검증 안 됨(코드 검토로만 확인). **직전
   갱신("PN-71E50394 완료로 착수 가능")은 틀렸다 - `PN-B5C2845A`로
@@ -603,10 +662,7 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   `Kill`로 `pendingSignals`에 기록해도 대상이 절대 깨어나지 않는다.
   **여전히 재현 불가능** - `PN-B5C2845A`(신규 등록, 해법 후보 및
   위험도 분석 포함)가 해소돼야 이 항목도 재검증 가능해진다.
-- [ ] (신규, 2026-09-17) `PN-2008220B`(coroHandle.resume() CR3
-  미동기화, RM-23F4B687에 원칙으로도 기록) 해소되면 그 수정이
-  `SP-F682B889` §7.3(코루틴 재개 경로) 서술과 여전히 일치하는지
-  재확인.
+(`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을
 미리 체크리스트에 못박아 둔 것)
