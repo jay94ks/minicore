@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CA3C3E57
   status: approved
-  updatedAt: 2026-09-17T02:49:23.448Z
+  updatedAt: 2026-09-17T03:17:05.229Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -314,7 +314,7 @@ private:
 };
 ```
 
-**적용 대상**: `Channel::ownerProcess`(`PN-18FDBFF3`, 지난 틱 등록)를
+**적용 대상**: `Channel::ownerProcess`(`PN-18FDBFF3`, 완료됨)를
 `Process*` 대신 `DontDeref<Process>`로 선언 - 소유자 검증은
 `channel->ownerProcess == DontDeref<Process>(callerProcess)`(또는
 동급 비교)로만 이뤄지고, `ownerProcess`를 통해 `Process`의 멤버에
@@ -324,6 +324,94 @@ private:
 비교하고 절대 역참조하면 안 되는 포인터"가 또 나오면 같은 템플릿을
 재사용한다(`kMakeSharedNew`류와 동일한 확장 패턴, `SP-1DB13F61`
 참고). 착수 시 `RM-32D06563`(용어 및 개념)에 등록(CLAUDE.md 규칙 12).
+
+### 6-A.1 다른 유사 패턴으로 확대 적용 — 코드 감사 결과 (2026-09-17,
+설계자 의견 "Channel 이외에도 유사한 패턴의 포인터들에 확대
+적용하자")
+
+`docs git grep`로 `process.cpp`(Kill의 `children` 순회 비교)/
+`pnp.cpp`(`DeviceOwnerEntry::owner`)/`async_task.h`(`AsyncTaskWaitQueue`/
+`PendingConnectRequest`)/`task.h`를 대조 감사했다 - **지금 코드에는
+`Channel::ownerProcess`와 정확히 같은 패턴(구조체 필드에 담겨 자기
+스코프보다 오래 살아남는, "신원 비교만 하고 절대 역참조 안 하는"
+포인터)이 더 없다**:
+
+- `DeviceOwnerEntry::owner`(`pnp.cpp`)는 이미 `WeakPtr<Process>`이고
+  `.lock()`으로 생존 여부만 확인한다(신원 비교 아님, "누가 이
+  BAR를 쥐고 있는가"가 아니라 "지금 누군가 쥐고 있는가"만 묻는다) -
+  다른 문제(ABA 없는 생존 판정)를 이미 올바르게 풀고 있어 교체
+  대상이 아니다.
+- `process.cpp`의 Kill `children` 순회(`reinterpret_cast<int64_t>
+  (child.get()) == args->targetProcessId`)는 겉보기엔 비슷해
+  보이지만 실제로는 **`SP-9CB55C5B`가 이미 풀기로 확정한 별개의
+  문제**(유저가 준 raw pid 정수를 안전하게 해석)다 - `DontDeref<T>`가
+  해결하는 "구조체 필드에 오래 보관된 포인터"가 아니라 "매번 새로
+  스캔하며 임시로 비교하는 루프"라 애초에 필드 자체가 없다.
+- `AsyncTaskWaitQueue`/`PendingConnectRequest`의 `AsyncTask*`들은
+  실제로 역참조된다(`cur->next` 순회, intrusive list) - `DontDeref<T>`
+  대상이 아니다(역참조가 필요한 정상 포인터).
+
+**결론**: 지금 당장 되돌려 고칠 기존 코드는 없다 - 이 문서(§6-A)가
+확립한 `DontDeref<T>`를 **앞으로 이런 패턴이 나타날 때마다** 적용하는
+관례로 `RM-23F4B687`(코딩 컨벤션)에 남긴다(§9 참고).
+
+### 6-A.2 추가 의미론적 포인터 템플릿 — `ObserverPtr<T>` 제안
+(설계자 의견 "의미론적 템플릿들을 추가 설계하자")
+
+`DontDeref<T>`가 메우는 자리(비소유·비역참조)의 옆자리로, 이
+코드베이스에 실제로 훨씬 흔하게 나타나는 패턴이 있다 - **비소유지만
+역참조는 필요한** 포인터(예: `debug_session.cpp`의
+`auto* callerThread = submitter ? static_cast<UserThread*>
+(submitter.get()) : nullptr;` - `submitter`(`SharedPtr<Task>`)가
+스코프에 살아있는 동안만 유효하다는 게 암묵적 계약이지, 타입이
+그걸 표현하지 않는다). 지금은 이런 자리에 그냥 평범한 `T*`를 써서
+"이게 소유 포인터인지 관찰 전용인지"가 코드만 보고는 구분 안 된다 -
+과거 `AcceptFromChannel`류의 무검증 `reinterpret_cast` 사고도
+넓게 보면 "이 포인터의 소유권/생존 보장이 어디서 오는지"가 타입에
+드러나지 않아 실수하기 쉬웠던 사례 중 하나였다.
+
+```cpp
+// minicore/libs/libkenv/shared_ptr.h (제안 - DontDeref<T> 바로 옆)
+// 비소유 + 역참조 허용 - "이 포인터의 생존은 내가 보장하지 않는다,
+// 호출부가 더 오래 사는 무언가(SharedPtr/스택 변수 등)로 보장해야
+// 한다"는 계약을 타입으로 드러낸다. DontDeref<T>와의 차이는 딱
+// operator*/operator-> 유무 하나뿐.
+template <typename T>
+class ObserverPtr {
+public:
+    ObserverPtr() = default;
+    explicit ObserverPtr(T* ptr) : ptr_(ptr) {}
+
+    T& operator*() const { return *ptr_; }
+    T* operator->() const { return ptr_; }
+    explicit operator bool() const { return ptr_ != nullptr; }
+    T* get() const { return ptr_; }
+
+    bool operator==(const ObserverPtr& other) const { return ptr_ == other.ptr_; }
+    bool operator!=(const ObserverPtr& other) const { return !(*this == other); }
+
+private:
+    T* ptr_ = nullptr;
+};
+```
+
+**적용 후보(신규 코드부터, 기존 코드 일괄 교체는 하지 않음 -
+`RM-23F4B687` §4 과설계 방지, 회귀 위험 대비 이득이 낮음)**:
+`debug_session.cpp`/`process.cpp` 등에서 `SharedPtr<T>::get()`
+직후 임시로 raw 포인터를 뽑아 쓰는 자리들. 지금 당장 전부 바꾸지
+않고, **새로 작성되는 코드에 한해 이 관례를 쓰도록 규칙만 세워
+둔다**(§9). `DontDeref<T>`처럼 즉시 강제 마이그레이션할 만큼
+시급한 버그 사례가 있는 건 아니다 - 순수 표현력/실수 방지 목적.
+
+## 9. 관례 - 앞으로 이런 포인터가 나오면 (CLAUDE.md 규칙 12 등록 대상)
+
+- **신원 비교만, 역참조는 절대 금지** → `DontDeref<T>`.
+- **비소유, 역참조는 필요, 생존은 호출부 책임** → `ObserverPtr<T>`
+  (§6-A.2, 신규 코드부터 권장).
+- **비소유, 역참조 필요, 대상이 죽을 수 있어 매번 생존 확인 필요**
+  → 기존 `WeakPtr<T>::lock()`(변경 없음, `DeviceOwnerEntry::owner`
+  가 이미 이 자리의 올바른 선례).
+- **소유** → 기존 `SharedPtr<T>`/`UniquePtr<T>`(변경 없음).
 
 ## 7. 요약
 

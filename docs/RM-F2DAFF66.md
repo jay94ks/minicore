@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T02:57:05.318Z
+  updatedAt: 2026-09-17T03:07:08.861Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -232,6 +232,13 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   `pending_approval`로 전환(이 발견 자체는 코드 갭이 아니라 계획
   진행 누락이라 이 문서보다 일반 루프 절차 2번에 해당하지만, "설계는
   확정됐는데 후속 조치가 멈춰 있었다"는 성격이 같아 여기 기록).
+- **`SP-9F1DB1D8`(gCurrentTask RwSpinlock)**: `PN-D3597800`
+  completed(commit 2d0da74) 주장 독립 검증 - `spinlock.h:129`에
+  `RwSpinlock`/`RwSpinlockReadGuard`/`RwSpinlockWriteGuard` 확인,
+  `scheduler.cpp`에 `gCurrentTaskLock[kMaxCores]` + 18곳의 가드
+  적용(읽기/쓰기 전부) 실측 확인 - 구현 중 추가로 발견됐다는
+  `retireCurrentTask()`/`handleFpuTrap()` 두 곳도 실제로 가드가
+  걸려 있음. 갭 없음.
 - **`SP-1DB13F61`(vtable 타입 placement new 예외)**: `shared_ptr.h`에
   `kMakeSharedNew<T>()`/`kDestroyCtorAndFree<T>()`(§3 제안 그대로)가
   실제로 구현돼 있고, `mutex_core.h`/`semaphore_core.h` 둘 다 예전
