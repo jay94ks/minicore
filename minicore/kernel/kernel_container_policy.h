@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_KERNEL_CONTAINER_POLICY_H
 #define MINICORE_KERNEL_KERNEL_CONTAINER_POLICY_H
 
+#include "libkcont/lockfree_vector.h"
 #include "libkcont/vector.h"
 #include "libkmm/slab.h"
 
@@ -40,8 +41,19 @@ struct KernelVectorPolicy {
 template <typename T>
 using KernelVector = Vector<T, KernelVectorPolicy>;
 
-inline void* kKernelVectorAlloc(uint64_t size) { return KernelVectorPolicy::kAlloc(size); }
-inline void kKernelVectorFree(void* ptr, uint64_t size) { KernelVectorPolicy::kFree(ptr, size); }
+inline void* kKernelVectorAlloc(uint64_t size) { return GenericSlabAllocator::alloc(size); }
+inline void kKernelVectorFree(void* ptr, uint64_t size) { GenericSlabAllocator::free(ptr, size); }
+
+// [신규, 2026-09-17, PN-DAE91888] LockFreeVector<T>(libkcont)도 같은
+// "함수 포인터로 할당자 주입" 원칙을 그대로 따른다 - Policy 템플릿
+// 파라미터 없이 alloc/free 시그니처만 받으므로(세그먼트 방식이라
+// moveElement/destroyElement 훅 자체가 필요 없음 - 재할당이 없어 기존
+// 원소를 옮기거나 정리할 일이 없다), 별도 정책 구조체 없이
+// KernelVectorPolicy가 이미 노출한 kKernelVectorAlloc/kKernelVectorFree
+// 를 그대로 ensureAllocator에 넘기면 된다 - `KernelLockFreeVector<Foo> v;
+// v.ensureAllocator(kKernelVectorAlloc, kKernelVectorFree);`.
+template <typename T>
+using KernelLockFreeVector = LockFreeVector<T>;
 
 }  // namespace kernel
 
