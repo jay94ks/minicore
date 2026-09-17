@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T03:07:08.861Z
+  updatedAt: 2026-09-17T03:23:30.395Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -232,6 +232,18 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   `pending_approval`로 전환(이 발견 자체는 코드 갭이 아니라 계획
   진행 누락이라 이 문서보다 일반 루프 절차 2번에 해당하지만, "설계는
   확정됐는데 후속 조치가 멈춰 있었다"는 성격이 같아 여기 기록).
+- **`SP-E9B44929`(syscall 그룹+call 2단계 인코딩)**: minicore-88
+  완료 보고(commit 1f9228d) 독립 검증 - `syscall.h`의
+  `kMakeSyscallEndpointId`/`kSyscallGroupOf`/`kSyscallCallOf` +
+  `kSyscallEndpointSelfTerminate = kMakeSyscallEndpointId(0, 0)`류
+  재정의 확인, `syscall.cpp`의 `gCallSlotPool[1024]`(정적 범프 풀 -
+  최초엔 `GenericSlabAllocator`로 동적 할당했다가 `SelfTerminateHandler`
+  등록이 `GenericSlabAllocator::init()`보다 먼저 실행되는 부팅
+  순서 때문에 페이지 폴트 패닉 - 실측으로 스스로 잡고 정적 풀로
+  교체) 확인. `RM-48E1E610`도 그룹별 챕터로 실제 재구성됨(그룹 0
+  Process부터 확인) - Sync 그룹(8)은 §17.2 정정 대기로 의도적으로
+  번호만 예약 상태 유지, 경고 문구까지 남아 있음. 완전히 닫힌
+  사례 - 갭 없음.
 - **`SP-9F1DB1D8`(gCurrentTask RwSpinlock)**: `PN-D3597800`
   completed(commit 2d0da74) 주장 독립 검증 - `spinlock.h:129`에
   `RwSpinlock`/`RwSpinlockReadGuard`/`RwSpinlockWriteGuard` 확인,
@@ -379,6 +391,13 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   QEMU 실측까지 전부 완료, 그 안에서 파생된 "#DB 유저 syscall
   범위" 후속 질의(QU-3DB5F85C)도 빠짐없이 SP-9A6D579F/PN-87D6B615로
   분리 등록돼 이미 이 감사 문서 §3에서 추적 중임을 재확인 - 갭 없음.
+
+- **`SP-0666DB3C` §17(Mutex/Semaphore syscall 노출)**: §17.2 정정이
+  `PN-CE6A04AB`/`SP-CA3C3E57`를 정확히 인용하며 "세대 태그 슬롯
+  테이블" 패턴으로 교체 방향을 잡아 뒀고, `SP-E9B44929`(syscall
+  그룹+call 인코딩)와는 다른 축(핸들 값 형식 vs 엔드포인트 번호
+  형식)이라 서로 충돌 없음을 확인. `RM-48E1E610`의 Sync 그룹(8)도
+  "§17.2 정정 대기"로 정확히 의도적 미등록 상태 유지 중 - 갭 없음.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
