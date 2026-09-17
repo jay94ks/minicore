@@ -11,10 +11,13 @@ namespace kernel {
 
 class Waitable;  // WeakPtr<Waitable>로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
 
-// SP-0666DB3C §11 - 명시적(explicit) TLS 슬롯 개수. Task::tlsSlots의
-// 배열 크기이자 TlsRegistry::allocateSlot()(tls.h)의 발급 상한이라
-// 두 파일이 서로를 포함하지 않도록 이 값 자체를 Task와 같은 헤더에
-// 둔다(ThreadLocal<T>/TlsRegistry 전체 선언은 tls.h 참고).
+// SP-0666DB3C §11 - 명시적(explicit) TLS 슬롯 개수. [갱신, 2026-09-18,
+// PN-22E5E9E7 항목2] 예전엔 Task::tlsSlots(평범한 배열 필드) 크기였으나,
+// 이제 tls.h/tls.cpp의 진짜 `thread_local void* gTlsSlots[kMaxTlsSlots]`
+// 크기이자 TlsRegistry::allocateSlot()(tls.h)의 발급 상한이다 - 그
+// 배열이 여전히 이 값을 참조하므로(순환 include 회피) 이 값 자체는
+// 그대로 Task와 같은 헤더에 둔다(ThreadLocal<T>/TlsRegistry 전체 선언은
+// tls.h 참고).
 constexpr uint32_t kMaxTlsSlots = 16;  // 실측 후 조정(RM-23F4B687 §4 원칙)
 
 // 스케줄러의 최소 스케줄링 단위(PL-2D3184BC, 설계자 지시, QU-BA001D73,
@@ -86,6 +89,31 @@ struct Task {
     // parkCurrent 경로, 현재는 어떤 ring3 코드도 안 거침)는 여전히
     // CR3가 안 맞을 수 있다 - PN-63BCFE45 참고.
     uint64_t userPml4Phys = 0;
+
+    // [신규, 2026-09-18, PN-22E5E9E7 항목2/3, SP-29D652AA §4.1/§4.4]
+    // 이 Task 전용 TCB(Thread Control Block) 주소 - 진짜 컴파일러
+    // `thread_local` 변수(tls.h의 `gTlsSlots` 등, .tdata/.tbss 템플릿
+    // 인스턴스)에 접근할 때 컴파일러가 생성하는 %fs-상대 코드가 실제로
+    // 참조하는 주소다. `Task::init()`(task.cpp)이 링커가 만든 템플릿
+    // 경계(`kTlsTemplateStart`/`kTlsTemplateTdataEnd`/`kTlsTemplateEnd`,
+    // linker.ld)를 Slab에서 복사해 이 Task만의 인스턴스를 만들고, 그
+    // 블록의 **끝 주소**(x86_64 TLS variant II 관례 - FS_BASE가 블록의
+    // 끝을 가리키고 개별 변수는 음수 오프셋으로 접근)를 여기 담는다.
+    // **왜 userPml4Phys와 같은 자리에 있는가**: CR3와 똑같이 FS_BASE도
+    // `kContextSwitch`(콜리세이브+RFLAGS만 저장/복원)도 `iretq`도 건드리지
+    // 않는 순수 MSR이라, Task 전환마다 `kSyncFsBase`(scheduler.cpp)가
+    // `kSyncCr3`와 정확히 같은 다섯 디스패치 지점에서 다시 실어야 한다
+    // (userPml4Phys 문서 주석 참고 - 같은 문제, 같은 해법). 이 값은
+    // 템플릿 복사본 바로 뒤에 이어붙인 8바이트 self-pointer 헤더의
+    // 주소다(`*reinterpret_cast<uint64_t*>(kernelFsBase) == kernelFsBase`) -
+    // [실측 정정, 2026-09-18] 처음엔 `-ftls-model=local-exec`(cmake/
+    // toolchain-x86_64.cmake)면 self-pointer 헤더 자체가 필요 없을
+    // 거라 봤으나, `gTlsSlots`가 extern이라 Itanium C++ ABI가 강제하는
+    // TLS 래퍼 함수(`_ZTW...`, task.cpp의 `kMakeTaskTlsBlock()` 문서
+    // 주석 참고)가 `-ftls-model`과 무관하게 항상 FS:0을 역참조해
+    // "스레드 포인터 자신"부터 읽으므로, 그 자리에 진짜 self-pointer가
+    // 있어야 한다는 것을 QEMU 실측(즉시 페이지 폴트)으로 발견했다.
+    uint64_t kernelFsBase = 0;
 
     // 이 Task가 ring3 첫 진입(process.cpp의 kEnterRing3) 때 점프할
     // 목표 주소/유저 스택 top(PN-D0ED9611) - `isUserLevel`인 Task만
@@ -230,13 +258,6 @@ struct Task {
     // 재경쟁"과 "강제로 끌려나옴"을 구분할 수 있게 한다. 아직 이 값을
     // 실제로 읽는 호출부는 없다(다음 후속 항목).
     WaitCancelReason lastCancelReason = WaitCancelReason::None;
-
-    // 명시적(explicit) Thread Local Storage 슬롯 배열(SP-0666DB3C §11) -
-    // 진짜 컴파일러 thread_local이 아니라 TlsRegistry::allocateSlot()로
-    // 발급받은 인덱스를 ThreadLocal<T>가 그대로 이 배열에 꽂아 쓴다.
-    // 각 슬롯이 가리키는 실제 인스턴스의 생성/해제는 그 슬롯을 발급받은
-    // 서브시스템 책임 - Task 자신은 포인터 배열만 소유한다.
-    void* tlsSlots[kMaxTlsSlots] = {};
 
     // CR0.TS 기반 lazy FPU/SSE 컨텍스트 저장 영역(SP-83A07867 §8,
     // PN-F258698E) - FXSAVE/FXRSTOR이 요구하는 16바이트 정렬 512바이트

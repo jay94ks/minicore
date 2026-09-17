@@ -466,6 +466,25 @@ void kSyncDebugRegs(Task* task) {
     asm volatile("mov %0, %%dr7" : : "r"(dr7));
 }
 
+// [신규, 2026-09-18, PN-22E5E9E7 항목3, SP-29D652AA §4.4] kSyncCr3/
+// kSyncFpu/kSyncDebugRegs와 정확히 같은 다섯 지점(SP-83A07867 §3.2가
+// 확립한 "코어 소유가 아니라 Task 소유 레지스터는 디스패치 시점에
+// 동기화" 패턴)에서 호출된다 - FS_BASE(MSR 0xC0000100)는 CR3와 똑같이
+// `kContextSwitch`(콜리세이브+RFLAGS만 저장/복원)도 `iretq`(InterruptFrame)
+// 도 건드리지 않는 순수 코어 레지스터라, Task 전환마다 이 훅이 명시적으로
+// 다시 실어야 진짜 컴파일러 `thread_local`(%fs-상대 접근, task.cpp의
+// `Task::init()`이 만든 `kernelFsBase` TCB 블록)이 "지금 실행 중인
+// Task 것"을 가리킨다. kSyncCr3의 skip-if-same 최적화(TLB flush 회피가
+// 목적)는 여기 해당 없다 - wrmsr(FS_BASE)는 TLB를 건드리지 않아 매번
+// 무조건 다시 쓴다(kSyncDebugRegs와 동일한 판단, 정확성 우선).
+void kSyncFsBase(Task* task) {
+    constexpr uint32_t kIa32FsBaseMsr = 0xC0000100u;
+    const uint64_t target = task->kernelFsBase;
+    const uint32_t lo = static_cast<uint32_t>(target);
+    const uint32_t hi = static_cast<uint32_t>(target >> 32);
+    asm volatile("wrmsr" : : "c"(kIa32FsBaseMsr), "a"(lo), "d"(hi) : "memory");
+}
+
 // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §3) - excludeCore를
 // 뺀 나머지 코어 중 gNormalQueues 근사 길이가 가장 긴 코어를 O(코어
 // 수) 선형 스캔으로 찾는다(Pull이 "훔쳐올 대상"을 고를 때 쓴다).
@@ -1340,6 +1359,7 @@ void Scheduler::onTick(InterruptFrame* frame) {
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
     kSyncDebugRegs(next);
+    kSyncFsBase(next);
     // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
@@ -1431,6 +1451,7 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
     kSyncDebugRegs(next);
+    kSyncFsBase(next);
     kContextSwitch(&current->savedRsp, next->savedRsp);
 }
 
@@ -1644,6 +1665,7 @@ void Scheduler::yieldCurrent() {
     kSyncCr3(current);
     kSyncFpu(current, coreIndex);
     kSyncDebugRegs(current);
+    kSyncFsBase(current);
     // **실측으로 발견한 버그(2026-09-14, Channel IPC 스트레스
     // 테스트)**: 위 kContextSwitch의 pushfq는 방금 실행한 cli 때문에
     // IF=0인 RFLAGS를 이 Task 자신의 저장 슬롯에 그대로 담아 버린다 -
@@ -1699,6 +1721,7 @@ void Scheduler::parkCurrent() {
     kSyncCr3(current);
     kSyncFpu(current, coreIndex);
     kSyncDebugRegs(current);
+    kSyncFsBase(current);
     // 누군가 깨워 runLoop이 이 Task를 다시 고를 때까지 여기서 멈춰
     // 있다가, 다시 선택되면 이 지점부터 재개된다 - yieldCurrent()와
     // 같은 이유로(위 주석 참고) 여기서도 명시적으로 다시 켜야 한다 -
@@ -1909,6 +1932,7 @@ extern "C" void kSyncCr3OnTaskStart() {
         // 설계 의도였으므로 새 심볼을 만들지 않는다).
         kernel::kSyncFpu(self, kernel::Scheduler::currentCoreIndex());
         kernel::kSyncDebugRegs(self);
+        kernel::kSyncFsBase(self);
     }
 }
 

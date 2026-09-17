@@ -1,11 +1,21 @@
 #include "task.h"
 
 #include "acpi.h"
+#include "libkenv/mem.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "scheduler.h"
+
+// linker.ld가 정의하는 thread_local 템플릿 경계(PN-22E5E9E7 항목1) -
+// kTlsTemplateStart~kTlsTemplateTdataEnd는 파일에 실제 바이트가 있는
+// .tdata 범위(memcpy 대상), kTlsTemplateTdataEnd~kTlsTemplateEnd는
+// .tbss(항상 0으로 memset) 범위.
+extern "C" char kTlsTemplateStart[];
+extern "C" char kTlsTemplateTdataEnd[];
+extern "C" char kTlsTemplateEnd[];
 
 namespace {
 
@@ -49,6 +59,66 @@ kernel::uint64_t kReserveStackVirtRange(kernel::uint32_t pageCount) {
 
 #endif  // MINICORE_TASK_STACK_GUARD_PAGE
 
+// [신규, 2026-09-18, PN-22E5E9E7 항목2/4, SP-29D652AA §4.1] .tdata/
+// .tbss 템플릿을 복사해 이 Task 전용 TCB 블록을 만들고 그 FS_BASE
+// 값(템플릿 바로 뒤에 이어붙인 self-pointer 헤더의 주소)을 반환한다 -
+// x86_64 TLS variant II 레이아웃.
+//
+// [실측 정정, 2026-09-18] 처음엔 `-ftls-model=local-exec`(cmake/
+// toolchain-x86_64.cmake)면 컴파일러가 FS:0을 절대 역참조하지 않을
+// 것이라 보고 self-pointer 헤더 없이 순수 템플릿 복사본만 만들었으나,
+// QEMU 실측(TEMP thread_local 프로브, 이 계획의 검증 절 참고)에서
+// 즉시 페이지 폴트로 크래시했다 - `objdump`로 원인을 추적한 결과,
+// `gTlsSlots`가 extern(다른 번역 단위에서 접근)이라 Itanium C++ ABI가
+// 요구하는 **TLS 래퍼 함수**(`_ZTWN6kernel9gTlsSlotsE`, 같은 헤더를
+// include하는 모든 TU가 이 심볼을 통해서만 접근)가 자동 생성됐는데,
+// 이 래퍼는 `-ftls-model`과 무관하게 항상 `mov %fs:0x0, %rax`로
+// "스레드 포인터 자신"부터 읽은 뒤 거기에 링크 타임 음수 오프셋을
+// 더하는 모델-불가지론적(model-agnostic) 관례를 쓴다 - `-ftls-model`은
+// **같은 TU 안에서의 직접 접근**에만 영향을 준다. 그래서 FS:0에 정말로
+// self-pointer(자기 자신의 주소)가 있어야 한다 - dtv는 불필요(이 래퍼가
+// dtv 인덱싱을 쓰지 않고 오프셋을 직접 더하는 것까지 실측으로 확인함).
+//
+// **정렬**: 이 함수 자신은 정렬을 별도로 강제하지
+// 않고 `memsz`(kTlsTemplateEnd - kTlsTemplateStart, 링커가 이미
+// PT_TLS.p_align에 맞춰 반올림해 둔 값 그대로)를 그대로 슬랩 요청
+// 크기로 쓴다 - 실측(`readelf -l`) 결과 GCC/binutils가 이 세그먼트에
+// 고른 `p_align`은 16(linker.ld의 `.tdata`/`.tbss` `ALIGN(8)` 지시보다
+// 큼 - 링커 자체 기본값으로 보인다)이었지만, `GenericSlabAllocator`의
+// 버킷 할당(현재 128B 버킷)이 매번 페이지 내 등분 오프셋이라 이미
+// 그보다 넓게 정렬돼 있어(§2.3 - 버킷 크기의 배수 오프셋이면 항상
+// 그 버킷 크기만큼 정렬됨) 지금은 우연히 문제가 없다. **정렬 요구가
+// 실제 버킷 크기를 넘어서게 되면**(예: 16바이트보다 넓은 정렬이 필요한
+// thread_local 변수가 추가되고 버킷이 그보다 작아지면) 이 함수가 명시적
+// 정렬 보정을 해야 한다 - 지금은 그런 변수가 없어 미루고 이 사실만
+// 기록해 둔다(RM-23F4B687 §4 원칙, 실측 후 조정).
+//
+// 실패(슬랩 고갈) 시 0을 반환 - 호출부(Task::init())는 이미 다른
+// 실패 가능 할당(kernelStackPhys)도 확인하지 않는 것과 같은 수준으로
+// 그대로 둔다(이 프로젝트가 OOM을 이 함수 하나만 특별 취급하지 않음) -
+// kernelFsBase가 0으로 남으면 kSyncFsBase(scheduler.cpp)가 FS_BASE에
+// 0을 실어 이후 이 Task의 thread_local 접근이 잘못된 주소를 건드리게
+// 되지만, 이미 커널 스택 할당 자체가 실패하는 것과 동급의 치명적
+// OOM 상황이라 이 함수만 별도로 방어하지 않는다.
+kernel::uint64_t kMakeTaskTlsBlock() {
+    const auto templateStart = reinterpret_cast<kernel::uint64_t>(kTlsTemplateStart);
+    const auto tdataEnd = reinterpret_cast<kernel::uint64_t>(kTlsTemplateTdataEnd);
+    const auto templateEnd = reinterpret_cast<kernel::uint64_t>(kTlsTemplateEnd);
+    const kernel::uint64_t filesz = tdataEnd - templateStart;
+    const kernel::uint64_t memsz = templateEnd - templateStart;
+    constexpr kernel::uint64_t kTcbHeaderSize = 8;  // self-pointer 하나뿐(위 문서 주석)
+
+    void* block = kernel::GenericSlabAllocator::alloc(memsz + kTcbHeaderSize);
+    if (!block) {
+        return 0;
+    }
+    memcpy(block, reinterpret_cast<const void*>(templateStart), filesz);
+    memset(static_cast<kernel::uint8_t*>(block) + filesz, 0, memsz - filesz);
+    const kernel::uint64_t fsBase = reinterpret_cast<kernel::uint64_t>(block) + memsz;
+    *reinterpret_cast<kernel::uint64_t*>(fsBase) = fsBase;  // FS:0 self-pointer
+    return fsBase;
+}
+
 }  // namespace
 
 namespace kernel {
@@ -71,6 +141,13 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     // "현재 코어 노드 우선"으로 하고 있으므로 여기서는 그 사실을 나중에
     // 다시 조회할 수 있게 값만 남긴다.
     numaNode = Acpi::cpuNumaNode(Scheduler::currentCoreIndex());
+
+    // [신규, 2026-09-18, PN-22E5E9E7 항목2] 이 Task 전용 thread_local
+    // TCB 인스턴스 - Scheduler::currentTask()가 이 Task를 가리키기 전
+    // (아직 어느 큐에도 없음)에 만들어도 안전하다(순수 로컬 계산, 다른
+    // Task/코어 상태를 안 건드림). kSyncFsBase(scheduler.cpp)가 이
+    // Task가 실제로 디스패치되는 순간 FS_BASE에 실제로 반영한다.
+    kernelFsBase = kMakeTaskTlsBlock();
 
     const uint32_t order = kOrderForStackSize(stackSize);
     kernelStackPhys = PageFrameAllocator::allocOrder(order);

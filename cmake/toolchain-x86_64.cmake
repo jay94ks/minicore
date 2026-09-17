@@ -53,7 +53,18 @@ set(CMAKE_C_FLAGS_INIT "${_minicore_freestanding_flags}")
 # 항상 한 코어가 먼저 접근해 초기화를 끝내므로(SMP AP들은 그 이후에나
 # 기동) 진짜 동시 초기화 경쟁은 없다고 보고, 가드 인프라를 새로 구현하는
 # 대신 표준 커널/프리스탠딩 관례대로 이 플래그로 끈다.
-set(CMAKE_CXX_FLAGS_INIT "${_minicore_freestanding_flags} -fno-exceptions -fno-rtti -fcoroutines -fno-threadsafe-statics")
+# [추가, 2026-09-18, PN-22E5E9E7 항목2/3] `-ftls-model=local-exec` -
+# 이 커널은 동적 링커가 전혀 없는 완전히 정적인 단일 실행 파일이라
+# (`-nostdlib -static`, 위 `-fno-pic -fno-pie`) thread_local 접근에
+# initial-exec/general-dynamic 모델의 GOT 간접 참조나 FS:0 self-pointer
+# 역참조가 전혀 필요 없다 - local-exec을 명시적으로 강제해 컴파일러가
+# 항상 FS_BASE로부터 링크 타임에 고정된 음수 오프셋만 쓰게 한다(task.cpp의
+# Task::init()이 만드는 TCB가 self-pointer/dtv 헤더 없이 순수 .tdata/.tbss
+# 템플릿 복사본뿐인 이유- PN-22E5E9E7 항목2 참고). 이 플래그 없이 컴파일러
+# 기본 휴리스틱에 맡기면 모델을 잘못 고를 위험이 있어(예: initial-exec을
+# 골라 FS:0 역참조 코드를 생성하면 이 TCB 레이아웃과 안 맞아 조용히
+# 잘못된 주소를 읽는다) 명시적으로 고정한다.
+set(CMAKE_CXX_FLAGS_INIT "${_minicore_freestanding_flags} -fno-exceptions -fno-rtti -fcoroutines -fno-threadsafe-statics -ftls-model=local-exec")
 set(CMAKE_ASM_FLAGS_INIT "-ffreestanding")
 
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-nostdlib -static")
