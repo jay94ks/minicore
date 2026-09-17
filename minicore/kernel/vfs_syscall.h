@@ -118,6 +118,19 @@ struct WriteArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] Mkdir/Unlink와 같은 급의
+// "경로만으로 동작, fd 불필요" 오퍼레이션(§9.4) - `ResolvePathArgs`와
+// 거의 같은 모양이다. `MountKind::Channel` 마운트는 Open과 동일한
+// 이유(§9.1 IPC 와이어 포맷 미정)로 아직 NotSupported.
+struct StatArgs {
+    const char* path = nullptr;  // in: 절대 경로
+    uint32_t pathLen = 0;
+    // out
+    uint64_t size = 0;
+    bool isDirectory = false;
+    ChannelError error = ChannelError::None;
+};
+
 // [갱신, SP-E9B44929] Vfs 그룹(3).
 constexpr SyscallEndpointId kSyscallEndpointMount = kMakeSyscallEndpointId(3, 0);
 constexpr SyscallEndpointId kSyscallEndpointUnmount = kMakeSyscallEndpointId(3, 1);
@@ -128,10 +141,11 @@ constexpr SyscallEndpointId kSyscallEndpointOpen = kMakeSyscallEndpointId(3, 5);
 constexpr SyscallEndpointId kSyscallEndpointClose = kMakeSyscallEndpointId(3, 6);
 constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
+constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 9개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 10개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 

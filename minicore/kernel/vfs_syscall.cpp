@@ -448,6 +448,57 @@ public:
 
 WriteHandler gWriteHandler;
 
+// [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] Stat - fd 없이 경로만으로
+// 동작(ResolvePathHandler와 거의 같은 모양). MountKind::Channel은
+// Open과 동일한 이유로 아직 NotSupported.
+class StatHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<StatArgs*>(argsRaw);
+        if (!kValidateVfsBuffer(task, args->path, args->pathLen)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
+
+        MountKind kind{};
+        uint64_t channelId = 0;
+        KernelFsDriver* driver = nullptr;
+        uint32_t relOffset = 0;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (kind == MountKind::Channel) {
+            args->error = ChannelError::NotSupported;  // PN-EA4EE935와 동일한 스코프 결정
+            co_return;
+        }
+
+        KernelFsStatArgs kfsArgs;
+        kfsArgs.relPath = args->path + relOffset;
+        kfsArgs.relPathLen = args->pathLen - relOffset;
+        AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
+        if (!fsTask) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // PN-EA4EE935 실측 발견 그대로 재적용
+        AsyncTaskAwaiter(fsTask).await();
+
+        if (kfsArgs.error != VfsError::None) {
+            args->error = kMapVfsError(kfsArgs.error);
+            co_return;
+        }
+        args->size = kfsArgs.size;
+        args->isDirectory = kfsArgs.isDirectory;
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+StatHandler gStatHandler;
+
 }  // namespace
 
 void VfsSyscallService::registerSyscallEndpoints() {
@@ -460,6 +511,7 @@ void VfsSyscallService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointClose, &gCloseHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointRead, &gReadHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointWrite, &gWriteHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointStat, &gStatHandler);
 }
 
 }  // namespace kernel

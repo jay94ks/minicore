@@ -26,6 +26,7 @@ constexpr SyscallEndpointId kSyscallEndpointOpen = kMakeSyscallEndpointId(3, 5);
 constexpr SyscallEndpointId kSyscallEndpointClose = kMakeSyscallEndpointId(3, 6);
 constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
+constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
 
 struct MountArgs {
     const char* path = nullptr;
@@ -105,6 +106,16 @@ struct WriteArgs {
     uint32_t len = 0;
     // out
     uint32_t bytesWritten = 0;
+    ChannelError error = ChannelError::None;
+};
+
+// [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] fd 없이 경로만으로 동작.
+struct StatArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    // out
+    uint64_t size = 0;
+    bool isDirectory = false;
     ChannelError error = ChannelError::None;
 };
 
