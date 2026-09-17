@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CCACB192
   status: approved
-  updatedAt: 2026-09-17T01:37:59.362Z
+  updatedAt: 2026-09-17T02:37:51.540Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -87,6 +87,19 @@ ASCII만) 대신 "처음부터 넓게(소수+유니코드) 지원"을 선택했�
 **[확정, 2026-09-17, QU-8E75915F 답변]** (b) 채택 - v1부터 UTF-8로
 디코딩해 콜백에 넘긴다(서로게이트 페어 조합 포함).
 
+**[갱신, 2026-09-17, 설계자 의견(opinion)]** "문자열 관련해서 유니코드
+등은 `minicore/libs/libutf8`처럼 별도 라이브러리를 구성하도록 해.
+이것들 역시 커널/유저 랜드 공용이어야 해." - 위 UTF-8 디코딩(코드
+포인트 → UTF-8 바이트열, 서로게이트 페어 조합)을 `json.cpp` 안에
+직접 구현하지 않고 **신규 `minicore/libs/libutf8`**(커널/유저
+공용, `libelf`/`libjson` 자신과 동일한 `MINICORE_..._KERNEL` 매크로
+게이팅 패턴)로 분리하고, `libjson`은 그 라이브러리를 링크해 쓴다 -
+정확한 함수 시그니처/API 범위(코드 포인트 인코딩만인지, 향후 UTF-8
+검증/순회 유틸까지 포함하는지)는 착수 세션이 실제 필요(지금은
+`\uXXXX` 디코딩 하나뿐)에 맞춰 확정한다(RM-23F4B687 §4 - 과설계
+방지, CLAUDE.md 규칙 4). `RM-7C249618`에 "예정"으로 이미 등재
+완료(이 패치와 함께).
+
 ## 5. 직렬화(쓰기) - `JsonWriter`
 
 `pubreg`가 `query` 응답 등을 JSON으로 만들어 내야 하므로 최소한의
@@ -119,8 +132,10 @@ public:
 `minicore/libs/libjson/json.h`/`json.cpp` + `CMakeLists.txt` -
 `libelf`(`MINICORE_LIBELF_KERNEL` 매크로 게이팅, SP-68182FBD §2.4)와
 동일한 패턴으로 커널/유저 양쪽 빌드를 분기한다(기본값은 유저 영역용
-컴파일). 착수 시 `RM-7C249618`의 "예정" 표기를 "구현 완료"로 갱신
-(CLAUDE.md 규칙 8).
+컴파일). `\uXXXX` 디코딩은 `minicore/libs/libutf8`(신규, §4 참고)를
+링크해 위임한다 - `json.cpp`가 직접 UTF-8 인코딩 로직을 갖지 않는다.
+착수 시 `RM-7C249618`의 "예정" 표기(libjson/libutf8 둘 다)를 "구현
+완료"로 갱신(CLAUDE.md 규칙 8).
 
 ## 7. 이 문서가 다루지 않는 것
 

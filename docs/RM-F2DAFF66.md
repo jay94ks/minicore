@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T02:20:07.749Z
+  updatedAt: 2026-09-17T02:43:25.796Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -191,6 +191,25 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **`RM-28225668`(인터럽트 벡터 목록)**: 0xE0-0xE3 전부 상태 최신,
   `PN-B3DD3D19`(인터럽트 구독)가 새 고정 IPI 벡터를 요구하지 않고
   기존 동적 벡터 위임 메커니즘을 재사용함을 확인 - 갭 없음.
+- **`SP-1DB13F61`(vtable 타입 placement new 예외)**: `shared_ptr.h`에
+  `kMakeSharedNew<T>()`/`kDestroyCtorAndFree<T>()`(§3 제안 그대로)가
+  실제로 구현돼 있고, `mutex_core.h`/`semaphore_core.h` 둘 다 예전
+  raw `GenericSlabAllocator::alloc`+`memset` 패턴이 남아있지 않음을
+  확인(주석이 `kMakeSharedNew<Mutex>()`/`kMakeSharedNew<Semaphore>()`
+  로 만들어야 한다고 명시) - 갭 없음.
+- **`SP-00CA7175`(커널 ↔ 커널 서비스 통신 채널)**: 문서 자체가 이미
+  2026-09-17에 "전면 정정"/"전부 완료" 각주를 달아 두었으나(RM-F2DAFF66
+  방법론 - 문서의 자체 완료 선언은 그 자체를 의심하고 재검증), 이번
+  세션이 독립적으로 코드 대조: `channel.h`(281/303행)의
+  `Channel::exclusivePreemptive` 필드 + `channel.cpp`(10곳)의
+  `AsyncReactor::submitCompletion(..., channel->exclusivePreemptive)`
+  전달로 Tier B 완전 구현 확인, `kernel_service_ring.h`(16행)에
+  `KernelServiceSharedRingBuffer` 구조체(Tier A 골격) 존재 확인 -
+  `PN-7AC01E6E`(completed)가 자체 기록한 "항목 7: 구조체만, 실제
+  소비자 없음"과 정확히 일치. **결론**: 문서의 자체 정정이 실제로
+  정확했다 - 갭 없음(남은 유일한 열린 항목인 Tier A 소비 알림
+  메커니즘/버퍼 크기는 실제 소비자가 생기기 전까지 정당하게 유예된
+  상태, RM-23F4B687 §4 패턴).
 - **`SP-EAB162FC`(ProcessRole/Capability/Resurrect 체계)**:
   §2.1(`Process::role` 필드)/§2.3(SubscribeInterrupt exclusive
   자격 검증)/§6.1-6.4(Resurrect `essential`/`resurrect` 플래그,
@@ -241,6 +260,18 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   기록돼 있고, 코드가 전혀 없어(devmgr 자식 프로세스로 실행 예정,
   아직 착수 전) 코드-문서 불일치 자체가 성립하지 않는다 - 교차
   참조(SP-9DD4F3EA/SP-39F18E30)도 최신 상태와 일치. 갭 없음.
+- **`SP-83A07867`(CR3 동기화 통합)**: §3.2/§8이 "모든 디스패치
+  재개 지점"을 두 갈래로 완결했다고 서술하지만, 작성 시점 이후
+  생긴 세 번째 재개 경로(`AsyncReactor::drainOnce()`의
+  `coroHandle.resume()`, 코루틴 지원과 함께 도입됨)가 빠져 있음을
+  발견 - 이미 `PN-2008220B`로 별도 추적 중인 바로 그 갭이라 새로운
+  코드 갭은 아니지만("작성 시점엔 정확했던 문서가 이후 생긴 새
+  경로를 못 따라간" 사례), 이 "완결됐다"고 주장하는 문서 자체에
+  교차 참조가 없어 다음에 §3.2/§8을 참고하는 사람이 오도될 수
+  있었다 - 교차 참조 추가(원문 미수정). §8의 하드웨어 불변조건
+  체크리스트(CR3/RSP0/FPU) 자체는 명시된 세 지점 안에서는 정확히
+  구현/완료돼 있음을 확인(PN-40210D5A/PN-AEA74E1B/PN-F258698E 전부
+  completed) - 문서 정정만, 코드 갭 아님.
 - **`SP-DE19BB1C`(커널 영역 TLB 샷다운)**: 이 문서 자체가 이미
   `PN-D132A1E9`(§5-1, 유저 영역 확장 - 요청자별 슬롯+수신자별
   Target Pending Mask) 완료를 상세히 기록해 뒀고, `tlb_shootdown.cpp`

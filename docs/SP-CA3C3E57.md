@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CA3C3E57
-  status: review
-  updatedAt: 2026-09-17T02:23:18.238Z
+  status: approved
+  updatedAt: 2026-09-17T02:41:41.934Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -78,11 +78,11 @@ struct ChannelTableSlot {
     uint32_t generation = 0;  // 재사용될 때마다 +1 (ABA 방지)
 };
 
-constexpr uint32_t kMaxChannelTableSlots = 65535;  // UINT16_MAX -
-// SP-9CB55C5B §4가 ProcessId 테이블에 이미 확정한 상한과 동일한
-// 값을 그대로 재사용(같은 종류의 "동시 생존 개체 수" 상한 개념이라
-// 별도로 다른 값을 새로 확정받을 이유가 없다고 판단 - 만약 실측으로
-// 부족하면 그때 재조정).
+constexpr uint32_t kMaxChannelTableSlots = 65536;  // [확정, 2026-09-17,
+// QU-1AF2C16B 답변] "채널의 전역 상한은 64K" - 64*1024 = 65536(인덱스
+// 0..65535, uint16_t 전체 범위를 정확히 채움). SP-9CB55C5B의
+// UINT16_MAX(65535)와는 1 차이지만 설계자가 이번엔 "64K"로 명시했으므로
+// 그 문구 그대로 65536을 쓴다.
 
 ChannelTableSlot gChannelTable[kMaxChannelTableSlots];
 Spinlock gChannelTableLock;  // 등록/해제만 보호(드묾) - 조회는
@@ -200,22 +200,130 @@ if (!channel) {
 
 ## 6. [열린 확인 — 설계자] 이 세부 설계에 대한 질문
 
-1. `kMaxChannelTableSlots = UINT16_MAX`(§2, ProcessId와 동일 값
-   재사용)가 적절한지, 아니면 Channel은 성격이 달라(프로세스보다
-   훨씬 자주 열고 닫힐 수 있음) 다른 상한이 필요한지.
-2. §3에서 "테이블 조회 자체엔 락이 불필요하다"고 판단했는데, 이
-   판단에 동의하는지 - 아니면 일관성을 위해 여기도 `SP-9F1DB1D8`
-   스타일 `RwSpinlock`을 쓰는 게 나은지.
-3. **[§1이 발견한 별개 문제, 이 설계 범위 밖으로 제안]**
-   `AcceptFromChannel`/`DestroyChannel`은 이 수정 이후에도 여전히
-   "그 채널을 만든 게 아닌 다른 프로세스"가 호출해도 막을 방법이
-   없다(`Channel`에 소유자 필드 자체가 없음) - 즉 역참조 안전성은
-   고쳐지지만 **권한(누가 Accept/Destroy할 수 있는가)은 여전히
-   무제한**이다. 이걸 이번에 같이 다룰지, 별도 계획(예: `Channel`에
-   `ownerProcess` 필드 추가 + `kResolveOwnedBridge`류 소유자 검증)
-   으로 분리해 나중에 다룰지 확인 필요 - 현재 v1 스코프에서 의도된
-   개방성(누구든 이름/ID만 알면 상호작용 가능하다는 IPC 설계 철학)
-   인지, 아니면 실제 갭인지 판단이 서지 않아 미리 결정하지 않았다.
+1. **[확정, 2026-09-17, QU-1AF2C16B 답변]** `kMaxChannelTableSlots`
+   - 설계자 답변: "채널의 전역 상한은 64K." - 제안된
+   `UINT16_MAX`(65535, §2)를 그대로 확정(≈64K, `SP-9CB55C5B`의
+   `kMaxProcessTableSlots`와 같은 값 재사용 판단이 승인됨).
+2. **[미확정 - 착수 세션 판단]** §3에서 "테이블 조회 자체엔 락이
+   불필요하다"고 판단했으나, 이 질문 자체는 QU-1AF2C16B 답변에서
+   명시적으로 다뤄지지 않았다 - 착수 세션이 §3의 논증(발급/해제만
+   드문 쓰기, 조회는 generation 비교만 - 최악의 경우도 "못 찾음"으로만
+   안전하게 실패)을 근거로 직접 판단해 구현한다(RM-23F4B687 §4 -
+   임의로 여기서 재확정하지 않음).
+3. **[확정, 2026-09-17, QU-1AF2C16B 답변]** Accept/Destroy 권한 부재
+   - 설계자 답변: **"Channel은 항상 소유자가 있어야해. 만든놈은
+   있는데 소유자가 없다는건 말이 되면 안돼. Bridge도 마찬가지야.
+   채널의 전역 상한은 64K. 만든놈들에게 관리 책임을 넘겨."** - §1의
+   \"의도된 개방성 아니면 실제 갭\" 질문에 대한 답이 명확히
+   **실제 갭**으로 확정됐다. `Channel`에 `ownerProcess`(또는 동급)
+   필드를 신설해 생성자 프로세스를 기록하고, `AcceptFromChannel`/
+   `DestroyChannel`이 `kResolveOwnedBridge`(§1이 이미 확인한 `Bridge`
+   쪽의 기존 패턴)와 대칭되는 소유자 검증을 거치도록 해야 한다 -
+   "Bridge도 마찬가지"는 `Bridge`가 이미 `Process::openBridges`로
+   이 패턴을 갖고 있음(§1 참고)을 재확인한 것이지 Bridge에 새로
+   뭔가를 추가하라는 뜻이 아니다. **후속 작업으로 분리**: 이 문서
+   본문(§2/§4/§5)은 이미 승인 대기 중인 세대 태그 슬롯 테이블 자체를
+   바꾸지 않고, 오너십 필드+검증은 별도 구현 단계(착수 세션이 PN
+   등록, CLAUDE.md 규칙 7)로 다룬다 - `Channel` 구조체에 필드 하나
+   추가 + 두 핸들러 앞단에 소유자 비교 한 줄이라 이 설계의 세대
+   태그 테이블 골격과 충돌하지 않는다.
+
+### 6.1 소유권 필드 구현 방식 — 왜 `WeakPtr<Process>`를 바로 못 쓰는가
+
+**[추가, 2026-09-17, minicore-88]** 후속 구현 단계로 넘기기 전에
+실제 구현 방식 하나를 미리 확정해 둔다 - 처음 떠오르는 방향은
+`Channel`에 `WeakPtr<Process> owner`를 추가하는 것이다(`Process::
+parent`가 이미 이 패턴). 그런데 `Channel`은 `kCreateNamedChannel`
+에서 `GenericSlabAllocator::alloc()` + 명시적 `init()`으로만
+준비되고 **실제 C++ 생성자/소멸자를 거치지 않는다**(channel.cpp:
+147-154, `DestroyChannelHandler`도 `GenericSlabAllocator::free()`만
+불러 `~Channel()`은 호출되지 않는다). `WeakPtr<T>::operator=`는
+대입 전에 `if (_block) _block->releaseWeak()`로 **현재 값**을 먼저
+정리하는데, `init()`에서 `owner = WeakPtr<Process>()`처럼 대입하면
+그 시점 `_block`이 슬랩 재사용으로 남은 쓰레기 값일 수 있어 임의
+주소에 `releaseWeak()`를 호출하는 새 미정의 동작을 만든다(placement
+new 없이는 안전하지 않음 - `SP-1DB13F61`이 vtable 타입에 대해 이미
+지적한 것과 같은 종류의 문제, 이번엔 가상 함수가 아니라 WeakPtr의
+비trivial 대입 연산자가 원인). `Channel`을 `BridgePipe`처럼 완전한
+`SharedPtr`/`EnableSharedFromThis` 관리로 마이그레이션하면(placement
+new로 실제 생성자를 거치게) 근본적으로 해결되지만, 이건
+`kCreateNamedChannel`/`DestroyChannelHandler` 전체의 할당/해제
+경로를 다시 짜는 훨씬 큰 작업이라 이 취약점 수정 PN의 범위를
+넘는다.
+
+**채택 — v1은 raw `Process*` 포인터 동일성 비교만**: `Channel::
+ownerProcess`를 **raw `Process*`**로 추가하고 **절대 역참조하지
+않으며 포인터 값 비교로만** 쓴다(`kProcessFromSubmitter(task).get()
+== channel->ownerProcess`). 이건 이 문서 §2가 막 고친 것과 같은
+종류의 위험(포인터 재사용/ABA)을 아주 좁은 범위로 다시 들여오는
+것이지만 결정적 차이가 있다 - **역참조가 전혀 없으므로 최악의
+경우도 "잘못된 프로세스가 권한이 있다고 오판"(권한 오판)에
+그치고, §2가 막던 것(임의 주소 역참조로 커널 패닉/손상)과는 심각도가
+다르다**. `Process`는 좀비로 회수 대기 중엔 구조체가 살아있고
+(`wait()`로 reap되기 전까지), 그 슬랩 슬롯이 곧바로 다른 새
+프로세스에 재사용될 확률도 낮아 실무적 위험은 작다고 판단한다.
+완전히 닫으려면 위의 `SharedPtr` 마이그레이션이 필요 - 별도 후속
+계획으로 분리한다(§7 참고).
+
+적용 지점: `channel.h`에 `Process* ownerProcess = nullptr;` 필드 +
+`init()`에서 `nullptr`로 리셋. `OpenChannelHandler::onExec`에서
+`channel->ownerProcess = kProcessFromSubmitter(task).get();`.
+`AcceptFromChannelHandler::onExec`/`DestroyChannelHandler::onExec`
+에서 `kResolveChannelId()` 성공 직후, 실제 로직 전에 `caller.get()
+!= channel->ownerProcess`면 `ChannelError::PermissionDenied`(이미
+존재하는 값)로 거부. `ConnectChannel`은 소유자 검증 대상이 아니다
+(§1에서 이미 확인 - 연결은 원래 남이 만든 채널에 하는 것이 정상).
+
+## 6-A. `DontDeref<T>` - 신원 비교 전용 포인터 래퍼 (신설, 2026-09-17,
+설계자 의견)
+
+> "이걸 보다가 든 생각인데, 단순 포인터 비교용으로 들고 있을거라면
+> `DontDeref<T>`를 설계하고 wrapping해서 역참조를 절대 하면 안된다고
+> 못박도록 해."
+
+§6-3이 확정한 `Channel::ownerProcess`(§2의 `ChannelTableSlot::ptr`과
+성격이 다르다 - 그건 실제로 역참조해 `Channel` 멤버에 접근해야 하는
+"진짜 포인터"지만, `ownerProcess`는 **"호출자의 `Process*`와 같은가"만
+비교**하면 되고 그 자체를 역참조할 일이 없다, §4/§5가 이미 호출자
+식별은 항상 `submitterTask.lock()`으로 별도로 얻고 있음)가 정확히
+이 패턴이다 - 과거 `AcceptFromChannel`류의 raw pointer 역참조 취약점
+(§0/이 문서 전체의 발단)과 `PN-C4611402`(Channel onCancel 댕글링
+포인터) 둘 다 "역참조하면 안 되는/안전하지 않은 포인터를 실수로
+역참조"에서 비롯된 만큼, 타입 시스템으로 원천 차단하자는 제안이다.
+
+```cpp
+// minicore/libs/libkenv/shared_ptr.h (제안 - SharedPtr/WeakPtr와 같은
+// "포인터류 유틸" 파일에 추가, 새 파일을 만들 만큼 크지 않음)
+template <typename T>
+class DontDeref {
+public:
+    DontDeref() = default;
+    explicit DontDeref(T* ptr) : ptr_(ptr) {}
+
+    bool operator==(const DontDeref& other) const { return ptr_ == other.ptr_; }
+    bool operator!=(const DontDeref& other) const { return !(*this == other); }
+    explicit operator bool() const { return ptr_ != nullptr; }
+
+    // 의도적으로 없음: operator*, operator->, T*로의 암시적/명시적
+    // 변환 연산자 전부 - 이 값은 신원 비교(==/!=/bool)만 허용되고
+    // 역참조는 컴파일 타임에 막힌다(멤버로 raw T* 자체가 없어
+    // reinterpret_cast 없이는 꺼낼 방법이 없음).
+
+private:
+    T* ptr_ = nullptr;
+};
+```
+
+**적용 대상**: `Channel::ownerProcess`(`PN-18FDBFF3`, 지난 틱 등록)를
+`Process*` 대신 `DontDeref<Process>`로 선언 - 소유자 검증은
+`channel->ownerProcess == DontDeref<Process>(callerProcess)`(또는
+동급 비교)로만 이뤄지고, `ownerProcess`를 통해 `Process`의 멤버에
+접근하는 코드는 애초에 컴파일되지 않는다. **일반화 여부(미결)**:
+이 제안은 지금 발견된 `ownerProcess` 하나를 위해 `DontDeref<T>`를
+`shared_ptr.h`에 범용 유틸로 추가하는 안이다 - 앞으로 "신원만
+비교하고 절대 역참조하면 안 되는 포인터"가 또 나오면 같은 템플릿을
+재사용한다(`kMakeSharedNew`류와 동일한 확장 패턴, `SP-1DB13F61`
+참고). 착수 시 `RM-32D06563`(용어 및 개념)에 등록(CLAUDE.md 규칙 12).
 
 ## 7. 요약
 
@@ -224,6 +332,13 @@ if (!channel) {
 - **실측으로 확정**: §0 - `ChannelRead`/`Write`/`CloseBridge`는
   이미 안전(`PN-9CC66142`), 남은 취약 지점은 `ConnectChannel`/
   `AcceptFromChannel`/`DestroyChannel` 셋뿐.
-- **확정 안 함**: §6의 세 질문(슬롯 상한, 조회 락 필요 여부,
-  Accept/Destroy 권한 부재를 이번에 같이 다룰지).
+- **확정, 2026-09-17(QU-1AF2C16B)**: 슬롯 상한 65536(64K, §2 갱신
+  완료) 확정. Accept/Destroy 권한 부재는 실제 갭으로 확정 -
+  `Channel::ownerProcess`(raw 포인터, 동일성 비교 전용 - §6.1)
+  신설 + 소유자 검증을 이 PN의 구현 범위에 포함한다.
+- **여전히 미확정**: 테이블 조회 락 필요 여부 - 착수 세션 판단에
+  위임(§3 원안대로 진행).
+- **이 문서 범위 밖으로 분리**: `Channel`을 `BridgePipe`처럼 완전한
+  `SharedPtr` 관리로 마이그레이션해 §6.1의 raw 포인터 동일성 비교
+  (좁은 범위의 잔여 위험)까지 없애는 작업 - 별도 계획 등록 예정.
 
