@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-30FCC8AE
   status: review
-  updatedAt: 2026-09-17T04:16:07.088Z
+  updatedAt: 2026-09-17T04:33:57.305Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -88,22 +88,44 @@ struct UserRecord {
     Uid uid;
     Uid parentUid;  // root(uid=0)는 자기 자신을 가리켜 트리 루트를 표시
 };
+```
 
-// setuid 권한 판정 - 항목 1~3 그대로.
-bool kCanSetuid(Uid callerUid, Uid targetUid) {
-    if (callerUid == kRootUid) return true;              // 1. root는 누구든
-    return kIsDescendantUser(targetUid, callerUid);       // 2/3. targetUid가 callerUid의
-                                                           //      사용자 트리 하위일 때만 허용
+**[정정, 2026-09-17, 설계자 의견]** "kCanSetuid는 kSetuid로
+통합하고, 할 수 있는지 없는지는 질의할 수 없어. 시도해서 안되면
+포기하게 만들어야 해." - 원안의 순수 판정 함수 `kCanSetuid()`(질의
+전용, 부작용 없음)를 폐기하고, **판정과 실행을 한 번에 하는
+`kSetuid()`**로 통합한다 - "할 수 있는지 미리 물어보고, 되면 그
+다음에 실행"하는 2단계 API 자체를 없애는 것이 목적이다(TOCTOU류
+경쟁/정보 유출 표면을 원천 차단 - 이 프로젝트가 이미 다른 곳에서
+확립한 "질의 따로/실행 따로 대신 원자적 시도-실패" 패턴과 결이
+같다, 예: `MutexLock`이 "잠글 수 있는지"를 먼저 안 물어보고 바로
+시도하는 것과 동일한 철학).
+
+```cpp
+// setuid 시도 - 판정과 실행이 한 함수 안에서 원자적으로 일어난다.
+// 실패하면(root도 아니고 targetUid가 callerUid의 하위도 아니면)
+// 대상 Process의 uid는 전혀 바뀌지 않고 에러만 반환 - "미리 물어볼"
+// 방법 자체가 없다.
+ChannelError kSetuid(Process& caller, Uid targetUid) {
+    if (caller.uid != kRootUid &&
+        !kIsDescendantUser(targetUid, caller.uid)) {  // 항목 1~3 판정
+        return ChannelError::PermissionDenied;
+    }
+    caller.uid = targetUid;  // 성공 - 호출자 자신의 uid를 targetUid로 전환
+    return ChannelError::None;
 }
 ```
 
 `kIsDescendantUser(targetUid, ancestorUid)`는 `targetUid`에서
 `parentUid`를 따라 거슬러 올라가며 `ancestorUid`에 도달하는지 확인한다
-(도달 전에 root에 닿으면 거짓 - `ancestorUid`의 하위가 아니라는 뜻).
-**이 판정은 §3의 `kCheckPermission()`(RWX 기반, Kill 등 syscall별
-개별 자원 접근 판정)과 별개의 메커니즘**이다 - `kCheckPermission`은
-"이 프로세스에 무엇을 할 수 있는가"를, `kCanSetuid`는 "이 uid로
-전환할 수 있는가"만 답한다. 둘 다 root 특권을 공유하지만 합쳐지지
+(도달 전에 root에 닿으면 거짓 - `ancestorUid`의 하위가 아니라는 뜻) -
+`kSetuid()` 내부 구현 세부로만 남고 별도 공개 API가 아니다. **이
+판정은 §3의 `kCheckPermission()`(RWX 기반, Kill 등 syscall별 개별
+자원 접근 판정, 질의 전용으로 유지 - 이번 정정 대상 아님)과 별개의
+메커니즘**이다 - `kCheckPermission`은 "이 프로세스에 무엇을 할 수
+있는가"를 순수 질의하고(Kill이 실제로 신호를 보내기 **직전**의
+판정이라 "시도-실패"와 이미 같은 성격), `kSetuid`는 "이 uid로
+전환을 시도"까지 함께 한다. 둘 다 root 특권을 공유하지만 합쳐지지
 않는다.
 
 ### 1-A.1 `UserRecord` 실제 필드/캐시 구조 (2026-09-17, 설계자 의견,
@@ -242,7 +264,7 @@ LRU)와 이번에 확정된 authmgr의 KV DB(영속·AES256 암호화)는
   구현된다(`pubreg`의 register/query 패턴과 동일 - 새 커널
   syscall/메커니즘 불필요, `SP-1FBC0EEB` Channel IPC 재사용).
 - **`gUserRecordCache[1024]`(커널 상주)는 authmgr의 read-through
-  캐시** - `kCanSetuid()`/`kCheckPermission()`이 조회할 때 먼저 이
+  캐시** - `kSetuid()`/`kCheckPermission()`이 조회할 때 먼저 이
   캐시를 보고, 없으면(cache miss) authmgr에 비동기 Channel 질의를
   보내 채운다. 이 프로젝트가 이미 "비동기 프레임워크 우선"
   (`SP-5A255B7C`)을 커널 전체 설계 원칙으로 확정해 뒀으므로,
@@ -262,27 +284,72 @@ LRU)와 이번에 확정된 authmgr의 KV DB(영속·AES256 암호화)는
   판단했다(RM-23F4B687 §4 과설계 방지) - 실측으로 지연이 문제가
   되면 그때 Tier A류 최적화를 재검토.
 
-### KV DB 자체의 설계 (authmgr 내부, 커널 범위 밖)
+### KV DB 자체의 설계 (authmgr 내부, 커널 범위 밖) - `libkvdb`로
+일반화 (2026-09-17, 설계자 의견)
 
 authmgr이 유저랜드 프로세스이므로 이 KV DB 자체는 **커널 코드가
 아니다** - `libkcrypto`(§1-A.1)를 링크해 각 레코드를 AES256으로
-암호화해 저장하고, 실제 온디스크 포맷/인덱싱 전략(B-tree, 로그
-구조 등)은 authmgr 설계 문서가 별도로 다룰 착수 세부(RM-23F4B687
-§4) - 이 문서는 "커널이 authmgr과 어떻게 상호작용하는가"까지만
-다룬다.
+암호화해 저장한다. **"KV DB 자체를 일반화하여 `minicore/libs/
+libkvdb`로 구현해. 커널 구성요소가 아닌데 여기 배치되는 이유는,
+`authmgr`라는 `커널 서비스`의 의존성이기 때문이야."** - `libkvdb`는
+authmgr 전용이 아니라 **범용 Key-Value DB 라이브러리**로 설계하고
+(다른 커널 서비스도 나중에 재사용 가능), `minicore/libs`(보통
+커널/유저 공용 또는 커널 전용이 있는 자리)에 두는 이유는 순수
+"커널 서비스(kernel service)의 의존성"이라는 자격이지 커널 코드
+여부가 아니다 - `RM-7C249618`에 이 배치 원칙을 명시적으로 기록해
+둔다(아래 §참고, minicore/libs가 "커널 서비스" 의존성까지 포괄한다는
+것은 이 프로젝트 라이브러리 배치 관례의 중요한 확장이라 `RM-7C249618`
+서두에도 남긴다). 실제 온디스크 포맷/인덱싱 전략(B-tree, 로그구조
+등)은 `libkvdb` 자신의 설계 시 착수 세부(RM-23F4B687 §4).
 
-### 아직 열려 있는 것 (착수 세션/후속 설계 확인 필요)
+### 아직 열려 있던 것 - authmgr 장애/root 처리 정책 확정 (2026-09-17,
+설계자 의견)
 
-1. root 캐시 항목을 커널이 부팅 시 하드코딩할지, authmgr이 아주
-   먼저 기동돼 커널에 채워 줄지(부팅 순서 의존성 발생) - 위 제안은
-   전자.
-2. authmgr이 죽으면(다른 커널 서비스처럼 `essential` 재시작 정책,
-   `SP-EAB162FC` §6) 캐시 미스 상태의 permission 판정이 어떻게
-   되는지 - 일시적으로 보수적 거부(fail-closed)할지, 캐시에 남은
-   값만으로 판정할지.
-3. Channel IPC 프로토콜(authmgr에게 보내는 조회/생성/삭제 메시지
-   형식) - `pubreg`의 register/query처럼 raw binary 구조체로 할지,
-   `libjson`을 재사용할지.
+1. **[확정]** root 캐시 항목: "root는 커널에 하드코딩 하고,
+   `authmgr`에 보관된 정보로 전환하는 방식." - 부팅 시 커널이
+   root(uid=0)의 최소 정보를 직접 하드코딩해 두되(authmgr 기동
+   전에도 root 판정이 항상 성립), **authmgr이 기동해 자신의 KV DB에
+   보관된 진짜 root 레코드를 제공하면 그쪽으로 전환**한다(부팅용
+   임시 하드코딩 → authmgr 권위 데이터로 승격). 전환 시점/방식
+   (authmgr이 기동 직후 스스로 커널에 알리는지, 커널이 첫 조회 때
+   확인하는지)은 착수 시 `PN-24A2B6F5`가 확정.
+2. **[확정]** authmgr 장애 시 정책: "authmgr이 죽으면 그게 다시
+   살아나기 전까지 캐쉬된 범위 내에서만 허가하고, 그외에 전부
+   `서비스 불가, 잠시후 재시도 할것`으로 응답하도록 해." -
+   **fail-closed(무조건 거부)가 아니라 "캐시 히트는 정상 판정,
+   캐시 미스는 명시적 재시도 요구"** - `kSetuid()`/
+   `kCheckPermission()`이 캐시에 있는 항목은 authmgr 생사와 무관하게
+   그대로 판정하고, 캐시에 없는 조회만 새 에러 코드류(예:
+   `ServiceUnavailable`/`TryAgain` - 정확한 이름은 착수 시 기존
+   `ChannelError` 관례에 맞춰 확정)로 응답한다 - 이 프로젝트의 다른
+   서비스 장애 정책(`SP-EAB162FC` §6 `essential` 재시작)과 결이
+   맞다(무조건 커널 패닉/거부가 아니라 점진적 회복 지향).
+3. **[확정, 2026-09-17, 설계자 의견, 이후 `libkproto`로 일반화]**
+   Channel IPC 프로토콜: "authmgr와의 Channel IPC 프로토콜은
+   바이너리로 직렬화해서 Channel IPC 위에서 동작하는 Request/
+   Response/Notification 구조로 구성해. Request 자체에 요청 구분을
+   넣으면 다수의 채널을 열 필요가 없지." - `libjson`이 아니라
+   **바이너리 직렬화** 채택, 3종 메시지(Request/Response/
+   Notification), Request 자신이 요청 종류 discriminator를 가져
+   단일 Channel로 다 처리. **[일반화, 2026-09-17, 후속 설계자
+   의견]** "커널과 커널 서비스간의 IPC 등, 제어에 관한 프로토콜은
+   기본적으로 `바이너리`로 제한하고, `minicore/libs/libkproto`
+   라이브러리로 분리 구현하도록 해. (유저/커널 공용으로 구현)" -
+   authmgr 하나만의 프로토콜이 아니라 **커널이 직접 당사자인 모든
+   커널-서비스 프로토콜**(Request/Response/Notification 프레이밍,
+   discriminator 처리 등 공통 기계 장치)이 `libkproto`(커널/유저
+   공용, `libjson`/`libutf8`/`libkcrypto`와 동일한 매크로 게이팅
+   패턴)로 일반화된다. **범위 명확화**: 이건 "**커널 자신**이
+   당사자인" 프로토콜(예: `SP-00CA7175`의 Tier A/B, authmgr의 이
+   Request/Response/Notification)에 적용되지, "커널이 중개만 하고
+   실제 양 당사자는 유저 프로세스인" 프로토콜(예: `pubreg`의
+   tool 등록/조회 - 등록자/조회자 모두 임의 유저 프로세스, `SP-CCACB192`
+   `libjson` 채택 이미 확정)과는 무관하다 - 서로 다른 관계라 충돌
+   아님. **열린 질문(결정 안 함)**: `SP-00CA7175` Tier B처럼 이미
+   구현된 커널-서비스 프로토콜(raw struct 직접 사용)을 `libkproto`
+   등장 이후 소급 리팩터링할지는 이 문서가 결정하지 않는다 - 별도
+   판단 필요(과설계/불필요한 리스크 가능성도 있어 임의로 정하지
+   않음, RM-23F4B687 §4).
 
 ## 2. 권한 비트 - `Permission`(재사용 가능한 범용 타입)
 
@@ -395,8 +462,8 @@ bool kCanSendSignal(const Process& caller, const Process& target) {
 ## 7. v1이 하지 않는 것 (명시적 축소 - 설계 공백 방지)
 
 - **setuid *권한 판정*은 §1-A로 확정됐지만, 실제로 그걸 호출하는
-  경로(syscall/API)는 아직 없다**: `kCanSetuid()`가 "누가 누구로
-  전환할 수 있는가"는 답하지만, 그 판정을 실제로 소비하는 지점
+  경로(syscall/API)는 아직 없다**: `kSetuid()`가 "누가 누구로
+  전환할 수 있는가"를 시도-실패 방식으로 판정하지만, 그 소비 지점
   (sudo/su 메커니즘, §1-B)과 uid 트리 자체를 관리하는 API(§1-C)
   둘 다 설계자가 "추가 설계 필요"로 명시해 이 문서 범위 밖으로
   분리됐다(§8 후속 계획). §2의 특수 비트 S도 §1-B가 확정되기 전까지
@@ -433,7 +500,7 @@ bool kCanSendSignal(const Process& caller, const Process& target) {
   필드 + `kCheckPermission()` 구현.
 - `Kill`의 권한 판정을 이 함수로 교체(`kResolveProcessId` 완료 이후).
 - `DebugAttach` 배선(§5).
-- `UserRecord` 트리 + `kCanSetuid()` 구현(§1-A) - **`PN-B6DB692C`**
+- `UserRecord` 트리 + `kSetuid()` 구현(§1-A) - **`PN-B6DB692C`**
   (등록 완료).
 - sudo/su 메커니즘(§1-B, 특수 비트 S의 실제 의미) + 사용자 신원
   관리 API(§1-C, 파일시스템 비노출) - **`PN-24A2B6F5`**(등록 완료,
@@ -441,5 +508,5 @@ bool kCanSendSignal(const Process& caller, const Process& target) {
   `PN-B6DB692C`가 이 계획을 선행 조건으로 대기 중(plan_depend 등록
   완료).
 - `RM-32D06563`(용어 및 개념)에 `Uid`/`Gid`/`Permission`/
-  `kCheckPermission`/`UserRecord`/`kCanSetuid` 등록(CLAUDE.md 규칙 12).
+  `kCheckPermission`/`UserRecord`/`kSetuid` 등록(CLAUDE.md 규칙 12).
 
