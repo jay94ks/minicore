@@ -40,7 +40,7 @@ add_library(minicore_kernel OBJECT
     resource_group.cpp
 )
 
-target_link_libraries(minicore_kernel PUBLIC libkenv libelf minicore_libs_x86_64)
+target_link_libraries(minicore_kernel PUBLIC libkenv libelf libkcont minicore_libs_x86_64)
 
 target_compile_definitions(minicore_kernel PRIVATE
     MINICORE_TASK_STACK_GUARD_PAGE=$<BOOL:${MINICORE_TASK_STACK_GUARD_PAGE}>
