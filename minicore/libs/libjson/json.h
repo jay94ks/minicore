@@ -38,24 +38,20 @@ enum class ErrorCode {
 // 하므로 초과 시 파싱을 중단한다.
 constexpr unsigned int kMaxNestingDepth = 32;
 
-// [정정, 착수 중 실측 발견 - QU-6A72AFE6로 SP-CCACB192 §3 재확인 요청]
-// 이 커널의 모든 코드는 `-mgeneral-regs-only`로 컴파일된다(freestanding
-// 커널 전역 관례, cmake/toolchain-x86_64.cmake) - 이 플래그는 컴파일러가
-// SSE/x87 레지스터를 아예 못 쓰게 막아, `double` 산술(리턴값이든 단순
-// 덧셈/곱셈이든)이 있는 함수는 **컴파일 자체가 실패한다**("SSE register
-// return with SSE disabled"로 직접 확인). `PN-F258698E`(FPU 지연
-// 컨텍스트)는 이 문제를 풀어주지 않는다 - 그건 Task 전환 시 FPU
-// 레지스터 "상태"를 저장/복원하는 스케줄러 메커니즘이지, 컴파일러가
-// 일반 C++ 코드에서 SSE 명령어를 내도 되는지와는 완전히 별개다. 즉
-// SP-CCACB192 §3이 확정한 "double까지 지원"은 **이 툴체인 제약상
-// 커널 빌드에서 그대로 구현할 수 없다** - 이 라이브러리가 정확히
-// "커널/유저 공용"이라 커널 빌드가 실제 제약이 된다.
-//
-// v1은 그래서 정수가 아닌 숫자(소수점/지수 포함)를 double로 변환하지
-// 않고 **원본 텍스트 그대로**(문자열 값과 동일하게 zero-copy) 넘긴다 -
-// 실제 double 변환이 필요한 호출부는 이 제약이 없는 유저랜드 코드에서
-// 직접 한다. 정수 전용 경로(`isInteger`+`intValue`)는 순수 정수
-// 산술이라 이 문제와 무관하게 그대로 지원한다.
+// [정정, 2026-09-17, QU-6A72AFE6 설계자 답변 반영] 착수 당시
+// `-mgeneral-regs-only`(SSE와 x87을 둘 다 막는 플래그)라 `double`
+// 산술이 있는 함수는 컴파일 자체가 실패했었다 - 설계자가 커널
+// 툴체인을 `-mno-mmx -mno-sse -mno-sse2`(+ `-mcmodel=large`)로
+// 교체하도록 지시해 해소됐다(cmake/toolchain-x86_64.cmake).
+// **단, x86-64 SysV ABI는 `double`을 항상 XMM0 레지스터로 반환하도록
+// 고정돼 있어 SSE가 꺼진 상태에서는 "함수가 double을 값으로 반환"하는
+// 것 자체가 여전히 불가능하다**(실측 확인 - `-mno-sse`를 켜도 이
+// 경우만은 "SSE register return with SSE disabled"로 계속 실패).
+// `double`을 **매개변수로 받거나 함수 내부에서 계산하는 것은 전혀
+// 문제없다**(x87 스택 명령어로 컴파일됨, 실측 확인) - 그래서 이
+// 콜백들처럼 가장 자연스러운 우회는 "반환값 대신 매개변수로 넘기기"
+// 다(이 파일 전체가 그 관례를 따른다 - `double`을 리턴하는 함수는
+// 이 라이브러리 어디에도 없다).
 struct Callbacks {
     void (*onObjectStart)(void* userData) = nullptr;
     void (*onObjectEnd)(void* userData) = nullptr;
@@ -64,10 +60,12 @@ struct Callbacks {
     void (*onKey)(const char* str, size_t len, void* userData) = nullptr;
     void (*onString)(const char* str, size_t len, void* userData) = nullptr;
     // isInteger==true면 intValue가 원래 텍스트를 정확히 표현한 int64_t
-    // 값(오버플로/소수점/지수 없음) - text/textLen도 항상 채워지므로
-    // (원본 숫자 텍스트, zero-copy) isInteger==false일 때는 호출부가
-    // text/textLen을 직접 파싱(예: 유저랜드에서 strtod류)해야 한다.
-    void (*onNumber)(const char* text, size_t textLen, bool isInteger, long long intValue, void* userData) = nullptr;
+    // 값(오버플로/소수점/지수 없음) - isInteger==false일 때는 value가
+    // 그 숫자의 double 근사값(직접 계산, SP-CCACB192 §3 원안 그대로).
+    // text/textLen은 항상 채워지는 원본 숫자 텍스트(zero-copy) - 호출부가
+    // 원한다면 완전한 정밀도가 필요할 때 직접 재파싱할 수 있게 남겨 둔다.
+    void (*onNumber)(const char* text, size_t textLen, bool isInteger, long long intValue, double value,
+                      void* userData) = nullptr;
     void (*onBool)(bool value, void* userData) = nullptr;
     void (*onNull)(void* userData) = nullptr;
     void (*onError)(ErrorCode code, size_t offset, void* userData) = nullptr;
@@ -98,10 +96,10 @@ public:
     bool key(const char* name, size_t nameLen);
     bool value(const char* str, size_t len);
     bool value(long long n);
-    // 이미 유효한 JSON number 텍스트(예: 유저랜드에서 직접 포맷한
-    // "3.14"/"1e10")를 따옴표 없이 그대로 삽입한다 - `double` 산술은
-    // 이 라이브러리 자신이 하지 않는다(json.h 상단 주석의 SSE 제약
-    // 참고). 호출부가 문법을 보장해야 한다(이 메서드는 검증하지 않음).
+    bool value(double n);
+    // 이미 유효한 JSON number 텍스트(예: 특정 소수 자릿수/지수 표기를
+    // 직접 제어하고 싶을 때)를 따옴표 없이 그대로 삽입한다 - 호출부가
+    // 문법을 보장해야 한다(이 메서드는 검증하지 않음).
     bool rawNumber(const char* text, size_t len);
     bool value(bool b);
     bool nullValue();
@@ -118,6 +116,9 @@ private:
     bool kAppend(const char* s, size_t n);
     bool kAppendEscapedString(const char* s, size_t n);
     bool kAppendInt(long long n);
+    // `double`을 매개변수로만 받고 절대 반환하지 않는다(위 클래스
+    // 상단 주석의 ABI 제약 참고).
+    bool kAppendDouble(double n);
 
     char* _buffer;
     size_t _capacity;

@@ -219,13 +219,14 @@ bool kParseStringRaw(ParserState& st, const char** outStr, size_t* outLen) {
     return true;
 }
 
-// [정정, 착수 중 실측 발견, json.h 상단 주석 참고 - QU-6A72AFE6]
-// SP-CCACB192 §3이 원래 요구한 "double까지 계산"은 이 커널 빌드의
-// `-mgeneral-regs-only` 제약상 불가능하다(SSE/x87 자체가 꺼져 있어
-// `double` 산술이 있는 함수는 컴파일이 안 됨, 실측 확인). 그래서 이
-// 함수는 정수가 아닌 숫자를 double로 계산하지 않고 **문법만 검증한
-// 뒤 원본 텍스트 구간을 그대로** `onNumber`에 넘긴다 - 정수 판정/
-// 변환(`intPart`)은 순수 정수 산술이라 그대로 수행한다.
+// [정정, 2026-09-17, QU-6A72AFE6 설계자 답변 반영 - json.h 상단 주석
+// 참고] SP-CCACB192 §3이 원래 요구한 "double까지 계산"을 그대로
+// 복원한다 - 커널 툴체인이 `-mno-mmx -mno-sse -mno-sse2`로 바뀌어
+// `double` 산술 자체는 다시 가능해졌다. 단 `value`를 이 함수의
+// **반환값이 아니라 지역 변수로 계산해 `onNumber`의 매개변수로 그대로
+// 넘긴다** - x86-64 SysV ABI가 `double` 반환을 항상 XMM0로 강제해서
+// (SSE 비활성 상태에서는 그 반환 자체가 불가능, 실측 확인) 이 함수
+// 자신은 계속 `bool`만 반환한다.
 bool kParseNumber(ParserState& st) {
     const size_t start = st.pos;
     bool negative = false;
@@ -253,6 +254,7 @@ bool kParseNumber(ParserState& st) {
     }
 
     bool isFloat = false;
+    double fracValue = 0.0;
     if (kPeek(st) == '.') {
         isFloat = true;
         ++st.pos;
@@ -260,15 +262,25 @@ bool kParseNumber(ParserState& st) {
             kFail(st, json::ErrorCode::InvalidNumber);
             return false;
         }
+        double scale = 0.1;
         while (kPeek(st) >= '0' && kPeek(st) <= '9') {
+            fracValue += static_cast<double>(kPeek(st) - '0') * scale;
+            scale *= 0.1;
             ++st.pos;
         }
     }
 
+    long exponent = 0;
+    bool hasExponent = false;
     if (kPeek(st) == 'e' || kPeek(st) == 'E') {
         isFloat = true;
+        hasExponent = true;
         ++st.pos;
-        if (kPeek(st) == '+' || kPeek(st) == '-') {
+        bool expNegative = false;
+        if (kPeek(st) == '+') {
+            ++st.pos;
+        } else if (kPeek(st) == '-') {
+            expNegative = true;
             ++st.pos;
         }
         if (!(kPeek(st) >= '0' && kPeek(st) <= '9')) {
@@ -276,14 +288,31 @@ bool kParseNumber(ParserState& st) {
             return false;
         }
         while (kPeek(st) >= '0' && kPeek(st) <= '9') {
+            exponent = exponent * 10 + (kPeek(st) - '0');
             ++st.pos;
         }
+        if (expNegative) {
+            exponent = -exponent;
+        }
+    }
+
+    double value = static_cast<double>(intPart) + fracValue;
+    if (negative) {
+        value = -value;
+    }
+    if (hasExponent) {
+        double factor = 1.0;
+        const long e = exponent < 0 ? -exponent : exponent;
+        for (long i = 0; i < e; ++i) {
+            factor *= 10.0;
+        }
+        value = exponent < 0 ? value / factor : value * factor;
     }
 
     const bool isInteger = !isFloat && !intOverflow;
     const long long intValue = negative ? -intPart : intPart;
     if (st.cb->onNumber) {
-        st.cb->onNumber(st.text + start, st.pos - start, isInteger, isInteger ? intValue : 0, st.userData);
+        st.cb->onNumber(st.text + start, st.pos - start, isInteger, isInteger ? intValue : 0, value, st.userData);
     }
     return true;
 }
@@ -643,10 +672,55 @@ bool JsonWriter::value(long long n) {
     return kAppendInt(n);
 }
 
-// [정정, 착수 중 실측 발견, json.h 상단 주석 참고] double을 직접
-// 포맷하는 대신 이미 유효한 숫자 텍스트를 그대로 삽입한다 - 이
-// 라이브러리는 `double` 산술을 전혀 하지 않는다(이 커널 빌드의
-// `-mgeneral-regs-only` 제약). 문법 검증은 호출부 책임.
+// [정정, 2026-09-17, QU-6A72AFE6 설계자 답변 반영 - json.h 상단 주석
+// 참고] `n`을 매개변수로만 받고(반환 아님) `bool`만 반환하므로 x86-64
+// SysV ABI의 "double 반환은 항상 XMM0" 제약과 무관하게 안전하게
+// 컴파일된다.
+bool JsonWriter::kAppendDouble(double n) {
+    if (n != n) {
+        return false;  // NaN - 이 v1은 유효한 JSON number로 표현할 방법이 없어 거부.
+    }
+    const bool negative = n < 0;
+    const double magnitude = negative ? -n : n;
+    if (negative && !kAppendChar('-')) {
+        return false;
+    }
+    const long long intPart = static_cast<long long>(magnitude);
+    if (!kAppendInt(intPart)) {
+        return false;
+    }
+    if (!kAppendChar('.')) {
+        return false;
+    }
+    // [v1 축소, 구현 세부 판단] 고정 6자리 소수점 - 완전한 최단
+    // 왕복(round-trip) 정밀도 대신 이 커널의 실사용처(tool 선언 JSON
+    // Schema 등)에 충분한 단순 고정소수점 표현을 택했다(freestanding에
+    // 표준 dtoa류 알고리즘 구현 부담이 큼, RM-23F4B687 §4).
+    double frac = magnitude - static_cast<double>(intPart);
+    constexpr int kDecimalPlaces = 6;
+    for (int i = 0; i < kDecimalPlaces; ++i) {
+        frac *= 10.0;
+        int digit = static_cast<int>(frac);
+        if (digit < 0) {
+            digit = 0;
+        } else if (digit > 9) {
+            digit = 9;
+        }
+        if (!kAppendChar(static_cast<char>('0' + digit))) {
+            return false;
+        }
+        frac -= static_cast<double>(digit);
+    }
+    return true;
+}
+
+bool JsonWriter::value(double n) {
+    if (!kBeforeValue()) {
+        return false;
+    }
+    return kAppendDouble(n);
+}
+
 bool JsonWriter::rawNumber(const char* text, size_t len) {
     if (!kBeforeValue()) {
         return false;

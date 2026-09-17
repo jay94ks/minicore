@@ -19,9 +19,27 @@ set(CMAKE_ASM_COMPILER /opt/cross/bin/x86_64-elf-gcc)
 # 링크로 낮춰서 툴체인 자체는 정상 동작함을 확인하게 한다.
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
+# [교체, 2026-09-17, QU-6A72AFE6 설계자 답변] `-mgeneral-regs-only`
+# 대신 `-mno-mmx -mno-sse -mno-sse2` + `-mcmodel=large`로 교체 -
+# 설계자가 예전 커널 개발 시 쓰던 플래그 세트 중 필요한 것만 채택
+# (libjson/libutf8 착수 중 실측 발견: `-mgeneral-regs-only`는 SSE뿐
+# 아니라 x87까지 전부 막아 `double` 산술이 있는 함수는 컴파일 자체가
+# 실패했다). `-mno-sse`류는 SSE 레지스터"만" 금지하므로 컴파일러가
+# `double`/`float` 산술을 x87 스택 명령어로 대체 - "당연히 no-mmx/
+# no-sse/no-sse2가 적용되면 MMX/SSE/SSE2는 인라인 어셈블러나 외부
+# 어셈블러 코드로만 사용 가능해"(설계자 코멘트, 일반 C++ 코드에서
+# MMX/SSE 내장 함수는 여전히 못 씀 - 의도된 제약). `-mcmodel=kernel`
+# 대신 `-mcmodel=large`로도 교체(설계자 지시 그대로) - 커널 자신의
+# 링크 주소가 상위 2GiB 안에 있다는 가정 자체를 하지 않는 가장 보수적인
+# 코드 모델이라 이 프로젝트의 higher-half 링커 스크립트 배치와 항상
+# 호환된다(더 큰/느린 절대주소 addressing을 대가로 어떤 배치에서도
+# 항상 올바름 - PN-F258698E의 FPU 지연 컨텍스트 저장/복원 로직이
+# x87 레지스터 상태(FXSAVE/FNSAVE 등)에도 여전히 맞물리는지는 착수
+# 세션이 실측 재검증).
 set(_minicore_freestanding_flags
     "-ffreestanding -fno-stack-protector -fno-pic -fno-pie \
--mno-red-zone -mcmodel=kernel -mgeneral-regs-only")
+-mno-red-zone -mcmodel=large -mno-mmx -mno-sse -mno-sse2 \
+-Wno-missing-field-initializers")
 
 set(CMAKE_C_FLAGS_INIT "${_minicore_freestanding_flags}")
 # [추가, 2026-09-17] `-fcoroutines` - GCC는 clang과 달리 `-std=c++20`
