@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_DEBUG_SESSION_H
 
 #include "channel.h"
+#include "interrupt_frame.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
 #include "syscall.h"
@@ -26,27 +27,57 @@ constexpr SyscallEndpointId kSyscallEndpointDebugSetBreakpoint = kMakeSyscallEnd
 // 예약, 미구현(PN-87D6B615 "남은 범위" 참고).
 //
 // [신규, 2026-09-17, SP-9A6D579F §3.5/§4, PN-87D6B615, RM-48E1E610
-// 7.4/7.7/7.8] 이번 증분(항목5 일부/6)이 구현하는 syscall -
-// `DebugContinue`(레지스터 접근 불필요, 그룹 freeze 교차 확인만
-// 필요)와 `DebugReadMemory`/`DebugWriteMemory`(대상 주소공간을
-// Paging::translatePage()로 직접 순회하는 커널 대행 복사 - 레지스터
-// 프레임 위치와 무관). `DebugGetRegisters`/`DebugSetRegisters`(call
-// 5/6)는 DebugSetSingleStep과 동일한 이유로 미구현 - "정지된 유저
-// Task의 전체 레지스터 상태(콜러세이브 아닌 것 포함)가 정확히 그
-// 커널 스택의 어느 InterruptFrame에 있는지"가 아직 설계되지 않은
-// 자리라(SP-83A07867이 다루는 건 CR3/RSP0/FPU/디버그 레지스터처럼
-// "코어 소유" 상태뿐, "이 Task가 트랩 당시 갖고 있던 전체 유저
-// 레지스터 스냅숏의 정확한 스택 오프셋"은 아직 어떤 문서도 확정한
-// 적이 없음) - DC-47000304/QU-C82E903B로 별도 질의 등록, 설계자
-// 답변 대기 중(아래 참고).
+// 7.4/7.7/7.8] `DebugContinue`(레지스터 접근 불필요, 그룹 freeze
+// 교차 확인만 필요)와 `DebugReadMemory`/`DebugWriteMemory`(대상
+// 주소공간을 Paging::translatePage()로 직접 순회하는 커널 대행 복사
+// - 레지스터 프레임 위치와 무관).
 constexpr SyscallEndpointId kSyscallEndpointDebugContinue = kMakeSyscallEndpointId(7, 4);
 constexpr SyscallEndpointId kSyscallEndpointDebugReadMemory = kMakeSyscallEndpointId(7, 7);
 constexpr SyscallEndpointId kSyscallEndpointDebugWriteMemory = kMakeSyscallEndpointId(7, 8);
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택 - 설계자
+// 답변("인터럽트 그 자체가 다른 프로세스에게 실행 기회를 줘야 하는데
+// 다른 방안을 사용하면 그렇게 할 수가 없어")] `DebugGetRegisters`/
+// `DebugSetRegisters`(call 5/6) - 이 커널의 소프트웨어 컨텍스트
+// 스위치(`kContextSwitch`)는 스택 자체를 스위칭하지 커널 스택 내용을
+// 옮기지 않으므로, `Scheduler::onTick()`이 이 Task를 `Blocked`로
+// 남기는 바로 그 순간 손에 쥔 `InterruptFrame*`(그 Task 자신의 커널
+// 스택 위, isr_common_stub이 쌓아 둔 자리)가 이 Task가 다시
+// 디스패치될 때까지 정확히 그 자리에 그대로 살아있다(다른 무엇도
+// 그 스택을 건드리지 않음 - "인터럽트 자신이 다른 프로세스에게
+// 실행 기회를 준다"는 게 바로 이 매커니즘: EOI 이후 코어는 다음
+// Task로 넘어가고, 이 Task는 자기 스택에 그 프레임을 그대로 둔 채
+// 그냥 대기한다). `kSaveDebugRegistersSnapshot()`이 이 프레임의
+// 값을 `DebugSession::savedRegisters`에 복사해 두고(값 복사 -
+// 여러 syscall/다른 코어에서 안전하게 조회할 수 있도록), 동시에
+// 그 살아있는 프레임 자신의 주소도 `DebugSession::liveFramePtr`에
+// 남겨 둔다(내부 전용, 어떤 syscall args에도 노출 안 됨) -
+// `DebugSetRegisters`는 이 사본만 바꾸고, `DebugContinue`가 재개
+// 직전 이 사본 값을 `*liveFramePtr`에 다시 써넣어(write-back) 실제
+// iretq 프레임에 반영한다.
+constexpr SyscallEndpointId kSyscallEndpointDebugGetRegisters = kMakeSyscallEndpointId(7, 5);
+constexpr SyscallEndpointId kSyscallEndpointDebugSetRegisters = kMakeSyscallEndpointId(7, 6);
 
 // [SP-9A6D579F §3.1] DR0-DR3 하드웨어 슬롯 수와 동일 - 스레드마다
 // 별도 슬롯이 아니라 프로세스당(사실상 mainThread 고정, 멀티스레드
 // 디버깅은 PN-2E4E9D79 완료 전까지 범위 밖) 공유.
 constexpr uint32_t kMaxDebugBreakpoints = 4;
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304] `InterruptFrame`
+// 자체를 syscall ABI로 그대로 노출하지 않는다 - `vector`/`errorCode`는
+// ISR 자신의 장부일 뿐 "레지스터"가 아니다(디버거 입장에서 의미 없는
+// 필드를 읽고 쓰게 하지 않기 위한 최소 API 위생, RM-23F4B687 §4). 그
+// 외 필드는 `InterruptFrame`과 정확히 같은 이름/순서 - `kSaveDebugRegistersSnapshot()`
+// 이 필드별로 복사한다.
+struct DebugRegisterSnapshot {
+    uint64_t rax = 0, rbx = 0, rcx = 0, rdx = 0, rsi = 0, rdi = 0, rbp = 0;
+    uint64_t r8 = 0, r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
+    uint64_t rip = 0;
+    uint64_t cs = 0;
+    uint64_t rflags = 0;
+    uint64_t rsp = 0;
+    uint64_t ss = 0;
+};
 
 struct DebugBreakpoint {
     // [신규, 2026-09-17, SP-9A6D579F §3.4] DR7의 R/Wi 필드와 대응
@@ -94,6 +125,19 @@ struct DebugSession {
     // `DebugContinue` 구현 시점에 `!proc->group->frozen`을 먼저
     // 확인해야 한다 - 이 주석이 그 요구사항을 미리 남겨 둔다.
     bool pausedByDebugger = false;
+
+    // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
+    // `kSaveDebugRegistersSnapshot()`이 `pausedByDebugger`를 세우는
+    // 바로 그 순간(Scheduler::onTick()) 함께 채운다 - `DebugGetRegisters`/
+    // `DebugSetRegisters`는 이 값 복사본만 읽고 쓴다. `liveFramePtr`는
+    // 그 값이 실려 있던 진짜 살아있는 `InterruptFrame`(이 디버기 자신의
+    // 커널 스택 위, 아직 그 자리에 그대로 있음)의 주소 - 어떤 syscall
+    // args에도 노출하지 않는 내부 전용 필드로, `DebugContinue`가 재개
+    // 직전 `savedRegisters`를 여기 다시 써넣어(write-back) 반영한
+    // 뒤 즉시 `nullptr`로 되돌린다(재사용/댕글링 방지 - 이 Task가
+    // 다시 정지하기 전까지는 무효).
+    DebugRegisterSnapshot savedRegisters;
+    InterruptFrame* liveFramePtr = nullptr;
 };
 
 struct DebugAttachArgs {
@@ -157,6 +201,29 @@ struct DebugWriteMemoryArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304] targetThread
+// 없음(위 DebugContinueArgs와 동일한 이유). `out`은 호출자(디버거)
+// 소유의 `DebugRegisterSnapshot` 버퍼 - 대상이 정지 상태(`pausedByDebugger`)
+// 가 아니면 `NotFound`.
+struct DebugGetRegistersArgs {
+    int64_t targetProcessId = -1;
+    DebugRegisterSnapshot* out = nullptr;  // 유저 포인터(호출자=디버거 소유 버퍼)
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// DebugGetRegistersArgs와 대칭 - `in`에서 읽어 대상의 `DebugSession::
+// savedRegisters`에 반영한다. 실제로 재개 시(DebugContinue) 살아있는
+// 프레임에 write-back된다(debug_session.h 상단 주석 참고) - 이 호출
+// 자체는 재개하지 않는다(그룹 freeze 여부와 무관하게 항상 사본만
+// 갱신, 별도로 DebugContinue를 불러야 함).
+struct DebugSetRegistersArgs {
+    int64_t targetProcessId = -1;
+    const DebugRegisterSnapshot* in = nullptr;  // 유저 포인터(호출자=디버거 소유 버퍼)
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 class DebugSessionService {
 public:
     // 부팅 시 한 번 - 위 syscall들을 SyscallRegistry에 등록한다.
@@ -179,6 +246,17 @@ public:
 // 않는다 - 세우는 주체는 #DB 콜백(kHandleUserBreakpointHit,
 // debug_session.cpp)이고, 이 함수는 그 결과를 그저 읽기만 한다.
 bool kIsPausedByDebugger(Task* task);
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
+// `Scheduler::onTick()`이 `kIsPausedByDebugger(task)`가 true라
+// `task`를 `Blocked`로 남기기로 결정한 바로 그 지점에서, 그 결정에
+// 쓰인 것과 같은 `frame`(이 코어가 방금 EOI를 보낸 스케줄러 틱
+// 자신의 `InterruptFrame*` - `task` 자신의 커널 스택 위, isr_common_stub
+// 이 쌓아 둔 자리)을 넘겨 호출한다. `task`가 유저 프로세스에 속하고
+// 활성 디버그 세션이 있으면 `DebugSession::savedRegisters`(값 복사)
+// 와 `liveFramePtr`(그 살아있는 프레임의 주소, write-back용)를 채운다
+// - 그 외(커널 전용 Task, 세션 없음)엔 아무 일도 하지 않는다(방어적).
+void kSaveDebugRegistersSnapshot(Task* task, InterruptFrame* frame);
 
 }  // namespace kernel
 

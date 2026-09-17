@@ -24,6 +24,39 @@ bool kIsPausedByDebugger(Task* task) {
     return proc->debugSession.pausedByDebugger;
 }
 
+void kSaveDebugRegistersSnapshot(Task* task, InterruptFrame* frame) {
+    if (!task->isUserLevel) {
+        return;
+    }
+    auto* thread = static_cast<UserThread*>(task);
+    SharedPtr<Process> proc = thread->process.lock();
+    if (!proc || !proc->debugSession.active) {
+        return;
+    }
+    DebugRegisterSnapshot& snap = proc->debugSession.savedRegisters;
+    snap.rax = frame->rax;
+    snap.rbx = frame->rbx;
+    snap.rcx = frame->rcx;
+    snap.rdx = frame->rdx;
+    snap.rsi = frame->rsi;
+    snap.rdi = frame->rdi;
+    snap.rbp = frame->rbp;
+    snap.r8 = frame->r8;
+    snap.r9 = frame->r9;
+    snap.r10 = frame->r10;
+    snap.r11 = frame->r11;
+    snap.r12 = frame->r12;
+    snap.r13 = frame->r13;
+    snap.r14 = frame->r14;
+    snap.r15 = frame->r15;
+    snap.rip = frame->rip;
+    snap.cs = frame->cs;
+    snap.rflags = frame->rflags;
+    snap.rsp = frame->rspOld;
+    snap.ss = frame->ssOld;
+    proc->debugSession.liveFramePtr = frame;
+}
+
 namespace {
 
 // [SP-9A6D579F §3.2] 권한 모델 - **이번 증분은 "직계 부모" 경로만
@@ -248,6 +281,40 @@ public:
             co_return;
         }
 
+        // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
+        // DebugSetRegisters가 사본(savedRegisters)을 바꿔 뒀을 수
+        // 있으니, 재개 직전 그 값을 살아있는 프레임(liveFramePtr -
+        // 이 Task 자신의 커널 스택 위, 정지 이후 아무도 안 건드림)에
+        // 다시 써넣는다(write-back) - SetRegisters를 안 불렀어도
+        // 같은 값을 그대로 되쓰는 것뿐이라 무해(더티 플래그로 조건부
+        // 분기하는 과설계 없이, RM-23F4B687 §4).
+        if (target->debugSession.liveFramePtr) {
+            InterruptFrame* frame = target->debugSession.liveFramePtr;
+            const DebugRegisterSnapshot& snap = target->debugSession.savedRegisters;
+            frame->rax = snap.rax;
+            frame->rbx = snap.rbx;
+            frame->rcx = snap.rcx;
+            frame->rdx = snap.rdx;
+            frame->rsi = snap.rsi;
+            frame->rdi = snap.rdi;
+            frame->rbp = snap.rbp;
+            frame->r8 = snap.r8;
+            frame->r9 = snap.r9;
+            frame->r10 = snap.r10;
+            frame->r11 = snap.r11;
+            frame->r12 = snap.r12;
+            frame->r13 = snap.r13;
+            frame->r14 = snap.r14;
+            frame->r15 = snap.r15;
+            frame->rip = snap.rip;
+            frame->cs = snap.cs;
+            frame->rflags = snap.rflags;
+            frame->rspOld = snap.rsp;
+            frame->ssOld = snap.ss;
+            // 재사용/댕글링 방지 - 이 Task가 다시 정지하기 전까지 무효.
+            target->debugSession.liveFramePtr = nullptr;
+        }
+
         // [SP-245D130B §9-4 교차 기록, ResourceGroup::thaw()와 대칭]
         // pausedByDebugger는 항상 내려놓지만(디버거가 정지를 풀기로
         // 결정했으므로), 그룹이 아직 frozen이면 실제로 깨우지 않는다 -
@@ -265,6 +332,108 @@ public:
 };
 
 DebugContinueHandler gDebugContinueHandler;
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615, DC-47000304 (A)
+// 채택] DebugGetRegisters - 대상이 정지 상태여야 하고(그래야
+// savedRegisters/liveFramePtr가 유효), 그 외 권한 검증은
+// DebugSetBreakpoint와 동일한 패턴.
+class DebugGetRegistersHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugGetRegistersArgs*>(argsRaw);
+
+        if (!Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->out), sizeof(DebugRegisterSnapshot))) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.pausedByDebugger) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        *args->out = target->debugSession.savedRegisters;
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugGetRegistersHandler gDebugGetRegistersHandler;
+
+// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615, DC-47000304 (A)
+// 채택] DebugSetRegisters - DebugGetRegistersHandler와 대칭(방향만
+// 반대). 이 호출 자체는 재개하지 않는다 - 사본만 갱신, 실제 반영은
+// DebugContinue가 write-back할 때(debug_session.h 상단 주석 참고).
+class DebugSetRegistersHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DebugSetRegistersArgs*>(argsRaw);
+
+        if (!Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->in), sizeof(DebugRegisterSnapshot))) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        SharedPtr<Process> target = kFindDebuggableChild(caller, args->targetProcessId);
+        if (!target) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.active) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<Process> debugger = target->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != caller.get()) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (!target->debugSession.pausedByDebugger) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        target->debugSession.savedRegisters = *args->in;
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DebugSetRegistersHandler gDebugSetRegistersHandler;
 
 // [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615 항목6] 디버기의
 // [pageBase, pageBase+4096) 구간 하나를 Paging::translatePage()로
@@ -470,6 +639,8 @@ void DebugSessionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointDebugDetach, &gDebugDetachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugSetBreakpoint, &gDebugSetBreakpointHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugContinue, &gDebugContinueHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugGetRegisters, &gDebugGetRegistersHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDebugSetRegisters, &gDebugSetRegistersHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugReadMemory, &gDebugReadMemoryHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDebugWriteMemory, &gDebugWriteMemoryHandler);
 }

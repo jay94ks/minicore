@@ -12,7 +12,7 @@
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived | 2026-09-15T05:47:02.266Z |
 | [DC-427BB6B2](./DC-427BB6B2.md) | 부트 경로 구현 착수 순서 및 부트로더 구현 방식 미정 | approved | 2026-09-13T13:14:35.335Z |
-| [DC-47000304](./DC-47000304.md) | DebugGetRegisters/SetRegisters - 정지된 유저 Task의 전체 레지스터 스냅숏 위치 미확정 | review | 2026-09-17T09:15:52.430Z |
+| [DC-47000304](./DC-47000304.md) | DebugGetRegisters/SetRegisters - 정지된 유저 Task의 전체 레지스터 스냅숏 위치 미확정 | approved | 2026-09-17T09:33:30.400Z |
 | [DC-474EE823](./DC-474EE823.md) | 4K 페이지의 2M 페이지 병합 정책 미정 | archived | 2026-09-15T05:47:25.626Z |
 | [DC-4809BB47](./DC-4809BB47.md) | Slab 할당자(SP-D7013B26) 세부 결정 미정 | archived | 2026-09-15T05:47:04.974Z |
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved | 2026-09-13T13:14:35.335Z |
@@ -44,7 +44,7 @@
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-17T01:40:07.683Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-17T00:15:27.234Z |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-17T08:00:37.841Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-17T09:16:49.404Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-17T09:33:40.901Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-17T07:28:23.928Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-15T12:46:23.061Z |

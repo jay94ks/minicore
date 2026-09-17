@@ -1001,7 +1001,7 @@ void Scheduler::startTickOnThisCore() {
     Lapic::startPeriodicTimer(kSchedulerTickVector, kSchedulerTickHz);
 }
 
-void Scheduler::onTick(InterruptFrame*) {
+void Scheduler::onTick(InterruptFrame* frame) {
     // 가장 먼저 EOI - 이 아래서 Task 전환이 일어나면 이 함수 호출은
     // 그 Task가 다시 스케줄될 때까지 "반환"하지 않는다(kContextSwitch
     // 가 콜스택 깊숙이 매달린 채로 남는다) - EOI를 미루면 그 사이
@@ -1144,6 +1144,17 @@ void Scheduler::onTick(InterruptFrame*) {
         const bool pausedByDebugger = kIsPausedByDebugger(current);
         if (frozenByGroup || pausedByDebugger) {
             current->state = TaskState::Blocked;
+            // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
+            // 지금 이 지점에서 손에 쥔 frame(이 Task 자신의 커널 스택
+            // 위, isr_common_stub이 쌓아 둔 자리)이 DebugGetRegisters/
+            // SetRegisters가 다룰 진짜 대상 - 이 Task가 재개되기
+            // 전까지 아무도 이 스택을 건드리지 않으므로 그 자리에
+            // 그대로 살아있다(debug_session.h kSaveDebugRegistersSnapshot
+            // 문서 주석 참고). pausedByDebugger가 아니면(그룹 freeze만)
+            // 이 함수 내부에서 조용히 아무 일도 안 한다.
+            if (pausedByDebugger) {
+                kSaveDebugRegistersSnapshot(current, frame);
+            }
         } else {
             enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
         }
