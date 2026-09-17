@@ -17,6 +17,29 @@ class Process;  // 포인터로만 참조(UserThread::process) - 전체 정의�
 // SyscallRegistry 참고).
 using SyscallEndpointId = uint32_t;
 
+// [신규, 2026-09-17, SP-E9B44929, 설계자 지시("Syscall Group -> Syscall
+// 로 맵핑되는 방식으로... 하위 8비트는 Syscall 번호, 그외 상위 비트는
+// 그룹 번호")] `SyscallEndpointId`의 와이어 타입/트랩 ABI는 전혀 안
+// 바뀐다(여전히 uint32_t, RDI로 전달) - 그 32비트 값의 **해석**만
+// 그룹(비트 15:8)+그룹 내 call 번호(비트 7:0)로 나뉜다. 비트 31:16은
+// 예약(반드시 0) - `SyscallRegistry`가 그 외 값을 즉시 거부한다.
+// 각 그룹의 call 번호는 그 그룹을 소유한 subsystem 문서가 다른
+// 그룹과 조율할 필요 없이 0부터 독자적으로 채운다(RM-48E1E610의
+// "그룹 배정" 절이 그룹 번호만 중재, call 번호는 안 건드림).
+constexpr uint32_t kSyscallCallBits = 8;
+constexpr uint32_t kSyscallCallMask = 0xFF;
+constexpr uint32_t kSyscallReservedMask = 0xFFFF0000u;  // 비트 31:16 - 반드시 0
+
+constexpr SyscallEndpointId kMakeSyscallEndpointId(uint8_t group, uint8_t call) {
+    return (static_cast<uint32_t>(group) << kSyscallCallBits) | call;
+}
+constexpr uint8_t kSyscallGroupOf(SyscallEndpointId id) {
+    return static_cast<uint8_t>((id >> kSyscallCallBits) & 0xFF);
+}
+constexpr uint8_t kSyscallCallOf(SyscallEndpointId id) {
+    return static_cast<uint8_t>(id & kSyscallCallMask);
+}
+
 // User-Level UserThread가 자연 종료(kTaskFallingToEnd)될 때 자기 자신을
 // 종료 처리해 달라고 제출하는 예약 endpoint(PL-2D3184BC "Task 종료
 // 프로토콜", QU-26F9420E 설계자 답변 1번, 2026-09-14 - "자기 자신을
@@ -36,7 +59,7 @@ using SyscallEndpointId = uint32_t;
 // userland/libs/libmc/syscall.cpp의 `for(;;){}` 스텁)이 이 종료
 // 시퀀스를 어떻게 트리거할지는 별도로 확인 필요(userland의 syscall
 // 트랩이 절대 ring3로 돌아가면 안 된다는 점이 일반 syscall과 다름).
-constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = 0;
+constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpointId(0, 0);
 
 // int 0x80/`syscall` 명령 두 트랩 경로가 공유하는 공용 verb 디스패치
 // (PN-124C105B, QU-E7E51931/QU-CD6F68B7로 확정된 ABI 그대로) - RAX=verb

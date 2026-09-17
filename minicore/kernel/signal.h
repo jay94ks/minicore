@@ -73,9 +73,10 @@ struct PendingSignal {
 // 와 같은 자릿수로 시작.
 constexpr uint32_t kPendingSignalChunkCapacity = 10;
 
-// RM-48E1E610 29-30번 - SP-0666DB3C §4.5 Syscall API.
-constexpr SyscallEndpointId kSyscallEndpointKill = 29;
-constexpr SyscallEndpointId kSyscallEndpointSignalAction = 30;
+// [갱신, 2026-09-17, SP-E9B44929] Process 그룹(0) - SP-0666DB3C §4.5
+// Syscall API.
+constexpr SyscallEndpointId kSyscallEndpointKill = kMakeSyscallEndpointId(0, 1);
+constexpr SyscallEndpointId kSyscallEndpointSignalAction = kMakeSyscallEndpointId(0, 2);
 
 // [SP-0666DB3C §4.5, PN-71E50394 항목 4] `Kill(targetProcessId, signal)` -
 // `targetProcessId`는 `SpawnProcessArgs::pid`/`WaitArgs::targetPid`와

@@ -15,8 +15,9 @@ class Process;  // 포인터로만 참조(DebugSession::debuggerProcess) - 전�
 // (§8 착수 조건이 실제로 갖춰진 부분)만 다룬다 - 브레이크포인트/
 // 싱글스텝/#DB ISR/메모리 읽기쓰기(§3.4-§3.6, 항목 3-6)는 하드웨어
 // 디버그 레지스터·ISR을 직접 건드리는 별도 증분으로 미룬다.
-constexpr SyscallEndpointId kSyscallEndpointDebugAttach = 50;
-constexpr SyscallEndpointId kSyscallEndpointDebugDetach = 51;
+// [갱신, 2026-09-17, SP-E9B44929] Debug 그룹(7).
+constexpr SyscallEndpointId kSyscallEndpointDebugAttach = kMakeSyscallEndpointId(7, 0);
+constexpr SyscallEndpointId kSyscallEndpointDebugDetach = kMakeSyscallEndpointId(7, 1);
 
 // [SP-9A6D579F §3.1] DR0-DR3 하드웨어 슬롯 수와 동일 - 스레드마다
 // 별도 슬롯이 아니라 프로세스당(사실상 mainThread 고정, 멀티스레드

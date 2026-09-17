@@ -194,9 +194,10 @@ enum class AddressSpaceError : uint32_t {
 // 수 없다(원래 확보한 최소 영역 자체를 없애는 API가 없음, v1 제약).
 constexpr uint64_t kMinHeapLength = 4096;
 
-constexpr SyscallEndpointId kSyscallEndpointMmap = 17;
-constexpr SyscallEndpointId kSyscallEndpointMunmap = 18;
-constexpr SyscallEndpointId kSyscallEndpointBrk = 19;
+// [갱신, 2026-09-17, SP-E9B44929] Memory 그룹(4).
+constexpr SyscallEndpointId kSyscallEndpointMmap = kMakeSyscallEndpointId(4, 0);
+constexpr SyscallEndpointId kSyscallEndpointMunmap = kMakeSyscallEndpointId(4, 1);
+constexpr SyscallEndpointId kSyscallEndpointBrk = kMakeSyscallEndpointId(4, 2);
 
 // **`process` 필드는 세 Args 구조체 전부에 공통** - onExec()이 실행되는
 // 시점의 `Scheduler::currentTask()`는 "이 syscall을 제출한 UserThread"가

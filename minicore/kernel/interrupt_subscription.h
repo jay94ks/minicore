@@ -113,11 +113,11 @@ struct InterruptSubscription {
     Spinlock lock;  // ISR과 syscall 양쪽에서 잡는다 - 구독자 슬롯 + 덤프 링 전부 이 하나로 보호
 };
 
-// endpointId 상수(RM-48E1E610 31-34번 예약).
-constexpr SyscallEndpointId kSyscallEndpointSubscribeInterrupt = 31;
-constexpr SyscallEndpointId kSyscallEndpointWaitInterrupt = 32;
-constexpr SyscallEndpointId kSyscallEndpointUnsubscribeInterrupt = 33;
-constexpr SyscallEndpointId kSyscallEndpointGetInterruptDump = 34;
+// [갱신, 2026-09-17, SP-E9B44929] Interrupt 그룹(5).
+constexpr SyscallEndpointId kSyscallEndpointSubscribeInterrupt = kMakeSyscallEndpointId(5, 0);
+constexpr SyscallEndpointId kSyscallEndpointWaitInterrupt = kMakeSyscallEndpointId(5, 1);
+constexpr SyscallEndpointId kSyscallEndpointUnsubscribeInterrupt = kMakeSyscallEndpointId(5, 2);
+constexpr SyscallEndpointId kSyscallEndpointGetInterruptDump = kMakeSyscallEndpointId(5, 3);
 
 enum class InterruptSubscriptionError : uint32_t {
     None = 0,

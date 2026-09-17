@@ -8,14 +8,68 @@
 
 namespace {
 
-constexpr kernel::uint32_t kMaxSyscallEndpoints = 256;  // v1 상한 - 필요해지면 늘림
-
 struct EndpointSlot {
     kernel::AsyncTaskSubjectCode subjectCode = 0;
     bool used = false;
 };
 
-EndpointSlot gEndpointSlots[kMaxSyscallEndpoints];
+// [신규, 2026-09-17, SP-E9B44929 §6 답변 - "그룹별 테이블을 두고,
+// 그게 포인터로 기능별 테이블을 가리키게 해. 그룹별 테이블에는
+// min/max 필드를 두면 공간을 절약할 수 있어"] 256개 그룹 슬롯은
+// 전부 정적으로 두되(포인터+2바이트라 가벼움), 각 그룹의 실제 call
+// 테이블은 그 그룹이 실제로 쓰는 [minCall, maxCall] 구간만큼만
+// 동적으로 잡는다 - 전체를 65536(그룹×콜) dense 배열로 두는 것보다
+// 훨씬 작다(현재 가장 큰 그룹인 Vfs도 14개 call뿐).
+struct GroupTable {
+    EndpointSlot* calls = nullptr;  // [minCall, maxCall] 구간, calls[call - minCall]로 색인
+    kernel::uint8_t minCall = 0;
+    kernel::uint8_t maxCall = 0;
+};
+
+GroupTable gGroupTables[256];
+
+// [중요] `SelfTerminateHandler`가 `Scheduler::init()`(kmain.cpp) 안에서
+// 이 파일의 `registerHandler()`를 부르는데, 그 시점은
+// `GenericSlabAllocator::init()`보다 **먼저**다(kmain.cpp 순서 확정 -
+// 부팅 극초반, 실측으로 발견: 슬랩 할당자를 여기서 썼다가 초기화 전
+// 페이지 폴트로 즉시 패닉했다). 그래서 그룹 call 테이블은 힙이 아니라
+// **정적 범프(bump) 풀**에서 잘라 쓴다 - 부팅 시 한 번씩만 등록되고
+// (동적 회수 없음) 총 등록 개수가 작아(현재 9개 그룹 합쳐 40개 미만)
+// 넉넉히 여유를 둔 정적 배열이면 충분하다.
+constexpr kernel::uint32_t kCallSlotPoolCapacity = 1024;  // 실측 후 조정 대상(RM-23F4B687 §4)
+EndpointSlot gCallSlotPool[kCallSlotPoolCapacity];
+kernel::uint32_t gCallSlotPoolUsed = 0;
+
+// 그룹 테이블이 call을 담을 수 있도록 필요하면 [minCall, maxCall]
+// 구간을 확장한다 - 정적 풀에서 새 조각을 잘라 옛 내용을 복사하고
+// 옛 조각은 그냥 버려진다(반납 없음, 풀이 넉넉해 문제되지 않음).
+bool kEnsureGroupCallSlot(GroupTable& table, kernel::uint8_t call) {
+    if (table.calls && call >= table.minCall && call <= table.maxCall) {
+        return true;  // 이미 범위 안 - 재할당 불필요
+    }
+    const kernel::uint8_t newMin = table.calls ? (call < table.minCall ? call : table.minCall) : call;
+    const kernel::uint8_t newMax = table.calls ? (call > table.maxCall ? call : table.maxCall) : call;
+    const kernel::uint32_t newCount = static_cast<kernel::uint32_t>(newMax) - newMin + 1;
+    if (gCallSlotPoolUsed + newCount > kCallSlotPoolCapacity) {
+        return false;  // 풀 고갈
+    }
+    EndpointSlot* newCalls = &gCallSlotPool[gCallSlotPoolUsed];
+    gCallSlotPoolUsed += newCount;
+    for (kernel::uint32_t i = 0; i < newCount; ++i) {
+        newCalls[i] = EndpointSlot{};
+    }
+    if (table.calls) {
+        const kernel::uint32_t oldCount = static_cast<kernel::uint32_t>(table.maxCall) - table.minCall + 1;
+        for (kernel::uint32_t i = 0; i < oldCount; ++i) {
+            newCalls[(table.minCall + i) - newMin] = table.calls[i];
+        }
+        // 옛 조각은 반납하지 않는다(정적 풀 - free 개념 없음, 위 주석 참고).
+    }
+    table.calls = newCalls;
+    table.minCall = newMin;
+    table.maxCall = newMax;
+    return true;
+}
 
 }  // namespace
 
@@ -79,19 +133,40 @@ void UserThread::release(UserThread* thread) {
 }
 
 bool SyscallRegistry::registerHandler(SyscallEndpointId endpointId, AsyncTaskHandler* handler) {
-    if (endpointId >= kMaxSyscallEndpoints || gEndpointSlots[endpointId].used) {
+    if (endpointId & kSyscallReservedMask) {
+        return false;  // 비트 31:16은 반드시 0(SP-E9B44929)
+    }
+    const uint8_t group = kSyscallGroupOf(endpointId);
+    const uint8_t call = kSyscallCallOf(endpointId);
+    GroupTable& table = gGroupTables[group];
+    if (table.calls && call >= table.minCall && call <= table.maxCall &&
+        table.calls[call - table.minCall].used) {
+        return false;  // 이미 채워진 슬롯(설계 실수 조기 발견용, 기존 계약 그대로)
+    }
+    if (!kEnsureGroupCallSlot(table, call)) {
         return false;
     }
-    gEndpointSlots[endpointId].subjectCode = AsyncCallbackRegistry::registerHandler(handler);
-    gEndpointSlots[endpointId].used = true;
+    EndpointSlot& slot = table.calls[call - table.minCall];
+    slot.subjectCode = AsyncCallbackRegistry::registerHandler(handler);
+    slot.used = true;
     return true;
 }
 
 bool SyscallRegistry::resolveSubjectCode(SyscallEndpointId endpointId, AsyncTaskSubjectCode* outSubjectCode) {
-    if (endpointId >= kMaxSyscallEndpoints || !gEndpointSlots[endpointId].used) {
+    if (endpointId & kSyscallReservedMask) {
         return false;
     }
-    *outSubjectCode = gEndpointSlots[endpointId].subjectCode;
+    const uint8_t group = kSyscallGroupOf(endpointId);
+    const uint8_t call = kSyscallCallOf(endpointId);
+    GroupTable& table = gGroupTables[group];
+    if (!table.calls || call < table.minCall || call > table.maxCall) {
+        return false;
+    }
+    const EndpointSlot& slot = table.calls[call - table.minCall];
+    if (!slot.used) {
+        return false;
+    }
+    *outSubjectCode = slot.subjectCode;
     return true;
 }
 

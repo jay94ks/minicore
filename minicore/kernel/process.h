@@ -365,8 +365,8 @@ private:
     static WeakPtr<Process> gOrphanRoot;
 };
 
-// RM-48E1E610 59번 - SpawnProcess.
-constexpr SyscallEndpointId kSyscallEndpointSpawnProcess = 59;
+// [갱신, 2026-09-17, SP-E9B44929] Process 그룹(0) - SpawnProcess.
+constexpr SyscallEndpointId kSyscallEndpointSpawnProcess = kMakeSyscallEndpointId(0, 4);
 
 // SpawnProcess 실패 사유(SP-6BEAE0C1 §3) - `ChannelError`와 같은 관례
 // (out 파라미터로 결과 코드 하나 + 부가 값).
@@ -459,8 +459,8 @@ constexpr uint32_t kMaxSpawnArgsEntryCount = 4096;
 // 조정 가능한 순수 구현 세부, RM-23F4B687 §4).
 constexpr uint64_t kMaxSpawnImageSize = 4UL * 1024 * 1024;
 
-// RM-48E1E610 35번 - Wait.
-constexpr SyscallEndpointId kSyscallEndpointWait = 35;
+// [갱신, 2026-09-17, SP-E9B44929] Process 그룹(0) - Wait.
+constexpr SyscallEndpointId kSyscallEndpointWait = kMakeSyscallEndpointId(0, 3);
 
 // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
 // Wait syscall 인자 - **v1은 논블로킹**(POSIX `waitpid(pid, status,

@@ -49,7 +49,8 @@ struct EnumerateDevicesArgs {
     ChannelError error = ChannelError::None;
 };
 
-constexpr SyscallEndpointId kSyscallEndpointEnumerateDevices = 8;
+// [갱신, 2026-09-17, SP-E9B44929] Device 그룹(2).
+constexpr SyscallEndpointId kSyscallEndpointEnumerateDevices = kMakeSyscallEndpointId(2, 0);
 
 // [SP-9DD4F3EA §3.3] devmgr(또는 devmgr이 스폰한 드라이버 자식,
 // SP-EAB162FC §4/QU-3AAAB5E9 - 이 syscall은 role 검증을 하지 않고
@@ -80,7 +81,7 @@ struct RequestIoPermissionArgs {
     uint32_t assignedIrqVector = 0;  // v1: 항상 0(위 "v1 축소 범위" 참고)
 };
 
-constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = 9;
+constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = kMakeSyscallEndpointId(2, 1);
 
 class PnpService {
 public:

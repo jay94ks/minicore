@@ -379,15 +379,15 @@ public:
     static void registerSyscallEndpoints();
 };
 
-// endpointId 상수(SyscallRegistry 고정 슬롯) - kSyscallEndpointSelfTerminate
-// (syscall.h, 값 0) 바로 다음부터 배정한다.
-constexpr SyscallEndpointId kSyscallEndpointOpenChannel = 1;
-constexpr SyscallEndpointId kSyscallEndpointConnectChannel = 2;
-constexpr SyscallEndpointId kSyscallEndpointAcceptFromChannel = 3;
-constexpr SyscallEndpointId kSyscallEndpointChannelRead = 4;
-constexpr SyscallEndpointId kSyscallEndpointChannelWrite = 5;
-constexpr SyscallEndpointId kSyscallEndpointCloseBridge = 6;
-constexpr SyscallEndpointId kSyscallEndpointDestroyChannel = 7;
+// [갱신, 2026-09-17, SP-E9B44929] Group+Call 2단계 인코딩 - Channel은
+// 그룹 1, call은 0부터 독자적으로 배정(RM-48E1E610 그룹 배정 절 참고).
+constexpr SyscallEndpointId kSyscallEndpointOpenChannel = kMakeSyscallEndpointId(1, 0);
+constexpr SyscallEndpointId kSyscallEndpointConnectChannel = kMakeSyscallEndpointId(1, 1);
+constexpr SyscallEndpointId kSyscallEndpointAcceptFromChannel = kMakeSyscallEndpointId(1, 2);
+constexpr SyscallEndpointId kSyscallEndpointChannelRead = kMakeSyscallEndpointId(1, 3);
+constexpr SyscallEndpointId kSyscallEndpointChannelWrite = kMakeSyscallEndpointId(1, 4);
+constexpr SyscallEndpointId kSyscallEndpointCloseBridge = kMakeSyscallEndpointId(1, 5);
+constexpr SyscallEndpointId kSyscallEndpointDestroyChannel = kMakeSyscallEndpointId(1, 6);
 
 struct OpenChannelArgs {
     const char* name = nullptr;   // nullptr 또는 nameLength==0 - 이름 없이 개설

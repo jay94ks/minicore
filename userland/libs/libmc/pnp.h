@@ -47,7 +47,8 @@ struct EnumerateDevicesArgs {
     ChannelError error = ChannelError::None;
 };
 
-constexpr SyscallEndpointId kSyscallEndpointEnumerateDevices = 8;
+// [갱신, 2026-09-17, SP-E9B44929] Device 그룹(2) - 커널 쪽과 값을 맞춤.
+constexpr SyscallEndpointId kSyscallEndpointEnumerateDevices = kMakeSyscallEndpointId(2, 0);
 
 // minicore/kernel/pnp.h의 RequestIoPermissionArgs와 바이트 단위로
 // 정확히 같은 레이아웃이어야 한다(위 문서 주석의 수동 동기화 부담
@@ -61,7 +62,7 @@ struct RequestIoPermissionArgs {
     uint32_t assignedIrqVector = 0;
 };
 
-constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = 9;
+constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = kMakeSyscallEndpointId(2, 1);
 
 }  // namespace mc
 

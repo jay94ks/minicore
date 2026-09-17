@@ -17,10 +17,21 @@ using SyscallEndpointId = uint32_t;
 // 입장에서 불투명(opaque)하다.
 using SyscallToken = uint64_t;
 
-// RM-48E1E610 0번과 같은 값 - Task가 자연 종료할 때(또는 명시적
-// selfTerminate() 호출로) 커널에 제출하는 endpoint(kernel::
-// kSyscallEndpointSelfTerminate, minicore/kernel/syscall.h 참고).
-constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = 0;
+// [신규, 2026-09-17, SP-E9B44929] 커널 쪽(minicore/kernel/syscall.h)과
+// 동일한 Group+Call 2단계 인코딩 - 값을 맞춰 두는 관례 그대로 헬퍼도
+// 미러링한다.
+constexpr uint32_t kSyscallCallBits = 8;
+constexpr uint32_t kSyscallCallMask = 0xFF;
+
+constexpr SyscallEndpointId kMakeSyscallEndpointId(uint8_t group, uint8_t call) {
+    return (static_cast<uint32_t>(group) << kSyscallCallBits) | call;
+}
+
+// RM-48E1E610 그룹 0(Process), call 0과 같은 값 - Task가 자연 종료할
+// 때(또는 명시적 selfTerminate() 호출로) 커널에 제출하는 endpoint
+// (kernel::kSyscallEndpointSelfTerminate, minicore/kernel/syscall.h
+// 참고). group.call = 0.0이라 우연히 종전 값(0)과 동일.
+constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpointId(0, 0);
 
 // 이 프로세스를 종료한다 - 커널이 트랩 지점에서 이 UserThread를 즉시
 // 끝내고 절대 ring3로 복귀시키지 않으므로(PN-71C3D483, QU-D96B1DCE
