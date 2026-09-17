@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T19:24:02.335Z
+  updatedAt: 2026-09-17T20:24:43.074Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1055,8 +1055,13 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   웨이크업 경로 자체가 없다 - 그 파킹을 깨우는 유일한 길은 그
   UserThread 자신이 제출한 AsyncTask가 정상 완료되는 것뿐이라,
   `Kill`로 `pendingSignals`에 기록해도 대상이 절대 깨어나지 않는다.
-  **여전히 재현 불가능** - `PN-B5C2845A`(신규 등록, 해법 후보 및
-  위험도 분석 포함)가 해소돼야 이 항목도 재검증 가능해진다.
+  **여전히 재현 불가능** - `PN-B5C2845A`가 해소돼야 이 항목도 재검증
+  가능해진다. **[갱신, 2026-09-18]** `PN-B5C2845A`가 제시한 두 후보
+  (공유 핫패스 확장 / Kill v1 범위 축소) 둘 다 설계자가 채택하지
+  않고, 세 번째 방향("`acceptFromChannel`/`connectChannel`/
+  `ChannelRead`/`ChannelWrite` 얘들을 실패시키면 되잖아" - 4개
+  핸들러 개별 실패 처리, 공유 핫패스 불변경)을 직접 지시했다
+  (`QU-8E137FFD` 답변) - 아직 미착수, 다음 세션 대상.
 (`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을
