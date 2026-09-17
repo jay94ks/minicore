@@ -54,9 +54,12 @@ struct FileHeader {
 static_assert(sizeof(FileHeader) == 64, "ELF64 파일 헤더는 정확히 64바이트여야 한다");
 
 // ELF64 프로그램 헤더(세그먼트 서술자, System V ABI) - PT_LOAD 타입만
-// 실제 메모리 매핑 대상이다(그 외 타입은 v1에서 전부 무시 - PT_DYNAMIC/
-// PT_INTERP는 동적 링킹용이라 이번 비-PIE v1 범위 밖, PT_NOTE/PT_TLS
-// 등도 마찬가지).
+// 실제 메모리 매핑 대상이다(그 외 타입은 v1에서 대부분 무시 - PT_DYNAMIC/
+// PT_INTERP는 동적 링킹용이라 이번 비-PIE v1 범위 밖, PT_NOTE 등도
+// 마찬가지). [갱신, 2026-09-18, PN-22E5E9E7 항목5] PT_TLS만 예외 -
+// 매핑 대상은 아니지만(loadIntoAddressSpace가 여전히 PT_LOAD만 처리)
+// Process::execImage()가 이 타입을 인식해 thread_local 템플릿 정보를
+// 저장한다(위 kSegmentTypeTls 참고).
 struct ProgramHeader {
     u32 type;
     u32 flags;
@@ -70,6 +73,12 @@ struct ProgramHeader {
 static_assert(sizeof(ProgramHeader) == 56, "ELF64 프로그램 헤더는 정확히 56바이트여야 한다");
 
 constexpr u32 kSegmentTypeLoad = 1;  // PT_LOAD
+// [신규, 2026-09-18, PN-22E5E9E7 항목5, SP-29D652AA §5.1] thread_local
+// 템플릿 위치(vaddr/filesz/memsz/align) - 위 PT_LOAD 전용 주석이
+// "PT_TLS 등도 무시"라고 적어 뒀던 시절과 달리, 이제 커널 쪽
+// Process::execImage()(process.cpp)가 이 타입을 인식해 Process에
+// 템플릿 정보를 저장한다(실제 UserThread별 인스턴스 생성은 항목6).
+constexpr u32 kSegmentTypeTls = 7;  // PT_TLS
 
 constexpr u32 kSegmentFlagExecute = 1;  // PF_X
 constexpr u32 kSegmentFlagWrite = 2;    // PF_W

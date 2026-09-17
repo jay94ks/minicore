@@ -330,6 +330,22 @@ public:
     // 실제 페이지를 찾아 반납한다. init()이 pml4Phys 확보 직후 초기화.
     ProcessAddressSpaceManager addressSpace;
 
+    // [신규, 2026-09-18, PN-22E5E9E7 항목5, SP-29D652AA §5.1/§5.2] 이
+    // 프로세스의 ELF `PT_TLS` 세그먼트(있으면) 템플릿 - `execImage()`가
+    // `elf::kSegmentTypeLoad` memsz 합산과 같은 세그먼트 스캔에서 함께
+    // 채운다. **이번 증분(항목5)은 순수 파싱/저장까지만** - 실제
+    // UserThread별 TLS 인스턴스 생성(항목6)/FS_BASE 스왑(항목7)은 아직
+    // 이 필드를 소비하지 않는다. `hasTlsTemplate`가 false면 나머지
+    // 세 필드는 의미 없음(PT_TLS 세그먼트 자체가 없는 바이너리 - v1
+    // 유저 바이너리는 아직 thread_local을 쓰지 않아 항상 이 경우).
+    // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로
+    // group/frozenByGroup과 동일한 이유로 init()에서 매번 리셋한다.
+    uint64_t tlsTemplateVaddr = 0;
+    uint64_t tlsTemplateFilesz = 0;
+    uint64_t tlsTemplateMemsz = 0;
+    uint64_t tlsTemplateAlign = 0;
+    bool hasTlsTemplate = false;
+
     // Signal 전달 인프라(SP-0666DB3C §4.3, PN-71E50394) - 아직 대기
     // 중(전달 시도 전)인 신호들의 목록 + 각 신호 번호별 처리 방식.
     // 둘 다 init()에서 명시적으로 리셋한다 - Resurrect(§6.2)가 같은

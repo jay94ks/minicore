@@ -196,6 +196,13 @@ bool Process::init() {
     // 이유 - Resurrect가 같은 정적 Process를 재사용할 수 있으므로
     // 이전 생애의 메모리 사용량이 새 생애로 새어 들어가면 안 된다.
     memoryBytesUsed = 0;
+    // [신규, 2026-09-18, PN-22E5E9E7 항목5] memoryBytesUsed와 동일한
+    // 이유(Resurrect 재사용) - execImage()가 매번 새로 채운다.
+    tlsTemplateVaddr = 0;
+    tlsTemplateFilesz = 0;
+    tlsTemplateMemsz = 0;
+    tlsTemplateAlign = 0;
+    hasTlsTemplate = false;
     addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
     // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로,
     // 이전 생애의 신호 상태가 새 생애로 새어 들어가지 않도록 매번
@@ -468,6 +475,14 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
         const elf::ProgramHeader seg = image.segment(i);
         if (seg.type == elf::kSegmentTypeLoad) {
             imageBytes += seg.memsz;
+        } else if (seg.type == elf::kSegmentTypeTls) {
+            // [신규, 2026-09-18, PN-22E5E9E7 항목5] 순수 저장만 - 실제
+            // 인스턴스 생성/FS_BASE 배선은 항목6/7(아직 미구현).
+            tlsTemplateVaddr = seg.vaddr;
+            tlsTemplateFilesz = seg.filesz;
+            tlsTemplateMemsz = seg.memsz;
+            tlsTemplateAlign = seg.align;
+            hasTlsTemplate = true;
         }
     }
     memoryBytesUsed += imageBytes;
