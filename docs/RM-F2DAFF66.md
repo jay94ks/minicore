@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T17:27:33.228Z
+  updatedAt: 2026-09-17T17:32:46.027Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -947,6 +947,30 @@ approved 전환되는 문서 위주로 전환한다.
   `currentCoreIndex()` 전환)도 `scheduler.cpp`의 `gRdtscpSupported`
   분기(rdtscp 성공 시 그 결과, 아니면 `kScanCoreIndexByApicId()`
   폴백)로 정확히 구현돼 있음을 확인. **갭 없음.**
+
+- **[신규, 2026-09-18] `SP-FAF768AB`(제네릭 컨테이너 템플릿 -
+  Node/List/Vector/Rbtree/RbMultiTree/Map/OrderedList/LruList/Queue)**:
+  이 문서는 이미 자체적으로 §6-A("착수 세션 실측 발견 - 원안 코드의
+  실제 버그 2건")를 갖고 있어 위험 지대로 보고 정밀 대조했다 -
+  `minicore/libs/libkcont/{intrusive_list.h, vector.h, rbtree.h,
+  map.h}` 확인 결과, §6-A가 스스로 기록한 두 수정(①`List::init()`이
+  `_sentinel = Node{}`(댕글링 유발) 대신 `_sentinel.prev/next = 
+  &_sentinel` 개별 대입, ②`Rbtree`/`RbMultiTree::remove(T*)`가 원안의
+  `static`이 아니라 인스턴스 메서드로 `_root` 갱신)가 정확히 코드에
+  반영돼 있음을 직접 확인. `List`/`OrderedList`/`LruList`/`Queue`
+  네 타입 전부 (파일 경로 주석이 "또는 별도 queue.h" 등으로 이미
+  유연하게 열어 뒀던 대로) `intrusive_list.h` 한 파일에 통합 배치돼
+  있고, `RbMultiTree`는 `rbtree.h`에 실재, `Vector<T, Policy>`의
+  `DefaultContainerPolicy`/`moveElement`/`destroyElement` 훅도
+  설계 그대로 구현돼 있음을 확인. **갭 없음** - 이 문서로 approved
+  상태였으나 아직 이 방법론이 안 다뤘던 SP 문서 3건(`SP-4DCD0E6A`/
+  `SP-F146B7F8`/`SP-FAF768AB`)을 전부 소진했다.
+
+**[2026-09-18] approved SP 문서 후보 풀 재소진** - document_list
+전수 재대조로 찾아낸 미점검 approved SP 문서 3건을 전부 처리(1건
+갭 발견/정정, 2건 갭 없음). 다음 스윕은 새로 approved 전환되는
+문서 위주로 계속한다(SP-30FCC8AE(사용자/권한 체계)가 review에서
+approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
