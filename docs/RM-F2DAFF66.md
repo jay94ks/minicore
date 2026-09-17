@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T20:24:43.074Z
+  updatedAt: 2026-09-17T21:22:19.865Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -625,8 +625,9 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 확인 안 한 `approved` SP 문서가 더 없음(document_list로 재확인
 필요시 다음 틱에). **[갱신, 2026-09-17]** §3에 있던 두 재검증 대기
 항목(`PN-2008220B`/`SP-B1E258D8`) 전부 §2로 이관 완료 - §3은 이제
-`SP-9A6D579F`(부분 착수 중, 완료되면 재대조)/`PN-B5C2845A`(Kill이
-Syscall::wait 파킹 대상에 미도달, 해법 미착수) 두 항목만 남았다.
+`SP-9A6D579F`(부분 착수 중, 완료되면 재대조) 한 항목만 남았다 -
+`PN-B5C2845A`(Kill이 Syscall::wait 파킹 대상에 미도달)는 2026-09-18
+완료돼 이 목록에서 빠짐(§1 참고).
 다음부터는 PL/DC류 문서, 또는 새로 `approved` 전환되는 문서(예:
 `SP-B26CDBDD`가 구현되면 그 시점에) 위주로 전환한다.
 
@@ -1027,6 +1028,35 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   Open과 동일한 스코프 결정으로 NotSupported 유지. 갭 없음, 같은
   패턴의 반복이라 별도 하위 절 없이 여기 한 줄로만 추가 기록.
 
+- **[신규, 2026-09-18] `SP-B071E628` §6-6(pubreg register/query 완전
+  바이너리) - 확정 직후 `PN-185406F6` 항목4(commit 974adce) 구현과
+  즉시 대조**: 설계가 여러 차례(§6-4 절충안 반려→§6-5→QU-4B38857C
+  답변→§6-6 확정) 급하게 뒤집힌 직후 착수된 구현이라 이 문서 방법론이
+  가장 주목해 온 위험 패턴("승인 직후/막 구현된 문서")에 정확히
+  해당 - `userland/libs/libmc/pubreg.h`의 `PubregRegisterRequest`/
+  `PubregRegisterAck`/`PubregQueryRequest`/`PubregRegistrationEntry`
+  전부 §6-6의 `PubregRegistration` 필드(registryId/protocolCode[4]/
+  implementationId[28]/endpoint/featureFlags)와 정확히 일치,
+  `PubregEndpointKind`(Channel/Tcp/Udp) discriminated union도 설계
+  그대로. `minicore/pubreg/main.cpp`의 `kHandleRegister`/`kHandleQuery`가
+  이 와이어 포맷을 정확히 그 레이아웃으로 파싱/조립함을 확인 -
+  query의 mode 0(전체)/1(substring, `kImplementationIdMatches`)과
+  offset/count 페이지네이션도 QU-E05A55AD 1번 답변 그대로. "닫힌
+  파이프 → 등록 자동 해제"(`kReleaseRegistrationsOwnedBy`)도 §3/§6
+  원 설계 그대로 보존. `PN-10EE096A`가 막 노출한
+  `waitAnyForMultipleSyscall` 위에서 accept+다중 연결을 멀티플렉싱하는
+  것도 그 syscall의 의도된 최초 소비처로 정확히 맞물림. **정직하게
+  기록된 v1 단순화 하나**(코드 갭 아님, 설계 문서가 와이어 포맷까지만
+  다루고 버퍼링 정책은 구현 세부로 남겨 둔 영역) - 한 `ChannelRead`가
+  메시지 2개 이상을 한 번에 받아오면 첫 메시지만 처리하고
+  `bytesBuffered`를 무조건 0으로 리셋해 나머지를 버린다(주석이 직접
+  인정 - "다음 메시지 조각을 잃지 않으려면 별도 스크래치 필요, v1은
+  파이프라이닝을 포기"); 이 프로토콜이 요청-응답 왕복이라 정상
+  클라이언트는 응답 전 다음 메시지를 안 보내므로 지금은 안전하나,
+  다중 메시지 파이프라이닝이 실제로 필요해지면 재검토 대상. **갭
+  없음** - 설계 확정부터 구현까지 빠르게 이어졌음에도 와이어 포맷/
+  페이지네이션/자동해제/신규 syscall 소비 전부 정확히 일치한 사례.
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
@@ -1055,13 +1085,19 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   웨이크업 경로 자체가 없다 - 그 파킹을 깨우는 유일한 길은 그
   UserThread 자신이 제출한 AsyncTask가 정상 완료되는 것뿐이라,
   `Kill`로 `pendingSignals`에 기록해도 대상이 절대 깨어나지 않는다.
-  **여전히 재현 불가능** - `PN-B5C2845A`가 해소돼야 이 항목도 재검증
-  가능해진다. **[갱신, 2026-09-18]** `PN-B5C2845A`가 제시한 두 후보
-  (공유 핫패스 확장 / Kill v1 범위 축소) 둘 다 설계자가 채택하지
-  않고, 세 번째 방향("`acceptFromChannel`/`connectChannel`/
-  `ChannelRead`/`ChannelWrite` 얘들을 실패시키면 되잖아" - 4개
-  핸들러 개별 실패 처리, 공유 핫패스 불변경)을 직접 지시했다
-  (`QU-8E137FFD` 답변) - 아직 미착수, 다음 세션 대상.
+  **[완료, 2026-09-18] `PN-B5C2845A` 해소됨** - 설계자가
+  `QU-8E137FFD`에서 "`acceptFromChannel`/`connectChannel`/
+  `ChannelRead`/`ChannelWrite` 얘들을 실패시키면 되잖아"로 세 번째
+  방향(공유 핫패스 새 분기 추가가 아니라, 기존 `AsyncTaskState::
+  Cancelled`/`onCancel()` 메커니즘에 "대기자가 있을 수도 있다"는
+  조건 하나씩만 끼워 넣는 방식)을 지시했고, 실제 구현+devmgr TEMP
+  Kill 왕복 실측(3회 연속 성공, `hasWaiter=1 wasSuspended=1` 확인) +
+  표준 회귀(베이스라인과 동일 크래시율 직접 비교 확인)까지 완료했다
+  (commit `33ade60`). `Kill`이 이제 `Syscall::wait()`로 파킹된
+  UserThread에도 도달한다 - **이 항목이 막고 있던 "실제 취소 레이스"
+  재검증이 이제 가능해졌다** - 다음 세션이 `PN-C4611402`를 재검증할
+  수 있다(아래로 이동 대상, §2로 옮길 정도의 재검증은 아직 별도
+  수행 안 함 - `PN-C4611402` 자신의 재검증이 완료되면 그때 §2로).
 (`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을
