@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-4DCD0E6A
   status: approved
-  updatedAt: 2026-09-17T11:18:38.217Z
+  updatedAt: 2026-09-17T11:32:48.368Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -231,7 +231,7 @@ unlink+재삽입 두 단계라 원자적으로 안 묶이면 중간에 다른 �
 항목을 못 찾는 창이 생김)는 여전히 이 문서에서 lock-free/concurrent
 설계를 제공하지 않는다 - 이 판단이 틀렸다면 정정 바란다.
 
-## 4. `LockFreeQueue<T>` - 실현 가능, 이 문서에서 설계 확정 (Michael-Scott 알고리즘)
+## 4. `LockFreeQueue<T>` - 실현 가능, 이 문서에서 설계 확정 (Michael-Scott 알고리즘, **비침습 전환 확정**)
 
 `Queue`(`SP-FAF768AB` §5-D)의 lock-free 버전은 Michael-Scott 1996
 알고리즘(MPMC lock-free FIFO 큐) - `LockFreeList`(§1)의 Harris
@@ -243,33 +243,62 @@ enqueue/dequeue 두 CAS 지점이 서로 겹쳐도(한쪽이 tail을 아직 못
 따라잡은 "느슨한 tail" 상태) 안전하게 헬핑으로 보정되는 것이 이
 알고리즘의 핵심.
 
+**[결정, 2026-09-17, `QU-253D6D24` 답변]** 최초 스케치는 `T` 안에
+`LockFreeNode`를 내장하는 침습적(intrusive) 설계였으나, 착수 전
+자가 점검(`PN-013215F9`)에서 구조적 결함이 발견됐다 - Michael-Scott
+원 알고리즘은 dequeue가 반환하는 값과 새로 더미가 되는 노드가 서로
+다른 메모리(Node/Value 분리)임을 전제하는데, 침습 설계는 그 둘이
+같은 메모리라서 호출자가 반환받은 `T`를 정상적으로 재사용/해제하면
+큐 내부 `_head`가 손상된 값을 읽는다. 설계자가 권장안("Queue만
+비침습 전환")을 채택 - 아래 스케치를 **별도 Node 래퍼가 `T*`를
+담는 비침습 설계**로 교체한다.
+
 ```cpp
-// intrusive_list.h (이어서) 또는 별도 lockfree_queue.h
+// lockfree_queue.h
 namespace kernel {
+
+// T와 별도의 메모리 - dequeue가 반환하는 T*와 큐 내부 연결 구조가
+// 겹치지 않는다(침습 설계의 구조적 결함 회피, QU-253D6D24).
+struct LockFreeQueueNode {
+    AtomicPtr<LockFreeQueueNode> next;
+    T* value;  // 실제 타입 매개변수는 클래스 템플릿에서 옴 - 의사코드
+};
 
 template <typename T, typename Traits>
 class LockFreeQueue {
 public:
-    // head/tail 둘 다 항상 더미 노드를 하나 가리킨다(초기화 시 더미
-    // 하나를 확보해 _head=_tail=dummy로 시작 - 착수 세션이 더미 노드
-    // 확보 방식(정적 멤버 vs 호출자 제공)을 확정).
-    bool enqueue(T* item);       // CAS로 tail 전진, 실패 시 재시도(락 없음)
-    T* dequeue();                // CAS로 head 전진, 비어있으면 nullptr
+    // head/tail 둘 다 항상 더미 Node 하나를 가리킨다(초기화 시 value=
+    // nullptr인 더미 하나를 확보해 _head=_tail=dummy로 시작).
+    //
+    // enqueue: GenericSlabAllocator로 새 LockFreeQueueNode를 *CAS
+    // 시도 전에* 먼저 할당한다 - 할당 실패 시 그 자리에서 false를
+    // 반환하고 큐 상태에는 어떤 예약/구멍도 남기지 않는다(LockFreeVector가
+    // 겪은 "예약 먼저, 실패하면 구멍" 패턴과 정반대 - PN-DAE91888/
+    // RM-32D06563 사후분석 원칙 준수). 할당 성공 후에만 tail을 CAS로
+    // 전진시킨다.
+    bool enqueue(T* item);
+    // dequeue: head를 CAS로 전진시키고 옛 head가 가리키던 다음 Node의
+    // value(T*)를 반환, 비어있으면 nullptr. 옛 head Node 자체(래퍼,
+    // T 아님)는 RCU 유예 후 GenericSlabAllocator로 반납.
+    T* dequeue();
 
 private:
-    AtomicPtr<LockFreeNode> _head;
-    AtomicPtr<LockFreeNode> _tail;
+    AtomicPtr<LockFreeQueueNode> _head;
+    AtomicPtr<LockFreeQueueNode> _tail;
 };
 
 }  // namespace kernel
 ```
 
-**`LockFreeList`(§1)와 동일한 전제 조건**: dequeue된 옛 head 노드의
-실제 메모리 반납이 다른 스레드의 진행 중인 enqueue/dequeue와 겹칠 수
-있어(그 스레드가 아직 그 노드를 통해 tail을 따라가는 중일 수 있음),
+**`LockFreeList`(§1)와 동일한 전제 조건**: dequeue 이후 옛 head Node
+래퍼(비침습 전환 후에도 여전히 Node 자체는 별도 회수 대상)의 실제
+메모리 반납이 다른 스레드의 진행 중인 enqueue/dequeue와 겹칠 수 있어
+(그 스레드가 아직 그 노드를 통해 tail을 따라가는 중일 수 있음),
 `SP-B1E258D8`(RCU, `PN-495C11B7`)가 실제로 완료되기 전까지는 안전하게
 구현할 수 없다 - 착수 조건은 `LockFreeList`와 동일하게 `PN-495C11B7`
-완료(§6).
+완료(§6). RCU는 여전히 필요(Node 래퍼 회수), 다만 이제 T 자신은
+호출자 소유권 반환 즉시 자유롭게 재사용 가능(비침습 전환으로 확보된
+안전성).
 
 ## 5. 범위 밖 (v1)
 
