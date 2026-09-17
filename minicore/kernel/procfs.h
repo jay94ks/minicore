@@ -17,6 +17,13 @@ namespace kernel {
 // 전부 NotFound. 임의/자식 pid 열람은 `QU-764C5624`(Kill/DebugAttach가
 // 이미 마주친 "pid -> Process* 안전 조회 수단 없음" 문제)의 답변
 // 이후로 미룬다.
+//
+// [추가, 2026-09-17, PN-0C282BB7] `meminfo`/`uptime` - 특정 프로세스가
+// 아니라 커널 전역 상태를 노출하는 두 번째 부류의 파일. 이들은
+// `Process*`에 매이지 않으므로 §2의 "self만 허용" 권한 제약과 무관
+// (설계 확인 결과 - 특정 프로세스에 종속되지 않는 전역 정보라 접근
+// 제어 필요 없음, `PN-0C282BB7` §4 참고) - 호출자가 누구든 항상 읽을
+// 수 있다.
 // [핸들 충돌 방지] `LiveFs`의 `named/`/`kernel/<name>` 핸들은 태그 없는
 // 원시 `Channel*` 값을 그대로 `FileHandle::value`로 쓴다(livefs.cpp) -
 // `ProcFs`도 원시 `Process*`를 그대로 쓰면 `Read`/`Stat` 디스패치가
@@ -29,6 +36,15 @@ namespace kernel {
 // HandleValue`=1, 이진 0b01과도 겹치지 않음 - 그 값은 비트1이 0이다)
 // 실제 원시 포인터와 절대 충돌하지 않는다.
 constexpr uint64_t kProcFsHandleTagBit = 1ULL << 1;
+
+// [추가, 2026-09-17, PN-0C282BB7] `meminfo`/`uptime` 핸들은 `Process*`를
+// 담지 않는 상태 없는 전역 핸들이라, 위 태그 비트만으로는 self/status
+// 핸들(실제 `Process*` | kProcFsHandleTagBit)과 구분할 수 없다 -
+// `Process*`는 항상 8바이트 정렬이라 태그 비트(bit1)만 OR해서는 bit2가
+// 절대 서지 않는다는 사실을 이용해, bit2를 "이 핸들은 프로세스에
+// 안 매인 전역 통계 파일"이라는 두 번째 표시로 예약한다(self/status
+// 핸들과 절대 충돌 안 함 - 그쪽은 bit2가 항상 0).
+constexpr uint64_t kProcFsGlobalHandleBit = 1ULL << 2;
 
 class ProcFs {
 public:

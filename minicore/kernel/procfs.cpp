@@ -1,8 +1,10 @@
 #include "procfs.h"
 
 #include "libkenv/mem.h"
+#include "page_frame_allocator.h"
 #include "process.h"
 #include "syscall.h"
+#include "timer.h"
 
 namespace {
 
@@ -47,6 +49,65 @@ void kAppendI64(char* buf, kernel::uint32_t bufSize, kernel::uint32_t& pos, kern
 
 constexpr char kSelfStatusPath[] = "self/status";
 constexpr kernel::uint32_t kMaxStatusLen = 256;  // §3의 5줄 정도는 넉넉히 담는 v1 상한
+
+// [추가, 2026-09-17, PN-0C282BB7] meminfo/uptime - self/status와 달리
+// Process*가 없는 전역 핸들이라 procfs.h의 kProcFsGlobalHandleBit로
+// 구분한다. 세부 번호(0/1)는 이 파일 안에서만 의미를 가지는 임의
+// 식별자 - 외부에 노출되지 않는다.
+constexpr char kMeminfoPath[] = "meminfo";
+constexpr char kUptimePath[] = "uptime";
+constexpr kernel::uint64_t kProcFsMeminfoHandle = kernel::kProcFsHandleTagBit | kernel::kProcFsGlobalHandleBit | (0ULL << 3);
+constexpr kernel::uint64_t kProcFsUptimeHandle = kernel::kProcFsHandleTagBit | kernel::kProcFsGlobalHandleBit | (1ULL << 3);
+constexpr kernel::uint32_t kMaxGlobalStatusLen = 320;  // meminfo가 노드 8개까지 나열할 수 있어 status보다 여유를 둠
+
+// [PN-0C282BB7 §1] PageFrameAllocator가 실제로 추적하는 것은 "남은
+// 페이지 수"뿐(할당자 자체가 총량을 저장하지 않음, page_frame_allocator.cpp
+// 확인 완료) - 그래서 Linux의 MemTotal류를 만들어내지 않고, 실제로
+// 존재하는 값(전체/노드별 잔여 페이지)만 KB 단위로 노출한다
+// (CLAUDE.md 규칙 4 - 실제로 없는 통계를 발명하지 않음).
+kernel::uint32_t kFormatMeminfo(char* buf, kernel::uint32_t bufCap) {
+    kernel::uint32_t pos = 0;
+    constexpr kernel::uint64_t kPageSizeKb = 4;  // 4KiB 페이지 고정(page_frame_allocator.cpp와 동일 전제)
+
+    kAppendStr(buf, bufCap, pos, "MemFreeKb:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<kernel::int64_t>(kernel::PageFrameAllocator::freePageCount() * kPageSizeKb));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    const kernel::uint32_t nodeCount = kernel::PageFrameAllocator::numaNodeCount();
+    kAppendStr(buf, bufCap, pos, "NumaNodeCount:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<kernel::int64_t>(nodeCount));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    for (kernel::uint32_t node = 0; node < nodeCount; ++node) {
+        kAppendStr(buf, bufCap, pos, "MemFreeNode");
+        kAppendI64(buf, bufCap, pos, static_cast<kernel::int64_t>(node));
+        kAppendStr(buf, bufCap, pos, "Kb:\t");
+        kAppendI64(buf, bufCap, pos,
+                   static_cast<kernel::int64_t>(kernel::PageFrameAllocator::freePageCountOnNode(node) * kPageSizeKb));
+        kAppendStr(buf, bufCap, pos, "\n");
+    }
+
+    return pos;
+}
+
+// [PN-0C282BB7 §2] Timer::tickCount()는 HPET/LAPIC-PIT 경로 둘 다
+// 정확히 100Hz로 증가한다(timer.cpp의 kDefaultTargetHz/kLegacyPitTargetHz
+// 확인 완료 - 스케줄러 틱과 같은 시간원을 그대로 재사용, 새 타이머를
+// 만들지 않음) - 즉 틱 1개가 정확히 1 centisecond다.
+kernel::uint32_t kFormatUptime(char* buf, kernel::uint32_t bufCap) {
+    kernel::uint32_t pos = 0;
+    const kernel::uint64_t ticks = kernel::Timer::tickCount();
+
+    kAppendStr(buf, bufCap, pos, "UptimeSeconds:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<kernel::int64_t>(ticks / 100));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "UptimeCentiseconds:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<kernel::int64_t>(ticks));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    return pos;
+}
 
 // [SP-5D965B74 §3] 매 Read마다 그 시점의 스냅샷을 새로 만든다(status는
 // 계속 바뀌는 값이라 open()~read() 사이 갱신을 반영해야 하므로 -
@@ -116,6 +177,15 @@ bool kResolveCallerProcess(kernel::AsyncTask* task, kernel::SharedPtr<kernel::Pr
 namespace kernel {
 
 OpenResult ProcFs::open(AsyncTask* task, const char* relPath, uint32_t relPathLen, uint32_t /*flags*/) {
+    // [PN-0C282BB7] 전역 통계 파일 - 프로세스에 안 매이므로 권한
+    // 판정 자체가 없다(procfs.h 참고).
+    if (kEqualsExact(relPath, relPathLen, kMeminfoPath, sizeof(kMeminfoPath) - 1)) {
+        return OpenResult{FileHandle{kProcFsMeminfoHandle}, false, VfsError::None};
+    }
+    if (kEqualsExact(relPath, relPathLen, kUptimePath, sizeof(kUptimePath) - 1)) {
+        return OpenResult{FileHandle{kProcFsUptimeHandle}, false, VfsError::None};
+    }
+
     if (!kEqualsExact(relPath, relPathLen, kSelfStatusPath, sizeof(kSelfStatusPath) - 1)) {
         return OpenResult{FileHandle{}, false, VfsError::NotFound};
     }
@@ -130,6 +200,26 @@ ReadResult ProcFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t 
     if ((handle.value & kProcFsHandleTagBit) == 0) {
         return ReadResult{0, VfsError::InvalidHandle};
     }
+
+    if (handle.value & kProcFsGlobalHandleBit) {
+        char global[kMaxGlobalStatusLen];
+        uint32_t globalLen;
+        if (handle.value == kProcFsMeminfoHandle) {
+            globalLen = kFormatMeminfo(global, kMaxGlobalStatusLen);
+        } else if (handle.value == kProcFsUptimeHandle) {
+            globalLen = kFormatUptime(global, kMaxGlobalStatusLen);
+        } else {
+            return ReadResult{0, VfsError::InvalidHandle};
+        }
+        if (offset >= globalLen) {
+            return ReadResult{0, VfsError::None};  // EOF
+        }
+        const uint64_t available = globalLen - offset;
+        const uint32_t toCopy = static_cast<uint32_t>(available < len ? available : len);
+        memcpy(buf, global + offset, toCopy);
+        return ReadResult{toCopy, VfsError::None};
+    }
+
     auto* proc = reinterpret_cast<Process*>(handle.value & ~kProcFsHandleTagBit);
 
     char status[kMaxStatusLen];
@@ -145,6 +235,21 @@ ReadResult ProcFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t 
 }
 
 void ProcFs::stat(AsyncTask* task, KernelFsStatArgs* args) {
+    if (kEqualsExact(args->relPath, args->relPathLen, kMeminfoPath, sizeof(kMeminfoPath) - 1)) {
+        char global[kMaxGlobalStatusLen];
+        args->size = kFormatMeminfo(global, kMaxGlobalStatusLen);
+        args->isDirectory = false;
+        args->error = VfsError::None;
+        return;
+    }
+    if (kEqualsExact(args->relPath, args->relPathLen, kUptimePath, sizeof(kUptimePath) - 1)) {
+        char global[kMaxGlobalStatusLen];
+        args->size = kFormatUptime(global, kMaxGlobalStatusLen);
+        args->isDirectory = false;
+        args->error = VfsError::None;
+        return;
+    }
+
     if (!kEqualsExact(args->relPath, args->relPathLen, kSelfStatusPath, sizeof(kSelfStatusPath) - 1)) {
         args->error = VfsError::NotFound;
         return;
