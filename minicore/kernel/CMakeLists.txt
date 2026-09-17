@@ -32,6 +32,7 @@ add_library(minicore_kernel OBJECT
     livefs.cpp
     procfs.cpp
     mount_table.cpp
+    vfs_syscall.cpp
     process.cpp
     debug_session.cpp
     address_space.cpp

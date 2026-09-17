@@ -35,6 +35,7 @@
 #include "syscall_fastpath.h"
 #include "timer.h"
 #include "tlb_shootdown.h"
+#include "vfs_syscall.h"
 
 namespace {
 
@@ -634,6 +635,14 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     } else {
         kernel::Logger::info("minicore: livefs mounted at /sys/live");
     }
+
+    // VFS syscall 5종(SP-7CC5693A §2.2/§2.5, PN-452FF696) - livefs
+    // 마운트 직후(위)에 이어 붙인다: fs 서비스는 아직 없지만 Mount 등을
+    // 호출하려면 최소 MountTable::init()이 끝나 있어야 하므로 이 순서를
+    // 지킨다(다른 registerSyscallEndpoints() 호출들과 같은 이유로
+    // BSP에서 한 번만).
+    kernel::VfsSyscallService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: vfs mount/unmount/resolve-path syscall endpoints registered");
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).
