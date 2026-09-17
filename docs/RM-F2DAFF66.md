@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T12:02:02.701Z
+  updatedAt: 2026-09-17T12:12:28.368Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -174,7 +174,7 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 
 ### 1-E. `SP-71DA77B3`(인터럽트 구독) `WaitInterrupt` `onCancel` 미구현 -
 댕글링 포인터 위험 (코드 갭, `PN-C4611402`/§1-B와 동일 결함 클래스,
-**신규 발견, 조치 중**)
+**해소 완료**)
 
 - **출처**: 설계자 지시("설계 공백을 찾아다녀봐")로 재개한 이번 스윕에서
   `SP-71DA77B3`를 처음으로 이 문서 방법론에 대입 - `interrupt_subscription.h`/
@@ -206,8 +206,17 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   다른 서브시스템(예: `WaitInterruptHandler`와 구조가 같은 향후
   핸들러)이 있는지도 함께 훑는 것을 이 문서의 표준 절차에 추가할
   가치가 있다.
-- **현재 상태**: 미해소(`PN-BD276A24` 착수 대기) - §1-B와 달리 아직
-  코드 수정 전이므로 "완전 해소"로 표시하지 않는다.
+- **[완료, 2026-09-17, commit 58c7416]** `InterruptWaiterQueue::remove()`
+  추가 + `WaitInterruptHandler::onCancel` 구현 완료 - 단 `args->vector`로
+  owner를 재조회해 슬롯 하나만 찾는 대신(취소 시점엔 `submitterTask`가
+  이미 비어 있을 수 있어 `ConnectChannelHandler`류가 그 경로를 피한 것과
+  같은 이유), 그 벡터의 구독자 슬롯(최대 8개) 전부를 훑어 제거하는
+  더 단순한 방식으로 구현(`PN-BD276A24` 참고). `Subscribe`/`Unsubscribe`/
+  `GetInterruptDump`는 no-op 유지(이유 주석 추가). `InterruptWaiterQueue::
+  remove()` 자체는 TEMP 단위 테스트(head/중간/tail/미존재)로 검증,
+  실제 취소 레이스 왕복은 `PN-C4611402`와 동일하게 코드 감사로 검증
+  (재현 수단 자체가 `PN-B5C2845A` 대기 중이라 동일한 제약).
+- **현재 상태**: **완전 해소.**
 
 ## §2. 점검 완료 - 갭 없음 확인
 
@@ -480,6 +489,44 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   `QueryInterfaces` "폐기" 갱신) - 둘 다 정확함. 실제 코드 갭은 아직
   발생할 수조차 없는 단계 - 갭 없음(착수 시 재점검 대상으로 §3 유지
   가치 있음, 아래 이동 없이 여기 기록만).
+
+### 1-F. `SP-9525C4C0`(Push/Pull 로드밸런싱) Push 경로에 §5.3 FPU 안전
+가드 누락 (코드 갭, **신규 발견, 조치 중**)
+
+- **출처**: 이번 스윕에서 `SP-9525C4C0`를 처음 대입 - `scheduler.cpp`와
+  대조하던 중 이 문서 §5.3("이번 설계의 핵심 기여")이 확립한
+  `kCanMigrateFpuSafely()` 가드가 Pull(`runLoop()`, ~1351행)에는
+  정확히 있는데 **Push(`enqueue()`, ~929-943행)에는 없음**을 발견.
+- **문제**: Task가 lazy FPU 소유("`gFpuOwner[coreIndex] == task`")를
+  쥔 채로 Push가 다른 코어 큐로 옮기면, 원래 코어의 하드웨어 FPU
+  레지스터에만 있는 최신 값이 저장되지 않고 유실될 수 있다 - §5.3이
+  이미 "진짜 정합성 버그"로 명시한 바로 그 시나리오. Pull은 §5.3의
+  v1 절충안(`kCanMigrateFpuSafely` 확인 후 안전하지 않으면 이관 스킵)을
+  그대로 구현했지만 Push는 그 가드 없이 무조건 이관한다 - 타이밍
+  의존적이라 드물게만 발현되는 데이터 손상.
+- **조치**: **`PN-F55FB154`**(scheduled) 등록 - Push도 Pull과 동일한
+  가드를 추가(안전하지 않으면 이번 이관을 건너뛰고 원래 코어 유지).
+  `enqueue()`의 `coreIndex` 파라미터가 항상 그 Task의 실제 lazy FPU
+  소유 코어와 일치하는지는 호출부 전수 조사가 필요해 착수 세션이
+  확인하도록 남겨 둠. `SP-9525C4C0`에 정정 각주 추가 완료,
+  minicore-88 통보 완료.
+- **현재 상태**: 미해소 - §1-B/§1-E와 같은 "onCancel 미구현" 계열과는
+  다른 새 결함 클래스(비대칭 가드 누락)이지만, 같은 교훈("한쪽
+  경로에만 적용된 안전장치가 대칭 경로에서 빠질 수 있다")을 보여줌 -
+  앞으로 Push/Pull처럼 "같은 자원을 다루는 대칭 경로 쌍"을 볼 때마다
+  한쪽만 보고 끝내지 않고 반대쪽도 대조하는 습관을 이 문서의 표준
+  절차에 추가할 가치가 있다.
+
+- **`SP-6BEAE0C1`(fork/exec, SpawnProcess syscall)**: 매우 큰 문서 -
+  `process.cpp`의 `SpawnProcessHandler`/`WaitHandler`와 전면 대조.
+  §3의 `flags` 비트마스크(`kSpawnDebugStart` 검증+소비, `PN-A6E01B8A`/
+  `PN-87D6B615` 항목8), §6의 프로세스 트리(`parent`/`children`,
+  `PN-E2A114C1`의 WeakPtr 전환 포함), §4의 System V 스택 프레임
+  (argv/envp가 실제로 `execImage()`에 전달돼 조립됨, `PN-E35294B8`),
+  §11-3의 COW 참조 카운트 인프라(`PageFrameAllocator::retain/refCount`)
+  전부 실재 확인 - 여러 세션에 걸친 다수 증분(PN-543C0CE9 등)이
+  전부 정확히 교차 참조돼 있다. 갭 없음 - 대형 기능이 이 정도로
+  빈틈없이 추적된 드문 사례.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
