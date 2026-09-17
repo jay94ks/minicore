@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T15:41:06.277Z
+  updatedAt: 2026-09-17T16:13:15.223Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -846,6 +846,55 @@ approved 전환되는 문서 위주로 전환한다.
 `archived`(더 이상 인용 대상 아님). 다음 스윕은 새로 `approved`
 전환되는 문서(SP-CCACB192처럼 착수와 동시에 갭이 드러나는 경우가
 실제로 있었음 - §1-G 참고) 또는 QA류 문서 위주로 전환한다.
+
+- **[신규, 2026-09-18] QA류 문서 점검 (`QA-26450C3E`/`QA-08F8C96F`) -**
+  **이 방법론 대상 아님이 확인됨, 갭 없음**: QA 문서는 SP/DC처럼 "확정된
+  설계"를 산문으로 선언하는 문서가 아니라 체크리스트 자체라, 이 문서의
+  핵심 위험 패턴(목록 뒷부분 항목이 조용히 누락)이 애초에 잘 안 맞는다.
+  실제로 대조해보니 두 문서 모두 미체크 항목마다 예외 없이 구체적인
+  `PN-XXXXXXXX` 계획 참조가 이미 붙어 있어(`QA-26450C3E`의 BIOS/EFI→
+  `PN-7FBF255A`, 인터럽트 라우팅/IPC→`PN-B3DD3D19`, procfs→`PN-48F0F90C`,
+  devmgr/fs 실코드→`PN-BD9AAE2F`/`PN-452FF696`, 특권경계 3항목도 같은
+  선행조건으로 명시; `QA-08F8C96F`의 부팅시간/컨텍스트스위칭 비용 실측→
+  본문 자체가 방법론 미확정을 `CLAUDE.md` 규칙4에 따라 의도적으로 유보)
+  "조용히 빠진 것"이 아니라 전부 openly 추적 중 - 갭 없음. 이 두 문서는
+  이제 이 방법론의 스윕 대상 풀에서 제외(§3에도 추가 안 함), QA류는
+  devmgr/fs 실코드 착수 등 실측 조건이 갖춰질 때 자연히 체크 항목이
+  옮겨가는 것으로 충분.
+
+### 1-H. `SP-1FBC0EEB`(Channel IPC) `OpenChannel`/`ConnectChannel`의
+`name` 포인터 미검증 - `PN-B552E75F`(Read/Write 소급 적용)와 동일
+결함 클래스가 대칭 핸들러 두 곳에 남아 있었음 (코드 갭, **발견 즉시
+같은 커밋에서 해소, minicore-88 세션, commit 4eb17f1**)
+
+- **출처**: `PN-B552E75F`(2026-09-16 completed)가 `ChannelReadHandler`/
+  `ChannelWriteHandler`의 유저 포인터(`buffer`/`data`)에
+  `kValidateUserBuffer()` 검증을 소급 적용했을 때, 같은 파일의
+  `OpenChannelHandler`/`ConnectChannelHandler`가 쓰는 `name`/
+  `nameLength`(마찬가지로 유저 포인터)는 그 소급 범위에서 빠졌다.
+- **발견 경위**: `PN-EAB3A9AE`(libmc Channel IPC syscall 래퍼, 이
+  프로젝트 최초의 진짜 유저랜드 Channel 호출부 준비) 착수 중,
+  실제 syscall 트랩 검증을 설계하려고 `channel.cpp` 핸들러 전체를
+  다시 읽다가 minicore-88이 직접 포착 - 이전까지 모든 Channel
+  테스트가 내부 TEMP 스캐폴딩(가짜 UserThread가 핸들러를 직접 호출,
+  실제 syscall 인자 검증 경계를 전혀 안 거침)이었기 때문에 잠복해
+  있었다.
+- **조치**: 발견과 동일 커밋(`4eb17f1`)에서 즉시 수정 - 두 핸들러
+  모두에 `PN-B552E75F`와 동일한 `kValidateUserBuffer` 가드 추가
+  (`nameLength > 0`일 때만 검사, 이름 없이 여는 `OpenChannel` 경로는
+  원래도 `name`을 안 건드리므로 영향 없음). `channel.cpp` 코드로
+  독립 확인 완료.
+- **의미**: §1-B/§1-E/§1-F가 이미 세 번 확인한 것과 같은 일반 패턴
+  ("한 결함 클래스를 한 서브시스템/경로 쌍에서 잡아도, 비슷한 시기에
+  독립적으로 다뤄진 대칭 경로에는 그 교훈이 전파 안 될 수 있다")의
+  네 번째 사례 - 다만 이번엔 발견부터 수정까지 같은 세션·같은 커밋
+  안에서 끝나 **이 문서에 "열린 갭"으로 남은 적이 없다**(§1-B/E/F와
+  달리 별도 PN 등록 없이 즉시 해소). 3-B 표준 절차("대칭 경로 쌍은
+  양쪽 다 확인")가 실제로 작동을 검증받은 사례로 기록.
+- **현재 상태**: 완전 해소. `PN-EAB3A9AE` 자신은 여전히 `scheduled`
+  (두 개의 독립 유저랜드 프로세스 간 실제 connect/accept/read/write
+  전체 핸드셰이크 실측은 아직 미완료로 명시적으로 남음) - 이건 이
+  발견과 무관한 별개의 잔여 범위.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
