@@ -118,6 +118,22 @@ struct WriteArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [SP-2AAD7C8D §9.3, PN-E9960D10] **[정직하게 기록] `End`는 이번
+// 증분 범위 밖** - 파일 크기를 알아야 하는데 `Process::FileDescriptor`
+// 가 원래 경로를 안 들고 있어(fsHandle만 저장) `KernelFsStatArgs`
+// (경로 기반 API)로 조회할 방법이 없다. `Set`/`Current`는 fd 테이블
+// offset의 순수 산술이라 `KernelFsDriver` 호출 자체가 필요 없다.
+enum class SeekWhence : uint32_t { Set, Current, End };
+
+struct LseekArgs {
+    int32_t fd = -1;
+    int64_t offset = 0;
+    SeekWhence whence = SeekWhence::Set;
+    // out
+    uint64_t newOffset = 0;
+    ChannelError error = ChannelError::None;  // InvalidHandle / InvalidArgument(음수 결과) / NotSupported(End)
+};
+
 // [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] Mkdir/Unlink와 같은 급의
 // "경로만으로 동작, fd 불필요" 오퍼레이션(§9.4) - `ResolvePathArgs`와
 // 거의 같은 모양이다. `MountKind::Channel` 마운트는 Open과 동일한
@@ -141,11 +157,12 @@ constexpr SyscallEndpointId kSyscallEndpointOpen = kMakeSyscallEndpointId(3, 5);
 constexpr SyscallEndpointId kSyscallEndpointClose = kMakeSyscallEndpointId(3, 6);
 constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
+constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9);
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 10개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 11개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 

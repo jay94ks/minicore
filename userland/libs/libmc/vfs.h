@@ -26,6 +26,7 @@ constexpr SyscallEndpointId kSyscallEndpointOpen = kMakeSyscallEndpointId(3, 5);
 constexpr SyscallEndpointId kSyscallEndpointClose = kMakeSyscallEndpointId(3, 6);
 constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
+constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9);
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
 
 struct MountArgs {
@@ -106,6 +107,19 @@ struct WriteArgs {
     uint32_t len = 0;
     // out
     uint32_t bytesWritten = 0;
+    ChannelError error = ChannelError::None;
+};
+
+// [SP-2AAD7C8D §9.3, PN-E9960D10] Set/Current만 지원 - End는
+// NotSupported(커널 쪽 vfs_syscall.h 주석 참고).
+enum class SeekWhence : uint32_t { Set, Current, End };
+
+struct LseekArgs {
+    int32_t fd = -1;
+    int64_t offset = 0;
+    SeekWhence whence = SeekWhence::Set;
+    // out
+    uint64_t newOffset = 0;
     ChannelError error = ChannelError::None;
 };
 

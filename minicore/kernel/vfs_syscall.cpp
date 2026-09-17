@@ -448,6 +448,49 @@ public:
 
 WriteHandler gWriteHandler;
 
+// [SP-2AAD7C8D §9.3, PN-E9960D10] Set/Current만 지원(End는 vfs_syscall.h
+// 상단 주석 참고 - 정직하게 범위 밖) - fd 테이블 offset의 순수 산술이라
+// KernelFsDriver 호출 자체가 필요 없다.
+class LseekHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<LseekArgs*>(argsRaw);
+        SharedPtr<Process> process = kProcessFromSubmitter(task);
+        if (!process) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        const int32_t fd = args->fd;
+        auto* slot = process->fileDescriptors.find([fd](const Process::FileDescriptor& e) { return e.fd == fd; });
+        if (!slot) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+
+        if (args->whence == SeekWhence::End) {
+            args->error = ChannelError::NotSupported;  // PN-E9960D10 "왜 End를 이번에 빼는가" 참고
+            co_return;
+        }
+
+        const int64_t base =
+            args->whence == SeekWhence::Set ? 0 : static_cast<int64_t>(slot->value.offset);  // Current면 현재 offset 기준
+        const int64_t result = base + args->offset;
+        if (result < 0) {
+            args->error = ChannelError::InvalidArgument;  // POSIX EINVAL과 동일한 결(음수 offset은 무효)
+            co_return;
+        }
+
+        slot->value.offset = static_cast<uint64_t>(result);
+        args->newOffset = slot->value.offset;
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+LseekHandler gLseekHandler;
+
 // [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] Stat - fd 없이 경로만으로
 // 동작(ResolvePathHandler와 거의 같은 모양). MountKind::Channel은
 // Open과 동일한 이유로 아직 NotSupported.
@@ -511,6 +554,7 @@ void VfsSyscallService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointClose, &gCloseHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointRead, &gReadHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointWrite, &gWriteHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointLseek, &gLseekHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointStat, &gStatHandler);
 }
 
