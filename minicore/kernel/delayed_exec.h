@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_DELAYED_EXEC_H
 #define MINICORE_KERNEL_DELAYED_EXEC_H
 
+#include "libkcont/intrusive_list.h"
 #include "libkenv/types.h"
 
 namespace kernel {
@@ -13,21 +14,26 @@ namespace kernel {
 // **자료구조(§2, QU-A8C0CC2C 설계자 답변)**: 고정 배열이 아니라
 // 연결 리스트다 - "초과 시 또 별도의 비용이 발생하니 linked list로
 // 구현해야 해"(설계자 지시). 상한 자체가 없으므로 `schedule()`의
-// 실패 가능성은 순수 노드 할당 실패(OOM)로 좁혀진다. 동시 대기
-// 항목 수가 여전히 적을 것으로 예상돼(실사용처가 Resurrect 백오프
-// 하나뿐) `pump()`는 정렬 리스트/힙 없이 매번 선형 순회한다
-// (RM-23F4B687 §4 - 실제로 항목 수가 늘어나는 게 확인되면 재검토).
+// 실패 가능성은 순수 노드 할당 실패(OOM)로 좁혀진다.
+//
+// [수정, 2026-09-17, PN-73E61BD1 항목3, SP-FAF768AB §5-B]
+// `deadlineTick` 기준 항상 정렬 상태를 유지하는 libkcont
+// `OrderedList<DelayedTimerEntry, DeadlineTraits>`(delayed_exec.cpp
+// 익명 네임스페이스, 헤더에 노출할 필요 없음)로 교체 - `schedule()`은
+// 여전히 O(n) 삽입(정렬 위치를 선형 탐색)이라 비용은 그대로지만,
+// `pump()`는 이제 머리부터 만료 안 된 첫 항목을 만나는 즉시 순회를
+// 멈출 수 있다(그 뒤는 전부 마감이 더 늦은 항목이므로) - 예전엔
+// 매번 리스트 전체를 끝까지 훑었다. 동작(어떤 항목들이 만료
+// 판정되는지)은 정확히 동일, 순수 성능 개선.
 using DelayedCallback = void (*)(void* arg);
 
-// 슬랩(SP-D7013B26)에서 노드 하나씩 할당/해제하는 연결 리스트 항목 -
-// 정렬되지 않은 채 삽입 순서 그대로 매달리고, pump()가 매번 선형
-// 순회하며 만료분을 찾는다(§2 참고, 헤더 서두 주석과 동일 근거).
+// 슬랩(SP-D7013B26)에서 노드 하나씩 할당/해제하는 연결 리스트 항목.
 struct DelayedTimerEntry {
     uint64_t deadlineTick = 0;   // Timer::tickCount() 기준 절대 시각
     DelayedCallback callback = nullptr;
     void* arg = nullptr;
     uint64_t token = 0;          // 발급 시 유일값(취소용)
-    DelayedTimerEntry* next = nullptr;
+    Node deadlineLink;           // OrderedList<DelayedTimerEntry, DeadlineTraits> 연결용
 };
 
 class DelayedExecutionQueue {
