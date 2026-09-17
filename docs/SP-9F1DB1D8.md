@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9F1DB1D8
   status: review
-  updatedAt: 2026-09-17T02:07:55.498Z
+  updatedAt: 2026-09-17T02:10:57.597Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -66,16 +66,28 @@ Task를 가리키는지에 대한 호출부의 착각"이었고, 애초에
      이라고 명시하고, `onForcedMigration()`의 `current !=
      gForcedMigrationRequest.target` 방어가 그 낡음을 무해하게
      처리한다(v1은 이 API 자체가 호출부 하나뿐인 수동/진단 경로).
+   - **[추가, 2026-09-17, minicore-f8 검토로 발견 - 최초 조사 누락]**
+     `kWakeCoreIfIdle(coreIndex)`(:495-498) - `Scheduler::enqueue()`
+     (:842-843)가 Push 로드밸런싱으로 `targetCore != coreIndex`(다른
+     코어 큐에 밀어 넣은 경우)일 때만 그 `targetCore`의
+     `gCurrentTask`를 읽어 idle이면 깨움 IPI를 보낸다 - 호출한 코어
+     자신이 아니라 targetCore를 읽는 크로스코어 접근으로, 위 두
+     지점과 동일한 패턴. 이 함수 자신의 문서 주석도 이미 "정확한
+     판정이 아니지만(idle 진입 직전/직후의 좁은 창) 안전한 근사 -
+     false positive 비용이 낮다"고 명시해 둬, 위 두 지점과 같은
+     "스탤값 허용" 설계 철학을 공유한다.
 
-**결론**: 진짜(엄밀한 C++ 메모리 모델 의미의) 데이터 레이스는 "다른
-코어가 비동기적으로 갱신 중인 `Task*` 슬롯을 락/원자 연산 없이
-평범한 포인터로 읽는" 두 지점(`taskOnCore`/`requestForcedMigration`)
-뿐이다 - 실무적으로는 이미 스탤값 허용 설계라 지금까지 문제를
-일으키지 않았지만, 표준적으로는 미정의 동작이고 컴파일러가 그 값을
-레지스터에 캐싱해 두고 다시 안 읽어올 여지가 이론상 있다. **같은
-코어 자신의 `currentTask()` 읽기는 애초에 레이스가 아니다** - 한
-코어는 한 번에 하나의 명령어 스트림만 실행하므로, 자기 슬롯을 자기가
-쓰는 시점과 자기가 읽는 시점은 프로그램 순서로 이미 전순서(total
+**결론(정정)**: 진짜(엄밀한 C++ 메모리 모델 의미의) 데이터 레이스는
+"다른 코어가 비동기적으로 갱신 중인 `Task*` 슬롯을 락/원자 연산 없이
+평범한 포인터로 읽는" **세 지점**(`taskOnCore`/
+`requestForcedMigration`/`kWakeCoreIfIdle`)이다(최초 버전은 두 지점만
+찾아 부정확했다 - minicore-f8 검토로 세 번째를 발견, 감사) - 실무적
+으로는 이미 스탤값 허용 설계라 지금까지 문제를 일으키지 않았지만,
+표준적으로는 미정의 동작이고 컴파일러가 그 값을 레지스터에 캐싱해
+두고 다시 안 읽어올 여지가 이론상 있다. **같은 코어 자신의
+`currentTask()` 읽기는 애초에 레이스가 아니다** - 한 코어는 한
+번에 하나의 명령어 스트림만 실행하므로, 자기 슬롯을 자기가 쓰는
+시점과 자기가 읽는 시점은 프로그램 순서로 이미 전순서(total
 order)다.
 
 ## 2. 제안 — 비대칭 RwSpinlock: 크로스코어 접근만 잠그고, 동일 코어
@@ -148,6 +160,7 @@ Task* Scheduler::taskOnCore(uint32_t coreIndex) {
 }
 
 // requestForcedMigration()도 동일하게 gCurrentTaskLock[fromCore] 읽기 락으로 감싼다.
+// kWakeCoreIfIdle(targetCore)도 동일하게 gCurrentTaskLock[targetCore] 읽기 락으로 감싼다.
 
 // 각 쓰기 지점(onTick/onForcedMigration/runLoop/yieldCurrent/parkCurrent) -
 // 대입 한 줄만 감싼다("쓰는 동안에만" - QU 답변 그대로):
@@ -208,9 +221,10 @@ Task* Scheduler::taskOnCore(uint32_t coreIndex) {
   `RwSpinlockWriteGuard` 추가.
 - `scheduler.cpp`: `gCurrentTaskLock[kMaxCores]` 추가, 쓰기 4곳
   (`onTick`/`onForcedMigration`×2/`runLoop`×2/`yieldCurrent`/
-  `parkCurrent`, 정확한 개수는 착수 시 재확인) + 읽기 2곳
-  (`taskOnCore`/`requestForcedMigration`)에 가드 삽입. `currentTask()`
-  자체는 변경 없음.
+  `parkCurrent`, 정확한 개수는 착수 시 재확인) + 읽기 **3곳**
+  (`taskOnCore`/`requestForcedMigration`/`kWakeCoreIfIdle` - 세
+  번째는 minicore-f8 검토로 추가 발견, §1 참고)에 가드 삽입.
+  `currentTask()` 자체는 변경 없음.
 - 기존 `cli` 임계구역과 겹치는 쓰기 지점들은 **`cli` 구간 안에서
   락을 잡고 푼다** - `cli`가 이미 그 코어의 인터럽트를 막고 있어
   락 자체가 실제로 경합할 일은 없지만(라이터는 코어당 하나뿐),
@@ -240,7 +254,8 @@ Task* Scheduler::taskOnCore(uint32_t coreIndex) {
 - **제안(비판적 검토 대기)**: §2의 `RwSpinlock` 설계와 gCurrentTask
   슬롯별 크로스코어 전용 적용.
 - **실측으로 확정**: §1의 접근부 전수 조사(쓰기 전부 동일 코어,
-  진짜 레이스는 크로스코어 읽기 2곳뿐).
+  진짜 레이스는 크로스코어 읽기 3곳 - `taskOnCore`/
+  `requestForcedMigration`/`kWakeCoreIfIdle`).
 - **확정 안 함**: §7의 세 질문 - 특히 "동일 코어 락-프리 절충이
   맞는 해석인지"는 minicore-f8/설계자 확인 전엔 착수하지 않는다.
 

@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T01:47:04.321Z
+  updatedAt: 2026-09-17T02:12:26.816Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -228,6 +228,14 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   으로 이미 정확히 등록돼 있음을 `plan_get`으로 확인 - 디스패치
   핫패스를 건드리는 위험도 때문에 의도적으로 미착수 상태(minicore-88
   세션이 이미 인지하고 보류 중) - openly 추적 중, 숨은 갭 아님.
+- **`SP-C2670F69`(AHCI)**: §4 항목2("fs 서비스 설계가 아직 없음")가
+  낡은 교차 참조였음을 발견 - `SP-7CC5693A`(fs/VFS)가 그 사이
+  approved되며 §3.2 `FileSystemDriver::mount(BlockDevice*)`가 정확히
+  `AhciBlockDevice`를 연결점으로 지목해 뒀는데 이 문서는 갱신이 안
+  돼 있었다. 정정 각주 추가 - `BlockDevice` 인터페이스 세부(LBA
+  read/write/TRIM 등 정확한 시그니처)는 여전히 미정이지만 코드가
+  전혀 없는 순수 설계 단계 세부라 별도 PN 등록은 보류(AHCI 실착수
+  시 자연히 확정될 항목, RM-23F4B687 §4 취지) - 갭 없음(정정만).
 - **`SP-DE19BB1C`(커널 영역 TLB 샷다운)**: 이 문서 자체가 이미
   `PN-D132A1E9`(§5-1, 유저 영역 확장 - 요청자별 슬롯+수신자별
   Target Pending Mask) 완료를 상세히 기록해 뒀고, `tlb_shootdown.cpp`
