@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T14:54:56.334Z
+  updatedAt: 2026-09-17T15:10:27.432Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -560,10 +560,10 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   전부 정확히 교차 참조돼 있다. 갭 없음 - 대형 기능이 이 정도로
   빈틈없이 추적된 드문 사례.
 
-- **`SP-CCACB192`(libjson)**: `minicore/libs/`에 `libjson`/`libutf8`
-  디렉터리 자체가 없어(git_tree 확인) `SP-B071E628`(pubreg)와 같은
-  이유로 코드 대조가 성립하지 않는 순수 설계 단계 - 갭 판정 불가,
-  착수 시 재점검 대상으로 남김.
+- ~~**`SP-CCACB192`(libjson)**: 착수 전 순수 설계 단계라 갭 판정
+  불가~~ **[갱신, 2026-09-17] 착수 완료(commit 12c7481) - §1-G로
+  이동, 실제 갭 발견됨(§3 double 지원 전제가 틀림)** - 아래 §1-G
+  참고.
 
 - **`SP-F15B4A63`(지연 실행/타이머 인프라)**: 이 문서 자신이 "리액터가
   전용 Task에서 `runLoop()` 인라인 idle 경로로 재설계됐으니
@@ -757,6 +757,44 @@ approved 전환되는 문서 위주로 전환한다.
   `kTryClaimFirstPanic()` CAS 래치로 40/40 완전 해소) - 둘 다
   `panic.cpp`/`paging.cpp`에 실제 구현 확인. 세 계획 모두 completed,
   결정→구현→실측 검증까지 전 사슬이 정확히 일치하는 좋은 사례.
+
+### 1-G. `SP-CCACB192`(libjson) §3 "double까지 지원" - 컴파일러 제약으로
+실제 구현 불가능함이 착수 중 드러남 (설계 갭, **답변 대기 중**)
+
+- **출처**: §3이 "(b) 정수+부동소수점 전부 지원... 이 프로젝트는
+  이미 FPU 지연 컨텍스트(`PN-F258698E`)가 구현돼 있어 커널 코드에서
+  부동소수점 연산 자체는 가능하다"고 확정(QU-8E75915F 답변 채택).
+- **문제**: `PN-185406F6`(pubreg) 착수 중 libjson 실제 구현
+  (2026-09-17, commit 12c7481)에서 **§3의 이 전제 자체가 틀렸음이
+  드러났다** - `cmake/toolchain-x86_64.cmake`가 커널 빌드 전체를
+  `-mgeneral-regs-only`로 컴파일해 SSE/x87 명령어 자체를 컴파일러가
+  못 내게 막는다(`double` 산술이 있는 함수는 "SSE register return
+  with SSE disabled" 컴파일 에러로 즉시 실패, 리턴값뿐 아니라 일반
+  산술도 마찬가지 - 실측 확인). `PN-F258698E`(FPU 레지스터 상태
+  저장/복원)는 Task 전환 시점의 런타임 메커니즘일 뿐 컴파일러가
+  SSE 명령어를 내도 되는지와는 완전히 다른 층위 - §3 원문이 이 둘을
+  혼동했다. 이 타겟/파일 단위로 `-mgeneral-regs-only`를 해제하는
+  기존 패턴이 이 프로젝트에 없음도 코드 감사로 확인됨.
+- **임시 우회(v1, 설계자 확정 전)**: 정수 아닌 JSON number를 double로
+  계산하지 않고 원본 텍스트 그대로(zero-copy) `onNumber`에 넘김,
+  `JsonWriter`도 `value(double)` 대신 `rawNumber()`(이미 포맷된
+  텍스트 삽입)로 대체 - 실제 double 변환이 필요하면 그 제약이 없는
+  유저랜드 호출부가 직접 수행.
+- **[확정, 2026-09-17, 설계자 답변 QU-6A72AFE6]** ②(진짜 double 지원
+  인프라 구축) 채택 - `-mgeneral-regs-only`를 제거하고 설계자가
+  과거 커널 개발에 쓰던 플래그 세트(`-ffreestanding -O0 -nostdlib
+  -mcmodel=large -mno-red-zone -mno-mmx -mno-sse -mno-sse2
+  -fno-exceptions -fno-rtti` 등, 필요한 것만 선별 적용)로 교체 지시 -
+  `-mno-sse`류는 `-mgeneral-regs-only`처럼 부동소수점 자체를 완전히
+  막는 게 아니라 MMX/SSE/SSE2를 인라인/외부 어셈블러 경로로만 국한
+  시키는 것이라, 일반 C++ 코드의 `double` 산술은 컴파일러가 x87로
+  처리하게 될 것으로 보인다.
+- **현재 상태**: 방향 확정, **구현은 아직 착수 전** - `cmake/
+  toolchain-x86_64.cmake` 플래그 교체 + 실제 double 컴파일 성공
+  여부 + 기존 FPU 지연 컨텍스트(`PN-F258698E`)의 lazy save/restore가
+  x87 경로에서도 안전한지(x87 MMX/FPU 상태와 SSE/XMM 상태 저장
+  범위가 다를 수 있음 - 재검증 필요) 실측이 남아 있다. minicore-88
+  영역(코드/빌드) - 이 문서는 착수되면 재대조.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
