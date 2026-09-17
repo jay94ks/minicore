@@ -41,13 +41,13 @@
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-15T17:44:39.178Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-17T01:40:07.683Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-17T00:15:27.234Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-17T02:55:24.884Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-17T03:47:18.644Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-17T03:17:35.506Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-17T02:37:58.998Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-15T12:46:23.061Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-16T23:05:05.544Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-17T03:23:30.395Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-17T03:43:11.994Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-16T00:01:24.894Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-17T02:50:12.359Z |
@@ -58,7 +58,7 @@
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-16T07:36:40.243Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-16T03:13:54.308Z |
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved | 2026-09-16T14:29:59.188Z |
-| [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | review | 2026-09-17T03:26:49.164Z |
+| [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | review | 2026-09-17T03:45:50.284Z |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-16T00:15:17.731Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
 | [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved | 2026-09-16T00:21:27.201Z |
