@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T02:49:32.245Z
+  updatedAt: 2026-09-17T02:57:05.318Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -191,6 +191,24 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **`RM-28225668`(인터럽트 벡터 목록)**: 0xE0-0xE3 전부 상태 최신,
   `PN-B3DD3D19`(인터럽트 구독)가 새 고정 IPI 벡터를 요구하지 않고
   기존 동적 벡터 위임 메커니즘을 재사용함을 확인 - 갭 없음.
+- **`PN-18FDBFF3`(Channel ownerProcess → DontDeref&lt;Process&gt; 승격)**:
+  minicore-88 완료 보고(commit f454faf) - `shared_ptr.h:538`의
+  `DontDeref<T>`(534행 주석에 "operator*/operator->/T* 변환 전혀
+  없음" 명시, g++ -fsyntax-only로 operator-> 실제 컴파일 에러까지
+  확인했다고 보고) + `channel.h:293/324`의 타입 교체 전부 코드로
+  직접 확인. `RM-32D06563`에도 `DontDeref<T>`/세대 태그 슬롯 테이블
+  공용 패턴 둘 다 신규 등록됨(RM-F2DAFF66 방법론이 요구하는 "새
+  개념은 RM-32D06563에" 규칙 8/12를 스스로 챙긴 사례).
+- **[좋은 사전 포착 사례]** minicore-88이 `PN-E82744B1`(Mutex/
+  Semaphore syscall) 착수 전 재검토 중 `SP-0666DB3C` §17.2가
+  Channel과 똑같이 "핸들=포인터값" 관례를 그대로 물려받고 있었음을
+  스스로 발견 - `PN-CE6A04AB`로 그 관례 자체가 보안 취약점이었던
+  걸 이미 아는 상태였기에, 구현 착수 전에 §17.2 정정 각주 + 착수
+  조건에 세대 태그 테이블 패턴 필수화를 미리 걸어 뒀다(§17.2/
+  `PN-E82744B1` 코드 대조로 확인). RM-F2DAFF66이 추적하는 "한 문서의
+  낡은 설명이 다른 문서에도 복제돼 있을 수 있다"(§5 방법론)는 것과
+  정확히 같은 패턴을 이 세션 밖에서도 스스로 잡아낸 사례 - 별도
+  조치 불필요, 기록만.
 - **`PN-CE6A04AB`/`SP-CA3C3E57`(Channel 보안 취약점)**: minicore-88이
   구현 완료(commit 74f0f75) 보고, 이번 틱에 코드 독립 확인 -
   `channel.h:293`(`ownerProcess`), `channel.cpp`의 `kResolveChannelId`
