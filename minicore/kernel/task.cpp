@@ -54,6 +54,18 @@ kernel::uint64_t kReserveStackVirtRange(kernel::uint32_t pageCount) {
 namespace kernel {
 
 void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
+    // [신규, 2026-09-17, PN-73E61BD1 항목1] `waitQueueLink`(libkcont
+    // `Node`)의 "비어 있음" 표현은 nullptr이 아니라 자기 자신을
+    // 가리키는 self-reference다(intrusive_list.h 참고) -
+    // `UserThread::allocate()`가 raw 슬랩 메모리를 `memset(0)`으로만
+    // 준비하므로(placement new 없음, 이 프로젝트 전역 관례) 이 필드는
+    // 반드시 여기서 명시적으로 self-reference 상태로 되돌려야 한다
+    // (PN-633BF2D8 TEMP 검증 중 발견한 `List::init()`의 `_sentinel
+    // = Node{}` 버그와 근본적으로 같은 함정 - 대입이 아니라 필드를
+    // 직접 채워야 한다).
+    waitQueueLink.prev = &waitQueueLink;
+    waitQueueLink.next = &waitQueueLink;
+
     // [신규, PN-A74871F2] 이 Task를 생성 중인 코어의 NUMA 노드를 사후
     // 기록 - 할당 정책 자체는 이미 PageFrameAllocator::allocOrder()가
     // "현재 코어 노드 우선"으로 하고 있으므로 여기서는 그 사실을 나중에

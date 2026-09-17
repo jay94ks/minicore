@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_WAIT_QUEUE_H
 #define MINICORE_KERNEL_WAIT_QUEUE_H
 
+#include "libkcont/intrusive_list.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
@@ -9,9 +10,18 @@
 
 namespace kernel {
 
-// SP-0666DB3C §1 - Mutex/Semaphore가 공유하는 FIFO 대기열. Task::next
-// (스케줄러 큐 전용 침습적 포인터지만, 파킹된 Task는 어느 스케줄러
-// 큐에도 없으므로 재사용 가능)로 단일 연결 리스트를 구성한다.
+// [수정, 2026-09-17, PN-73E61BD1 항목1, SP-FAF768AB §5-D] Task::
+// waitQueueLink(task.h)를 링크로 쓰는 Traits - 예전엔 스케줄러 큐
+// 전용 `Task::next`를 재사용하는 손짜기 단일 연결 리스트였으나,
+// libkcont `Queue<T, Traits>`(§5-D, List<T,Traits> 위의 FIFO 래퍼)로
+// 교체했다(순수 내부 자료구조 치환 - 공개 API/의미 불변, RM-23F4B687
+// §4 "동작 중인 코드를 검증 없이 건드리지 않는다" 원칙에 따라 항목별
+// 개별 검증 완료).
+struct WaitQueueTraits {
+    static constexpr Node Task::* Link = &Task::waitQueueLink;
+};
+
+// SP-0666DB3C §1 - Mutex/Semaphore가 공유하는 FIFO 대기열.
 // WaitQueue 자신이 Waitable이므로, 이 큐에 파킹된 Task의 blockedOn은
 // (Mutex/Semaphore 자신이 아니라) 이 인스턴스를 직접 가리킨다.
 class WaitQueue : public Waitable {
@@ -54,17 +64,21 @@ public:
     // 함 - scheduler.h의 TaskQueue::isEmpty와 같은 관례).
     bool isEmpty() const;
 
-    // Waitable 구현(§9.3) - task가 이 큐 안에 있으면 O(n) 순회로
-    // 리스트에서 잘라내고 강제로 재개시킨다(리스트가 대개 짧다는 전제
-    // - 경합이 심한 락은 애초에 설계 재검토 대상, §5-2와 같은 가정).
-    // 이미 정상적으로 깨어나 떠난 뒤라면(경쟁 상황) 아무 일도 하지
-    // 않고 false.
+    // Waitable 구현(§9.3) - task가 이 큐 안에 있으면(자기 자신을
+    // 가리키지 않는 waitQueueLink) 잘라내고 강제로 재개시킨다.
+    // [수정, 2026-09-17, PN-73E61BD1 항목1] 예전엔 O(n) 순회로 직접
+    // 찾아 스플라이스했으나, libkcont `List<T,Traits>::remove()`가
+    // 대상 노드 자체의 이웃만 다시 잇는 진짜 O(1) 연산이라(어느
+    // 리스트의 몇 번째인지 몰라도 됨) 이 함수도 그만큼 빨라졌다(순수
+    // 자료구조 치환의 부수 효과 - 새 알고리즘을 설계한 것이 아니라
+    // libkcont가 이미 그렇게 구현돼 있음, PN-633BF2D8). 이미 정상적으로
+    // 깨어나 떠난 뒤라면(경쟁 상황, waitQueueLink가 이미 unlink된
+    // 상태) 아무 일도 하지 않고 false.
     bool cancel(Task* task, WaitCancelReason reason) override;
 
 private:
-    Spinlock _lock;  // _head/_tail/각 Task의 blockedOn 정리를 보호(짧게만 보유)
-    Task* _head = nullptr;
-    Task* _tail = nullptr;
+    Spinlock _lock;  // _queue/각 Task의 blockedOn 정리를 보호(짧게만 보유)
+    Queue<Task, WaitQueueTraits> _queue;
 };
 
 }  // namespace kernel

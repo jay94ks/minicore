@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_TASK_H
 #define MINICORE_KERNEL_TASK_H
 
+#include "libkcont/intrusive_list.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
@@ -148,6 +149,21 @@ struct Task {
     // 코어별 큐(폴백/lock-free 공용, PL-2D3184BC 4단계)가 쓰는 침습적
     // (intrusive) 다음-포인터 - 이 Task가 큐에 들어있을 때만 유효.
     AtomicPtr<Task> next;
+
+    // [신규, 2026-09-17, PN-73E61BD1 항목1, SP-FAF768AB §1/§2]
+    // `WaitQueue`(Mutex/Semaphore 공유 대기열) 전용 침습적 링크 -
+    // 예전엔 위 `next`(스케줄러 큐 전용 필드)를 "파킹된 Task는 어느
+    // 스케줄러 큐에도 없으니 재사용 가능하다"는 논리로 이중 용도로
+    // 빌려 썼으나, libkcont `List<T, Traits>`(PN-633BF2D8)로 교체하며
+    // 전용 필드로 분리했다 - 한 Task가 스케줄러 큐 자료구조와 대기열
+    // 자료구조 양쪽에 동시에 속할 일이 없다는 기존 불변조건은 그대로
+    // 유지되지만(파킹 중엔 `next`를 스케줄러가 안 씀), 서로 다른
+    // 두 개념을 서로 다른 필드로 표현하는 쪽이 더 명확하다(libkcont
+    // intrusive_list.h 문서 주석의 "한 T가 서로 다른 리스트 두 개에
+    // 동시에 속해야 하면 Node 멤버를 두 개 두면 된다"는 원칙 그대로).
+    // 이 Task가 어느 WaitQueue에도 파킹돼 있지 않을 때는 자기 자신을
+    // 가리키는 sentinel 상태(Node의 기본값).
+    Node waitQueueLink;
 
     // 이 Task가 지금 무엇에 막혀 파킹돼 있는지(SP-0666DB3C §9.2, 임의
     // 대기 상태를 강제로 끄집어내는 범용 훅) - 파킹 시작 시 그 대기
