@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T15:10:27.432Z
+  updatedAt: 2026-09-17T15:30:55.318Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -795,6 +795,42 @@ approved 전환되는 문서 위주로 전환한다.
   x87 경로에서도 안전한지(x87 MMX/FPU 상태와 SSE/XMM 상태 저장
   범위가 다를 수 있음 - 재검증 필요) 실측이 남아 있다. minicore-88
   영역(코드/빌드) - 이 문서는 착수되면 재대조.
+
+- **[신규, 2026-09-17] `DC-21647E46`(커널 전역 포인터 SharedPtr/
+  WeakPtr 전환) - 5-Phase 로드맵 전체 완료 확인**: 이 문서 자체가
+  이미 매우 상세히 자기 추적돼 있음(과거 이 세션이 갱신한 이력
+  포함) - Phase 0-4(PN-E2A114C1/PN-21C2D4E9/PN-B41D8C0E/
+  PN-B4987BF6/PN-9CC66142) 전부 completed로 정확히 기록됨. 보안
+  관련 핵심 주장(Phase 4의 `kResolveOwnedBridge`가 위조된 bridge
+  핸들을 막는다) 하나를 독립 재검증 - `channel.cpp`에 실재하고
+  5개 syscall 핸들러 전부(`ChannelRead`/`Write`/`CloseBridge` 등)
+  가 이를 통해서만 `args->bridge`를 해석함을 확인. 갭 없음 - 이
+  문서가 스스로 관리한 대형 마이그레이션 로드맵이 실제 코드와
+  정확히 일치하는 드문 완결 사례.
+
+- **[신규, 2026-09-17] `DC-47000304`(DebugGetRegisters/SetRegisters
+  레지스터 스냅숏 위치) - (A)안 채택 후 구현 확인**: (A)(DebugSession
+  사본 저장 + write-back) 채택이 `PN-87D6B615`로 정확히 구현됨을
+  코드 대조(`kSaveDebugRegistersSnapshot`/`liveFramePtr`/
+  `savedRegisters` 전부 `debug_session.cpp`에 실재, write-back 로직도
+  확인). 갭 없음. **부수 확인**: 이 문서가 "SMP4 검증은 별개의
+  사전 존재 버그(`PN-9F8FF132`) 때문에 실행 못 함"이라고 적어 둔 그
+  블로커가 **이후 완전히 해소됨**(부팅 순서 재배치, commit d720d57,
+  10/10 SMP4 무결 검증) - DC-47000304 자체가 틀린 건 아니고(그
+  시점엔 정확했던 서술), 이제 SMP4 하에서 DebugGetRegisters/
+  SetRegisters의 완전한 E2E TEMP 재검증이 가능해진 상태(우선순위
+  낮은 후속 기회로 기록만, 새 PN 등록은 보류 - RM-23F4B687 §4).
+
+**[2026-09-17] DC류 문서 후보 풀 소진** - `DC-FB38F86F`/`DC-21647E46`/
+`DC-47000304` 전부 점검 완료(갭 없음, 하나는 부수적으로 완화 기회
+발견). `DC-235312EF`는 CNW 툴링(git_add_bulk 인코딩) 조사 문서라 이
+방법론(설계 문서 vs 커널 코드) 대상이 아님 - 이미 자체 해소됨,
+스킵. `DC-48565C0B`/`DC-427BB6B2`/`DC-79A2387A`/`DC-5AB13FFC`는
+`DS-D4E5C451`에 이미 통합 반영돼 있고 그 문서 자체를 이번 세션
+초반에 이미 상세 점검했으므로 개별 재확인 생략. 나머지 DC는 전부
+`archived`(더 이상 인용 대상 아님). 다음 스윕은 새로 `approved`
+전환되는 문서(SP-CCACB192처럼 착수와 동시에 갭이 드러나는 경우가
+실제로 있었음 - §1-G 참고) 또는 QA류 문서 위주로 전환한다.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
