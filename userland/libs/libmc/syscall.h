@@ -58,6 +58,39 @@ SyscallToken submit(SyscallEndpointId endpointId, void* args);
 // 싶으면 endpoint별 args 구조체 자신의 error 필드를 본다).
 bool wait(SyscallToken token);
 
+// [신규, 2026-09-18, PN-10EE096A] kernel::Syscall::MultiWaitOutcome의
+// 유저랜드 거울(mount_table.h류 error enum과 동일한 관례 - 값 순서를
+// 정확히 맞춘다: Completed=0, Failed=1, Invalid=2).
+enum class MultiWaitOutcome : uint32_t { Completed = 0, Failed = 1, Invalid = 2 };
+
+// [신규, 2026-09-18, PN-10EE096A] kernel::WaitAnyOfSyscallArgs와
+// 바이트 단위로 정확히 같은 레이아웃(idt.cpp `kSyscallVerbWaitAnyOf`,
+// syscall.h 참고) - verb=2, RDI=이 구조체를 가리키는 포인터.
+struct WaitAnyOfSyscallArgs {
+    const SyscallToken* tokens = nullptr;  // in
+    uint32_t count = 0;                    // in
+    // out
+    SyscallToken resultToken = 0;
+    MultiWaitOutcome resultOutcome = MultiWaitOutcome::Invalid;
+};
+
+// tokens 중 아무 하나가 끝날 때까지 블로킹(OR 의미) - 커널 verb=2를
+// 그대로 한 번 호출한다. count==0이면 즉시 실패(Invalid) 취급.
+WaitAnyOfSyscallArgs waitAnyForMultipleSyscall(const SyscallToken* tokens, uint32_t count);
+
+// tokens로 지정한 N개를 전부 드레인한다(AND 의미) - 커널에는 verb=2
+// 하나만 있고(waitAnyForMultipleSyscall과 완전히 같은 구현을 공유,
+// QU-31402585/QU-F475C6C2/QU-C06793C2), 이 함수는 유저랜드 쪽에서
+// "아직 결과를 못 받은 토큰들"만 추려 그 verb를 최대 count번 반복
+// 호출하는 루프를 얹는다(RM-23F4B687 §4 - verb 중복 방지, 새
+// 스크래치 버퍼 할당도 방지). **`tokens`는 non-const다** - 이 함수가
+// 내부적으로 완료된 항목을 swap-remove하며 그 배열 자체를 작업
+// 공간으로 재사용한다(순서가 망가짐, 원본이 필요하면 호출 전에
+// 복사해 둔다). 결과는 "완료된 순서"로 outResults[0..count)에
+// 채워진다(최소 count칸 필요) - 어떤 토큰이었는지는
+// outResults[i].resultToken으로 알 수 있다.
+void waitForMultipleSyscall(SyscallToken* tokens, uint32_t count, WaitAnyOfSyscallArgs* outResults);
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_SYSCALL_H

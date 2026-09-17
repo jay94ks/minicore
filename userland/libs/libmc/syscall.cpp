@@ -55,4 +55,41 @@ bool wait(SyscallToken token) {
     return verb != 0;
 }
 
+WaitAnyOfSyscallArgs waitAnyForMultipleSyscall(const SyscallToken* tokens, uint32_t count) {
+    WaitAnyOfSyscallArgs args;
+    if (count == 0 || tokens == nullptr) {
+        args.resultOutcome = MultiWaitOutcome::Invalid;
+        return args;
+    }
+    args.tokens = tokens;
+    args.count = count;
+    // submit()과 동일한 이유("D" 제약) - verb=2는 RDI=args 포인터 하나만
+    // 쓴다(idt.cpp kSyscallVerbWaitAnyOf, RSI 불필요).
+    uint64_t verb = 2;  // waitAnyOf
+    asm volatile("int $0x80" : "+a"(verb) : "D"(reinterpret_cast<uint64_t>(&args)) : "memory");
+    // 트랩 실패(verb==0, 예: 포인터 검증 실패)면 out 필드가 안 채워진
+    // 채로 남아 있으므로 Invalid로 정리해 둔다.
+    if (verb == 0) {
+        args.resultOutcome = MultiWaitOutcome::Invalid;
+    }
+    return args;
+}
+
+void waitForMultipleSyscall(SyscallToken* tokens, uint32_t count, WaitAnyOfSyscallArgs* outResults) {
+    uint32_t remaining = count;
+    for (uint32_t i = 0; i < count && remaining > 0; ++i) {
+        WaitAnyOfSyscallArgs result = waitAnyForMultipleSyscall(tokens, remaining);
+        outResults[i] = result;
+        // 완료된 토큰을 작업 배열에서 swap-remove(순서 무관 - 대기
+        // 대상 "집합"일 뿐이다).
+        for (uint32_t j = 0; j < remaining; ++j) {
+            if (tokens[j] == result.resultToken) {
+                tokens[j] = tokens[remaining - 1];
+                --remaining;
+                break;
+            }
+        }
+    }
+}
+
 }  // namespace mc

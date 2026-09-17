@@ -278,6 +278,26 @@ private:
     static MultiWaitResult waitForAnyOf(const AsyncTaskManageCode* tokens, uint32_t count);
 };
 
+// [신규, 2026-09-18, PN-10EE096A] `Syscall::waitAnyForMultipleSyscall()`을
+// ring3 유저랜드 verb(2, idt.cpp의 `kSyscallVerbWaitAnyOf`)에 노출하는
+// 인자 구조체 - `submit()`(RDI=endpointId, RSI=args)이나 `wait()`
+// (RDI=token만)과 달리 입출력 필드가 여러 개라 구조체 포인터 하나로
+// 묶는다(RDI=이 구조체를 가리키는 포인터). `waitForMultipleSyscall()`도
+// 이 verb를 그대로 재사용한다 - 커널 내부에서 이미 완전히 같은 구현
+// (`waitForAnyOf`)을 공유하고 "AND vs OR"의 차이는 유저랜드 호출부가
+// 몇 번 부르는지에만 있다는 게 이미 확정된 설계라(QU-31402585/
+// QU-F475C6C2/QU-C06793C2), verb를 2개로 나누지 않는다(RM-23F4B687
+// §4 - 불필요한 중복 방지). `userland/libs/libmc/syscall.h`의
+// `WaitAnyOfSyscallArgs`와 바이트 단위로 정확히 같은 레이아웃이어야
+// 한다(channel.h/vfs.h와 동일한 수동 거울 복사 관례).
+struct WaitAnyOfSyscallArgs {
+    const AsyncTaskManageCode* tokens = nullptr;  // in
+    uint32_t count = 0;                           // in
+    // out
+    AsyncTaskManageCode resultToken = 0;
+    Syscall::MultiWaitOutcome resultOutcome = Syscall::MultiWaitOutcome::Invalid;
+};
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_SYSCALL_H

@@ -529,10 +529,21 @@ void kPanic(kernel::InterruptFrame* frame) {
 // 레지스터 배치는 이 답변 범위 밖(QU-CD6F68B7 본문 참고) - 필요해지면
 // 별도로 확정한다.
 //
+// [신규, 2026-09-18, PN-10EE096A] 위 "필요해지면 그때"가 실사용처
+// (pubreg 항목4의 다중 연결 accept 루프)가 생겨 지금이다:
+//   2(waitAnyOf) - RDI=WaitAnyOfSyscallArgs*(syscall.h) - tokens/count
+//                  in, resultToken/resultOutcome out. `submit()`/
+//                  `wait()`와 달리 입출력 필드가 여러 개라 구조체
+//                  포인터 하나로 묶는다. waitForMultipleSyscall()도
+//                  이 verb 하나를 재사용(둘 다 커널 내부에서 완전히
+//                  같은 구현을 공유 - QU-31402585/QU-F475C6C2/
+//                  QU-C06793C2, verb를 2개로 나눌 이유가 없다).
+//
 // PN-16CA347D(프로세스 모델)/PN-55D24891(ring3 진입) 완료로 이 벡터는
 // 이제 실제 UserThread 컨텍스트에서 실행 가능하다.
 constexpr kernel::uint64_t kSyscallVerbSubmit = 0;
 constexpr kernel::uint64_t kSyscallVerbWait = 1;
+constexpr kernel::uint64_t kSyscallVerbWaitAnyOf = 2;
 
 // context_switch.S가 entry 함수의 자연 반환 시 호출하는 것과 같은
 // 함수(scheduler.cpp) - self-terminate 트랩 특별 취급(아래 참고)이
@@ -619,6 +630,35 @@ uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
         case kSyscallVerbWait: {
             const auto token = static_cast<AsyncTaskManageCode>(arg0);
             return Syscall::wait(token) ? 1 : 0;
+        }
+        case kSyscallVerbWaitAnyOf: {
+            // [신규, 2026-09-18, PN-10EE096A] wait()/submit()과 마찬가지로
+            // 이 verb 자체가 트랩을 건 UserThread의 실행 흐름에서
+            // **동기적으로** 처리된다(AsyncTaskHandler::onExec()처럼
+            // 나중에 리액터 컨텍스트에서 실행되는 게 아님) - 그래서
+            // channel.cpp의 kValidateUserBuffer(submitterTask 체이닝,
+            // 비동기 컨텍스트가 CR3 재동기화 문제를 겪는 것에 대한
+            // 대응)를 재사용할 필요 없이, 지금 이 순간의
+            // Scheduler::currentTask()가 곧 그 포인터의 실제 소유자다.
+            auto* thread = static_cast<UserThread*>(Scheduler::currentTask());
+            auto* args = reinterpret_cast<WaitAnyOfSyscallArgs*>(arg0);
+            if (!thread || !args) {
+                return 0;
+            }
+            if (!Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args),
+                                           sizeof(WaitAnyOfSyscallArgs), thread->userPml4Phys)) {
+                return 0;
+            }
+            if (args->count == 0 || args->tokens == nullptr ||
+                !Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->tokens),
+                                           sizeof(AsyncTaskManageCode) * static_cast<uint64_t>(args->count),
+                                           thread->userPml4Phys)) {
+                return 0;
+            }
+            const Syscall::MultiWaitResult result = Syscall::waitAnyForMultipleSyscall(args->tokens, args->count);
+            args->resultToken = result.token;
+            args->resultOutcome = result.outcome;
+            return 1;
         }
         default:
             return 0;  // 알 수 없는 verb - 실패로 취급(v1, 새 DC 불필요 수준)
