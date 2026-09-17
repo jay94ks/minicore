@@ -1,6 +1,7 @@
 #ifndef MINICORE_LIBS_LIBKENV_CHUNKED_LIST_H
 #define MINICORE_LIBS_LIBKENV_CHUNKED_LIST_H
 
+#include "libkenv/mem.h"
 #include "libkenv/types.h"
 
 // libkenv: 청크(chunk) 단위로 저장 공간을 확보하는 범용 연결 리스트 -
@@ -67,10 +68,31 @@ public:
             return nullptr;
         }
         Chunk* chunk = reinterpret_cast<Chunk*>(mem);
+        // [수정, 2026-09-17, PN-584DB994 조사 중 실측 발견] 예전엔
+        // `used`만 false로 명시적으로 초기화하고 `value`는 그대로
+        // 뒀다 - `T`가 POD/raw 포인터일 땐 무해했지만(주석 상단이
+        // 원래 약속한 "모든 필드를 명시적으로 초기화"가 실제로는
+        // `value`엔 안 지켜지고 있었음), `T=SharedPtr<U>`/`WeakPtr<U>`
+        // 처럼 대입 연산자가 **"현재 값을 먼저 정리(release)한 뒤"**
+        // 새 값을 쓰는 타입에서는 이 슬랩 원시 메모리에 남아있던
+        // 쓰레기 바이트를 `_block`으로 오인해 `releaseStrong()`/
+        // `releaseWeak()`를 쓰레기 주소에 대고 호출하는 미정의 동작으로
+        // 이어진다 - 이 Chunk의 **첫 슬롯에 처음 값을 넣는 바로 이
+        // 대입문(`chunk->slots[0].value = value` 등)** 자체가 그 트리거다.
+        // `memset(0)`으로 전체 Chunk를 밀어 두면 `T*` 계열 멤버가
+        // 전부 nullptr(NSDMI와 동일한 상태)가 돼 안전해진다
+        // (Process::allocate()가 전체 memset(0)으로 자신의 WeakPtr
+        // 필드들을 안전하게 만드는 것과 동일한 근거). 실측으로
+        // 재현하진 못했지만(QEMU 신선한 메모리는 보통 0이라 우연히
+        // 무해했을 가능성) `Process::children`/`openBridges`/
+        // `pendingSignals`/`UserThread::pendingSyscalls`가 전부 이
+        // 함수를 거치고, 이 커널의 유일한 미해결·간헐적(4-6%) 실측
+        // 버그(PN-584DB994)가 바로 이런 "가끔 재사용된 슬랩 메모리에
+        // 남은 쓰레기 값" 조건에서만 터지는 프로파일과 정확히
+        // 일치한다 - 근본 원인일 가능성이 높다고 판단해 우선 수정하고
+        // PN-584DB994에 교차 기록한다.
+        memset(chunk, 0, sizeof(Chunk));
         chunk->next = _head;
-        for (uint32_t i = 0; i < ChunkCapacity; ++i) {
-            chunk->slots[i].used = false;
-        }
         chunk->slots[0].value = value;
         chunk->slots[0].used = true;
         _head = chunk;
