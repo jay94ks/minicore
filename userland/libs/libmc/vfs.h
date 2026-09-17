@@ -28,6 +28,8 @@ constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
 constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9);
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
+constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
+constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
 
 struct MountArgs {
     const char* path = nullptr;
@@ -130,6 +132,21 @@ struct StatArgs {
     // out
     uint64_t size = 0;
     bool isDirectory = false;
+    ChannelError error = ChannelError::None;
+};
+
+// [SP-2AAD7C8D §9.3/§9.4, PN-CF030FC3] fd 없이 경로만으로 동작.
+struct MkdirArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+struct UnlinkArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    // out
     ChannelError error = ChannelError::None;
 };
 

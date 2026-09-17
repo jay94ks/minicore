@@ -542,6 +542,92 @@ public:
 
 StatHandler gStatHandler;
 
+// [SP-2AAD7C8D §9.3/§9.4, PN-CF030FC3] StatHandler와 같은 골격 -
+// fd 불필요, MountKind::Channel은 계속 NotSupported.
+class MkdirHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<MkdirArgs*>(argsRaw);
+        if (!kValidateVfsBuffer(task, args->path, args->pathLen)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
+
+        MountKind kind{};
+        uint64_t channelId = 0;
+        KernelFsDriver* driver = nullptr;
+        uint32_t relOffset = 0;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (kind == MountKind::Channel) {
+            args->error = ChannelError::NotSupported;  // PN-EA4EE935와 동일한 스코프 결정
+            co_return;
+        }
+
+        KernelFsMkdirArgs kfsArgs;
+        kfsArgs.relPath = args->path + relOffset;
+        kfsArgs.relPathLen = args->pathLen - relOffset;
+        AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
+        if (!fsTask) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // PN-EA4EE935 실측 발견 그대로 재적용
+        AsyncTaskAwaiter(fsTask).await();
+
+        args->error = kMapVfsError(kfsArgs.error);
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+MkdirHandler gMkdirHandler;
+
+class UnlinkHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<UnlinkArgs*>(argsRaw);
+        if (!kValidateVfsBuffer(task, args->path, args->pathLen)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
+
+        MountKind kind{};
+        uint64_t channelId = 0;
+        KernelFsDriver* driver = nullptr;
+        uint32_t relOffset = 0;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (kind == MountKind::Channel) {
+            args->error = ChannelError::NotSupported;  // PN-EA4EE935와 동일한 스코프 결정
+            co_return;
+        }
+
+        KernelFsUnlinkArgs kfsArgs;
+        kfsArgs.relPath = args->path + relOffset;
+        kfsArgs.relPathLen = args->pathLen - relOffset;
+        AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
+        if (!fsTask) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // PN-EA4EE935 실측 발견 그대로 재적용
+        AsyncTaskAwaiter(fsTask).await();
+
+        args->error = kMapVfsError(kfsArgs.error);
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+UnlinkHandler gUnlinkHandler;
+
 }  // namespace
 
 void VfsSyscallService::registerSyscallEndpoints() {
@@ -556,6 +642,8 @@ void VfsSyscallService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointWrite, &gWriteHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointLseek, &gLseekHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointStat, &gStatHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointMkdir, &gMkdirHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointUnlink, &gUnlinkHandler);
 }
 
 }  // namespace kernel

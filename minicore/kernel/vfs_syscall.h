@@ -147,6 +147,24 @@ struct StatArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [SP-2AAD7C8D §9.3/§9.4, PN-CF030FC3] StatArgs와 같은 모양(fd 불필요) -
+// **[정직하게 기록]** 현재 유일한 KernelFsDriver 구현체(livefs)는
+// 읽기 전용이라 실제로는 항상 PermissionDenied를 반환한다
+// (mount_table.h "v1 축소 범위" 절) - Write와 동일한 상황.
+struct MkdirArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+struct UnlinkArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 // [갱신, SP-E9B44929] Vfs 그룹(3).
 constexpr SyscallEndpointId kSyscallEndpointMount = kMakeSyscallEndpointId(3, 0);
 constexpr SyscallEndpointId kSyscallEndpointUnmount = kMakeSyscallEndpointId(3, 1);
@@ -159,10 +177,12 @@ constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
 constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9);
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
+constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
+constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 11개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 13개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 
