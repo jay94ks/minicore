@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T17:32:46.027Z
+  updatedAt: 2026-09-17T18:02:10.447Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -965,6 +965,29 @@ approved 전환되는 문서 위주로 전환한다.
   설계 그대로 구현돼 있음을 확인. **갭 없음** - 이 문서로 approved
   상태였으나 아직 이 방법론이 안 다뤘던 SP 문서 3건(`SP-4DCD0E6A`/
   `SP-F146B7F8`/`SP-FAF768AB`)을 전부 소진했다.
+
+- **[신규, 2026-09-18] `SP-7CC5693A`(VFS 커널 서브시스템) §2.1/§2.2/§2.5 -**
+  **PN-452FF696이 방금 구현한 실코드와 즉시 대조**: 이전까지는 §4-A/§9.1의
+  교차 참조로만 언급되고 이 방법론이 직접 대입한 적은 없었던 문서 -
+  `PN-452FF696`(VFS Mount/Unmount/ResolvePath/SignalUserlandReady/
+  WaitForUserlandReady syscall 구현, commit 69d7fa9)로 처음 실코드가
+  생겨 바로 대조했다. `minicore/kernel/mount_table.h`(§2.1)의
+  `MountKind`/`MountEntry`/`MountTable::resolve/mount/mountKernel/unmount`
+  전부 pseudocode와 정확히 일치(최장 접두사 일치 + `/` 경계 처리까지),
+  `KernelFsDriver`가 `AsyncTaskHandler` 상속 형태(§2.1 2026-09-17 개정판)로
+  구현된 것도 확인. `minicore/kernel/vfs_syscall.h/.cpp`(§2.2/§2.5)의
+  `MountArgs`/`UnmountArgs`/`ResolvePathArgs`/`SignalUserlandReadyArgs`/
+  `WaitForUserlandReadyArgs`와 5개 syscall endpoint(그룹3, `RM-48E1E610`
+  갱신과 일치) 전부 문서 그대로. `SignalUserlandReady`의 "커널 전역 단
+  1회만" 요구사항도 `AtomicU32::compareExchange(0,1)`로 정확히 구현.
+  `ResolvePathArgs`가 `MountKind::KernelDriver`를 만나면 `NotSupported`로
+  응답하는 것도 §2.1/§9.1이 이미 "§9 착수 시 확정"으로 열어 둔 것과
+  일치(임의 결정 아님, CLAUDE.md 규칙4 준수를 코드 주석이 직접 인용).
+  **갭 없음** - §3(드라이버 우선순위)/§9(표준 파일 API)는 이 커밋의 의도된
+  범위 밖(코드 주석이 스스로 명시)이라 대상 아님, 다음 착수 시 재대조.
+  minicore-88이 직접 검증 코드 안에 RM-F2DAFF66 §1-B/E를 인용해 이번
+  핸들러가 그 결함 클래스와 무관한 이유까지 남겨 둔 점도 특기할 만함 -
+  이 방법론의 교훈이 구현 단계에서 실제로 참조되고 있다는 방증.
 
 **[2026-09-18] approved SP 문서 후보 풀 재소진** - document_list
 전수 재대조로 찾아낸 미점검 approved SP 문서 3건을 전부 처리(1건
