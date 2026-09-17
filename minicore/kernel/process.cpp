@@ -507,16 +507,23 @@ struct ProcessTableSlot {
 };
 
 ProcessTableSlot gProcessTable[kMaxProcessTableSlots];
-Spinlock gProcessTableLock;  // 발급/해제만 보호(드묾, SP-9CB55C5B §2
-                             // "등록/해제는 SpawnProcess/reap 시점에만
-                             // 일어나 드묾") - 조회(kResolveProcessId)는
-                             // 락 없이 인덱스+세대 비교 + lock()만 한다.
+// [수정, 2026-09-17, PN-AA30E4C8, QU-68D76FC4/QU-E847DB03(SP-9F1DB1D8)
+// 답변과 동일한 패턴 재사용] 원래 plain Spinlock은 "발급/해제(쓰기)만
+// 보호하고 조회(kResolveProcessId, 읽기)는 락 없이 인덱스+세대 비교
+// + lock()만 한다"는 주석이 있었으나, 이건 설계가 아니라 실재하는
+// 데이터 경쟁이었다 - 다른 코어가 kAllocateProcessId()/kFreeProcessId()
+// 로 이 슬롯의 generation/proc을 갱신하는 도중(둘 다 원자적으로 함께
+// 바뀌지 않음) 락 없이 읽으면 찢긴(torn) generation+proc 조합을 볼 수
+// 있다. 등록/해제는 드물고 조회는 훨씬 잦은 패턴이라(SP-9CB55C5B §5가
+// 이미 지적) Scheduler::gCurrentTaskLock(SP-9F1DB1D8)과 정확히 같은
+// "쓰기 배타적/읽기는 카운터만 증분" RwSpinlock으로 교체한다.
+RwSpinlock gProcessTableLock;
 
 // 발급 - `proc`을 위한 새 슬롯을 확보하고 그 슬롯의 인덱스를
 // `proc->processTableIndex`에 되먹여 저장한 뒤 인코딩된 ProcessId를
 // 반환한다(실패 시 kInvalidProcessId, proc은 건드리지 않음).
 ProcessId kAllocateProcessId(const SharedPtr<Process>& proc) {
-    SpinlockGuard guard(gProcessTableLock);
+    RwSpinlockWriteGuard guard(gProcessTableLock);
     for (uint32_t i = 0; i < kMaxProcessTableSlots; ++i) {
         if (!gProcessTable[i].proc.lock()) {
             gProcessTable[i].generation++;
@@ -534,7 +541,8 @@ ProcessId kAllocateProcessId(const SharedPtr<Process>& proc) {
 // 아직 아무 데도 연결되지 않는다 - `Wait`은 여전히 "직계 자식만"
 // 스코프라 `self->children`을 직접 순회한다. `Kill`의 임의 대상
 // 확장(`PN-88E62419`)이 이 함수의 첫 실사용처가 될 예정(SP-9CB55C5B
-// §3/§4).
+// §3/§4). **[수정, 2026-09-17, PN-AA30E4C8]** 읽기 락(카운터만 증분,
+// 다른 읽기와 동시 진행 가능) - 위 `gProcessTableLock` 문서 주석 참고.
 [[maybe_unused]] SharedPtr<Process> kResolveProcessId(ProcessId pid) {
     if (pid == kInvalidProcessId) {
         return {};
@@ -544,6 +552,7 @@ ProcessId kAllocateProcessId(const SharedPtr<Process>& proc) {
     if (index >= kMaxProcessTableSlots) {
         return {};
     }
+    RwSpinlockReadGuard guard(gProcessTableLock);
     ProcessTableSlot& slot = gProcessTable[index];
     if (slot.generation != generation) {
         return {};
@@ -559,7 +568,7 @@ void kFreeProcessId(uint32_t processTableIndex) {
     if (processTableIndex >= kMaxProcessTableSlots) {
         return;
     }
-    SpinlockGuard guard(gProcessTableLock);
+    RwSpinlockWriteGuard guard(gProcessTableLock);
     gProcessTable[processTableIndex].proc = WeakPtr<Process>();
 }
 
