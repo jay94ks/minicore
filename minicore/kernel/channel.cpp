@@ -376,7 +376,7 @@ public:
         // [수정, PN-CE6A04AB] 더 이상 raw 포인터가 아니다 - channel->
         // channelId는 kCreateNamedChannel()이 이미 안전하게 발급해 둔
         // 값이다(channel.h §ChannelId 주석 참고).
-        channel->ownerProcess = kProcessFromSubmitter(task).get();
+        channel->ownerProcess = DontDeref<Process>(kProcessFromSubmitter(task).get());
         args->channelId = channel->channelId;
         args->channelHandle = args->channelId;
         co_return;
@@ -509,7 +509,7 @@ public:
         // 와 같은 패턴, 실사용처 없음 - RM-C65F7760 참고).
         if (channel->ownerProcess) {
             SharedPtr<Process> caller = kProcessFromSubmitter(task);
-            if (!caller || caller.get() != channel->ownerProcess) {
+            if (!caller || DontDeref<Process>(caller.get()) != channel->ownerProcess) {
                 args->error = ChannelError::PermissionDenied;
                 co_return;
             }
@@ -842,7 +842,7 @@ public:
         // nullptr는 커널 예약 채널).
         if (channel->ownerProcess) {
             SharedPtr<Process> caller = kProcessFromSubmitter(task);
-            if (!caller || caller.get() != channel->ownerProcess) {
+            if (!caller || DontDeref<Process>(caller.get()) != channel->ownerProcess) {
                 args->error = ChannelError::PermissionDenied;
                 co_return;
             }

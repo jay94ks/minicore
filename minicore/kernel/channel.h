@@ -285,12 +285,12 @@ public:
     // 시(kFreeChannelId) 이 값에서 인덱스를 역산해 O(1)로 슬롯을 비운다.
     ChannelId channelId = 0;
 
-    // [신규, PN-CE6A04AB/SP-CA3C3E57 §6.1] 이 채널을 만든 프로세스 -
-    // **절대 역참조하지 않는다**, AcceptFromChannel/DestroyChannel의
-    // 호출자가 이 값과 포인터 동일성만 비교하는 용도(raw 포인터인
-    // 이유와 잔여 위험은 SP-CA3C3E57 §6.1 참고 - Channel이 아직
-    // SharedPtr 관리 대상이 아니라 WeakPtr을 안전하게 못 씀).
-    Process* ownerProcess = nullptr;
+    // [신규, PN-CE6A04AB/SP-CA3C3E57 §6.1, 타입 승격 PN-18FDBFF3/§6-A]
+    // 이 채널을 만든 프로세스 - `DontDeref<Process>`라 애초에
+    // 역참조할 방법이 없다(operator*/->/T* 변환 없음, shared_ptr.h
+    // 참고). AcceptFromChannel/DestroyChannel의 호출자가 이 값과
+    // 동일성만 비교하는 용도.
+    DontDeref<Process> ownerProcess;
 
     // Tier B(SP-00CA7175 §2.2, "ExclusivePreemptiveChannel") - true면
     // 이 Channel의 accept/read/write에서 파생된 AsyncTask가 그 코어의
@@ -321,7 +321,7 @@ public:
         hasName = false;
         nameLength = 0;
         channelId = 0;
-        ownerProcess = nullptr;
+        ownerProcess = DontDeref<Process>();
         exclusivePreemptive = false;
         pendingHead = nullptr;
         pendingTail = nullptr;

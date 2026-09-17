@@ -524,6 +524,30 @@ UniquePtr<T> kMakeUnique(T* preConstructed) {
     return UniquePtr<T>(preConstructed);
 }
 
+// [신규, 2026-09-17, SP-CA3C3E57 §6-A, 설계자 의견] 신원 비교 전용
+// 포인터 래퍼 - "이 값이 그 프로세스/객체와 같은가"만 판정해야 하고
+// 절대 역참조하면 안 되는 자리(예: Channel::ownerProcess)를 위한
+// 타입. ref-counting이 전혀 없는 순수 값 래퍼라 SharedPtr/WeakPtr과
+// 달리 placement new 없이 raw 슬랩 메모리 위에 그대로 대입해도
+// 안전하다(WeakPtr::operator=가 겪는 "대입 전 기존 값을 정리하려다
+// 쓰레기 포인터를 역참조" 문제 자체가 없음 - 정리할 상태가 없으므로).
+// 의도적으로 operator*/operator->/T*로의 변환이 전혀 없다 - 이
+// 값에서 원래 포인터를 꺼낼 방법이 없으므로 역참조 실수 자체가
+// 컴파일 타임에 막힌다.
+template <typename T>
+class DontDeref {
+public:
+    DontDeref() = default;
+    explicit DontDeref(T* ptr) : _ptr(ptr) {}
+
+    bool operator==(const DontDeref& other) const { return _ptr == other._ptr; }
+    bool operator!=(const DontDeref& other) const { return !(*this == other); }
+    explicit operator bool() const { return _ptr != nullptr; }
+
+private:
+    T* _ptr = nullptr;
+};
+
 }  // namespace kernel
 
 #endif  // MINICORE_LIBS_LIBKENV_SHARED_PTR_H
