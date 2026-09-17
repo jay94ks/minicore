@@ -553,6 +553,29 @@ bool kCanMigrateFpuSafely(const Task* task, uint32_t fromCore) {
     return !task->fpuInitialized || gFpuOwner[fromCore] != task;
 }
 
+// [신규, PN-F55FB154] Push가 targetCore로 이관하기 전에, task가 지금
+// "어느 코어에서든" 살아있는 FPU 소유자인지 전체 스캔으로 확인한다.
+// Pull(runLoop)의 victimCore는 그 Task를 방금 popFront()한 바로 그
+// 큐라 kCanMigrateFpuSafely(task, victimCore)가 의미상 정확하지만,
+// Push의 coreIndex 인자는 그런 보장이 없다 - 실제 호출부 전수 조사
+// (debug_session.cpp/kmain.cpp ×2/process.cpp/resource_group.cpp)
+// 결과 다섯 곳 전부 Scheduler::currentCoreIndex()(이 Task를 지금
+// 깨우는 코어, 즉 waker 자신)만 넘기고, "이 Task가 마지막으로 FPU를
+// 쓴 코어"와는 무관하다. 그래서 kCanMigrateFpuSafely(task, coreIndex)
+// 를 그대로 재사용하면 거의 항상 엉뚱한 코어의 gFpuOwner만 검사해
+// 실제로는 위험한 이관도 "안전"으로 오판하게 된다 - 대신 gFpuOwner[]
+// 전체를 스캔해 task가 실제로 살아있는 소유자인 코어를 직접 찾는다.
+// 찾지 못하면(어디서도 소유자가 아니면) gCoreCount를 반환한다(유효
+// 코어 인덱스는 항상 <gCoreCount이므로 이 값이 안전한 "없음" sentinel).
+uint32_t kFindFpuOwnerCore(const Task* task) {
+    for (uint32_t i = 0; i < gCoreCount; ++i) {
+        if (gFpuOwner[i] == task) {
+            return i;
+        }
+    }
+    return gCoreCount;
+}
+
 // [SP-ECC59BAE §3.1] 강제 이관 요청 슬롯 - tlb_shootdown.cpp의
 // g_tlbShootdownRequest 단일 슬롯과 동일한 관례(PN-D132A1E9가 그
 // 문서에 남긴 "동시 호출자가 여럿이면 슬롯을 늘리거나 직렬화 락이
@@ -936,7 +959,19 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
         uint32_t targetCore = coreIndex;
         if (task->affinityMask == kTaskAffinityAllCores &&
             gNormalQueues[coreIndex].approxLength() > kPushThresholdLength()) {
-            targetCore = kFindLeastLoadedCoreNumaAware(coreIndex, task->numaNode);
+            const uint32_t candidate = kFindLeastLoadedCoreNumaAware(coreIndex, task->numaNode);
+            if (candidate != coreIndex) {
+                // [PN-F55FB154] Pull(runLoop)은 이미 kCanMigrateFpuSafely로
+                // 이 검사를 하는데 Push만 빠져 있었다 - task가 candidate가
+                // 아닌 다른 코어에서 지금 살아있는 FPU 소유자라면(원격
+                // FXSAVE 불가, kCanMigrateFpuSafely 문서 주석 참고) 이번
+                // Push를 보류하고 targetCore를 coreIndex로 유지한다(Pull의
+                // 스킵/재시도 정책과 동일 - 다음 기회에 다시 시도됨).
+                const uint32_t fpuOwnerCore = kFindFpuOwnerCore(task);
+                if (fpuOwnerCore == gCoreCount || fpuOwnerCore == candidate) {
+                    targetCore = candidate;
+                }
+            }
         }
         gNormalQueues[targetCore].pushBack(task);
         if (targetCore != coreIndex) {
