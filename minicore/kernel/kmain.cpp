@@ -646,6 +646,24 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Logger::info("minicore: PCI enumeration:");
     kernel::Pci::enumerate(kLogPciDevice);
 
+    // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
+    asm volatile("sti");
+
+    kernel::Smp::startApCores();
+
+    // [순서 재배치, 2026-09-17, PN-9F8FF132, 설계자 지시] 이 두 호출
+    // (Process::init()을 실제로 부르는 첫 지점)은 예전엔 Smp::
+    // startApCores() *이전*(sti 이전)에 있었다 - 실측으로 확인된
+    // PN-9F8FF132 하이젠버그(부팅 극초반 Process::init() 단 1회만으로
+    // SMP4 AP 기동 자체가 멎거나 트리플 폴트하는 타이밍 의존 레이스)의
+    // 재현 조건이 정확히 "AP 기동이 다 끝나기 전에 Process::init()이
+    // 불린다"였다 - 정확한 레이스 지점을 계측으로 좁혀 그 자리만
+    // 고치는 대신, 애초에 그 전제 조건 자체가 성립할 수 없도록 여기로
+    // 옮겼다: Smp::startApCores()가 완전히 반환한(=AP 3개가 전부 기동
+    // 신호를 보낸) 뒤에만 Process 관련 초기화가 실행된다. 이 순서
+    // 제약은 SP-8B6B8D25/PL-65C20380 어디에도 이전엔 명시된 적이 없던
+    // 새로 확정된 제약이다 - 이후 이 두 호출을 다시 Smp::startApCores()
+    // 보다 앞으로 옮기지 않는다.
     // [신규, 2026-09-17, SP-245D130B §1] gRootResourceGroup은 정적
     // 전역(진짜 C++ 생성자를 거침)이라 원칙적으로 이 호출 없이도 이름
     // 없이는 쓸 수 있지만, 아래 kSpawnInitProcess()/kSpawnServiceProcesses()
@@ -656,11 +674,6 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
 
     kSpawnInitProcess();
     kSpawnServiceProcesses();
-
-    // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
-    asm volatile("sti");
-
-    kernel::Smp::startApCores();
 
     // 이 지점부터 BSP 자신도 스케줄러 디스패치 루프에 들어간다 -
     // 절대 반환하지 않는다(PL-2D3184BC 5/6단계). runLoop()을 직접
