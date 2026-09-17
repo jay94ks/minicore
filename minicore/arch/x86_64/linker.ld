@@ -45,6 +45,11 @@ PHDRS
     ktext   PT_LOAD FLAGS(5);       /* R+X */
     krodata PT_LOAD FLAGS(4);       /* R */
     kdata   PT_LOAD FLAGS(6);       /* R+W */
+    tls     PT_TLS  FLAGS(4);       /* R - PN-22E5E9E7 §4.2/SP-29D652AA §4.2,
+                                        .tdata/.tbss는 :kdata에도 동시에
+                                        속한다(표준 관례 - PT_LOAD가 실제
+                                        메모리에 올리고, PT_TLS는 그 중
+                                        TLS 템플릿 범위만 별도로 가리킨다) */
 }
 
 SECTIONS
@@ -92,6 +97,31 @@ SECTIONS
     {
         *(.data .data.*)
     } :kdata
+
+    /* [신규, PN-22E5E9E7 항목1/SP-29D652AA §4.2] 커널 자신의 real
+     * thread_local TLS 템플릿 - 코어별 TCB(Task::init())가 부팅마다
+     * 이 템플릿을 복사해 자기 tdata/tbss 인스턴스를 만든다(§4.1, 아직
+     * 미구현 - 이 파일은 링커 스크립트 배선만). kTlsTemplateStart~
+     * kTlsTemplateTdataEnd는 파일에 실제 바이트가 있는 .tdata 범위
+     * (그대로 memcpy 대상), kTlsTemplateTdataEnd~kTlsTemplateEnd는
+     * .tbss(파일엔 없음, 항상 0으로 memset) 범위 - PT_TLS 세그먼트의
+     * p_filesz/p_memsz와 정확히 같은 경계.
+     *
+     * :kdata에도 함께 속한다(표준 ELF TLS 관례 - PT_LOAD가 실제 로드를
+     * 담당하고 PT_TLS는 그 안에서 TLS 템플릿 범위만 가리키는 별도
+     * 메타데이터일 뿐 별도로 로드되지 않는다). */
+    .tdata ALIGN(8) : AT(ADDR(.tdata) - KERNEL_VMA)
+    {
+        kTlsTemplateStart = .;
+        *(.tdata .tdata.*)
+        kTlsTemplateTdataEnd = .;
+    } :kdata :tls
+
+    .tbss ALIGN(8) : AT(ADDR(.tbss) - KERNEL_VMA)
+    {
+        *(.tbss .tbss.*)
+        kTlsTemplateEnd = .;
+    } :kdata :tls
 
     /* [신규, 2026-09-17, x86_64-elf-gcc 크로스컴파일 툴체인 교체(PN-22E5E9E7
      * 대응) 중 실측 발견] 전역 C++ 생성자(.init_array) - 지금까지 clang은
