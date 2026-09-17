@@ -228,27 +228,72 @@ kernel::uint64_t kReadCr2() {
     return cr2;
 }
 
+// [신규, 2026-09-18, PN-F7EBD6F5 근본 원인 수정] `Serial::write()`는
+// 자기 자신 한 번의 호출만 락으로 감싼다(serial.cpp의 `gWriteLock`
+// 주석 참고) - 그런데 이 진단 덤프는 예전엔 `Serial::write`/
+// `writeHex`를 20회 넘게 연달아 호출했다. 그 호출 사이사이(락이
+// 풀려 있는 틈)에 다른 코어가 끼어들면 두 코어의 출력이 호출 단위로
+// 뒤섞인다 - 실제로 관측된 "vector=  vector=0x...002 error_code=..."
+// 류의 깨진 로그(PN-907C5289/PN-F7EBD6F5)가 정확히 이 패턴이다.
+// `SMP4`에서 하나의 stop-the-world NMI가 여러 코어에 동시에 도착하면
+// 그 코어들 전부가 이 함수를 거의 동시에 실행하므로 실측 재현율이
+// 매우 높았다(PN-F7EBD6F5, 90%대). 해법은 logger.cpp의
+// `SerialLoggingDriver::writeLine()`이 이미 쓰는 것과 같은 원칙 -
+// **전체 메시지를 로컬 버퍼 하나에 다 이어붙인 뒤 `Serial::write()`를
+// 정확히 한 번만 호출**한다(그러면 `gWriteLock` 한 번의 획득 구간이
+// 메시지 전체를 덮는다). `Logger`의 256바이트 버퍼는 이 전체 레지스터
+// 덤프(20개 이상 필드)에 비해 너무 작아 재사용하지 않고, 여기 전용
+// 버퍼+헬퍼를 따로 둔다.
+kernel::uint32_t kAppendDiagStr(char* buf, kernel::uint32_t bufSize, kernel::uint32_t pos, const char* s) {
+    while (*s && pos + 1 < bufSize) {
+        buf[pos++] = *s++;
+    }
+    return pos;
+}
+
+// Serial::writeHex()와 정확히 같은 포맷("0x"+16자리 16진수)을 버퍼에
+// 이어붙인다.
+kernel::uint32_t kAppendDiagHex(char* buf, kernel::uint32_t bufSize, kernel::uint32_t pos, kernel::uint64_t value) {
+    constexpr char kHexDigits[] = "0123456789abcdef";
+    char tmp[19] = "0x0000000000000000";
+    for (kernel::uint32_t i = 0; i < 16; ++i) {
+        tmp[17 - i] = kHexDigits[(value >> (i * 4)) & 0xF];
+    }
+    return kAppendDiagStr(buf, bufSize, pos, tmp);
+}
+
 // [PN-F443FE73, SP-677210E6 "NMI 활용"] kPanic(InterruptFrame*)와
 // NMI WatchdogTrap 분기 양쪽이 공유하는 레지스터 덤프 - 원래
 // kPanic() 본문 그대로, 재사용을 위해 이름만 붙여 뺐다(로직 변경
-// 없음).
-void kPrintFrameDiagnostics(kernel::InterruptFrame* frame) {
-    kernel::Serial::write("  vector=");
-    kernel::Serial::writeHex(frame->vector);
-    kernel::Serial::write(" error_code=");
-    kernel::Serial::writeHex(frame->errorCode);
-    kernel::Serial::write("\n  rip=");
-    kernel::Serial::writeHex(frame->rip);
-    kernel::Serial::write(" cs=");
-    kernel::Serial::writeHex(frame->cs);
-    kernel::Serial::write(" rflags=");
-    kernel::Serial::writeHex(frame->rflags);
-    kernel::Serial::write("\n");
+// 없음). `header`는 호출부가 이미 완성해 둔 안내 문구(예: "\nminicore:
+// NMI - debug forced halt\n") - 위 SMP 안전성 이유로 이 함수 안에서
+// 별도로 Serial::write하지 않고 반드시 이 함수의 버퍼 안에 함께
+// 담아 단 한 번의 Serial::write()로 내보낸다(호출부가 헤더와 덤프를
+// 각각 따로 write하면 그 사이 틈에서 여전히 다른 코어가 끼어들 수
+// 있다 - PN-F7EBD6F5).
+void kPrintFrameDiagnostics(kernel::InterruptFrame* frame, const char* header) {
+    constexpr kernel::uint32_t kBufSize = 1024;  // 헤더+23개 필드 전체를 넉넉히 담음
+    char buf[kBufSize];
+    kernel::uint32_t pos = 0;
+
+    pos = kAppendDiagStr(buf, kBufSize, pos, header);
+
+    pos = kAppendDiagStr(buf, kBufSize, pos, "  vector=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->vector);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " error_code=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->errorCode);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n  rip=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rip);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " cs=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->cs);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rflags=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rflags);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n");
 
     if (frame->vector == 14) {  // Page Fault
-        kernel::Serial::write("  cr2(fault addr)=");
-        kernel::Serial::writeHex(kReadCr2());
-        kernel::Serial::write("\n");
+        pos = kAppendDiagStr(buf, kBufSize, pos, "  cr2(fault addr)=");
+        pos = kAppendDiagHex(buf, kBufSize, pos, kReadCr2());
+        pos = kAppendDiagStr(buf, kBufSize, pos, "\n");
     }
 
     // PN-63BCFE45 진단 강화 - rip/cs/rflags/cr2만으로는 이번 멀티
@@ -257,47 +302,50 @@ void kPrintFrameDiagnostics(kernel::InterruptFrame* frame) {
     // InterruptFrame에 있는 전체 GPR + rsp/rbp + 그 순간의 CR3까지
     // 함께 덤프하도록 넓혔다 - 앞으로의 크래시 진단에도 일반적으로
     // 유용하다.
-    kernel::Serial::write("  rax=");
-    kernel::Serial::writeHex(frame->rax);
-    kernel::Serial::write(" rbx=");
-    kernel::Serial::writeHex(frame->rbx);
-    kernel::Serial::write(" rcx=");
-    kernel::Serial::writeHex(frame->rcx);
-    kernel::Serial::write(" rdx=");
-    kernel::Serial::writeHex(frame->rdx);
-    kernel::Serial::write("\n  rsi=");
-    kernel::Serial::writeHex(frame->rsi);
-    kernel::Serial::write(" rdi=");
-    kernel::Serial::writeHex(frame->rdi);
-    kernel::Serial::write(" rbp=");
-    kernel::Serial::writeHex(frame->rbp);
-    kernel::Serial::write(" rspOld=");
-    kernel::Serial::writeHex(frame->rspOld);
-    kernel::Serial::write("\n  ssOld=");
-    kernel::Serial::writeHex(frame->ssOld);
-    kernel::Serial::write(" r8=");
-    kernel::Serial::writeHex(frame->r8);
-    kernel::Serial::write(" r9=");
-    kernel::Serial::writeHex(frame->r9);
-    kernel::Serial::write(" r10=");
-    kernel::Serial::writeHex(frame->r10);
-    kernel::Serial::write("\n  r11=");
-    kernel::Serial::writeHex(frame->r11);
-    kernel::Serial::write(" r12=");
-    kernel::Serial::writeHex(frame->r12);
-    kernel::Serial::write(" r13=");
-    kernel::Serial::writeHex(frame->r13);
-    kernel::Serial::write(" r14=");
-    kernel::Serial::writeHex(frame->r14);
-    kernel::Serial::write("\n  r15=");
-    kernel::Serial::writeHex(frame->r15);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "  rax=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rax);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rbx=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rbx);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rcx=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rcx);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rdx=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rdx);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n  rsi=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rsi);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rdi=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rdi);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rbp=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rbp);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " rspOld=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->rspOld);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n  ssOld=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->ssOld);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " r8=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r8);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " r9=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r9);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " r10=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r10);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n  r11=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r11);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " r12=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r12);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " r13=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r13);
+    pos = kAppendDiagStr(buf, kBufSize, pos, " r14=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r14);
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n  r15=");
+    pos = kAppendDiagHex(buf, kBufSize, pos, frame->r15);
     {
         kernel::uint64_t cr3;
         asm volatile("mov %%cr3, %0" : "=r"(cr3));
-        kernel::Serial::write(" cr3=");
-        kernel::Serial::writeHex(cr3);
+        pos = kAppendDiagStr(buf, kBufSize, pos, " cr3=");
+        pos = kAppendDiagHex(buf, kBufSize, pos, cr3);
     }
-    kernel::Serial::write("\n");
+    pos = kAppendDiagStr(buf, kBufSize, pos, "\n");
+
+    buf[pos] = '\0';
+    kernel::Serial::write(buf);
 }
 
 // [PN-F443FE73, SP-677210E6 "#DB(Debug) 상세 설계"] #DB는 NMI/#MC와
@@ -390,14 +438,12 @@ bool kHandleMachineCheck() {
 void kHandleNmi(kernel::InterruptFrame* frame) {
     switch (kernel::Nmi::reasonForThisCore()) {
         case kernel::NmiReason::DebugHalt:
-            kernel::Serial::write("\nminicore: NMI - debug forced halt\n");
-            kPrintFrameDiagnostics(frame);
+            kPrintFrameDiagnostics(frame, "\nminicore: NMI - debug forced halt\n");
             for (;;) {
                 asm volatile("cli; hlt");
             }
         case kernel::NmiReason::WatchdogTrap:
-            kernel::Serial::write("\nminicore: NMI - watchdog: this core unresponsive\n");
-            kPrintFrameDiagnostics(frame);
+            kPrintFrameDiagnostics(frame, "\nminicore: NMI - watchdog: this core unresponsive\n");
             for (;;) {
                 asm volatile("cli; hlt");
             }
@@ -442,19 +488,26 @@ void kPanic(kernel::InterruptFrame* frame) {
         kernel::Nmi::stopAllOtherCores();
     }
 
-    kernel::Serial::write("\nminicore: PANIC - unhandled exception: ");
+    // [수정, 2026-09-18, PN-F7EBD6F5] 헤더 문구도 kPrintFrameDiagnostics
+    // 안의 단일 Serial::write()에 함께 담아야 하므로(위 함수 주석
+    // 참고), 여기서 먼저 로컬 버퍼에 조립해 둔다 - 예전처럼 여기서
+    // 바로 Serial::write하지 않는다.
+    char headerBuf[96];
+    kernel::uint32_t headerPos = 0;
+    headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, "\nminicore: PANIC - unhandled exception: ");
     if (frame->vector < 32) {
-        kernel::Serial::write(kExceptionNames[frame->vector]);
+        headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, kExceptionNames[frame->vector]);
     } else {
         // 33-254 대역인데 registerHandler로 등록된 콜백이 없는 채
         // 인터럽트가 들어온 경우 - kExceptionNames는 CPU 예외(0-31)
         // 전용이라 그대로 인덱싱하면 엉녡한 이름이 찍힌다(예전에는
         // 이 경로 자체가 없어서 문제가 없었다 - PL-2D149D8F에서 범용
         // 벡터 디스패치를 추가하며 같이 고침).
-        kernel::Serial::write("Unrouted hardware interrupt");
+        headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, "Unrouted hardware interrupt");
     }
-    kernel::Serial::write("\n");
-    kPrintFrameDiagnostics(frame);
+    headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, "\n");
+    headerBuf[headerPos] = '\0';
+    kPrintFrameDiagnostics(frame, headerBuf);
 
     for (;;) {
         asm volatile("cli; hlt");
