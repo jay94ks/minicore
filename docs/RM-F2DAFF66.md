@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T17:24:41.103Z
+  updatedAt: 2026-09-17T17:27:33.228Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -933,6 +933,20 @@ approved 전환되는 문서 위주로 전환한다.
   정확하고 정직하게(잔여 위험까지) 기록해 뒀으므로 조치 불필요 -
   **문서만 낡아 있던 것.**
 - **현재 상태**: 완전 해소(문서 정정).
+
+- **[신규, 2026-09-18] `SP-F146B7F8`(TLS/PerCpu 인프라)**: §1
+  (`ThreadLocal<T>`/`TlsRegistry`)/§2(`PerCpu<T>`) 전부 `tls.h`/
+  `percpu.h`와 한 줄씩 대조 - `Task::tlsSlots[kMaxTlsSlots=16]`
+  (task.h:18/239), `ThreadLocal<T>::get/set`이 `Scheduler::
+  currentTask()->tlsSlots[_slot]`를 그대로 씀, `PerCpu<T>::get/
+  forCore`가 `_values[kAcpiMaxCpus]`+`Scheduler::currentCoreIndex()`
+  를 그대로 씀 - 설계 스케치와 정확히 일치. 유일한 배치 차이
+  (`PerCpu<T>`를 문서 제안 `libkenv` 대신 `kernel`에 둔 것)는 이미
+  `percpu.h` 자신의 주석이 이유(get()이 kernel:: 의존 유발)까지 함께
+  정확히 기록해 둠 - 숨은 갭 아니다. §2.4-1(rdtscp 기반
+  `currentCoreIndex()` 전환)도 `scheduler.cpp`의 `gRdtscpSupported`
+  분기(rdtscp 성공 시 그 결과, 아니면 `kScanCoreIndexByApicId()`
+  폴백)로 정확히 구현돼 있음을 확인. **갭 없음.**
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
