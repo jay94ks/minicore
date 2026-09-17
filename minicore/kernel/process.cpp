@@ -6,6 +6,7 @@
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
+#include "resource_group.h"
 #include "scheduler.h"
 #include "syscall.h"
 #include "waitable.h"
@@ -178,6 +179,12 @@ bool Process::init() {
     // 동일한 이유(Resurrect가 같은 정적 Process를 재사용)로 매번 리셋.
     isZombie = false;
     exitCode = 0;
+    // 자원 그룹 소속(SP-245D130B §1/§4) - parent/children과 동일한
+    // 이유로 매번 리셋. 실제 그룹 가입은 init() 이후 스폰 경로
+    // (joinResourceGroup())가 담당 - init() 자신은 항상 "그룹 없음"
+    // 상태로 되돌려 둔다.
+    group = nullptr;
+    frozenByGroup = false;
     addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
     // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로,
     // 이전 생애의 신호 상태가 새 생애로 새어 들어가지 않도록 매번
@@ -461,6 +468,19 @@ bool Process::raiseSignal(SignalNumber number) {
     return true;
 }
 
+void Process::joinResourceGroup(ResourceGroup* newGroup) {
+    if (group == newGroup) {
+        return;
+    }
+    if (group) {
+        group->removeMember(this);
+    }
+    group = newGroup;
+    if (group) {
+        group->addMember(weakFromThis());
+    }
+}
+
 namespace {
 
 // [SP-6BEAE0C1 §3, PN-543C0CE9 착수 4번째 증분] SpawnProcess 본체 -
@@ -675,6 +695,17 @@ public:
             }
             procShared->parent = WeakPtr<Process>(parentProc);
         }
+        // [신규, 2026-09-17, SP-245D130B §1] 자원 그룹 소속 - 명시적으로
+        // "다른 그룹으로 가입" 하는 syscall이 아직 없으므로(§8 후속),
+        // 부모의 그룹을 그대로 물려받는다(Linux의 새 프로세스가 부모의
+        // cgroup을 상속하는 것과 동일한 기본값 - 이 문서가 열어 둔
+        // "동적 그룹 생성/명시적 가입" 자체가 아직 없어 실제로는 항상
+        // parentProc->group도 gRootResourceGroup으로 귀결된다, 그래도
+        // 나중에 동적 그룹이 생겼을 때 자연히 맞물리도록 상속 방식으로
+        // 미리 짜 둔다). parentProc이 없으면(도달 불가 방어 경로) 그냥
+        // 루트로.
+        procShared->joinResourceGroup(parentProc ? (parentProc->group ? parentProc->group : &gRootResourceGroup)
+                                                  : &gRootResourceGroup);
         // parentProc이 이 시점에도 비어 있으면(진짜 root조차 없는 -
         // init도 아직 스폰 안 된 부팅 극초반) 정말 아무도 소유할 수
         // 없다 - 이 역시 이론상 도달 불가(SpawnProcess 자체가 유저

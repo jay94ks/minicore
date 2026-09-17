@@ -15,6 +15,7 @@
 #include "paging.h"
 #include "panic.h"
 #include "process.h"
+#include "resource_group.h"
 #include "serial.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
@@ -989,8 +990,19 @@ void Scheduler::onTick(InterruptFrame*) {
     // SelfTerminateHandler가 Scheduler::retireTask(current)로 정리
     // 큐에 등록한다. 그 전까지 이 Task는 어느 큐에도 없는 채로 그냥
     // "스위칭되어 나간" 상태로만 남는다(다시 뽑힐 걱정 없음).
+    //
+    // [신규, 2026-09-17, SP-245D130B §4] ResourceGroup freeze - 이
+    // 재스케줄 결정 지점이 바로 resource_group.h의 kCheckAndMarkFrozen()
+    // 문서 주석이 가리키는 "그 지점"이다. Zombie와 같은 급의 "재삽입
+    // 안 함" 분기 하나를 더 두되, 이쪽은 대신 Blocked로 남겨 나중에
+    // ResourceGroup::thaw()가 다시 enqueue()하게 한다(Zombie는 영원히
+    // 안 돌아오지만 이쪽은 그룹이 풀리면 돌아온다는 차이).
     if (current->state != TaskState::Zombie) {
-        enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
+        if (kCheckAndMarkFrozen(current)) {
+            current->state = TaskState::Blocked;
+        } else {
+            enqueue(coreIndex, current);  // 라운드로빈 - Ready로 큐 꼬리에 재삽입
+        }
     }
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);

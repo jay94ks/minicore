@@ -15,6 +15,7 @@ class Image;  // 전방 선언(minicore/libs/libelf/elf.h) - Process::execImage 
 namespace kernel {
 
 class UserThread;
+class ResourceGroup;  // 포인터로만 참조(Process::group) - 전체 정의는 resource_group.h(SP-245D130B)
 struct BridgePipe;  // 포인터로만 참조(Process::openBridges) - 전체 정의는 channel.h(PN-9CC66142)
 
 // 프로세스 신원 - 이 프로세스가 신뢰할 수 있는 커널 서비스인지를
@@ -200,6 +201,24 @@ public:
     bool isZombie = false;
     int32_t exitCode = 0;
 
+    // [신규, 2026-09-17, SP-245D130B §1/§4] 이 프로세스가 속한 자원
+    // 그룹(cgroup류) - `parent`/`children`(프로세스 트리)과 완전히
+    // 별개의 축이다. 소유 관계가 아니라 순수 관찰용 raw 포인터다
+    // (`ResourceGroup`은 지금 전부 정적 전역이라 이 포인터의 수명을
+    // 넘어설 걱정이 없다 - `gRootResourceGroup` 하나뿐, 동적 그룹
+    // 생성이 생기면 그때 소유권 모델을 재검토). `joinResourceGroup()`
+    // 이 아니면 직접 대입하지 않는다. init()에서 명시적으로 nullptr로
+    // 리셋(Resurrect §6.2가 같은 정적 Process를 재사용할 수 있으므로
+    // 이전 생애의 그룹 소속이 새 생애로 새어 들어가면 안 된다).
+    ResourceGroup* group = nullptr;
+
+    // [신규, 2026-09-17, SP-245D130B §4] `group->freeze()`가 이
+    // 프로세스를 실제로 멈췄는지 - `ResourceGroup::thaw()`가 이 값이
+    // true인 프로세스만 다시 깨운다(freeze() 호출 이후 새로 스폰돼
+    // 애초에 멈춘 적 없는 프로세스와 구분하기 위함). init()에서 매번
+    // 리셋(위 group과 동일한 이유).
+    bool frozenByGroup = false;
+
     // 신원/시작 플래그(SP-EAB162FC) - 둘 다 스폰 시점에 호출부가 직접
     // 채우고, 그 이후 바꾸는 setter는 두지 않는다(§1/§6 원칙).
     ProcessRole role = ProcessRole::Normal;
@@ -335,6 +354,15 @@ public:
     // 아직 어디에도 배선돼 있지 않다(별도 후속 항목). 실패(자원 고갈)
     // 시 false.
     bool raiseSignal(SignalNumber number);
+
+    // [신규, 2026-09-17, SP-245D130B §1] 이 프로세스를 `newGroup`으로
+    // 옮긴다(옛 그룹에서 빼고 새 그룹에 넣음, `newGroup==nullptr`이면
+    // 그냥 빼기만) - `ResourceGroup::addMember()`가 `WeakPtr<Process>`를
+    // 받는데 `EnableSharedFromThis<Process>::weakFromThis()`가
+    // `protected`라 외부 클래스가 못 부르므로, `Process` 자신의 이
+    // 메서드가 대신 호출해 넘긴다(resource_group.h의 addMember 문서
+    // 주석과 동일한 이유).
+    void joinResourceGroup(ResourceGroup* newGroup);
 
     // [SP-6BEAE0C1, PN-543C0CE9 착수 4번째/5번째 증분] SpawnProcess(59번)/
     // Wait(35번) syscall 엔드포인트를 SyscallRegistry에 등록한다 -

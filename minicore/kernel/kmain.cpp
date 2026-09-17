@@ -26,6 +26,7 @@
 #include "pci.h"
 #include "pnp.h"
 #include "process.h"
+#include "resource_group.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "smp.h"
@@ -294,6 +295,12 @@ void kSpawnInitProcess() {
     // (이 등록 자체는 그 이후 단계들의 성패와 무관 - "이 Process가
     // 유효한 좀비 트리 루트다"라는 사실만 필요하다).
     kernel::Process::setOrphanRoot(gInitProcess);
+    // [신규, 2026-09-17, SP-245D130B §1] init은 트리 루트라 부모가 없어
+    // joinResourceGroup()의 "부모 그룹 상속" 기본값을 못 쓴다 - 명시적
+    // 으로 루트 자원 그룹에 가입시킨다(SpawnProcess로 만들어질 그
+    // 자손들은 이 값을 그대로 상속받게 됨, process.cpp SpawnProcessHandler
+    // 참고).
+    gInitProcess->joinResourceGroup(&kernel::gRootResourceGroup);
     // spawnName(PN-71C2B857, SP-00CA7175 §2.0) - role/startFlags와 같은
     // 관례로 init() 직후 호출부가 직접 채운다.
     memcpy(gInitProcess->spawnName, "init", 4);
@@ -361,6 +368,10 @@ void kSpawnServiceProcesses() {
             continue;
         }
         gServiceProcess[i] = proc;
+        // [신규, 2026-09-17, SP-245D130B §1] kSpawnInitProcess()와 동일한
+        // 이유 - 고정 스폰 KernelService도 SpawnProcess 경로를 안 타므로
+        // 부모 그룹 상속 기본값을 못 쓴다, 명시적으로 루트에 가입.
+        gServiceProcess[i]->joinResourceGroup(&kernel::gRootResourceGroup);
         kernel::UserThread* thread = gServiceProcess[i]->execImage(gServiceImage[i], &gServiceThread[i]);
         if (!thread) {
             kernel::Logger::error("minicore: service process execImage FAILED: %s", svc.name);
@@ -619,6 +630,14 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Logger::info("minicore: PCI config access=%s", kernel::Pci::usesMmconfig() ? "mmconfig+legacy" : "legacy");
     kernel::Logger::info("minicore: PCI enumeration:");
     kernel::Pci::enumerate(kLogPciDevice);
+
+    // [신규, 2026-09-17, SP-245D130B §1] gRootResourceGroup은 정적
+    // 전역(진짜 C++ 생성자를 거침)이라 원칙적으로 이 호출 없이도 이름
+    // 없이는 쓸 수 있지만, 아래 kSpawnInitProcess()/kSpawnServiceProcesses()
+    // 가 joinResourceGroup()으로 곧바로 참조하므로 이름을 채워 두는
+    // 이 초기화를 명시적으로 그 직전에 호출한다(할당자 의존성 없음 -
+    // SP-E9B44929 §6-A가 겪은 부팅 순서 함정과 무관).
+    kernel::kResourceGroupInit();
 
     kSpawnInitProcess();
     kSpawnServiceProcesses();

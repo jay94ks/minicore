@@ -37,6 +37,7 @@ add_library(minicore_kernel OBJECT
     address_space.cpp
     tlb_shootdown.cpp
     tls.cpp
+    resource_group.cpp
 )
 
 target_link_libraries(minicore_kernel PUBLIC libkenv libelf minicore_libs_x86_64)
