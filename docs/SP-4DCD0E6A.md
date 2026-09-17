@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-4DCD0E6A
   status: approved
-  updatedAt: 2026-09-17T07:48:57.249Z
+  updatedAt: 2026-09-17T11:03:56.069Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -90,6 +90,15 @@ private:
 착수는 `PN-495C11B7` 완료 이후로 미룬다(§6 착수 조건에 명시).
 
 ## 2. `LockFreeVector<T>` - 부분적으로 가능, append-only로 범위 제한
+
+**[경고, 2026-09-17, 설계자 지시] 안전하지 않음 - 실 구현에 적용 금지.**
+구현 자체는 `PN-DAE91888`(commit c0f35a0)로 이미 존재하고 TEMP/QEMU
+검증은 통과했지만, 설계자가 "LockFreeVector는 안전하지 않다고
+마킹하고 실 구현에 적용하지 마"라고 명시적으로 지시했다 - 구체적
+근거는 아직 기록되지 않았으나(확인 질의 등록됨, `PN-DAE91888` 참고),
+**이 설계/구현을 다른 서브시스템에 실제로 연결(wire-in)하지 않는다**
+- 이미 존재하는 헤더/코드는 참고용으로만 남기고, 새 소비자가 이걸
+쓰려는 시도가 보이면 이 경고를 근거로 저지한다.
 
 전체 재할당이 필요한 표준 `Vector`(`SP-FAF768AB` §3)의 성장 전략은
 lock-free와 근본적으로 안 맞는다(재할당 중 다른 스레드의 읽기가 옛
