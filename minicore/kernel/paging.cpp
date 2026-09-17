@@ -1,7 +1,10 @@
 #include "paging.h"
 
+#include "libkenv/chunked_list.h"
 #include "libkenv/mem.h"
+#include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 
 namespace {
@@ -83,6 +86,17 @@ void kZeroTable(kernel::uint64_t* table) {
 
 // parentTable[index]가 다음 레벨 테이블을 가리키게 하고, 그 테이블의
 // (identity-mapped) 포인터를 돌려준다 - 없으면 새로 만든다.
+//
+// [수정, 2026-09-17, PN-90BD044E/DC-FB38F86F(A) 채택, 설계자 답변]
+// 원래 이 함수는 완전히 무잠금이라 두 코어가 동시에 같은 아직-없는
+// parentTable[index]를 통과하면 각자 다른 테이블을 만들어 나중에 쓴
+// 쪽이 이기는 TOCTOU 경쟁이 있었다(먼저 쓴 쪽이 채운 하위 매핑은
+// 도달 불가능한 고아가 됨, 상세 근거는 PN-90BD044E) - 지금은 항상
+// 호출자(Paging::mapPage/mapRange/mergeRange 공개 진입점)가 미리
+// 잡아 둔 주소공간별 락(또는 higher-half 전역 락)을 쥔 채로만
+// 불린다는 것을 전제한다(이 함수 자신은 락을 잡지 않는다 - 이미
+// 호출자가 잡고 있으므로 재진입 불가 Spinlock을 다시 잡으면
+// 데드락이다).
 kernel::uint64_t* kGetOrCreateNextLevel(kernel::uint64_t* parentTable, kernel::uint32_t index, kernel::uint64_t flags) {
     if (parentTable[index] & kernel::PAGE_PRESENT) {
         parentTable[index] |= flags;  // 기존 권한에 이번 요청 권한을 더해준다(예: USER 승격)
@@ -93,6 +107,63 @@ kernel::uint64_t* kGetOrCreateNextLevel(kernel::uint64_t* parentTable, kernel::u
     kZeroTable(newTable);
     parentTable[index] = newTablePhys | kernel::PAGE_PRESENT | kernel::PAGE_WRITABLE | flags;
     return newTable;
+}
+
+// [신규, 2026-09-17, PN-90BD044E/DC-FB38F86F] 위 TOCTOU 경쟁을 막는
+// 실제 락 두 종류 - 설계자가 (A) 주소공간별 전용 락을 채택하면서
+// 원안이 이미 지적한 higher-half(여러 주소공간이 물리적으로 공유하는
+// 커널 공용 PDPT/PD/PT 영역, Paging::createAddressSpace()의 엔트리
+// 복사 방식 참고)용 별도 전역 락도 함께 필요하다는 트레이드오프를
+// 그대로 유지했다. 최상위 PML4 인덱스 하나만 higher-half인지 확인하면
+// 충분한 이유 - 그 아래 PDPT/PD/PT 세 단계는 higher-half PML4 엔트리
+// 밑에서는 어느 주소공간을 거치든 항상 같은 물리 테이블을 가리키므로,
+// 서로 다른 프로세스가 각자의 "주소공간별" 락을 잡아 봐야 그 공유
+// 테이블에 대한 경쟁을 막지 못한다 - 반드시 이 전역 락 하나로만
+// 통일해야 한다.
+kernel::Spinlock gHigherHalfPagingLock;
+
+// 주소공간(pml4Phys)별 전용 락 레지스트리 - Paging::createAddressSpace()
+// 가 새 pml4Phys를 발급하는 시점에 항목을 등록하고 destroyAddressSpace()
+// 가 반납할 때 제거한다. 락 자체(Spinlock)는 슬롯 안에 값으로 산다
+// (별도 힙 할당 불필요) - ChunkedList<T,N>는 이 커널 전역에서 이미
+// "성장 가능한 항목 레지스트리"에 쓰이는 확립된 패턴(Process::children/
+// ResourceGroup::memberProcesses 등)이라 그대로 재사용했다.
+// gAddressSpaceLockRegistryLock 자신은 삽입/삭제/조회(선형 탐색)
+// 동안만 아주 짧게 잡힌다 - 실제 페이지 테이블 조작처럼 오래 걸리는
+// 임계 구역은 조회로 얻은 그 항목의 Spinlock 쪽이 담당한다(레지스트리
+// 락과 개별 주소공간 락은 절대 동시에 둘 다 오래 쥐지 않는다).
+struct AddressSpaceLockEntry {
+    kernel::uint64_t pml4Phys = 0;
+    kernel::Spinlock lock;
+};
+kernel::ChunkedList<AddressSpaceLockEntry, 8> gAddressSpaceLocks;
+kernel::Spinlock gAddressSpaceLockRegistryLock;
+
+// 있으면 찾아 돌려주고, 없으면(정상 경로라면 항상 Paging::
+// createAddressSpace()가 미리 등록해 뒀어야 하지만, 방어적으로) 그
+// 자리에서 새로 등록한다 - 절대 "락을 못 찾았으니 무잠금으로 진행"
+// 하지 않는다.
+kernel::Spinlock* kFindOrCreateAddressSpaceLock(kernel::uint64_t pml4Phys) {
+    kernel::SpinlockGuard guard(gAddressSpaceLockRegistryLock);
+    auto* slot = gAddressSpaceLocks.find(
+        [pml4Phys](const AddressSpaceLockEntry& e) { return e.pml4Phys == pml4Phys; });
+    if (slot) {
+        return &slot->value.lock;
+    }
+    gAddressSpaceLocks.ensureAllocator(&kernel::GenericSlabAllocator::alloc, &kernel::GenericSlabAllocator::free);
+    AddressSpaceLockEntry entry;
+    entry.pml4Phys = pml4Phys;
+    auto* newSlot = gAddressSpaceLocks.insert(entry);
+    return newSlot ? &newSlot->value.lock : nullptr;  // OOM - 호출부가 최후 방어를 책임진다
+}
+
+void kRemoveAddressSpaceLock(kernel::uint64_t pml4Phys) {
+    kernel::SpinlockGuard guard(gAddressSpaceLockRegistryLock);
+    auto* slot = gAddressSpaceLocks.find(
+        [pml4Phys](const AddressSpaceLockEntry& e) { return e.pml4Phys == pml4Phys; });
+    if (slot) {
+        gAddressSpaceLocks.erase(slot);
+    }
 }
 
 // [PL-57CF86EF 분할] pd[pdIndex]가 2M PS 엔트리면, 그 물리주소/플래그를
@@ -155,6 +226,19 @@ kernel::uint32_t kPtIndex(kernel::uint64_t virtualAddr) { return (virtualAddr >>
 
 void kInvalidatePage(kernel::uint64_t virtualAddr) {
     asm volatile("invlpg (%0)" : : "r"(virtualAddr) : "memory");
+}
+
+// virtualAddr의 최상위 PML4 인덱스만으로 어느 락을 잡을지 고른다 -
+// 호출부(Paging::mapPage/mapRange/mergeRange)가 실제 트리 조작 전에
+// 정확히 한 번만 부른다. 레지스트리 OOM(극히 드묾)일 때조차 절대
+// nullptr을 반환하지 않고 higher-half 전역 락으로 물러난다 - "락을
+// 아예 못 잡는" 경로를 남겨 두지 않기 위한 최후 방어.
+kernel::Spinlock* kLockForAddressSpaceOp(kernel::uint64_t virtualAddr, kernel::uint64_t pml4Phys) {
+    if (kPml4Index(virtualAddr) >= kHigherHalfPml4Start) {
+        return &gHigherHalfPagingLock;
+    }
+    kernel::Spinlock* lock = kFindOrCreateAddressSpaceLock(pml4Phys);
+    return lock ? lock : &gHigherHalfPagingLock;
 }
 
 // [신규, 2026-09-16, SP-6BEAE0C1 §2/§11, PN-543C0CE9 착수 6번째 증분]
@@ -247,22 +331,31 @@ void Paging::init(uint64_t maxPhysAddr) {
     pml4[pml4Index] = pdptPhys | PAGE_PRESENT | PAGE_WRITABLE;
 }
 
-void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags, uint64_t pml4Phys) {
+}  // namespace
+
+namespace {
+
+// [수정, 2026-09-17, PN-90BD044E/DC-FB38F86F] Paging::mapPage()의 원래
+// 본문 그대로 - 이제 "호출자가 이미 적절한 락(주소공간별 또는
+// higher-half 전역)을 쥐고 있다"는 것을 전제하는 무잠금 내부 구현으로
+// 옮겼다. Paging::mapRange()도 내부 루프에서 (재진입 불가 Spinlock을
+// 다시 잡아 데드락 나는) Paging::mapPage()를 부르는 대신 이 함수를
+// 직접 호출한다 - 락은 공개 진입점(Paging::mapPage/mapRange)에서
+// 정확히 한 번만 잡는다.
+void kMapPageUnlocked(kernel::uint64_t virtualAddr, kernel::uint64_t physicalAddr, kernel::uint64_t flags,
+                      kernel::uint64_t pml4Phys) {
     virtualAddr &= ~(kPageSize4K - 1);
     physicalAddr &= ~(kPageSize4K - 1);
-    if (pml4Phys == 0) {
-        pml4Phys = kCurrentPml4Phys();
-    }
 
-    uint64_t* pml4 = kAsTable(pml4Phys);
-    uint64_t* pdpt = kGetOrCreateNextLevel(pml4, kPml4Index(virtualAddr), flags & PAGE_USER);
-    uint64_t* pd = kGetOrCreateNextLevel(pdpt, kPdptIndex(virtualAddr), flags & PAGE_USER);
+    kernel::uint64_t* pml4 = kAsTable(pml4Phys);
+    kernel::uint64_t* pdpt = kGetOrCreateNextLevel(pml4, kPml4Index(virtualAddr), flags & kernel::PAGE_USER);
+    kernel::uint64_t* pd = kGetOrCreateNextLevel(pdpt, kPdptIndex(virtualAddr), flags & kernel::PAGE_USER);
     // PL-57CF86EF 분할 - 이 4K 슬롯이 이미 2M 페이지에 속해 있으면
     // 아래서 그 엔트리를 PT 포인터로 잘못 해석하기 전에 먼저 풀어준다.
     kSplitTwoMegabyte(pd, kPdIndex(virtualAddr));
-    uint64_t* pt = kGetOrCreateNextLevel(pd, kPdIndex(virtualAddr), flags & PAGE_USER);
+    kernel::uint64_t* pt = kGetOrCreateNextLevel(pd, kPdIndex(virtualAddr), flags & kernel::PAGE_USER);
 
-    pt[kPtIndex(virtualAddr)] = physicalAddr | PAGE_PRESENT | flags;
+    pt[kPtIndex(virtualAddr)] = physicalAddr | kernel::PAGE_PRESENT | flags;
     // 지금 실행 중인 주소공간(현재 CR3)에 대한 변경일 때만 TLB를
     // 무효화한다 - pml4Phys가 아직 CR3에 설치되지 않은 다른 주소공간을
     // 가리키면 이 코어의 TLB엔 애초에 그 매핑이 캐시돼 있을 수 없다
@@ -273,6 +366,19 @@ void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags
     }
 }
 
+}  // namespace
+
+namespace kernel {
+
+void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags, uint64_t pml4Phys) {
+    if (pml4Phys == 0) {
+        pml4Phys = kCurrentPml4Phys();
+    }
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+    kMapPageUnlocked(virtualAddr, physicalAddr, flags, pml4Phys);
+}
+
 void Paging::mapRange(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t sizeBytes, uint64_t flags, uint64_t pml4Phys) {
     if (pml4Phys == 0) {
         pml4Phys = kCurrentPml4Phys();
@@ -280,6 +386,15 @@ void Paging::mapRange(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t size
     virtualAddr &= ~(kPageSize4K - 1);
     physicalAddr &= ~(kPageSize4K - 1);
     sizeBytes = (sizeBytes + kPageSize4K - 1) & ~(kPageSize4K - 1);
+
+    // [PN-90BD044E/DC-FB38F86F] 락 획득 범위 결정 - 이 범위 전체를
+    // 하나의 락으로 감싼다(개별 4K/2M 조각마다 다시 잡지 않음). 한
+    // 호출의 [virtualAddr, virtualAddr+sizeBytes) 범위는 항상 단일
+    // VMA/세그먼트 하나에 대응해 higher-half/lower-half 경계를 넘지
+    // 않는다는 이 커널의 기존 메모리 레이아웃 전제(SP-8B6B8D25) 위에서,
+    // 시작 주소 하나로 고른 락이 범위 전체에 유효하다고 본다.
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
 
     uint64_t mapped = 0;
     while (mapped < sizeBytes) {
@@ -306,7 +421,7 @@ void Paging::mapRange(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t size
                 continue;
             }
         }
-        mapPage(va, pa, flags, pml4Phys);
+        kMapPageUnlocked(va, pa, flags, pml4Phys);
         mapped += kPageSize4K;
     }
 }
@@ -315,6 +430,15 @@ bool Paging::mergeRange(uint64_t virtualAddr, uint64_t sizeBytes, uint64_t pml4P
     if (pml4Phys == 0) {
         pml4Phys = kCurrentPml4Phys();
     }
+    // [PN-90BD044E/DC-FB38F86F] 이 함수는 kGetOrCreateNextLevel()을
+    // 안 쓰지만, mapPage()/mapRange()가 만드는 것과 같은 PD/PT 엔트리를
+    // 직접 읽고 재구성(PT -> 2M PS로 교체)하므로 그 둘과 똑같이
+    // 주소공간별/higher-half 락으로 보호해야 한다 - 안 그러면 다른
+    // 코어의 mapPage()가 병합 도중인 PT를 동시에 채우다 그 갱신이
+    // 유실될 수 있다.
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+
     const uint64_t start = virtualAddr & ~(kPageSize2M - 1);
     const uint64_t end = (virtualAddr + sizeBytes + kPageSize2M - 1) & ~(kPageSize2M - 1);
 
@@ -517,6 +641,17 @@ uint64_t Paging::createAddressSpace() {
     for (uint32_t i = kHigherHalfPml4Start; i < kPml4EntryCount; ++i) {
         newPml4[i] = sourcePml4[i];
     }
+
+    // [PN-90BD044E/DC-FB38F86F] 이 pml4Phys를 향한 mapPage()/mapRange()/
+    // mergeRange() 호출이 앞으로 kLockForAddressSpaceOp()로 락을 찾을
+    // 수 있도록 여기서 미리 등록해 둔다 - 등록 자체가 실패(레지스트리
+    // 슬랩 고갈)하면 이 주소공간을 아예 안전하게 쓸 수 없다고 보고
+    // PageFrameAllocator 고갈과 동일하게 실패 처리한다(이미 확보한
+    // PML4 프레임은 반납).
+    if (!kFindOrCreateAddressSpaceLock(newPml4Phys)) {
+        PageFrameAllocator::freePage(newPml4Phys);
+        return 0;
+    }
     return newPml4Phys;
 }
 
@@ -528,6 +663,14 @@ void Paging::destroyAddressSpace(uint64_t pml4Phys) {
         }
     }
     PageFrameAllocator::freePage(pml4Phys);
+    // [PN-90BD044E/DC-FB38F86F] createAddressSpace()가 등록해 둔 락
+    // 항목을 반납한다 - 이 pml4Phys는 이제 반납됐으니 등록을 안 지우면
+    // 나중에 PageFrameAllocator가 같은 물리 프레임을 다른 새 주소공간에
+    // 재할당했을 때 엉뚱하게 옛 항목을 "찾아서" 재사용하게 된다(그
+    // 자체가 틀린 동작은 아니지만 - 락 인스턴스는 동일하게 안전 -
+    // 레지스트리가 이미 죽은 주소공간의 항목을 무한정 쌓아 두는 누수를
+    // 막기 위해 명시적으로 정리한다).
+    kRemoveAddressSpaceLock(pml4Phys);
 }
 
 }  // namespace kernel
