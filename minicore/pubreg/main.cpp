@@ -3,25 +3,63 @@
 // 같은 이유로 "libmc를 통해서만 커널에 요청한다"는 모양부터 갖춰 둔다
 // (minicore/devmgr/main.cpp/minicore/init/main.cpp와 동일한 관례).
 //
-// **[정정, 착수 중 코드 감사] 이번 증분은 항목1(서비스 스켈레톤)까지만**
-// - SP-B071E628 §3의 "openChannel(name="pubreg"류)로 등록 채널 개설"
-// (PN-185406F6 항목3)은 실제로 착수해 보니 `userland/libs/libmc`에
-// Channel IPC syscall 래퍼(ConnectChannel/AcceptFromChannel/
-// ChannelRead/ChannelWrite 등)가 **아직 하나도 없다**(devmgr/init
-// 둘 다 pnp/selfTerminate만 씀 - 코드 감사로 확인, libmc/pnp.h/
-// syscall.h 두 헤더뿐). 이 프로젝트에서 Channel IPC는 지금까지 전부
-// 커널 내부 TEMP 스캐폴딩(가짜 UserThread가 핸들러 onExec을 직접
-// 호출)으로만 검증돼 왔지, 진짜 유저랜드 ELF가 실제 syscall 트랩으로
-// Channel을 연 적이 한 번도 없다 - 그 래퍼 자체가 별도의 독립적인
-// 작업량(libmc/channel.h 신설)이라 항목3/4으로 분리해 후속 세션에
-// 남긴다(RM-23F4B687 §4 - 검증 없이 한 번에 다 만들지 않는다).
+// **[완료, 2026-09-17, PN-185406F6 항목3] "이름 있는 Channel" 개설 +
+// accept 루프**: PN-EAB3A9AE가 완성한 `libmc/channel.h` 위에서 부팅
+// 즉시 `OpenChannel(name="pubreg")`로 자신의 등록 채널을 개설하고,
+// `AcceptFromChannel`로 들어오는 연결을 순서대로 받는다.
+//
+// **[미착수] 항목4**: register/query 메시지 처리(libjson 파싱 -
+// SP-B071E628 §3)는 아직 없다 - 그 프로토콜 자체가 별도의 설계
+// 확정을 요구하는 작업량이라(RM-23F4B687 §4 - 검증 없이 한 번에 다
+// 만들지 않는다), 이번 증분은 accept 왕복 자체가 실제 syscall 트랩
+// 경계에서 올바르게 동작하는지만 검증하고 각 연결을 즉시 닫는다.
+#include "libmc/channel.h"
 #include "libmc/syscall.h"
 
+namespace {
+
+constexpr char kPubregChannelName[] = "pubreg";
+
+}  // namespace
+
 extern "C" void _start() {
-    // TODO(PN-185406F6 항목3/4): libmc/channel.h(신규) 완성 후
-    // openChannel(name="pubreg")로 등록 채널을 열고 register/query
-    // 메시지를 libjson으로 처리하는 루프가 여기 이어붙는다. 지금은
-    // 부팅 매니페스트 스캔(PN-D3C05C0B)이 이 프로세스를 정상적으로
-    // 찾아 스폰하는지(ProcessRole::KernelService 포함)만 검증 대상.
+    mc::OpenChannelArgs openArgs;
+    openArgs.name = kPubregChannelName;
+    openArgs.nameLength = sizeof(kPubregChannelName) - 1;
+
+    mc::SyscallToken openToken = mc::submit(mc::kSyscallEndpointOpenChannel, &openArgs);
+    if (openToken == 0 || !mc::wait(openToken) || openArgs.error != mc::ChannelError::None) {
+        // 이름 충돌(이미 다른 pubreg 인스턴스가 떠 있음, SP-9DD4F3EA
+        // §4a-3류 "인스턴스는 무조건 1개" 위반) 또는 자원 고갈 - 이
+        // 서비스는 계속 존재할 이유가 없으므로 종료한다(essential
+        // service 정책상 이 종료는 상위에서 패닉으로 처리됨, 의도된
+        // 동작 - PN-F82B59FD).
+        mc::selfTerminate(1);
+    }
+
+    for (;;) {
+        mc::AcceptFromChannelArgs acceptArgs;
+        acceptArgs.channelHandle = openArgs.channelHandle;
+
+        mc::SyscallToken acceptToken = mc::submit(mc::kSyscallEndpointAcceptFromChannel, &acceptArgs);
+        if (acceptToken == 0 || !mc::wait(acceptToken) || acceptArgs.error != mc::ChannelError::None) {
+            // 채널이 소멸됐거나(NotFound) 복구 불가능한 상태 - 더 이상
+            // accept할 수 없으므로 루프를 끝낸다.
+            break;
+        }
+
+        // TODO(PN-185406F6 항목4): 여기서 ChannelRead로 register/query
+        // 메시지를 받아 libjson으로 파싱하고 내부 테이블에 반영한 뒤
+        // ChannelWrite로 응답해야 한다. 그 프로토콜이 아직 없어 이번
+        // 증분은 연결만 받고 바로 닫는다(accept 왕복 자체의 실측
+        // 검증 목적, PN-EAB3A9AE).
+        mc::CloseBridgeArgs closeArgs;
+        closeArgs.bridge = acceptArgs.bridge;
+        mc::SyscallToken closeToken = mc::submit(mc::kSyscallEndpointCloseBridge, &closeArgs);
+        if (closeToken != 0) {
+            mc::wait(closeToken);
+        }
+    }
+
     mc::selfTerminate(0);
 }
