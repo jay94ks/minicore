@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T03:54:07.809Z
+  updatedAt: 2026-09-17T12:02:02.701Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -172,7 +172,54 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   코드 쪽 조치 불필요.
 - **현재 상태**: 완전 해소.
 
+### 1-E. `SP-71DA77B3`(인터럽트 구독) `WaitInterrupt` `onCancel` 미구현 -
+댕글링 포인터 위험 (코드 갭, `PN-C4611402`/§1-B와 동일 결함 클래스,
+**신규 발견, 조치 중**)
+
+- **출처**: 설계자 지시("설계 공백을 찾아다녀봐")로 재개한 이번 스윕에서
+  `SP-71DA77B3`를 처음으로 이 문서 방법론에 대입 - `interrupt_subscription.h`/
+  `.cpp`(PN-B3DD3D19가 구현)와 대조.
+- **문제**: `WaitInterruptHandler::onExec`이 이벤트가 없으면 자기 자신
+  (`AsyncTask*`)을 `slot->waiters`(`InterruptWaiterQueue`, channel.h의
+  `AsyncTaskWaitQueue`와 동일한 침습적 FIFO)에 매달아 두고 파킹하는데,
+  `onCancel(AsyncTask*, void*) override {}`가 **완전한 no-op**이다 -
+  제출 UserThread가 대기 중 죽으면(`PN-40E976F2`의 취소 경로) 그
+  포인터가 제거되지 않고 댕글링으로 남아, 다음 인터럽트의 ISR이
+  `waiters.popFront()`로 그걸 꺼내 `AsyncReactor::submitCompletion()`을
+  호출하는 순간 UAF가 된다. **§1-B(Channel IPC)에서 이미 발견·수정한
+  것과 정확히 같은 패턴**(코루틴 자신의 `AsyncTask*`를 침습적 대기
+  큐에 걸어 둔 채 파킹 → onCancel이 그 큐에서 제거 안 함) - `PN-B3DD3D19`
+  (2026-09-15 착수)가 §1-B의 수정(`PN-C4611402`, 2026-09-17)보다
+  먼저 만들어져 그 교훈이 반영되지 못한 것으로 보인다.
+- **조치**: **`PN-BD276A24`**(scheduled) 등록 - `InterruptWaiterQueue`에
+  `AsyncTaskWaitQueue::remove()`와 동일한 패턴의 `remove()` 추가,
+  `WaitInterruptHandler::onCancel`에서 `args->vector`로 슬롯을 찾아
+  호출. `SubscribeInterrupt`/`UnsubscribeInterrupt`/`GetInterruptDump`
+  세 핸들러는 onExec에 yield 지점이 없어 no-op 유지가 맞음(§1-B와
+  동일 논리). `SP-71DA77B3`에 정정 각주 추가 완료.
+- **의미**: 이 문서(§5 기록 규칙)가 "한 문서를 고칠 때 같은 설명이
+  복제됐는지 의심하라"고 이미 적어 뒀는데, 이번 발견은 그보다 한
+  단계 더 일반적인 패턴을 보여준다 - **한 서브시스템에서 잡은 결함
+  클래스(onCancel 미구현)가 비슷한 시기에 독립적으로 설계/구현된
+  다른 서브시스템에도 그대로 재현될 수 있다**. 앞으로 이런 "구조적
+  결함 클래스"를 하나 잡을 때마다, 같은 침습적 대기 큐 패턴을 쓰는
+  다른 서브시스템(예: `WaitInterruptHandler`와 구조가 같은 향후
+  핸들러)이 있는지도 함께 훑는 것을 이 문서의 표준 절차에 추가할
+  가치가 있다.
+- **현재 상태**: 미해소(`PN-BD276A24` 착수 대기) - §1-B와 달리 아직
+  코드 수정 전이므로 "완전 해소"로 표시하지 않는다.
+
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **`SP-D7013B26`(Slab 할당자/libkmm)**: "확정된 최종 설계" 절이 나열한
+  전 항목(더블 매거진 loaded/previous, `PreemptionGuard` 강제, 매거진
+  용량 16 고정, 버킷 7단계 32/64/128/256/512/1024/2048, `sizeToBucket()`
+  단일 경유, 슬랩 Order 0 고정, 고갈 시 즉시 nullptr 비블로킹, 2048B
+  초과는 PageFrameAllocator 직행)를 `libkmm/slab.h`/`slab.cpp`와 한
+  줄씩 대조 - 예외 없이 전부 설계 그대로 구현돼 있음을 확인
+  (`Scheduler::disablePreemption`/`enablePreemption`도 scheduler.h에
+  실재). 갭 없음 - 이 프로젝트에서 보기 드물게 처음부터 끝까지 정확히
+  구현된 사례로 기록.
 
 - **`TaskClass::RealTime` 우선 스케줄링**: `task.h` 주석이 "구현
   예정"이라고 남아 있어 의심했으나, `Scheduler::pickNext()`가 실제로
@@ -398,6 +445,41 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   그룹+call 인코딩)와는 다른 축(핸들 값 형식 vs 엔드포인트 번호
   형식)이라 서로 충돌 없음을 확인. `RM-48E1E610`의 Sync 그룹(8)도
   "§17.2 정정 대기"로 정확히 의도적 미등록 상태 유지 중 - 갭 없음.
+
+- **`SP-04EE2A18`(Syscall 디스패치)**: 핵심 계약(submit/wait 분리,
+  `SyscallRegistry`의 고정 슬롯+동적 subjectCode 간접화, 등록 안
+  된 endpoint/Slab 고갈 시 블로킹 없이 실패) 전부 `syscall.h`/`.cpp`에
+  그대로 구현돼 있음을 확인. `UserThread::pendingSyscall`이 원안의
+  단일 필드에서 `ChunkedList` 기반 다중 슬롯(`pendingSyscalls`)으로
+  진화했지만, 이는 숨겨진 이탈이 아니라 코드 주석에 명시된
+  `QU-31402585`/`QU-F475C6C2`(2026-09-14, 같은 날 후속 답변)로
+  확정된 정당한 확장 - `waitForMultipleSyscall`/`waitAnyForMultipleSyscall`
+  까지 구현됐다. 문서가 "verb/레지스터 배치는 아직 범위 밖"이라고
+  적어 둔 부분도 실제로 `kDispatchSyscallVerb`(idt.cpp)가 지금도
+  verb 0(submit)/1(wait)만 처리하고 멀티웨이트용 verb는 배정 안 돼
+  있음을 확인 - 문서 서술과 정확히 일치(유저랜드 자체가 아직 없어
+  당장 필요하지도 않음, RM-23F4B687 §4 패턴). 갭 없음.
+
+- **`SP-201238BB`(SharedPtr/WeakPtr/UniquePtr)**: 매우 큰 문서라
+  `libkenv/shared_ptr.h`/`type_traits.h`/`spinlock.h`와 전면 대조 -
+  `Atomic<T>`(AtomicU32/AtomicPtr 통합), `ControlBlockBase`/
+  `ControlBlock<T,Deleter>`/`SharedPtr<T,Deleter>`/`WeakPtr<T,Deleter>`
+  (별칭 생성자 포함)/`EnableSharedFromThis<T>`/`kMakeShared`/
+  `UniquePtr<T,Deleter>`/`kIsBaseOf`(type_traits.h로 분리) 전부 실재.
+  §2-B(`IntrusiveControlBlock`/`IntrusiveRefCounted`/
+  `IntrusiveSharedPtr`/`IntrusiveWeakPtr`/`kMakeIntrusiveShared`)만
+  `shared_ptr.h`에 없음 - 그러나 문서 자신이 "v1에서 실제로 적용할
+  타입은 아직 미정(설계만 제공)"이라고 명시해 둔 항목이라 숨겨진
+  갭이 아니라 공개적으로 유예된 설계(RM-23F4B687 §4 패턴). 갭 없음.
+
+- **`SP-B071E628`(pubreg)**: `PN-185406F6`(pubreg 서비스 구현)이
+  여전히 `scheduled`이고 `minicore/pubreg` 디렉터리 자체가 없어(git_tree
+  확인) 코드 대조 자체가 성립하지 않는다 - 순수 설계 단계. 문서
+  §8의 "9개 항목 전부 교차 확인 완료" 자체 선언을 표본으로 재검증
+  (SP-EAB162FC §2.2의 `pubreg` 추가, `RM-48E1E610`의 `PublishInterface`/
+  `QueryInterfaces` "폐기" 갱신) - 둘 다 정확함. 실제 코드 갭은 아직
+  발생할 수조차 없는 단계 - 갭 없음(착수 시 재점검 대상으로 §3 유지
+  가치 있음, 아래 이동 없이 여기 기록만).
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
