@@ -3,6 +3,7 @@
 #include "gdt.h"
 #include "libelf/elf.h"
 #include "libkenv/mem.h"
+#include "libkenv/spinlock.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
 #include "paging.h"
@@ -179,6 +180,12 @@ bool Process::init() {
     // 동일한 이유(Resurrect가 같은 정적 Process를 재사용)로 매번 리셋.
     isZombie = false;
     exitCode = 0;
+    // [신규, 2026-09-17, PN-C39882D0] ProcessId 발급 상태 - isZombie와
+    // 동일한 이유(Resurrect 재사용)로 매번 리셋. 고정 스폰 KernelService는
+    // SpawnProcess 경로를 안 타 kAllocateProcessId()를 절대 안 부르므로
+    // 이 두 필드는 계속 무효 상태로 남는다(process.h 문서 주석 참고).
+    processId = kInvalidProcessId;
+    processTableIndex = kInvalidProcessTableIndex;
     // 자원 그룹 소속(SP-245D130B §1/§4) - parent/children과 동일한
     // 이유로 매번 리셋. 실제 그룹 가입은 init() 이후 스폰 경로
     // (joinResourceGroup())가 담당 - init() 자신은 항상 "그룹 없음"
@@ -483,6 +490,79 @@ void Process::joinResourceGroup(ResourceGroup* newGroup) {
 
 namespace {
 
+// [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] ProcessId의 세대
+// 태그 슬롯 테이블 - channel.cpp의 `ChannelTableSlot`/`gChannelTable`과
+// 동일한 패턴이되, `Process`는 raw 슬랩 포인터가 아니라 SharedPtr로
+// 관리되므로(PN-E2A114C1) `Channel*==nullptr` 대신 `WeakPtr<Process>::
+// lock()` 실패로 생존을 판정한다(Process* 역참조 없이 판정, SP-9CB55C5B
+// §2 그대로). `WeakPtr<T>`에는 `operator bool()`이 없어(shared_ptr.h
+// 확인) "슬롯이 비었는가"는 `!slot.proc.lock()`으로 판정한다 - 기본
+// 생성된 빈 WeakPtr도 내부 컨트롤 블록이 nullptr이라 `lock()`이
+// 안전하게 빈 SharedPtr을 반환하므로, "한 번도 발급 안 된 슬롯"과
+// "발급됐다가 대상이 죽었는데 아직 명시적으로 안 비워진 슬롯"을 굳이
+// 구분할 필요가 없다(둘 다 안전하게 재사용 가능 - 방어적으로도 유리).
+struct ProcessTableSlot {
+    WeakPtr<Process> proc;
+    uint32_t generation = 0;
+};
+
+ProcessTableSlot gProcessTable[kMaxProcessTableSlots];
+Spinlock gProcessTableLock;  // 발급/해제만 보호(드묾, SP-9CB55C5B §2
+                             // "등록/해제는 SpawnProcess/reap 시점에만
+                             // 일어나 드묾") - 조회(kResolveProcessId)는
+                             // 락 없이 인덱스+세대 비교 + lock()만 한다.
+
+// 발급 - `proc`을 위한 새 슬롯을 확보하고 그 슬롯의 인덱스를
+// `proc->processTableIndex`에 되먹여 저장한 뒤 인코딩된 ProcessId를
+// 반환한다(실패 시 kInvalidProcessId, proc은 건드리지 않음).
+ProcessId kAllocateProcessId(const SharedPtr<Process>& proc) {
+    SpinlockGuard guard(gProcessTableLock);
+    for (uint32_t i = 0; i < kMaxProcessTableSlots; ++i) {
+        if (!gProcessTable[i].proc.lock()) {
+            gProcessTable[i].generation++;
+            gProcessTable[i].proc = WeakPtr<Process>(proc);
+            proc->processTableIndex = i;
+            return (static_cast<ProcessId>(gProcessTable[i].generation) << 32) | i;
+        }
+    }
+    return kInvalidProcessId;  // 슬롯 고갈(동시 생존 UINT16_MAX개 초과)
+}
+
+// 안전 해석 - 유저가 넘긴 pid가 무엇이든 인덱스 범위 검사 + generation
+// 일치 확인 + `WeakPtr::lock()`만으로 끝난다(`reinterpret_cast<Process*>`
+// 를 단 한 번도 쓰지 않음). **[범위 안내, PN-C39882D0]** 이 함수는
+// 아직 아무 데도 연결되지 않는다 - `Wait`은 여전히 "직계 자식만"
+// 스코프라 `self->children`을 직접 순회한다. `Kill`의 임의 대상
+// 확장(`PN-88E62419`)이 이 함수의 첫 실사용처가 될 예정(SP-9CB55C5B
+// §3/§4).
+[[maybe_unused]] SharedPtr<Process> kResolveProcessId(ProcessId pid) {
+    if (pid == kInvalidProcessId) {
+        return {};
+    }
+    const uint32_t index = static_cast<uint32_t>(pid & 0xFFFFFFFFLL);
+    const uint32_t generation = static_cast<uint32_t>(pid >> 32);
+    if (index >= kMaxProcessTableSlots) {
+        return {};
+    }
+    ProcessTableSlot& slot = gProcessTable[index];
+    if (slot.generation != generation) {
+        return {};
+    }
+    return slot.proc.lock();
+}
+
+// 해제 - 좀비가 부모에게 Wait으로 회수(reap)되는 시점에 O(1)로 슬롯을
+// 비운다(generation은 그대로 - 다음 재사용 때 +1). 애초에 발급받은 적
+// 없는 프로세스(고정 스폰 KernelService 등, processTableIndex ==
+// kInvalidProcessTableIndex)를 넘기면 안전하게 아무 일도 하지 않는다.
+void kFreeProcessId(uint32_t processTableIndex) {
+    if (processTableIndex >= kMaxProcessTableSlots) {
+        return;
+    }
+    SpinlockGuard guard(gProcessTableLock);
+    gProcessTable[processTableIndex].proc = WeakPtr<Process>();
+}
+
 // [SP-6BEAE0C1 §3, PN-543C0CE9 착수 4번째 증분] SpawnProcess 본체 -
 // 앞선 세 증분(PageFrameAllocator::retain/refCount, Process::
 // allocate()/UserThread::allocate(), Paging::isUserRangeValid)을 실제로
@@ -726,6 +806,22 @@ public:
         // 과설계 방지). 나중에 `DebugContinue`(§3.5, 아직 미구현,
         // PN-87D6B615 항목5)가 `Scheduler::enqueue()`로 명시적으로
         // Ready에 올려야만 실행을 시작한다.
+        // [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2/§6] ProcessId
+        // 발급 - 이 지점 이전엔 아직 실패 가능한 단계(argv/envp 복사,
+        // execImage, children.insert())가 남아 있었으나 전부 통과했다 -
+        // 원래 코드도 이 지점부터는 더 이상 실패 분기가 없었으므로(항상
+        // 성공으로 co_return) 같은 "이 이후엔 실패 없음" 전제를 그대로
+        // 따른다. 슬롯 고갈(UINT16_MAX개 동시 생존 프로세스 초과, 이
+        // 커널 규모에서 사실상 도달 불가)이라는 극히 드문 경우에도
+        // 이미 시작된 프로세스를 되돌리는 것보다(스레드가 곧 Ready
+        // 큐에 오르거나 디버그 정지 상태가 되므로, 그 시점 이후 되돌림은
+        // children.insert() 등 앞선 단계까지 전부 되감아야 해 원래 코드에
+        // 없던 복잡한 unwind를 새로 만들어야 함) `pid`만 무효로 남기고
+        // 스폰 자체는 성공시키는 쪽을 택한다(POSIX에 없는 실패 모드를
+        // 새로 만들지 않음, RM-23F4B687 §4) - `-1`로도 여전히 `Wait(-1,
+        // ...)`(아무 자식이나)로는 회수 가능하다.
+        procShared->processId = kAllocateProcessId(procShared);
+
         if (args->flags & SpawnProcessFlags::kSpawnDebugStart) {
             started->state = TaskState::Blocked;
             // [신규, 2026-09-17, SP-245D130B §9-4 답변] 이 정지도
@@ -739,7 +835,11 @@ public:
         } else {
             Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
         }
-        args->pid = reinterpret_cast<int64_t>(procShared.get());
+        // [수정, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2/§6, QU-AB5247DD
+        // 승인] 예전엔 `reinterpret_cast<int64_t>(procShared.get())`
+        // (포인터값 그 자체)였다 - 이제 커널이 발급한 불투명 핸들이라
+        // 유저는 이 값으로 어떤 Process도 직접 역참조할 수 없다.
+        args->pid = procShared->processId;
         args->error = SpawnProcessError::None;
         co_return;
     }
@@ -757,7 +857,7 @@ public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<WaitArgs*>(argsRaw);
         args->hadZombieChild = false;
-        args->reapedPid = -1;
+        args->reapedPid = kInvalidProcessId;
         args->exitCode = 0;
         args->hasAnyChild = false;
 
@@ -785,7 +885,12 @@ public:
             if (!child) {
                 return;
             }
-            if (args->targetPid != -1 && reinterpret_cast<int64_t>(child.get()) != args->targetPid) {
+            // [수정, 2026-09-17, PN-C39882D0] 예전엔 포인터값을 직접
+            // 비교(`reinterpret_cast<int64_t>(child.get())`)했으나, 이제
+            // `SpawnProcess`가 발급한 `ProcessId`(child->processId)와
+            // 비교한다 - 스코프(직계 자식만 순회)는 그대로, 비교 기준
+            // 값의 형식만 바뀌었다.
+            if (args->targetPid != kInvalidProcessId && child->processId != args->targetPid) {
                 return;
             }
             args->hasAnyChild = true;
@@ -797,7 +902,7 @@ public:
 
         if (zombie) {
             args->hadZombieChild = true;
-            args->reapedPid = reinterpret_cast<int64_t>(zombie.get());
+            args->reapedPid = zombie->processId;  // [수정, PN-C39882D0] 포인터값 대신 ProcessId
             args->exitCode = zombie->exitCode;
             // mainThread는 아직 SharedPtr 관리 대상이 아니다(PN-B4987BF6
             // 별도 계획, Task 자체를 SharedPtr로 옮기는 더 위험한 작업 -
@@ -805,6 +910,14 @@ public:
             if (zombie->mainThread) {
                 UserThread::release(zombie->mainThread);
             }
+            // [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] 좀비가
+            // 지금 여기서 실제로 회수(reap)되므로, 그 ProcessId 슬롯도
+            // 지금 해제한다(위 zombie->processId를 이미 읽은 뒤라 순서
+            // 무관 - kFreeProcessId는 인덱스만 지운다). kInvalidProcessTableIndex
+            // (이론상 도달 불가 - 이 zombie는 반드시 SpawnProcess를
+            // 거쳐 만들어졌으므로 항상 유효한 인덱스를 가짐)를 넘겨도
+            // kFreeProcessId 자체가 방어적으로 무시한다.
+            kFreeProcessId(zombie->processTableIndex);
             // [수정, 2026-09-17, PN-E2A114C1] `Process::release(zombie)`
             // 를 더 이상 직접 부르지 않는다 - `erase()`가 슬롯의 강한
             // 참조를 내려놓고(위 `zombie` 지역 변수가 아직 하나를 쥐고

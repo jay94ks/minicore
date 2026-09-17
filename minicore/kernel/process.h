@@ -93,6 +93,32 @@ inline uint32_t kResurrectIntervalMinutes(uint32_t consecutiveFailures) {
 // QU-7043EA6D 답변으로 확정 완료) 자체는 준비되었지만, **QU-FF3F0CAA
 // ("첫 프로세스"의 정체/유저랜드 빌드 체계) 답변이 아직 없어** 실제로
 // 실측 검증할 방법이 정해지기 전까지는 별도로 이어간다.
+// [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] 커널이 발급하는
+// 불투명 프로세스 핸들 - "pid는 사실 Process*를 reinterpret_cast한
+// 값"이던 예전 관례(`SpawnProcessArgs::pid`/`WaitArgs::targetPid`/
+// `reapedPid`)를 대체한다. `kChannelId`(channel.cpp)가 이미 확립한
+// "세대 태그 슬롯 테이블" 패턴과 동일 - 유저가 넘긴 값을 절대
+// `reinterpret_cast<Process*>`로 역참조하지 않고, 인덱스 범위 확인 +
+// generation 일치 확인만으로 안전하게 해석한다. **이 인코딩은
+// `SpawnProcess`로 만들어진 프로세스 트리에만 적용된다** - 고정 스폰
+// KernelService(kmain.cpp가 SpawnProcess syscall 경로 없이 직접
+// 만드는 devmgr/fs/net/tty 등)는 `kAllocateProcessId()`를 거치지
+// 않으므로 `processId`가 항상 `kInvalidProcessId`로 남는다(SP-9CB55C5B
+// §1 "이 트리는 SpawnProcess로 만들어진 프로세스의 부모-자식 관계만
+// 표현한다"와 동일한 스코프). **[범위 안내]** 이 PN은 `SpawnProcess`/
+// `Wait`의 pid 필드 인코딩 마이그레이션만 다룬다 - `Kill`의 권한
+// 스코프 확장(`PN-88E62419`)은 별도 계획으로, 그쪽은 여전히 기존
+// raw-pointer 비교(`reinterpret_cast<int64_t>(child.get())`)를 그대로
+// 쓴다(설계 문서 자신이 명시한 의도적 과도기적 불일치).
+using ProcessId = int64_t;
+constexpr ProcessId kInvalidProcessId = -1;
+
+// [확정, 2026-09-17, QU-78E4159E 답변] 시스템 전체 동시 생존 프로세스
+// 개수 상한 - UINT16_MAX. 슬롯 인덱스가 이 값 미만이어야 하므로
+// `kAllocateProcessId()`/`kResolveProcessId()`/`kFreeProcessId()`
+// (process.cpp, 테이블 자체는 파일 스코프 static)가 공유하는 상수.
+constexpr uint32_t kMaxProcessTableSlots = 65535;
+
 // [신규, 2026-09-17, PN-E2A114C1, DC-21647E46/QU-76409699 "(B) 포함으로
 // 읽자"] `EnableSharedFromThis<Process>` 상속 - `Process`의 모든
 // 인스턴스가 이제 `kMakeShared<Process>(...)`로 감싸져 관리되므로(아래
@@ -200,6 +226,20 @@ public:
     // 메커니즘은 이 좀비 개념과 무관하게 그대로 동작).
     bool isZombie = false;
     int32_t exitCode = 0;
+
+    // [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] 이 프로세스에
+    // 커널이 발급한 불투명 핸들(kInvalidProcessId로 시작 - `SpawnProcess`
+    // 성공 경로의 `kAllocateProcessId()`만 채운다, 위 `ProcessId`
+    // 문서 주석 참고). `processTableIndex`는 `kFreeProcessId()`가
+    // O(1)로 슬롯을 찾기 위한 역참조(SP-9CB55C5B §2 "Process 쪽에
+    // 자기 슬롯 인덱스를 역으로 저장해 둬야 해제 시 O(1)로 슬롯을
+    // 찾을 수 있다"). 둘 다 init()에서 매번 리셋(Resurrect가 같은
+    // 정적 Process를 재사용할 수 있으므로 - 다만 고정 스폰
+    // KernelService는 애초에 이 필드들을 채운 적이 없어 항상
+    // kInvalidProcessId/kInvalidProcessTableIndex로 남는다).
+    ProcessId processId = kInvalidProcessId;
+    static constexpr uint32_t kInvalidProcessTableIndex = 0xFFFFFFFFu;
+    uint32_t processTableIndex = kInvalidProcessTableIndex;
 
     // [신규, 2026-09-17, SP-245D130B §1/§4] 이 프로세스가 속한 자원
     // 그룹(cgroup류) - `parent`/`children`(프로세스 트리)과 완전히
@@ -393,6 +433,14 @@ private:
     static WeakPtr<Process> gOrphanRoot;
 };
 
+// [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] 위 `ProcessId` 세대
+// 태그 슬롯 테이블의 발급/해석/해제 3종(`kAllocateProcessId`/
+// `kResolveProcessId`/`kFreeProcessId`) - 테이블 자체를 포함해 전부
+// process.cpp의 익명 네임스페이스 안에 있다(channel.cpp의
+// `kAllocateChannelId`/`kResolveChannelId`/`kFreeChannelId`와 동일한
+// 관례 - `SpawnProcessHandler`/`WaitHandler`/`KillHandler` 전부 같은
+// process.cpp 파일 안에 있어 헤더에 노출할 이유가 없다).
+
 // [갱신, 2026-09-17, SP-E9B44929] Process 그룹(0) - SpawnProcess.
 constexpr SyscallEndpointId kSyscallEndpointSpawnProcess = kMakeSyscallEndpointId(0, 4);
 
@@ -458,8 +506,13 @@ struct SpawnProcessArgs {
     uint32_t flags = SpawnProcessFlags::kSpawnNone;  // SpawnProcessFlags 비트마스크
     // out
     SpawnProcessError error = SpawnProcessError::None;
-    int64_t pid = -1;  // 성공 시 새 Process*를 재해석한 값(AsyncTaskManageCode의
-                        // "포인터를 그대로 토큰으로" 관례와 동일) - 실패 시 -1 유지.
+    // [수정, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2/§6] 성공 시 새
+    // 프로세스의 `ProcessId`(세대 태그 슬롯 인코딩, `kAllocateProcessId()`)
+    // - 예전엔 `reinterpret_cast<int64_t>(Process*)` 그 자체였으나(값
+    // 형식 마이그레이션, 이미 승인된 ABI 변경 - QU-AB5247DD), 이제 유저는
+    // 이 값으로 어떤 Process도 직접 역참조할 수 없다. 실패 시
+    // `kInvalidProcessId`(-1) 유지.
+    int64_t pid = kInvalidProcessId;
 };
 
 // [신규, PN-E35294B8 항목2, QU-B9EB45E4 설계자 답변 그대로] argv+envp
@@ -503,13 +556,16 @@ constexpr SyscallEndpointId kSyscallEndpointWait = kMakeSyscallEndpointId(0, 3);
 // 내부 구현만 바꿔 확장할 수 있다.
 struct WaitArgs {
     // -1이면 아무 자식이나(POSIX wait(-1, ...)와 동일) - 그 외 값이면
-    // `SpawnProcessArgs::pid`와 동일한 관례(그 자식 Process*를
-    // reinterpret_cast<int64_t>한 값)와 정확히 일치하는 자식만 찾는다.
-    int64_t targetPid = -1;
+    // [수정, 2026-09-17, PN-C39882D0] `SpawnProcessArgs::pid`와 동일한
+    // 새 `ProcessId` 인코딩(자식 `Process::processId`)과 정확히
+    // 일치하는 자식만 찾는다. 스코프는 여전히 "호출자의 직계 자식만"
+    // (POSIX `wait()`와 동일 의미론, §5 - Wait은 임의 대상으로 확장된
+    // 적 없다) - 바뀐 건 순수 값 형식뿐.
+    int64_t targetPid = kInvalidProcessId;
 
     // out - hadZombieChild==true일 때만 reapedPid/exitCode가 유효하다.
     bool hadZombieChild = false;
-    int64_t reapedPid = -1;
+    int64_t reapedPid = kInvalidProcessId;
     int32_t exitCode = 0;
 
     // out - targetPid 조건에 맞는 자식이(좀비든 아니든) 하나라도
