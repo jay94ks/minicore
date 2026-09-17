@@ -45,6 +45,7 @@ enum class ChannelError : uint32_t {
     NotSupported,
     PermissionDenied,
     AlreadyExists,
+    Interrupted,  // [신규, PN-B5C2845A] 대기 도중 Kill/Terminate 대상이 돼 강제로 실패 완료됨
 };
 
 struct EnumerateDevicesArgs {

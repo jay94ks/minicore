@@ -270,7 +270,14 @@ Syscall::MultiWaitResult Syscall::waitForAnyOf(const AsyncTaskManageCode* tokens
                     break;
                 }
                 auto* task = reinterpret_cast<AsyncTask*>(slot->value.token);
-                if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
+                // [신규, 2026-09-18, PN-B5C2845A] `Cancelled`도 "끝남"
+                // 으로 인식한다 - 다른 프로세스의 Kill이 이 토큰을
+                // 취소시켰을 수 있다(`Scheduler::cancelPendingSyscalls`).
+                // Completed와 구분할 필요가 없어(호출부는 결국 실패로
+                // 다뤄야 함) Failed와 같은 outcome으로 매핑한다 -
+                // 새 MultiWaitOutcome 값을 추가하지 않는다.
+                if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed ||
+                    task->state == AsyncTaskState::Cancelled) {
                     result = {tokens[i], task->state == AsyncTaskState::Completed ? MultiWaitOutcome::Completed
                                                                                    : MultiWaitOutcome::Failed};
                     readySlot = slot;

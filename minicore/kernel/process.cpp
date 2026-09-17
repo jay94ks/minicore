@@ -502,6 +502,23 @@ bool Process::raiseSignal(SignalNumber number) {
         if (SharedPtr<Waitable> waitable = mainThread->blockedOn.lock()) {
             waitable->cancel(mainThread, WaitCancelReason::Signal);
         }
+        // [신규, 2026-09-18, PN-B5C2845A] Kill/Terminate는 위
+        // `blockedOn`(Waitable 기반 블로킹) 강제 웨이크업만으로는
+        // `mainThread`가 `Syscall::wait()`(`acceptFromChannel`/
+        // `connectChannel`/`ChannelRead`/`ChannelWrite` 등)로 파킹된
+        // 경우에 절대 도달하지 못한다(PN-B5C2845A 발견 - `Scheduler::
+        // parkCurrent()`는 `blockedOn`을 전혀 안 씀). Kill/Terminate
+        // 둘 다(§4.4 체크포인트/kCheckSignalCheckpoint와 동일한 판정
+        // 대상) 이 경로도 함께 켠다 - `Scheduler::cancelPendingSyscalls`
+        // 가 아직 안 끝난 pendingSyscalls 항목을 `Cancelled`로 전이시켜
+        // 깨우고(waitForAnyOf가 이제 `Cancelled`도 인식, syscall.cpp
+        // 참고), 각 핸들러의 `onCancel()`이 `args->error`를 채운다
+        // (설계자 답변 "얘들을 실패시키면 되잖아", QU-8E137FFD) - 대상이
+        // 실제로 파킹돼 있지 않으면(pendingSyscalls가 비어있거나 전부
+        // 이미 끝남) 이 호출은 그냥 아무 일도 안 하는 것과 같다.
+        if (number == SignalNumber::Kill || number == SignalNumber::Terminate) {
+            Scheduler::cancelPendingSyscalls(mainThread);
+        }
     }
     return true;
 }

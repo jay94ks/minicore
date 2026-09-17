@@ -486,6 +486,11 @@ public:
     // AsyncTaskHandler::onCancel 문서 참고).
     void onCancel(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ConnectChannelArgs*>(argsRaw);
+        // [신규, 2026-09-18, PN-B5C2845A] 이 취소가 무엇 때문이든
+        // (Kill 등) 호출자가 나중에 args->error로 원인을 알 수 있게
+        // 항상 먼저 채운다(설계자 답변 "얘들을 실패시키면 되잖아",
+        // QU-8E137FFD) - 아래 정리 로직의 성공/실패와 무관.
+        args->error = ChannelError::Interrupted;
         Channel* channel = nullptr;
         if (args->target != 0) {
             channel = kResolveChannelId(args->target);  // [수정, PN-CE6A04AB]
@@ -628,6 +633,8 @@ public:
     // 넘기면 UAF다(SP-1FBC0EEB §"취소/실패 처리"에 정정 각주 추가함).
     void onCancel(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<AcceptFromChannelArgs*>(argsRaw);
+        // [신규, 2026-09-18, PN-B5C2845A] ConnectChannelHandler::onCancel과 동일한 이유(위 참고).
+        args->error = ChannelError::Interrupted;
         auto* channel = kResolveChannelId(args->channelHandle);  // [수정, PN-CE6A04AB]
         if (!channel) {
             return;
@@ -712,6 +719,8 @@ public:
     // 강한 소유)과는 별개의 문제라 이 정리도 별도로 필요하다.
     void onCancel(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ChannelReadArgs*>(argsRaw);
+        // [신규, 2026-09-18, PN-B5C2845A] ConnectChannelHandler::onCancel과 동일한 이유(위 참고).
+        args->error = ChannelError::Interrupted;
         SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
         if (!bridge) {
             return;
@@ -787,6 +796,8 @@ public:
     // (같은 댕글링 포인터 위험, 위 ChannelReadHandler 주석 참고).
     void onCancel(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<ChannelWriteArgs*>(argsRaw);
+        // [신규, 2026-09-18, PN-B5C2845A] ConnectChannelHandler::onCancel과 동일한 이유(위 참고).
+        args->error = ChannelError::Interrupted;
         SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
         if (!bridge) {
             return;

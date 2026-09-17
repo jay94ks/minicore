@@ -609,15 +609,27 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
     gDraining[coreIndex] = true;
 
     if (task->state == AsyncTaskState::Cancelled) {
-        // [PN-40E976F2] 이 AsyncTask를 기다리던 UserThread가 이미
-        // 죽어(scheduler.cpp의 SelfTerminateHandler::onExec) 결과를
-        // 가져갈 사람이 없다 - onExec을 실행/재개하지 않고 곧장
-        // onCancel만 부른 뒤 자원을 반납한다. autoFree는 취소
-        // 시점에 이미 강제로 true가 돼 있다(그 시점 이후로는 아무도
-        // wait()로 직접 반납할 수 없으므로).
+        // [PN-40E976F2] 원래 시나리오 - 이 AsyncTask를 기다리던
+        // UserThread가 이미 죽어(scheduler.cpp의 SelfTerminateHandler::
+        // onExec) 결과를 가져갈 사람이 없다 - onExec을 실행/재개하지
+        // 않고 곧장 onCancel만 부른 뒤 자원을 반납한다. autoFree는
+        // 그 경우 취소 시점에 이미 강제로 true가 돼 있다.
         AsyncTaskHandler* handler = AsyncCallbackRegistry::resolve(task->subjectCode);
         if (handler) {
             handler->onCancel(task, task->args);
+        }
+        // [신규, 2026-09-18, PN-B5C2845A] 새 시나리오 - 이 AsyncTask의
+        // 원래 제출자가 아직 살아서 `Syscall::wait()`로 이 토큰을
+        // 기다리며 파킹돼 있을 수 있다(다른 프로세스의 Kill이
+        // `Scheduler::cancelPendingSyscalls()`로 이 상태를 만든 경우 -
+        // PN-40E976F2의 "제출자가 이미 죽었다" 전제가 더 이상 항상
+        // 참이 아니게 됨). 그 경우 `autoFree`는 false로 남아 있으므로
+        // (cancelPendingSyscalls 문서 참고) 아래에서 반납하지 않고,
+        // 대기자를 먼저 깨워 `Syscall::waitForAnyOf()`가 스스로
+        // 소비/반납하게 한다 - `Completed`/`Failed` 분기(아래)가 이미
+        // 하는 것과 동일한 패턴.
+        if (SharedPtr<Task> waiter = task->waitingTask.lock()) {
+            Scheduler::scheduleImmediate(coreIndex, waiter.get());
         }
         if (task->autoFree) {
             kReleaseAsyncTask(task);

@@ -265,6 +265,27 @@ public:
     // 반납이 끝나 있으므로 이 위험이 원천적으로 없어진다.
     static void retireTask(Task* task);
 
+    // [신규, 2026-09-18, PN-B5C2845A] `userThread->pendingSyscalls`에
+    // 남아 있는, 아직 안 끝난(Ready/Suspended) AsyncTask들을 전부
+    // `AsyncTaskState::Cancelled`로 전이시킨다 - 원래
+    // `SelfTerminateHandler::onExec`(PN-40E976F2) 전용이던 "사망 전파"
+    // 로직을 공용 함수로 뽑아 `Process::raiseSignal()`의 Kill/Terminate
+    // 경로도 재사용할 수 있게 했다. 두 호출부의 차이 - 자기 자신이
+    // 죽는 경우(원래 용도)는 이 목록의 어떤 항목도 `waitingTask`를
+    // 갖지 않는다(그 스레드 자신이 곧 wait()를 부를 참이었다면애초에
+    // 실행 중일 수 없으므로) - 반면 `Kill`이 대상으로 삼는, 이미
+    // `Syscall::wait()`로 파킹된 스레드는 자신의 pendingSyscalls
+    // 항목에 스스로를 `waitingTask`로 등록해 둔 상태다. 그래서 이
+    // 함수는 항목별로 `waitingTask`가 있는지 직접 확인해(있으면 그
+    // 대기자가 나중에 `waitForAnyOf()`에서 스스로 소비/반납하도록
+    // `autoFree`를 그대로 false로 두고 목록에서 지우지 않음, 없으면
+    // 기존과 동일하게 즉시 반납+목록에서 제거) 두 시나리오 모두
+    // 안전하게 처리한다. **호출부가 이 함수 호출 뒤 이 목록 전체를
+    // `clear()`해도 되는지는 호출부 책임** - 자기 자신이 죽는
+    // 경우(SelfTerminateHandler)만 안전하다(살아있는 스레드의 목록을
+    // 통째로 지우면 여전히 대기 중인 항목까지 잃는다).
+    static void cancelPendingSyscalls(UserThread* userThread);
+
     // 선점 비활성화 카운터(공개 API, PL-2D3184BC 8단계) - 인터럽트
     // 자체는 막지 않는다(onTick이 이 카운트를 보고 Task 전환만
     // 보류한다) - Slab 할당자(SP-D7013B26)의 PreemptionGuard가 코어별

@@ -749,50 +749,13 @@ public:
         Scheduler::retireTask(target);
         auto* userThread = static_cast<UserThread*>(target);
 
-        // [PN-40E976F2] 이 UserThread가 제출했지만(Syscall::submit)
-        // 아직 wait()로 소비되지 않은 AsyncTask들을 정리한다 - 이제
-        // 그 결과를 가져갈 사람이 영원히 없다. pendingSyscalls 자체가
-        // 설계자가 말한 "사망 전파 목록"이다(이미 있는 자료구조를
-        // 그대로 재사용 - ChunkedList::clear() 문서 주석이 애초에 이
-        // 용도를 예정해 뒀다).
-        userThread->pendingSyscalls.forEach([](UserThread::PendingSyscall& pending, auto*) {
-            auto* asyncTask = reinterpret_cast<AsyncTask*>(pending.token);
-            if (asyncTask->state == AsyncTaskState::Completed || asyncTask->state == AsyncTaskState::Failed) {
-                // 이미 끝났지만 아무도 wait()로 가져가지 않은 결과 -
-                // 리액터는 autoFree=false라 이미 손을 뗀 상태이므로
-                // 여기서 대신 반납한다.
-                GenericSlabAllocator::free(reinterpret_cast<void*>(asyncTask->stackBase), kAsyncTaskStackSize);
-                GenericSlabAllocator::free(asyncTask, sizeof(AsyncTask));
-                return;
-            }
-            // 아직 안 끝났다 - 취소로 전이한다. 이제 아무도 결과를
-            // 가져가지 않으므로 autoFree를 강제로 켜서 리액터가 스스로
-            // 반납하게 한다.
-            const bool wasSuspended = (asyncTask->state == AsyncTaskState::Suspended);
-            asyncTask->autoFree = true;
-            // §8.3-1(SP-F682B889) - onCancel을 부르기 전에 먼저
-            // cancelSource를 트리거한다. 이 AsyncTask가 Ready였다면
-            // 아래에서 onExec 자체를 건너뛰므로 사실상 무관하지만,
-            // Suspended였다면(yield()로 실행 중간에 멈춰 있었다면)
-            // onCancel만 불리고 onExec으로는 다시 재개되지 않으므로
-            // (state==Cancelled 검사가 onExec 재개보다 우선) 이 트리거
-            // 자체가 onExec 쪽에서 관측될 일은 없다 - 그래도 §8.2가
-            // "이미 끝난 작업에 트리거해도 무해"를 보장하고, cancelSource
-            // 를 직접 폴링하는 다른 코드(예: 타임아웃과 경합하는 코드)
-            // 가 상태를 일관되게 보게 하기 위해 항상 호출한다.
-            asyncTask->cancelSource.trigger();
-            asyncTask->state = AsyncTaskState::Cancelled;
-            if (wasSuspended) {
-                // Ready(이미 실행 큐에 있음)라면 언젠가 popFront될 때
-                // 자연히 Cancelled를 발견한다 - 하지만 Suspended(스스로
-                // yield하고 큐 밖으로 나가 있는 상태)라면 아무도 다시
-                // 큐에 넣어주지 않는 한 영원히 방치된다. 이 함수 자신이
-                // 그 AsyncTask를 원래 실행했던 바로 그 코어의 리액터
-                // 위에서 돌고 있으므로(v1 - 코어 간 이관 없음)
-                // submitCompletion을 직접 불러도 안전하다.
-                AsyncReactor::submitCompletion(asyncTask);
-            }
-        });
+        // [PN-40E976F2, 리팩터링 2026-09-18 PN-B5C2845A] 이 UserThread가
+        // 제출했지만(Syscall::submit) 아직 wait()로 소비되지 않은
+        // AsyncTask들을 정리한다 - 이제 그 결과를 가져갈 사람이 영원히
+        // 없다. 자기 자신이 죽는 경우라 이 목록의 어떤 항목도
+        // waitingTask를 갖지 않으므로(cancelPendingSyscalls 문서 참고)
+        // 아래 clear()로 목록 전체를 마저 비워도 안전하다.
+        Scheduler::cancelPendingSyscalls(userThread);
         userThread->pendingSyscalls.clear();
 
         // [수정, 2026-09-17, PN-E2A114C1] `userThread->process`가 이제
@@ -1789,6 +1752,72 @@ void Scheduler::retireCurrentTask() {
     // 와 동일한 패턴의 방어적 무한 루프.
     for (;;) {
     }
+}
+
+// [신규, 2026-09-18, PN-B5C2845A] SelfTerminateHandler(PN-40E976F2)
+// 전용이던 "사망 전파" 로직을 공용 함수로 뽑았다 - scheduler.h의
+// `Scheduler::cancelPendingSyscalls` 문서 주석 참고(두 호출부의 차이 -
+// 자기 자신이 죽는 경우 vs 다른 프로세스의 Kill이 대상으로 삼는,
+// 여전히 살아서 `Syscall::wait()`로 파킹된 경우 - 이 함수가 항목별로
+// `waitingTask` 유무를 직접 확인해 두 경우 모두 안전하게 처리한다).
+void Scheduler::cancelPendingSyscalls(UserThread* userThread) {
+    userThread->pendingSyscalls.forEach([userThread](UserThread::PendingSyscall& pending, auto* slot) {
+        auto* asyncTask = reinterpret_cast<AsyncTask*>(pending.token);
+        // [신규, PN-B5C2845A] 이 AsyncTask가 끝나기를 실제로 기다리는
+        // kernel::Task가 있는지(예: Kill 대상이 이 토큰으로
+        // waitForAnyOf에 파킹돼 있는 경우) - 있으면 그 대기자가 나중에
+        // 스스로 소비/반납하도록 이 항목을 건드리지 않고 목록에도
+        // 남겨 둔다(대기자의 waitForAnyOf가 자기 pendingSyscalls에서
+        // erase한다). SelfTerminateHandler의 원래 시나리오(자기 자신이
+        // 죽는 경우)는 이 목록의 어떤 항목도 대기자를 가질 수 없다
+        // (그 스레드 자신이 지금 실행 중이라 동시에 파킹돼 있을 수
+        // 없으므로) - 그래서 이 확인을 추가해도 기존 동작은 전혀
+        // 안 바뀐다.
+        const bool hasWaiter = static_cast<bool>(asyncTask->waitingTask.lock());
+        if (asyncTask->state == AsyncTaskState::Completed || asyncTask->state == AsyncTaskState::Failed) {
+            if (hasWaiter) {
+                return;  // 대기자가 스스로 소비/반납한다 - 여기서 먼저 반납하면 UAF.
+            }
+            // 이미 끝났지만 아무도 wait()로 가져가지 않은 결과 -
+            // 리액터는 autoFree=false라 이미 손을 뗀 상태이므로
+            // 여기서 대신 반납한다.
+            GenericSlabAllocator::free(reinterpret_cast<void*>(asyncTask->stackBase), kAsyncTaskStackSize);
+            GenericSlabAllocator::free(asyncTask, sizeof(AsyncTask));
+            userThread->pendingSyscalls.erase(slot);
+            return;
+        }
+        // 아직 안 끝났다 - 취소로 전이한다. 대기자가 없으면(기존
+        // 시나리오) autoFree를 강제로 켜서 리액터가 스스로 반납하게
+        // 하고 목록에서도 지운다 - 있으면(신규 시나리오) 그대로
+        // false로 남겨 대기자의 waitForAnyOf가 반납/erase하게 한다.
+        const bool wasSuspended = (asyncTask->state == AsyncTaskState::Suspended);
+        asyncTask->autoFree = !hasWaiter;
+        // §8.3-1(SP-F682B889) - onCancel을 부르기 전에 먼저
+        // cancelSource를 트리거한다. 이 AsyncTask가 Ready였다면
+        // 아래에서 onExec 자체를 건너뛰므로 사실상 무관하지만,
+        // Suspended였다면(yield()로 실행 중간에 멈춰 있었다면)
+        // onCancel만 불리고 onExec으로는 다시 재개되지 않으므로
+        // (state==Cancelled 검사가 onExec 재개보다 우선) 이 트리거
+        // 자체가 onExec 쪽에서 관측될 일은 없다 - 그래도 §8.2가
+        // "이미 끝난 작업에 트리거해도 무해"를 보장하고, cancelSource
+        // 를 직접 폴링하는 다른 코드(예: 타임아웃과 경합하는 코드)
+        // 가 상태를 일관되게 보게 하기 위해 항상 호출한다.
+        asyncTask->cancelSource.trigger();
+        asyncTask->state = AsyncTaskState::Cancelled;
+        if (wasSuspended) {
+            // Ready(이미 실행 큐에 있음)라면 언젠가 popFront될 때
+            // 자연히 Cancelled를 발견한다 - 하지만 Suspended(스스로
+            // yield하고 큐 밖으로 나가 있는 상태)라면 아무도 다시
+            // 큐에 넣어주지 않는 한 영원히 방치된다. 이 함수 자신이
+            // 그 AsyncTask를 원래 실행했던 바로 그 코어의 리액터
+            // 위에서 돌고 있으므로(v1 - 코어 간 이관 없음)
+            // submitCompletion을 직접 불러도 안전하다.
+            AsyncReactor::submitCompletion(asyncTask);
+        }
+        if (!hasWaiter) {
+            userThread->pendingSyscalls.erase(slot);
+        }
+    });
 }
 
 void Scheduler::retireTask(Task* task) {
