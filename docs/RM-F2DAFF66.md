@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T20:09:59.547Z
+  updatedAt: 2026-09-18T21:15:41.622Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1378,15 +1378,21 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   가능성이 있는 항목이 **이번엔 미착수 상태로나마 openly 추적**된
   사례 - 이 문서(§4)의 목적이 실제로 작동함을 확인.
 
-- **`SP-76250478`(멀티스레드 유저 프로세스 지원) → `PN-0EB2FABF`**:
-  2026-09-18 approved, 구현 계획 `PN-0EB2FABF`(scheduled) 등록 완료 -
-  아직 코드는 없음. §2.1(`Process::threads`/`ThreadId`/`UserThread`
-  종료 필드)/§2.2(`CreateThread`)/§3 항목2-3(`SelfTerminateThread`,
-  좀비/Join 정책)/§3.1(`Join`/`Detach` 진짜 블로킹, `joinerAsyncTask`)
-  다섯 항목을 커밋이 올라오는 대로 실제 코드와 대조 - 특히 여러
-  syscall을 한 번에 나열하는 설계라 §1-A(`Task::numaNode`)류 "뒷부분
-  항목 누락" 패턴을 주의 깊게 점검한다(4개 syscall 중 일부만 반영되고
-  나머지가 조용히 빠지는 경우).
+- **[점검 완료, 2026-09-18, 갭 없음] `SP-76250478`(멀티스레드 유저
+  프로세스 지원) → `PN-0EB2FABF`(completed)**: 예고했던 다섯 항목
+  전부 커밋으로 반영됨을 `PN-0EB2FABF` 완료 기록으로 대조 확인 -
+  §2.1(commit b0f2753, `Process::threads`/`ThreadId`/`UserThread`
+  종료 필드), §2.2(commit 02b2702, `CreateThread`), §3
+  항목2-3(commit fd01642, `SelfTerminateThread` + 좀비/Join 정책),
+  §3.1(commit 5ee0fec, `Join`/`Detach` 진짜 블로킹) 전부 "뒷부분
+  항목 누락" 없이 완결. §4가 "착수 세션이 코드 감사로 확정"하라고
+  넘긴 두 실구현 세부(스케줄링 1:1 가정 전수 재검토, AsyncTask
+  코루틴 강제 재개 방식)도 각각 1단계(`WaitHandler`/`raiseSignal()`/
+  `ResourceGroup::thaw()`/`DebugContinueHandler`/`kFormatStatus()`
+  전체 순회로 수정)와 4단계(`AsyncTaskWeakRef` 공개 승격 + `JoinAwaiter`
+  커스텀 `co_await`, 그 과정에서 코루틴 프레임 누수/재개 경로 CR3
+  미동기화 잠재 버그 2건도 함께 발견·수정)에서 실제로 처리됨을
+  확인 - **갭 없음.**
 
 ## §5. 기록 규칙
 
