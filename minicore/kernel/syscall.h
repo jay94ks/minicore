@@ -200,13 +200,14 @@ public:
 
     // [신규, 2026-09-18, SP-76250478 §2.1/§3/§3.1, PN-0EB2FABF] 멀티스레드
     // 유저 프로세스 지원 - `Process::threads`(process.h)에 담기면서
-    // 함께 도입된 필드들. **이 증분(첫 착수)에서는 구조체만 마련하고
-    // 아무도 값을 세팅/소비하지 않는다** - `CreateThread`/
-    // `SelfTerminateThread`/`Join`/`Detach` syscall(전부 후속 증분)이
-    // 실제로 이 필드들을 배선한다. 지금은 프로세스당 스레드가 정확히
-    // 하나뿐이라(`execImage()`/fork()가 유일한 스레드 생성 경로) 전부
-    // 기본값에 머문다.
-    ThreadId threadId = kInvalidThreadId;  // CreateThread가 발급(§2.1)
+    // 함께 도입된 필드들.
+    // [갱신, 2026-09-18, PN-0EB2FABF 2단계] `threadId`는 이제 실제로
+    // 배선됐다 - `execImage()`/fork()의 최초 스레드와 `CreateThread`
+    // (process.cpp)가 만드는 스레드 전부 `Process::nextThreadId`에서
+    // 발급받는다. `isZombie`/`exitCode`/`detached`/`joinerAsyncTask`는
+    // 여전히 미배선 - `SelfTerminateThread`/`Join`/`Detach`(후속
+    // 증분)가 실제로 소비한다.
+    ThreadId threadId = kInvalidThreadId;  // CreateThread/execImage()/fork()가 발급(§2.1)
     bool isZombie = false;   // 이 스레드 자신의 좀비 상태(§3) - Process::
                              // isZombie(프로세스 트리 좀비, §6)와는 별개
                              // 축이다. 정상 종료 후 아직 Join되지 않은
@@ -219,6 +220,14 @@ public:
     // 미지원). AsyncTask는 이 파일 위 #include "async_task.h"로 이미
     // 완전한 타입이라 WeakPtr<AsyncTask>를 바로 멤버로 둘 수 있다.
     WeakPtr<AsyncTask> joinerAsyncTask;
+
+    // [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] `CreateThread`
+    // (process.cpp)가 만든 스레드에서만 쓴다 - `kEnterRing3Thread`
+    // (process.cpp)가 ring3 진입 직전 이 값을 RDI에 실어 `entry(arg)`
+    // SysV 관례를 만족시킨다. `execImage()`/fork()가 만드는 스레드는
+    // (ELF `_start`/재개 프레임을 각자 다른 방식으로 쓰므로) 이 필드를
+    // 전혀 안 씀(0으로 남음).
+    uint64_t threadStartArg = 0;
 
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든

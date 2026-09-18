@@ -286,6 +286,18 @@ public:
     bool isZombie = false;
     int32_t exitCode = 0;
 
+    // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] `CreateThread`
+    // (후속 항목2)가 새 스레드마다 발급하는 `ThreadId`의 단조증가
+    // 카운터 - 실행 중인 스레드 수와 무관하게 프로세스 생애 동안 절대
+    // 재사용하지 않는다(재사용을 허용하면 옛 id로 걸린 `Join`이 그
+    // 사이 다른 스레드를 잘못 가리킬 여지가 생긴다 - RM-23F4B687 §4
+    // 취지상 이 선택 자체는 순수 구현 세부). `execImage()`/`fork()`가
+    // 만드는 최초 스레드도 이 카운터에서 발급받아(보통 0) 이후
+    // `CreateThread`가 만드는 스레드들과 같은 id 공간을 공유한다.
+    // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로
+    // init()에서 매번 0으로 리셋한다(group/frozenByGroup과 동일한 이유).
+    ThreadId nextThreadId = 0;
+
     // [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] 이 프로세스에
     // 커널이 발급한 불투명 핸들(kInvalidProcessId로 시작 - `SpawnProcess`
     // 성공 경로의 `kAllocateProcessId()`만 채운다, 위 `ProcessId`
@@ -473,6 +485,7 @@ public:
                           uint64_t stringsSize = 0, const uint64_t* argOffsets = nullptr, uint32_t argCount = 0,
                           const uint64_t* envOffsets = nullptr, uint32_t envCount = 0);
 
+
     // [신규, 2026-09-18, PN-22E5E9E7 항목6, SP-29D652AA §5.2] 이
     // 프로세스의 PT_TLS 템플릿(항목5, `hasTlsTemplate`)이 있으면 그
     // 프로세스 주소공간 안에 `thread` 전용 TLS 인스턴스를 만들어
@@ -622,6 +635,35 @@ struct SpawnProcessArgs {
     // 이 값으로 어떤 Process도 직접 역참조할 수 없다. 실패 시
     // `kInvalidProcessId`(-1) 유지.
     int64_t pid = kInvalidProcessId;
+};
+
+// [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] Process 그룹(0) -
+// CreateThread(RM-48E1E610 #6).
+constexpr SyscallEndpointId kSyscallEndpointCreateThread = kMakeSyscallEndpointId(0, 6);
+
+// CreateThread 실패 사유 - SpawnProcessError와 같은 관례.
+enum class CreateThreadError : uint32_t {
+    None = 0,
+    InvalidArgument,  // entry가 Paging::isUserRangeValid를 통과 못함, 또는 args 자체가 유저 범위 밖
+    TooManyThreads,   // 이미 kMaxThreadsPerProcess개(위 정의)에 도달 - 설계자 opinion 그대로
+    OutOfMemory,      // UserThread slab 고갈, 또는 ProcessAddressSpaceManager::mapRegion() 실패
+                      // (VMA 8개 슬롯 소진 포함 - execImage() 문서 주석의 "알려진 한계" 참고)
+};
+
+// [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] CreateThread syscall
+// 인자 - 호출자와 같은 프로세스 안에 스레드를 추가한다(대상 프로세스를
+// 지정하는 필드가 없다 - "같은 프로세스"만 지원, SpawnProcess처럼 새
+// 주소공간을 만들지 않는다). `entry`는 SysV 관례대로 RDI=`arg` 하나만
+// 받는 함수로 취급한다(`kEnterRing3Thread`, process.cpp 참고) - 여러
+// 인자를 받는 시작 함수는 유저랜드가 `arg`를 구조체 포인터로 감싸
+// 처리한다.
+struct CreateThreadArgs {
+    uint64_t entry = 0;      // 유저 포인터 - 새 스레드의 시작 함수(반환 시 동작은 §3 항목2가 착수되기 전까지 미정의 - 반드시 반환하지 않게 작성)
+    uint64_t arg = 0;        // entry(arg) 형태로 RDI에 그대로 전달
+    uint64_t stackSize = 0;  // 0이면 기존 execImage()와 동일한 기본값(kUserStackSize, 64KiB)
+    // out
+    ThreadId threadId = kInvalidThreadId;
+    CreateThreadError error = CreateThreadError::None;
 };
 
 // [신규, 2026-09-18, PN-44C91D6E, SP-6BEAE0C1] `fork()` - 이 syscall만

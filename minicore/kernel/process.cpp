@@ -125,6 +125,55 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
     __builtin_unreachable();
 }
 
+// [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] `CreateThread`가
+// 만든 스레드 전용 ring3 진입점 - `kEnterRing3`와 거의 동일하지만
+// (세그먼트 reload -> `kSyncFsBaseToUser` -> iretq 순서, 그 함수 문서
+// 주석이 실측으로 확인해 둔 "셀렉터 reload가 FS_BASE를 지운다" 함정을
+// 똑같이 피한다) **RDI에 `threadStartArg`를 실어 SysV 관례대로
+// `entry(arg)` 호출처럼 보이게 한다** - `kEnterRing3`이 진입하는
+// ELF `_start`는 인자를 스택(argc/argv/envp)으로 받지 레지스터로
+// 받지 않아 이 차이가 필요했다. `self`는 이 함수의 유일한 호출부
+// (`CreateThreadHandler::onExec()`의 `thread->init(kEnterRing3Thread,
+// nullptr)`)가 항상 `UserThread`에만 거는 entry라 안전하게 캐스팅할
+// 수 있다(kEnterRing3와 동일한 근거).
+[[noreturn]] void kEnterRing3Thread(void*) {
+    auto* self = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+
+    static_assert(kernel::kGdtUserDataSelector == 0x1b, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
+    static_assert(kernel::kGdtUserCodeSelector == 0x23, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
+
+    const kernel::uint64_t entryPoint = self->ring3EntryPoint;
+    const kernel::uint64_t userStackTop = self->ring3UserStackTop;
+    const kernel::uint64_t startArg = self->threadStartArg;
+
+    asm volatile(
+        "mov $0x1b, %%ax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        :
+        :
+        : "rax", "memory");
+
+    kernel::kSyncFsBaseToUser(self);
+
+    // `"D"(startArg)` - 컴파일러가 이 값을 RDI에 실어 두게 강제한다
+    // (SysV 첫 인자 레지스터). 그 뒤 push들은 RDI를 전혀 건드리지
+    // 않으므로 iretq가 실행되는 순간에도 RDI는 그대로 startArg다.
+    asm volatile(
+        "pushq $0x1b\n\t"
+        "pushq %0\n\t"
+        "pushq $0x202\n\t"
+        "pushq $0x23\n\t"
+        "pushq %1\n\t"
+        "iretq\n\t"
+        :
+        : "r"(userStackTop), "r"(entryPoint), "D"(startArg)
+        : "memory");
+    __builtin_unreachable();
+}
+
 // [신규, PN-44C91D6E, fork() 자식 재개 경로] `kEnterRing3`와 정반대
 // 전제 - 고정 entryPoint/새 스택이 아니라, 부모가 트랩한 시점의 전체
 // InterruptFrame(`UserThread::forkResumeFrame`, fork() 핸들러가
@@ -275,6 +324,10 @@ bool Process::init() {
     // 재사용하므로, threads는 그 회수 절차에서 이미 비워져 있다 - 이
     // clear()는 순수 방어적 재확인).
     threads.clear();
+    // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] threads와 동일한
+    // 이유(Resurrect 재사용) - 이전 생애에 발급된 ThreadId가 새 생애로
+    // 새어 들어가면 안 된다.
+    nextThreadId = 0;
     lastFault = FaultInfo{};
     // 프로세스 트리(§6) - Resurrect(§6.2)가 같은 정적 Process를
     // 재사용할 수 있으므로, 이전 생애의 부모/자식 관계가 새 생애로
@@ -664,6 +717,11 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
     // kSpawnServiceProcesses)가 곧바로 첫 스레드를 만드는 것이라 이
     // 슬랩 고갈 시나리오 자체가 이미 다른 이유로 실패하는 경로들과
     // 같은 급의 드문 경우).
+    // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] 이 프로세스의
+    // 최초 스레드도 `CreateThread`(process.cpp)가 만드는 스레드들과
+    // 같은 id 공간을 공유한다 - 항상 이 함수가 가장 먼저 불리므로
+    // 사실상 항상 0.
+    thread->threadId = nextThreadId++;
     threads.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
     threads.insert(thread->sharedSelf());
 
@@ -1253,6 +1311,120 @@ public:
 
 WaitHandler gWaitHandler;
 
+// [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] CreateThread 본체 -
+// 호출자와 같은 프로세스 안에 스레드를 추가한다(process.h의
+// CreateThreadArgs/kEnterRing3Thread 문서 주석 참고). SpawnProcess와
+// 근본적으로 다른 점: 새 주소공간을 만들지 않고 호출자의 기존
+// `pml4Phys`를 그대로 공유하며, 스택 하나만 새로 확보한다.
+class CreateThreadHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<CreateThreadArgs*>(argsRaw);
+
+        // WaitHandler::onExec과 동일한 관례(PN-5BBD4301) - onExec() 안에서
+        // Scheduler::currentTask()를 직접 쓰지 않는다.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!proc) {
+            args->error = CreateThreadError::InvalidArgument;
+            co_return;
+        }
+
+        // entry는 유저 포인터 - 최소 1바이트라도 유저 범위 안에 있어야
+        // 한다(SpawnProcessArgs::imageBuffer 검증과 동일한 관례). 진짜
+        // 실행 가능한 코드인지까지는 검증하지 않는다 - execImage()의
+        // ELF 세그먼트 검증과 달리, 이미 실행 중인 프로세스 자신의
+        // 임의 함수 포인터를 받으므로 잘못된 값이면 유저 스스로 곧
+        // #PF로 대가를 치른다(기존 폴트 처리 경로가 그대로 잡음).
+        if (args->entry == 0 || !Paging::isUserRangeValid(args->entry, 1)) {
+            args->error = CreateThreadError::InvalidArgument;
+            co_return;
+        }
+
+        // [설계자 opinion, SP-76250478 §2.1] kMaxThreadsPerProcess
+        // 초과 시 단순 거부 - ChunkedList에 size()가 없어 forEach로
+        // 직접 센다(청크 개수가 적어 실용적으로 무해한 선형 비용).
+        uint32_t threadCount = 0;
+        proc->threads.forEach([&threadCount](SharedPtr<UserThread>&, auto*) { ++threadCount; });
+        if (threadCount >= kMaxThreadsPerProcess) {
+            args->error = CreateThreadError::TooManyThreads;
+            co_return;
+        }
+
+        UserThread* thread = UserThread::allocate();
+        if (!thread) {
+            args->error = CreateThreadError::OutOfMemory;
+            co_return;
+        }
+
+        // [알려진 한계, process.h 문서 주석 참고] ProcessAddressSpaceManager
+        // 는 최대 8개 VMA만 지원(address_space.h 클래스 문서) - 이
+        // mapRegion() 호출이 그 슬롯을 하나 더 소비한다. stackSize를
+        // 4KiB로 직접 올림해 두는 이유는 mapRegion()이 내부에서 하는
+        // 올림과 별개로, 우리 자신도 정확한 매핑 길이를 알아야
+        // stackTop(=stackBase+길이)을 정확히 계산할 수 있기 때문이다.
+        const uint64_t rawStackSize = args->stackSize ? args->stackSize : kUserStackSize;
+        const uint64_t stackSize = (rawStackSize + 4095UL) & ~4095ULL;
+        uint64_t stackBase = 0;
+        if (!proc->addressSpace.mapRegion(stackSize, PAGE_WRITABLE | PAGE_USER, VmaBacking::Anonymous, 0,
+                                           &stackBase)) {
+            UserThread::release(thread);
+            args->error = CreateThreadError::OutOfMemory;
+            co_return;
+        }
+        const uint64_t stackTop = stackBase + stackSize;
+
+        // SysV 관례상 함수 진입 시점의 RSP%16==8을 흉내낸다(call이
+        // 방금 반환주소 8바이트를 push한 것처럼 보이게) - 그 8바이트
+        // 자리에 0을 심어 둔다. `entry`가 §3 항목2(SelfTerminateThread
+        // 트램폴린, 아직 미착수) 없이 실수로 ret하면 주소 0으로 점프
+        // 하는 대신 그 자리에서 곧장 NULL 페이지 폴트로 정직하게
+        // 죽는다(기존 유저 폴트 처리 경로가 그대로 잡음) - 완전히
+        // 정의되지 않은 동작보다 안전한 v1 방어. kSetupInitialUserStack()
+        // 과 동일한 이유로 현재 CR3에 기대지 않고 Paging::translatePage()
+        // +direct map으로 직접 쓴다(이 onExec()이 reactor 컨텍스트에서
+        // 실행 중일 수 있어 proc->pml4Phys가 지금 CR3라는 보장이 없다).
+        const uint64_t retSlotAddr = stackTop - 8;
+        const uint64_t retSlotPage = retSlotAddr & ~0xFFFULL;
+        if (const uint64_t retSlotPhys = Paging::translatePage(retSlotPage, proc->pml4Phys)) {
+            auto* pageVirt = reinterpret_cast<uint8_t*>(kPhysToVirt(retSlotPhys));
+            *reinterpret_cast<uint64_t*>(pageVirt + (retSlotAddr - retSlotPage)) = 0;
+        }
+
+        thread->process = WeakPtr<Process>(proc);
+        thread->isUserLevel = true;
+        thread->userPml4Phys = proc->pml4Phys;
+        thread->ring3EntryPoint = args->entry;
+        thread->ring3UserStackTop = retSlotAddr;
+        thread->threadStartArg = args->arg;
+        thread->init(kEnterRing3Thread, nullptr);
+        thread->ensureSelfRef();
+        thread->threadId = proc->nextThreadId++;
+
+        proc->threads.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+        if (!proc->threads.insert(thread->sharedSelf())) {
+            // threads.insert() 실패 - 위 process.h/syscall.h 문서 주석의
+            // "순서 중요" 계약대로 release() 전에 이 스레드가 쓴 자원
+            // (여기서는 컨테이너 슬롯이 애초에 없으니 스택만)부터 되돌린다.
+            proc->addressSpace.unmapRegion(stackBase, stackSize);
+            UserThread::release(thread);
+            args->error = CreateThreadError::OutOfMemory;
+            co_return;
+        }
+
+        Scheduler::enqueue(Scheduler::currentCoreIndex(), thread);
+
+        args->threadId = thread->threadId;
+        args->error = CreateThreadError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+CreateThreadHandler gCreateThreadHandler;
+
 // [SP-0666DB3C §4.5, RM-48E1E610 29번, PN-71E50394 항목 4] `Kill` 본체 -
 // signal.h의 `KillArgs` 문서 주석 그대로, v1은 호출자 자신의 직계
 // 자식만 대상으로 허용한다(`WaitHandler`와 동일한 스코프/검증 방식).
@@ -1463,6 +1635,12 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     thread->forkResumeFrame.rax = 0;
     thread->init(kResumeForkedRing3, nullptr);
     thread->ensureSelfRef();
+    // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] fork() 자식의
+    // 새 Process는 항상 새로 init()된 상태(nextThreadId=0)에서 시작하므로
+    // execImage()와 동일하게 사실상 항상 0 - 부모의 threadId를 그대로
+    // 물려받지 않는다(부모/자식은 별개 Process이므로 각자 독립된 id
+    // 공간).
+    thread->threadId = proc->nextThreadId++;
     // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] execImage()와 동일한
     // 대체(위 execImage()의 threads.insert() 문서 주석 참고) - fork()
     // 자식도 스레드를 정확히 하나만 만드므로 관찰 가능한 동작은 동일.
@@ -1529,6 +1707,7 @@ void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointWait, &gWaitHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointKill, &gKillHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointSignalAction, &gSignalActionHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointCreateThread, &gCreateThreadHandler);
 }
 
 }  // namespace kernel
