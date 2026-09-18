@@ -496,6 +496,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 않도록 Lapic::isReady()로 방어돼 있음, 2026-09-14 실측으로
     // 발견한 초기화 순서 문제).
     kernel::Paging::init(kComputeMaxUsablePhysAddr(memmap, memmapEntries));
+    // [신규, 2026-09-18, SP-8D206F11 §2.2] IA32_PAT는 코어별 MSR이라
+    // BSP도 자기 몫을 스스로 설정해야 한다(kApMain이 AP 몫을 설정 -
+    // smp.cpp 참고, SyscallFastPath::initForThisCore()와 동일한 관례).
+    kernel::Paging::initPatForThisCore();
     kernel::Logger::info("minicore: direct physical map ready");
 
     if (kernel::Acpi::init(rsdpPaddr)) {

@@ -102,6 +102,10 @@ extern "C" void kApMain(kernel::uint32_t apIndex) {
     // KERNEL_GS_BASE 전부 코어별 MSR이라 각 AP도 자기 몫을 스스로
     // 설정해야 한다(BSP의 kMain()과 동일한 관례).
     kernel::SyscallFastPath::initForThisCore();
+    // [신규, 2026-09-18, SP-8D206F11 §2.2, QU-9F758912 설계자 답변]
+    // IA32_PAT도 위 STAR/LSTAR 등과 정확히 같은 이유로 코어별 MSR -
+    // BSP의 kMain()과 동일한 관례로 각 AP도 여기서 자기 몫을 설정한다.
+    kernel::Paging::initPatForThisCore();
     // SP-0666DB3C §12.4-1(PN-25587A7D) - BSP의 kMain()과 동일한 자리.
     kernel::Scheduler::initCoreIndexForThisCore();
 

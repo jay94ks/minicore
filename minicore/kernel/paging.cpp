@@ -6,6 +6,7 @@
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
+#include "x86_64/msr.h"
 
 namespace {
 
@@ -21,6 +22,28 @@ constexpr kernel::uint32_t kEntriesPerTable = 512;            // x86_64 4단계 
 // 엔트리에 다시 써넣는 것만으로 PRESENT 비트까지 함께 복원된다.
 constexpr kernel::uint64_t kLeafFlagsMask =
     kernel::PAGE_PRESENT | kernel::PAGE_WRITABLE | kernel::PAGE_USER | kernel::PAGE_CACHE_DISABLE;
+
+// [신규, 2026-09-18, SP-8D206F11 §2.2] IA32_PAT MSR 번호 + 인덱스4를
+// WC로 재정의한 값 - 인덱스 0~3/5~7은 Intel SDM의 하드웨어 리셋
+// 기본값(Table 11-11)을 그대로 유지한다(각 바이트는 그 인덱스의
+// 메모리 타입 인코딩 - 06h=WB, 04h=WT, 07h=UC-, 00h=UC, 01h=WC).
+// 이름 붙은 인코딩 상수로 조립해 매직 넘버를 피한다(Paging::
+// initPatForThisCore() 문서 주석의 표와 정확히 대응).
+constexpr kernel::uint32_t kMsrPat = 0x277;
+constexpr kernel::uint64_t kPatEncodingWb = 0x06;
+constexpr kernel::uint64_t kPatEncodingWt = 0x04;
+constexpr kernel::uint64_t kPatEncodingUcMinus = 0x07;
+constexpr kernel::uint64_t kPatEncodingUc = 0x00;
+constexpr kernel::uint64_t kPatEncodingWc = 0x01;
+constexpr kernel::uint64_t kPatValueWithIndex4Wc =
+    (kPatEncodingUc << 56) |        // 인덱스7 - 기존 그대로(1~3의 미러)
+    (kPatEncodingUcMinus << 48) |   // 인덱스6
+    (kPatEncodingWt << 40) |        // 인덱스5
+    (kPatEncodingWc << 32) |        // 인덱스4 - [신규] Write-Combining
+    (kPatEncodingUc << 24) |        // 인덱스3 - 기존 그대로(진짜 UC)
+    (kPatEncodingUcMinus << 16) |   // 인덱스2 - 기존 그대로(UC-, PAGE_CACHE_DISABLE 단독 사용처가 여기)
+    (kPatEncodingWt << 8) |         // 인덱스1 - 기존 그대로
+    (kPatEncodingWb << 0);          // 인덱스0 - 기존 그대로
 
 bool kIsAligned(kernel::uint64_t value, kernel::uint64_t align) {
     return (value & (align - 1)) == 0;
@@ -370,6 +393,10 @@ void kMapPageUnlocked(kernel::uint64_t virtualAddr, kernel::uint64_t physicalAdd
 
 namespace kernel {
 
+void Paging::initPatForThisCore() {
+    arch::kWriteMsr64(kMsrPat, kPatValueWithIndex4Wc);
+}
+
 void Paging::mapPage(uint64_t virtualAddr, uint64_t physicalAddr, uint64_t flags, uint64_t pml4Phys) {
     if (pml4Phys == 0) {
         pml4Phys = kCurrentPml4Phys();
@@ -671,6 +698,27 @@ void Paging::destroyAddressSpace(uint64_t pml4Phys) {
     // 레지스트리가 이미 죽은 주소공간의 항목을 무한정 쌓아 두는 누수를
     // 막기 위해 명시적으로 정리한다).
     kRemoveAddressSpaceLock(pml4Phys);
+}
+
+// [신규, 2026-09-18, SP-8D206F11 §2.3] CacheType -> PAT/PCD/PWT 비트
+// 변환표 - Paging::initPatForThisCore()가 세팅한 IA32_PAT 레이아웃과
+// 정확히 대응한다(인덱스0/1/3/4).
+void kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags, CacheType cacheType,
+                            uint64_t pml4Phys) {
+    switch (cacheType) {
+        case CacheType::WriteBack:
+            break;  // 인덱스0 - PAT.PCD.PWT 전부 0, 추가 비트 없음
+        case CacheType::WriteThrough:
+            flags |= PAGE_WRITE_THROUGH;  // 인덱스1
+            break;
+        case CacheType::Uncached:
+            flags |= PAGE_WRITE_THROUGH | PAGE_CACHE_DISABLE;  // 인덱스3
+            break;
+        case CacheType::WriteCombining:
+            flags |= PAGE_PAT;  // 인덱스4
+            break;
+    }
+    Paging::mapPage(virtAddr, physAddr, flags, pml4Phys);
 }
 
 }  // namespace kernel

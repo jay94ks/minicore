@@ -8,7 +8,21 @@ namespace kernel {
 constexpr uint64_t PAGE_PRESENT = 1UL << 0;
 constexpr uint64_t PAGE_WRITABLE = 1UL << 1;
 constexpr uint64_t PAGE_USER = 1UL << 2;
+// [신규, 2026-09-18, SP-8D206F11 §2.2] PWT(Page Write-Through, bit3) -
+// PAGE_CACHE_DISABLE(PCD, bit4)과 이 비트의 조합이 IA32_PAT의 8개
+// 슬롯 중 하나를 고른다(PAT.PCD.PWT 3비트, Paging::initPatForThisCore()
+// 문서 주석의 표 참고) - 지금까지는 PCD 단독(인덱스2, UC-)만 썼고
+// 이 비트를 세팅하는 코드가 없었다.
+constexpr uint64_t PAGE_WRITE_THROUGH = 1UL << 3;
 constexpr uint64_t PAGE_CACHE_DISABLE = 1UL << 4;  // MMIO(LAPIC 등)는 반드시 이걸 켜야 한다
+// [신규, 2026-09-18, SP-8D206F11 §2.2] PAT(레거시 PAT 비트, 4KiB PTE
+// 전용 - 2MiB/1GiB 대형 페이지는 이 대신 bit12를 쓰지만 이 프로젝트의
+// kMapPageWithCacheType()은 4KiB 매핑만 다룬다). PAGE_CACHE_DISABLE/
+// PAGE_WRITE_THROUGH와 3비트를 조합해 IA32_PAT 인덱스4(WC)를 고를 때
+// 세팅한다 - bit7은 대형 페이지 엔트리에서는 PS(Page Size)와 같은
+// 자리라 절대 혼동하면 안 된다(SDM 표기 주의, 이 프로젝트에서는
+// 4KiB PTE에만 이 상수를 쓴다).
+constexpr uint64_t PAGE_PAT = 1UL << 7;
 
 // [신규, 2026-09-16, SP-6BEAE0C1 §2/§11, PN-543C0CE9 착수 6번째 증분]
 // Copy-on-Write 표시 - x86_64 페이지 테이블 엔트리의 비트 9-11은
@@ -73,6 +87,26 @@ public:
     // 구한다) - 이 값까지 1GiB 페이지로 direct map을 늘린다(최소
     // 4GiB/최대 512GiB로 clamp, kDirectMapBase 주석 참고).
     static void init(uint64_t maxPhysAddr);
+
+    // [신규, 2026-09-18, SP-8D206F11 §2.2] IA32_PAT(MSR 0x277)는
+    // STAR/LSTAR/SFMASK 등과 마찬가지로 논리 프로세서별(코어별) MSR이라
+    // - BSP/AP 모두 각자 이 함수를 불러야 한다(SyscallFastPath::
+    // initForThisCore()와 동일한 관례: BSP는 kMain()이 init() 직후,
+    // AP는 kApMain()이 SyscallFastPath::initForThisCore()와 같은
+    // 자리에서). 인덱스 0~3/5~7은 하드웨어 리셋 기본값 그대로 두고
+    // (기존 PAGE_CACHE_DISABLE 사용처가 전혀 영향받지 않음) 인덱스4만
+    // WC(Write-Combining)로 재정의한다 - 아래 표(SDM 기본 PAT 인코딩
+    // + 이 프로젝트가 바꾸는 부분만 굵게):
+    //
+    // | 인덱스 | PAT.PCD.PWT | 타입              |
+    // |---|---|---|
+    // | 0 | 0.0.0 | WB (기존 그대로)          |
+    // | 1 | 0.0.1 | WT (기존 그대로)          |
+    // | 2 | 0.1.0 | UC- (기존 PAGE_CACHE_DISABLE 단독 사용처가 여기 걸림) |
+    // | 3 | 0.1.1 | UC (신규 API의 CacheType::Uncached가 여기)   |
+    // | 4 | 1.0.0 | **WC** — [신규]           |
+    // | 5~7 | 1.0.1/1.1.0/1.1.1 | 1~3과 동일(기존 그대로) |
+    static void initPatForThisCore();
 
     // init()이 실제로 확보한 direct map의 범위(바이트, 위 clamp 적용
     // 후의 값) - PageFrameAllocator::init()이 이 값을 넘는 usable
@@ -192,6 +226,26 @@ public:
     // 전체 시스템이 깨진다.
     static void destroyAddressSpace(uint64_t pml4Phys);
 };
+
+// [신규, 2026-09-18, SP-8D206F11 §2.3] Paging::initPatForThisCore()가
+// 세팅한 IA32_PAT 슬롯 중 소프트웨어가 실제로 고를 수 있는 4개만
+// 노출한다(인덱스2 UC-/5~7은 1~3의 미러라 별도 값을 둘 이유가 없음).
+enum class CacheType : uint8_t {
+    WriteBack,       // 인덱스0 - 일반 RAM 기본값
+    WriteThrough,    // 인덱스1
+    Uncached,        // 인덱스3 - 기존 PAGE_CACHE_DISABLE 단독 사용처(인덱스2, UC-)와는
+                     // 다른 슬롯이지만 실질적 동작은 동일(SP-8D206F11 §2.4 정정 참고)
+    WriteCombining,  // 인덱스4 - [신규] 프레임버퍼 등
+};
+
+// virtAddr에 physAddr을 매핑하되, flags에 cacheType이 가리키는 PAT
+// 인덱스의 PAT/PCD/PWT 비트 조합을 자동으로 얹어 Paging::mapPage()에
+// 위임하는 얇은 래퍼(SP-8D206F11 §2.3) - 4KiB 매핑 전용(PAGE_PAT
+// 문서 주석 참고, 대형 페이지는 이 API의 대상이 아니다). 새 자료구조/
+// 전역 상태 없음 - mapPage()와 마찬가지로 pml4Phys 생략(0) 시 현재
+// CR3을 쓴다.
+void kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags, CacheType cacheType,
+                            uint64_t pml4Phys = 0);
 
 }  // namespace kernel
 
