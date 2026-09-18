@@ -6,6 +6,7 @@
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "mount_table.h"
 #include "named_object.h"
 #include "syscall.h"
 #include "task.h"
@@ -256,6 +257,44 @@ ResourceGroup* kFindResourceGroupByName(const char* name, uint32_t nameLength);
 class ResourceGroupService {
 public:
     static void registerSyscallEndpoints();
+};
+
+// [신규, 2026-09-19, SP-6A563A8F §5, PN-4190BBD3 항목5] `/sys/live/
+// resourcegroup/<name>/cpu.stat` VFS 읽기 노출 핸들 - `ProcFs`
+// (procfs.h)의 "포인터 최하위 비트를 태그로 예약" 관례를 그대로
+// 재사용한다. `ResourceGroup::allocate()`가 `GenericSlabAllocator`로
+// 할당되고(동적 그룹), 그 버킷 크기가 전부 32의 배수라(`kBucketSizes`,
+// minicore/libs/libkmm/slab.cpp) 슬랩 슬롯 주소의 최하위 5비트(0~4)는
+// 항상 0이다 - 그중 비트3을 태그로 예약해도 실제 포인터 값과 절대
+// 충돌하지 않는다.
+constexpr uint64_t kResourceGroupHandleTagBit = 1ULL << 3;
+
+// `gRootResourceGroup`은 슬랩이 아니라 정적 전역(진짜 C++ 생성자를
+// 거침, 클래스 문서 주석 참고)이라 위 32바이트 정렬 보장이 적용되지
+// 않는다 - 포인터에 태그 비트만 OR하는 방식은 그 정적 인스턴스의
+// 실제 링크 주소가 우연히 그 비트를 이미 갖고 있으면 복원이 깨지는
+// 이론적 위험이 있다(PN-4190BBD3 항목5가 착수 중 발견한 갭). 대신
+// 루트는 포인터를 아예 핸들에 담지 않고 완전히 고정된 정수 핸들로
+// 특별 취급한다(procfs.cpp의 `kProcFsMeminfoHandle`과 같은 관례) -
+// 실제 동적 그룹 포인터는 비트0~4가 항상 0이므로 비트4까지 서 있는
+// 이 상수와 절대 같아질 수 없다.
+constexpr uint64_t kResourceGroupRootHandleBit = 1ULL << 4;
+constexpr uint64_t kResourceGroupRootCpuStatHandle = kResourceGroupHandleTagBit | kResourceGroupRootHandleBit;
+
+// `LiveFs`의 "resourcegroup/" 하위 경로 위임 대상 - `ProcFs`와 동일한
+// 구조(별도 계층 상속 없는 순수 헬퍼). v1 스코프는 `<name>/cpu.stat`
+// 하나뿐 - 그 외 경로는 NotFound. `SP-6A563A8F` §5가 `meminfo`/
+// `uptime`(procfs.h) 선례를 명시적으로 재사용 대상으로 지목했으므로,
+// 그 선례와 동일하게 호출자 권한 제약 없이 항상 읽을 수 있다(특정
+// 프로세스에 종속되지 않는 그룹 통계). 동적 그룹 핸들은 `Process*`
+// 핸들과 동일한 v1 한계(Open~Read 사이에 그룹이 Destroy되면 댕글링
+// 가능, procfs.h의 `read()` 문서 주석과 동일한 처지)를 그대로 물려
+// 받는다.
+class ResourceGroupFs {
+public:
+    static OpenResult open(const char* relPath, uint32_t relPathLen);
+    static ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len);
+    static void stat(const char* relPath, uint32_t relPathLen, KernelFsStatArgs* args);
 };
 
 }  // namespace kernel

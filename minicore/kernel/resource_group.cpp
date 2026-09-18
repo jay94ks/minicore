@@ -256,6 +256,157 @@ ResourceGroup* kFindResourceGroupByName(const char* name, uint32_t nameLength) {
 
 namespace {
 
+// [신규, 2026-09-19, SP-6A563A8F §5] cpu.stat 텍스트 조립 전용 -
+// procfs.cpp의 kAppendStr/kAppendI64와 완전히 동일한 최소 헬퍼(그
+// 파일의 주석 그대로 - Logger 포맷터는 재사용 불가능한 캡슐화라 이
+// 파일만의 아주 좁은 용도로 다시 최소 구현).
+void kAppendStr(char* buf, uint32_t bufSize, uint32_t& pos, const char* s) {
+    while (*s && pos + 1 < bufSize) {
+        buf[pos++] = *s++;
+    }
+}
+
+void kAppendI64(char* buf, uint32_t bufSize, uint32_t& pos, int64_t value) {
+    const bool neg = value < 0;
+    const uint64_t mag = neg ? (~static_cast<uint64_t>(value) + 1) : static_cast<uint64_t>(value);
+    char digits[24];
+    uint32_t n = 0;
+    uint64_t m = mag;
+    if (m == 0) {
+        digits[n++] = '0';
+    }
+    while (m) {
+        digits[n++] = static_cast<char>('0' + (m % 10));
+        m /= 10;
+    }
+    if (neg) {
+        kAppendStr(buf, bufSize, pos, "-");
+    }
+    while (n) {
+        if (pos + 1 < bufSize) {
+            buf[pos++] = digits[--n];
+        } else {
+            n = 0;
+        }
+    }
+}
+
+constexpr char kCpuStatFileName[] = "cpu.stat";
+constexpr uint32_t kMaxCpuStatLen = 160;  // 5줄 정도(PeriodTicks/QuotaTicks/UsedTicksInPeriod/TotalCpuTicks/Frozen)
+
+// relPath("<name>/cpu.stat")에서 이름 길이만 분리한다 - 이름 자신은
+// '/'를 포함할 수 없다는 전제(named_object.h류 평평한 이름 공간과
+// 동일 관례)이므로 첫 '/'를 구분자로 삼는다.
+bool kSplitResourceGroupPath(const char* relPath, uint32_t relPathLen, uint32_t* outNameLen) {
+    for (uint32_t i = 0; i < relPathLen; ++i) {
+        if (relPath[i] == '/') {
+            *outNameLen = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// [SP-6A563A8F §5] 매 Read/Stat마다 그 시점의 스냅샷을 새로 조립한다
+// (procfs.cpp의 status/meminfo와 동일한 원칙) - 락 없이 읽는다(다른
+// 코어가 동시에 cpu 필드를 갱신 중이면 값이 살짝 튈 수 있으나, 통계
+// 텍스트 파일 하나의 필드 몇 개라 procfs.cpp의 기존 status/meminfo
+// 판독도 동일하게 락을 안 쓰는 것과 같은 수준의 정밀도로 충분하다고
+// 판단).
+uint32_t kFormatCpuStat(ResourceGroup* group, char* buf, uint32_t bufCap) {
+    uint32_t pos = 0;
+
+    kAppendStr(buf, bufCap, pos, "PeriodTicks:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->cpu.periodTicks));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "QuotaTicks:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->cpu.quotaTicks));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "UsedTicksInPeriod:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->cpu.usedTicksInPeriod));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "TotalCpuTicks:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->accounting.totalCpuTicks));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "Frozen:\t");
+    kAppendStr(buf, bufCap, pos, group->frozen ? "1" : "0");
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    return pos;
+}
+
+}  // namespace
+
+OpenResult ResourceGroupFs::open(const char* relPath, uint32_t relPathLen) {
+    uint32_t nameLen = 0;
+    if (!kSplitResourceGroupPath(relPath, relPathLen, &nameLen)) {
+        return OpenResult{FileHandle{}, false, VfsError::NotFound};
+    }
+    const char* file = relPath + nameLen + 1;
+    const uint32_t fileLen = relPathLen - nameLen - 1;
+    if (!kNamesEqual(file, fileLen, kCpuStatFileName, sizeof(kCpuStatFileName) - 1)) {
+        return OpenResult{FileHandle{}, false, VfsError::NotFound};
+    }
+    ResourceGroup* group = kFindResourceGroupByName(relPath, nameLen);
+    if (!group) {
+        return OpenResult{FileHandle{}, false, VfsError::NotFound};
+    }
+    if (group == &gRootResourceGroup) {
+        return OpenResult{FileHandle{kResourceGroupRootCpuStatHandle}, false, VfsError::None};
+    }
+    return OpenResult{FileHandle{reinterpret_cast<uint64_t>(group) | kResourceGroupHandleTagBit}, false,
+                       VfsError::None};
+}
+
+ReadResult ResourceGroupFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) {
+    if ((handle.value & kResourceGroupHandleTagBit) == 0) {
+        return ReadResult{0, VfsError::InvalidHandle};
+    }
+    ResourceGroup* group = (handle.value & kResourceGroupRootHandleBit)
+                               ? &gRootResourceGroup
+                               : reinterpret_cast<ResourceGroup*>(handle.value & ~kResourceGroupHandleTagBit);
+
+    char statText[kMaxCpuStatLen];
+    const uint32_t statLen = kFormatCpuStat(group, statText, kMaxCpuStatLen);
+
+    if (offset >= statLen) {
+        return ReadResult{0, VfsError::None};  // EOF
+    }
+    const uint64_t available = statLen - offset;
+    const uint32_t toCopy = static_cast<uint32_t>(available < len ? available : len);
+    memcpy(buf, statText + offset, toCopy);
+    return ReadResult{toCopy, VfsError::None};
+}
+
+void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsStatArgs* args) {
+    uint32_t nameLen = 0;
+    if (!kSplitResourceGroupPath(relPath, relPathLen, &nameLen)) {
+        args->error = VfsError::NotFound;
+        return;
+    }
+    const char* file = relPath + nameLen + 1;
+    const uint32_t fileLen = relPathLen - nameLen - 1;
+    if (!kNamesEqual(file, fileLen, kCpuStatFileName, sizeof(kCpuStatFileName) - 1)) {
+        args->error = VfsError::NotFound;
+        return;
+    }
+    ResourceGroup* group = kFindResourceGroupByName(relPath, nameLen);
+    if (!group) {
+        args->error = VfsError::NotFound;
+        return;
+    }
+    char statText[kMaxCpuStatLen];
+    args->size = kFormatCpuStat(group, statText, kMaxCpuStatLen);
+    args->isDirectory = false;
+    args->error = VfsError::None;
+}
+
+namespace {
+
 class ResourceGroupJoinHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {

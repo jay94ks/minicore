@@ -7,6 +7,7 @@
 #include "named_object.h"
 #include "procfs.h"
 #include "process.h"
+#include "resource_group.h"
 #include "scheduler.h"
 #include "syscall.h"
 
@@ -150,11 +151,18 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
     static constexpr char kKernelPrefix[] = "kernel/";
     static constexpr char kInitrdCpioPath[] = "initrd.cpio";
     static constexpr char kProcPrefix[] = "proc/";
+    static constexpr char kResourceGroupPrefix[] = "resourcegroup/";
 
     if (kHasPrefix(relPath, relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
         const char* rest = relPath + (sizeof(kProcPrefix) - 1);
         const kernel::uint32_t restLen = relPathLen - (sizeof(kProcPrefix) - 1);
         return kernel::ProcFs::open(task, rest, restLen, 0);
+    }
+
+    if (kHasPrefix(relPath, relPathLen, kResourceGroupPrefix, sizeof(kResourceGroupPrefix) - 1)) {
+        const char* rest = relPath + (sizeof(kResourceGroupPrefix) - 1);
+        const kernel::uint32_t restLen = relPathLen - (sizeof(kResourceGroupPrefix) - 1);
+        return kernel::ResourceGroupFs::open(rest, restLen);
     }
 
     if (kHasPrefix(relPath, relPathLen, kNamedPrefix, sizeof(kNamedPrefix) - 1)) {
@@ -206,6 +214,10 @@ kernel::ReadResult kLiveFsReadImpl(kernel::FileHandle handle, kernel::uint64_t o
                                     kernel::uint32_t len) {
     if (handle.value & kernel::kProcFsHandleTagBit) {
         return kernel::ProcFs::read(handle, offset, buf, len);
+    }
+
+    if (handle.value & kernel::kResourceGroupHandleTagBit) {
+        return kernel::ResourceGroupFs::read(handle, offset, buf, len);
     }
 
     if (handle.value == kInitrdCpioHandleValue) {
@@ -276,6 +288,7 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
         case KernelFsOpCode::Stat: {
             auto* args = static_cast<KernelFsStatArgs*>(argsRaw);
             static constexpr char kProcPrefix[] = "proc/";
+            static constexpr char kResourceGroupPrefix[] = "resourcegroup/";
             if (kHasPrefix(args->relPath, args->relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
                 KernelFsStatArgs procArgs = *args;
                 procArgs.relPath = args->relPath + (sizeof(kProcPrefix) - 1);
@@ -284,6 +297,10 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
                 args->size = procArgs.size;
                 args->isDirectory = procArgs.isDirectory;
                 args->error = procArgs.error;
+            } else if (kHasPrefix(args->relPath, args->relPathLen, kResourceGroupPrefix,
+                                   sizeof(kResourceGroupPrefix) - 1)) {
+                ResourceGroupFs::stat(args->relPath + (sizeof(kResourceGroupPrefix) - 1),
+                                      args->relPathLen - (sizeof(kResourceGroupPrefix) - 1), args);
             } else {
                 kLiveFsStatImpl(args);
             }
