@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-17T21:22:19.865Z
+  updatedAt: 2026-09-18T03:17:30.110Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -219,6 +219,17 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **현재 상태**: **완전 해소.**
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **`PN-C4611402`(Channel IPC `onCancel`, "connectChannel 취소:
+  대기열에서 자신의 PendingConnectRequest 제거")** - [2026-09-18]
+  당시 코드 검토로만 확인했던 "댕글링 포인터 없음"을 `PN-B5C2845A`가
+  열어 준 실제 Kill-중-파킹 레이스로 QEMU에서 처음 재현/확정했다.
+  devmgr이 자기 채널에 `connectChannel`로 무기한 파킹 → 외부에서
+  `raiseSignal(Kill)` → `ConnectChannelHandler::onCancel()` →
+  `Channel::removePendingConnect()`가 실제로 그 대기 항목을 큐에서
+  제거해 `pendingHead`/`pendingTail`을 정확히 비움을 3회 반복 확인
+  (TEMP 스캐폴딩, 원복 완료 - 발행할 프로덕션 diff 없음). 갭 없음 -
+  설계/코드/실측 3단이 전부 일치.
 
 - **`SP-D7013B26`(Slab 할당자/libkmm)**: "확정된 최종 설계" 절이 나열한
   전 항목(더블 매거진 loaded/previous, `PreemptionGuard` 강제, 매거진
@@ -1057,6 +1068,26 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   없음** - 설계 확정부터 구현까지 빠르게 이어졌음에도 와이어 포맷/
   페이지네이션/자동해제/신규 syscall 소비 전부 정확히 일치한 사례.
 
+- **[신규, 2026-09-18] `PN-C39882D0`(pid ABI 마이그레이션) -
+  `kFindDebuggableChild()` 놓침(코드 갭, 발견 즉시 같은 세션에서
+  해소, commit 7d683d1)**: `PN-C39882D0` 자신의 문서 주석이 "이
+  마이그레이션은 SpawnProcess/Wait만 다룬다 - Kill은 raw-pointer
+  비교를 의도적으로 유지한다"고 명시적으로 예외를 하나만 적어 뒀는데,
+  `debug_session.cpp`의 `kFindDebuggableChild()`는 그 예외 목록에
+  없었음에도 여전히 옛 raw-pointer 비교를 쓰고 있었다 - 의도된
+  과도기적 예외가 아니라 마이그레이션이 단순히 놓친 파일. §1-B/E/F/H가
+  이미 세 번 이상 확인한 "한 결함 클래스를 고칠 때 비슷한 시기의
+  다른 경로가 빠질 수 있다" 패턴의 또 다른 사례 - 이번엔 "대칭 핸들러
+  쌍"이 아니라 "마이그레이션의 선언된 범위 vs 실제 커버리지" 형태.
+  **영향**: 실제 `SpawnProcess`가 반환하는 `ProcessId`를 그대로
+  `DebugAttach` 등에 넘기면 이 비교가 항상 실패해 `PermissionDenied`만
+  반환 - PN-87D6B615의 모든 이전 TEMP 검증은 합성 `Process`+
+  raw-pointer 값 조합만 써서 이 버그를 가리지 못했다(실측으로 실제
+  경로를 탄 적이 없었다는 뜻). `child->processId == targetProcessId`로
+  수정, 실측(4242 vs 9999 시뮬레이션 값)으로 확인. **갭 완전 해소.**
+  minicore-88이 PN-87D6B615 본문에 이미 매우 상세히 자체 기록해 둠 -
+  이 항목은 교차 참조용 짧은 기록.
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
@@ -1075,29 +1106,8 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   완료되면 그때 전체를 §목차 방법론으로 재대조.
 (`SP-B1E258D8`(RCU) 항목은 approved 전환 + `PN-495C11B7` 구현
 완료까지 끝나 아래 §2로 이동했다.)
-- [ ] (2026-09-17 재정정) `PN-C4611402`(§1-B, 완전 해소) 취소 로직이
-  실제 취소 레이스로는 아직 검증 안 됨(코드 검토로만 확인). **직전
-  갱신("PN-71E50394 완료로 착수 가능")은 틀렸다 - `PN-B5C2845A`로
-  실측 확인**: `Kill`은 `Task::blockedOn`(Waitable 기반 블로킹)이나
-  실행 중인 대상에만 실제로 도달하고, `acceptFromChannel`/
-  `connectChannel` 등이 쓰는 `Syscall::wait()`의 순수 파킹
-  (`Scheduler::parkCurrent()`, `blockedOn` 전혀 안 씀)에는 강제
-  웨이크업 경로 자체가 없다 - 그 파킹을 깨우는 유일한 길은 그
-  UserThread 자신이 제출한 AsyncTask가 정상 완료되는 것뿐이라,
-  `Kill`로 `pendingSignals`에 기록해도 대상이 절대 깨어나지 않는다.
-  **[완료, 2026-09-18] `PN-B5C2845A` 해소됨** - 설계자가
-  `QU-8E137FFD`에서 "`acceptFromChannel`/`connectChannel`/
-  `ChannelRead`/`ChannelWrite` 얘들을 실패시키면 되잖아"로 세 번째
-  방향(공유 핫패스 새 분기 추가가 아니라, 기존 `AsyncTaskState::
-  Cancelled`/`onCancel()` 메커니즘에 "대기자가 있을 수도 있다"는
-  조건 하나씩만 끼워 넣는 방식)을 지시했고, 실제 구현+devmgr TEMP
-  Kill 왕복 실측(3회 연속 성공, `hasWaiter=1 wasSuspended=1` 확인) +
-  표준 회귀(베이스라인과 동일 크래시율 직접 비교 확인)까지 완료했다
-  (commit `33ade60`). `Kill`이 이제 `Syscall::wait()`로 파킹된
-  UserThread에도 도달한다 - **이 항목이 막고 있던 "실제 취소 레이스"
-  재검증이 이제 가능해졌다** - 다음 세션이 `PN-C4611402`를 재검증할
-  수 있다(아래로 이동 대상, §2로 옮길 정도의 재검증은 아직 별도
-  수행 안 함 - `PN-C4611402` 자신의 재검증이 완료되면 그때 §2로).
+(`PN-C4611402`의 "실제 취소 레이스" 재검증 - `PN-B5C2845A`가 열어
+준 뒤 이 세션이 실제로 QEMU에서 재현/확정했다. 아래 §2로 이동.)
 (`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을

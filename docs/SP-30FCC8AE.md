@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-30FCC8AE
   status: review
-  updatedAt: 2026-09-17T04:40:01.793Z
+  updatedAt: 2026-09-18T02:26:52.046Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -233,7 +233,15 @@ sudoers류 멤버십을 어떻게 표현할지(예: 특정 `Gid`에 속하면 �
 그 상위 사용자가 자기 하위에 새 사용자를 만드는 구조, §1-A와 정합성
 필요) 확정.
 
-## 1-D. `authmgr` 커널 서비스 + Key-Value 데이터베이스 (2026-09-17,
+## 1-D. `authmgr` 커널 서비스 + Key-Value 데이터베이스
+
+**[분리, 2026-09-18, 설계자 opinion("사용자 데이터베이스/관리는
+커널 서비스 authmgr에 대한 별도 설계안을 작성해서 등록해줘야 결정이
+가능해")]** 이 절(및 §1-B/§1-C)의 내용을 승인 가능한 독립 문서
+`SP-CC1CF30E`(review)로 재구성했다 - 아래 원문은 그대로 두되, 실제
+결정/구현은 `SP-CC1CF30E`를 따른다.
+
+### (원문, 2026-09-17,
 설계자 의견, PN-24A2B6F5 대상)
 
 > "신원 관리의 전속 처리를 위한 `authmgr`라는 `커널 서비스`를
