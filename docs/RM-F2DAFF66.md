@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T10:44:44.049Z
+  updatedAt: 2026-09-18T13:07:35.680Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1233,6 +1233,20 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   `PN-2E4E9D79`(여전히 `planned`, 미착수)로 명시적으로 분리해 뒀다 -
   숨겨진 누락이 아니라 처음부터 openly 추적된 후속 과제. **갭 없음**
   (§1-A 범위를 제외한 나머지 전부).
+
+- **[신규, 2026-09-18] `SP-8D206F11`(CPU 캐시 관리 정책, review→approved) -
+  §2 전체 대조 완료**: 이번 세션이 §2.2를 코드와 대조하다 "AP 코어도
+  kMain 경로를 타 PAT MSR이 자동 적용된다"는 전제가 실제로는 틀렸음을
+  발견(AP는 별도의 `kApMain`을 타고 `Paging::init()`을 거치지 않음) -
+  `QU-9F758912`로 등록해 설계자가 "PAT MSR 설정을 kApMain에도 추가해"로
+  직접 확정. `PN-310C870F`(commit `1a5cb29`)가 그 답변 그대로
+  `Paging::initPatForThisCore()`를 BSP(`kMain`)/AP(`kApMain`) 양쪽에
+  배선하고 문서 §2.2/§2.4(기존 PCD 사용처가 실제로는 인덱스2가 아니라
+  인덱스3이라고 잘못 적혀 있던 것)까지 함께 바로잡아 구현 완료 - 실제
+  init/devmgr/fs/pubreg initrd SMP4 15회 반복(AP 3개 전부 정상 기동)
+  무회귀 확인. **갭 없음(§2 전체)** - §3(하드웨어 캐시 스누핑 여부)은
+  여전히 실사용처 없어 열린 질문으로 남아 있으나 이는 설계 문서 자신이
+  명시적으로 미뤄 둔 범위라 갭이 아님.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
