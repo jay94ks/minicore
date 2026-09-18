@@ -555,6 +555,14 @@ void kPanic(kernel::InterruptFrame* frame) {
 constexpr kernel::uint64_t kSyscallVerbSubmit = 0;
 constexpr kernel::uint64_t kSyscallVerbWait = 1;
 constexpr kernel::uint64_t kSyscallVerbWaitAnyOf = 2;
+// [신규, 2026-09-18, PN-44C91D6E] `fork()` 전용 verb - Submit/Wait/
+// WaitAnyOf와 달리 이 verb는 `kDispatchSyscallVerb`(위 셋의 공용
+// 디스패치)를 절대 타지 않는다(아래 `kHandleSyscallTrap`이 그
+// 이전에 직접 가로챔) - `syscall` 명령 경로(`kDispatchSyscallVerb`를
+// 공유하는 `syscall_fastpath.cpp`)는 fork()가 필요로 하는 전체
+// `InterruptFrame`을 애초에 갖고 있지 않아 이 verb 자체가 도달할
+// 수 없다(process.h의 `kHandleForkSyscall` 문서 주석 참고).
+constexpr kernel::uint64_t kSyscallVerbFork = 3;
 
 // context_switch.S가 entry 함수의 자연 반환 시 호출하는 것과 같은
 // 함수(scheduler.cpp) - self-terminate 트랩 특별 취급(아래 참고)이
@@ -716,6 +724,25 @@ uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
 namespace {
 
 void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
+    // [신규, 2026-09-18, PN-44C91D6E] fork()는 `kDispatchSyscallVerb`
+    // 공용 디스패치(verb/arg0/arg1 세 값만 받음)를 타지 않는다 - 자식
+    // 재개에 필요한 전체 `InterruptFrame`을 그대로 넘겨야 해서 여기서
+    // 직접 가로챈다. `kDispatchSyscallVerb`가 body 호출 앞뒤로 하는
+    // FS_BASE 스왑(진입 시 커널 TCB로, 반환 직전 유저 값으로)과
+    // 신호 체크포인트를 여기서도 똑같이 반복한다 - 이 verb만 그 공용
+    // 래퍼를 우회하므로 직접 하지 않으면 빠진다.
+    if (frame->rax == kSyscallVerbFork) {
+        kernel::Task* current = kernel::Scheduler::currentTask();
+        if (current) {
+            kernel::kSyncFsBase(current);
+        }
+        kCheckSignalCheckpoint();
+        kernel::kHandleForkSyscall(frame);
+        if (current && current->isUserLevel) {
+            kernel::kSyncFsBaseToUser(static_cast<kernel::UserThread*>(current));
+        }
+        return;
+    }
     frame->rax = kernel::kDispatchSyscallVerb(frame->rax, frame->rdi, frame->rsi);
 }
 

@@ -1295,6 +1295,165 @@ SignalActionHandler gSignalActionHandler;
 
 }  // namespace
 
+// [신규, 2026-09-18, PN-44C91D6E] `fork()` 본체 - idt.cpp의
+// `kHandleSyscallTrap`이 `kSyscallVerbFork`를 직접 가로채 전체
+// `InterruptFrame*`을 그대로 넘긴다(process.h의 `kHandleForkSyscall`
+// 문서 주석 참고). 이 함수는 부모 자신의 트랩 컨텍스트에서 **동기적
+//으로** 실행되므로(AsyncTaskHandler처럼 나중에 리액터 컨텍스트에서
+// 실행되는 게 아님) `Scheduler::currentTask()`가 곧 부모 자신이다 -
+// SpawnProcessHandler::onExec()이 `task->submitterTask.lock()`을
+// 써야 했던 것과 다른 이유(RM-23F4B687이 문서화한 "onExec() 안에서
+// Scheduler::currentTask()를 믿으면 안 된다" 함정은 나중에 실행되는
+// 비동기 컨텍스트에만 해당 - 여기는 그 함정 자체가 성립하지 않는다).
+void kHandleForkSyscall(InterruptFrame* frame) {
+    auto* parentThread = static_cast<UserThread*>(Scheduler::currentTask());
+    SharedPtr<Process> parentProcShared = parentThread ? parentThread->process.lock() : SharedPtr<Process>();
+    if (!parentProcShared) {
+        // 이론상 도달 불가(fork()는 항상 실제 UserThread 실행 흐름에서만
+        // 온다) - 방어적으로만.
+        frame->rax = static_cast<uint64_t>(kInvalidProcessId);
+        return;
+    }
+    Process* parentProc = parentProcShared.get();
+
+    Process* proc = Process::allocate();
+    UserThread* thread = proc ? UserThread::allocate() : nullptr;
+    if (!proc || !thread || !proc->init()) {
+        if (thread) {
+            UserThread::release(thread);
+        }
+        if (proc) {
+            Process::release(proc);
+        }
+        frame->rax = static_cast<uint64_t>(kInvalidProcessId);
+        return;
+    }
+    // Process::init() 직후, 아래에서 weakFromThis()를 쓰기 전에 이
+    // Process를 kMakeShared로 감싼다 - execImage() 호출부(SpawnProcessHandler
+    // 등)와 정확히 같은 전제(process.cpp execImage() 문서 주석 참고).
+    SharedPtr<Process> procShared = kMakeShared<Process>(proc);
+    if (!procShared) {
+        UserThread::release(thread);
+        proc->destroy();
+        Process::release(proc);
+        frame->rax = static_cast<uint64_t>(kInvalidProcessId);
+        return;
+    }
+
+    // Process::init()이 자동으로 만들어 둔 힙 VMA(부모와 무관한 임의
+    // 주소)는 그대로 두면 안 된다 - 아래 forEachVma 복제가 부모의 진짜
+    // 힙 VMA를 그 자리에 대신 채운다(process.h Process::init() 문서
+    // 주석의 "Brk 힙 VMA" 절 참고).
+    proc->addressSpace.unmapRegion(proc->heapStart, kMinHeapLength);
+
+    // 부모의 VMA 전부를 자식 주소공간에 재현한다 - Anonymous는 COW로
+    // (부모/자식 양쪽 PTE를 함께 내려야 함 - 자식만 내리면 부모가 먼저
+    // 써도 진짜 복사가 안 일어나 자식을 오염시킨다), FixedPhysical/
+    // FileBacked는 COW 없이 그대로 물리 프레임을 공유 매핑만 한다.
+    bool copyOk = true;
+    parentProc->addressSpace.forEachVma([&](const Vma& vma) {
+        if (!copyOk) {
+            return;
+        }
+        const uint64_t length = vma.end - vma.start + 1;
+        for (uint64_t off = 0; off < length; off += 4096UL) {
+            const uint64_t vaddr = vma.start + off;
+            const uint64_t phys = Paging::translatePage(vaddr, parentProc->pml4Phys);
+            if (!phys) {
+                continue;  // 이론상 도달 불가(장부에 있는 범위는 항상 매핑돼 있음) - 방어적 스킵
+            }
+            if (vma.backing == VmaBacking::Anonymous) {
+                PageFrameAllocator::retain(phys);
+                const uint64_t cowFlags = (vma.prot & ~PAGE_WRITABLE) | PAGE_USER | PAGE_COW;
+                Paging::mapPage(vaddr, phys, cowFlags, proc->pml4Phys);
+                // 부모 쪽도 함께 COW로 내린다 - 지금 이 함수가 부모
+                // 자신의 트랩 컨텍스트에서 실행 중이라 parentProc->pml4Phys
+                // 가 곧 현재 CR3이므로, Paging::mapPage()가 알아서 이
+                // 코어의 TLB도 함께 무효화한다(Paging::mapPage 문서 주석).
+                Paging::mapPage(vaddr, phys, cowFlags, parentProc->pml4Phys);
+            } else {
+                Paging::mapPage(vaddr, phys, vma.prot, proc->pml4Phys);
+            }
+        }
+        if (!proc->addressSpace.registerFixedRegion(vma.start, length, vma.prot, vma.backing)) {
+            copyOk = false;
+        }
+    });
+    if (!copyOk) {
+        UserThread::release(thread);
+        procShared.reset();  // destroy()+슬랩 반납(위 SpawnProcessHandler와 동일한 패턴)
+        frame->rax = static_cast<uint64_t>(kInvalidProcessId);
+        return;
+    }
+
+    // 힙 브레이크 북키핑도 부모 값 그대로 - 자식의 힙 VMA는 위 루프가
+    // 부모의 실제 힙 VMA를 이미 재현해 뒀으므로, heapStart/heapBrk도
+    // 그 자리를 가리켜야 이후 brk()가 올바른 범위를 찾는다.
+    proc->heapStart = parentProc->heapStart;
+    proc->heapBrk = parentProc->heapBrk;
+
+    // execImage()가 하던 것과 동일한 UserThread/Process 배선 - ELF
+    // 로딩이 없을 뿐 나머지는 전부 같은 절차(process.cpp execImage()
+    // 문서 주석과 1:1 대응).
+    thread->process = WeakPtr<Process>(procShared);
+    thread->isUserLevel = true;
+    thread->userPml4Phys = proc->pml4Phys;
+    // [신규, 2026-09-18, PN-44C91D6E] 자식은 execImage()의 kEnterRing3
+    // (고정 entryPoint+새 스택)이 아니라, 부모가 트랩한 시점의 전체
+    // InterruptFrame을 그대로 재현하는 kResumeForkedRing3로 시작한다 -
+    // rax만 0으로 덮어써(POSIX fork() 자식 쪽 반환값 규약) "부모가
+    // 트랩한 바로 그 지점에서, 자식이라는 것만 다르게" 재개한다.
+    thread->forkResumeFrame = *frame;
+    thread->forkResumeFrame.rax = 0;
+    thread->init(kResumeForkedRing3, nullptr);
+    thread->ensureSelfRef();
+    proc->mainThread = thread;
+
+    // TLS 인스턴스(PN-22E5E9E7 항목5/6) - 부모가 PT_TLS 템플릿을 갖고
+    // 있었으면 그 사실 자체도 복제해야 makeUserTlsInstance()가 자식용
+    // 인스턴스를 새로 만든다(공유가 아니라 독립 복사본 - fork() 자식은
+    // 자기 자신의 thread_local 상태를 가져야 한다, execImage()와 동일한
+    // 이유로 프로세스마다 하나씩).
+    proc->hasTlsTemplate = parentProc->hasTlsTemplate;
+    proc->tlsTemplateVaddr = parentProc->tlsTemplateVaddr;
+    proc->tlsTemplateFilesz = parentProc->tlsTemplateFilesz;
+    proc->tlsTemplateMemsz = parentProc->tlsTemplateMemsz;
+    proc->tlsTemplateAlign = parentProc->tlsTemplateAlign;
+    if (!proc->makeUserTlsInstance(thread)) {
+        UserThread::release(thread);
+        procShared.reset();
+        frame->rax = static_cast<uint64_t>(kInvalidProcessId);
+        return;
+    }
+
+    // 프로세스 트리 등록 - SpawnProcessHandler 5단계와 동일한 패턴.
+    parentProc->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+    if (!parentProc->children.insert(procShared)) {
+        UserThread::release(thread);
+        procShared.reset();
+        frame->rax = static_cast<uint64_t>(kInvalidProcessId);
+        return;
+    }
+    procShared->parent = WeakPtr<Process>(parentProcShared);
+
+    // 자원 그룹 소속 - 부모의 그룹을 그대로 물려받는다(SpawnProcessHandler
+    // 와 동일한 기본값), 메모리 사용량 계정도 부모와 동일한 총량으로
+    // 맞춘다(주소공간 전체를 그대로 복제했으므로 - execImage()의 ELF
+    // 세그먼트 스캔 대신 이 값을 그대로 쓴다).
+    procShared->joinResourceGroup(parentProc->group ? parentProc->group : &gRootResourceGroup);
+    procShared->memoryBytesUsed = parentProc->memoryBytesUsed;
+    if (procShared->group) {
+        procShared->group->accounting.totalMemoryBytesUsed += procShared->memoryBytesUsed;
+    }
+
+    procShared->processId = kAllocateProcessId(procShared);
+    Scheduler::enqueue(Scheduler::currentCoreIndex(), thread);
+
+    // 부모의 반환값 - 자식의 ProcessId(POSIX fork()와 동일한 규약,
+    // 자식 쪽 반환값 0은 위에서 forkResumeFrame.rax로 이미 처리).
+    frame->rax = static_cast<uint64_t>(procShared->processId);
+}
+
 void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointSpawnProcess, &gSpawnProcessHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointWait, &gWaitHandler);

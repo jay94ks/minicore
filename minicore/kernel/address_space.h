@@ -139,6 +139,19 @@ public:
     // 원래 범위 그대로 남겨 false를 반환한다.
     bool resizeAnonymousRegion(uint64_t start, uint64_t oldLength, uint64_t newLength);
 
+    // [신규, 2026-09-18, PN-44C91D6E] `fork()`가 부모의 VMA 전체를
+    // 순회하며 자식 주소공간에 그대로 재현하는 데 쓴다 - `_tree.forEach()`
+    // 를 그대로 노출하는 얇은 템플릿 래퍼(값이 항상 `Vma*`라는 이
+    // 클래스만의 불변조건을 알아야 안전하게 캐스팅할 수 있어 `MapleTree`
+    // 자신은 이 지식이 없다 - 그래서 `MapleTree`에 두지 않고 여기 둔다).
+    // 콜백은 `(const Vma&)`를 받는다 - 주소 오름차순(forEach와 동일).
+    // 이 관리자의 다른 공개 메서드와 동일하게 `_lock`을 잡는다.
+    template <typename Fn>
+    void forEachVma(Fn&& fn) {
+        SpinlockGuard guard(_lock);
+        _tree.forEach([&fn](uint64_t /*start*/, uint64_t /*end*/, void* value) { fn(*static_cast<const Vma*>(value)); });
+    }
+
 private:
     uint64_t _pml4Phys = 0;
     uint64_t _regionFloor = 0;

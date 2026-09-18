@@ -579,6 +579,21 @@ struct SpawnProcessArgs {
     int64_t pid = kInvalidProcessId;
 };
 
+// [신규, 2026-09-18, PN-44C91D6E, SP-6BEAE0C1] `fork()` - 이 syscall만
+// `int 0x80` 경로에서 유일하게 지원된다(`syscall` 명령 경로는 SYSRET용
+// rcx/r11만 보존해 자식 재개에 필요한 나머지 GPR 스냅샷이 아예 없다 -
+// idt.cpp의 `kHandleSyscallTrap`이 `kDispatchSyscallVerb` 공용
+// 디스패치를 타기 전에 이 verb만 직접 가로채 전체 `InterruptFrame`을
+// 그대로 넘긴다). `Syscall::submit()`의 submit-then-wait 모델과 근본적
+// 으로 안 맞아(부모/자식 양쪽이 "즉시" 반환해야 함) 이 verb 하나로
+// 완결된다 - args 구조체도, 별도 AsyncTaskHandler도 없다. `frame`을
+// 그대로 받아 그 안에서 끝까지 처리하고, 부모의 반환값(`frame->rax`
+// = 자식 ProcessId, 실패 시 -1)까지 여기서 직접 채운다 - 자식은
+// `kResumeForkedRing3`(process.cpp)가 별도로 재개시킨다(그 함수
+// 문서 주석 참고).
+constexpr SyscallEndpointId kSyscallEndpointFork = kMakeSyscallEndpointId(0, 8);
+void kHandleForkSyscall(InterruptFrame* frame);
+
 // [신규, PN-E35294B8 항목2, QU-B9EB45E4 설계자 답변 그대로] argv+envp
 // 문자열 데이터 총합의 v1 상한 - "huge page 1개만큼으로 제한해"를
 // 그대로 반영(x86_64의 2MiB 대형 페이지 크기). 이 상한을 넘으면
