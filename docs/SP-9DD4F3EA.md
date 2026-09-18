@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-16T15:00:00.989Z
+  updatedAt: 2026-09-18T10:22:10.663Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -363,4 +363,26 @@ blacklist)을 devmgr 프로세스 하나의 실제 시작 시퀀스로 엮는다
 Channel IPC에 `exclusivePreemptive` 플래그만 얹으면 충분(Tier B).
 Tier A(전용 공유메모리 링버퍼)는 현재 실사용처 없음. 이 시퀀스는
 그대로 유효하다.
+
+**[갱신, 2026-09-18, PN-A0F72A3A 조사] 5단계("드라이버 자식 스폰")의
+실제 구현 방식 확정** - §3.2가 이미 "정적 링크 + 자식 프로세스로
+분리 실행"이라고 확정해 둔 것을, `PN-543C0CE9`(SpawnProcess 구현)의
+`SpawnProcessArgs`/`kSetupInitialUserStack`(process.cpp) 코드 감사로
+구체화했다: devmgr은 자기 자신의 ELF 원본 바이트를(`/sys/live/
+initrd.cpio`를 Open+Read해 `libcpio`로 자기 이름 엔트리를 찾아) 그대로
+`SpawnProcessArgs::imageBuffer`로 넘겨 **자기 자신을 다시 스폰**하고,
+`argv`(예: `{"devmgr", "--driver=ahci"}`)로 자식에게 "어떤 드라이버로
+실행돼야 하는지"를 알린다 - 별도 드라이버 ELF 파일은 initrd에 없다.
+`kSetupInitialUserStack`을 직접 읽어 확인한 결과 **커널 쪽 argv/envp
+스택 레이아웃(`[argc][argv...][NULL][envp...][NULL][auxv AT_NULL]`,
+표준 SysV x86-64 프로세스 시작 규약 그대로)은 이미 완전히 구현
+완료돼 있다** - `initialRsp`가 정확히 이 프레임의 시작(`argc` 위치)을
+가리키도록 `ring3UserStackTop`에 설정된다. **다만 유저랜드
+(`userland/libs/libmc`)에는 이 프레임을 실제로 읽어 `main(argc,
+argv)` 형태로 넘겨주는 crt0 진입 스텁이 아직 없다** - 지금까지 어떤
+유저 프로그램도 argv를 실제로 소비한 적이 없어(전부 `extern "C" void
+_start()`, 인자 없음) 이 스텁 자체가 없었다는 뜻이다. 이 스텁을
+추가하는 작업은 지금 당장 착수하지 않는다 - 아직 실사용 소비자가
+없어(RM-23F4B687 §4) devmgr의 드라이버 모드 재진입이 실제로 착수될
+때(PN-A0F72A3A) 함께 만든다.
 

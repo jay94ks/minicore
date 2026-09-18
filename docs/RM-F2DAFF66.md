@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T07:54:35.962Z
+  updatedAt: 2026-09-18T09:54:10.125Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -278,24 +278,52 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   재개 경로(CR3가 이미 맞는 경우)엔 추가 비용 없음.
 - **현재 상태**: **완전 해소.**
 
-### 1-K. `PageFrame` 구조체 - 설계는 approved, 코드는 아직 기존 `uint16_t` 배열 (발견됨, 미해결)
+### 1-K. `PageFrame` 구조체 - 구조체 교체 + rmap/LRU 1단계 배선 완료 (완전 해소, 잔여는 미래 트리거로 분리)
 
 - **출처**: `SP-6CEFBE9B`("물리 페이지 프레임 메타데이터 — PageFrame
   구조체", 2026-09-18 approved)가 rmap(§6)/swap LRU(§7)/캐시타입
-  일관성(§3) 필드를 포함한 64바이트 `PageFrame` 구조체를 확정했다 -
-  이 문서 자체가 승인 직후 이 감사 문서에 스스로 등록하는 사례(작성
-  세션이 곧 이 RM-F2DAFF66도 관리하는 세션).
-- **실제 코드**: `page_frame_allocator.cpp`는 여전히
-  `SP-6BEAE0C1` §11-3 당시의 `uint16_t` 참조 카운트 배열뿐이다 -
-  `PageFrame` 구조체/`RmapEntry`/rmap 삽입·제거/LRU 리스트 전부
-  코드에 아직 없다.
-- **조치**: `PN-2FC5ED36`(PageFrame 구조체 실제 구현, planned)로
-  추적 - 구조체 교체 자체는 기존 `retain()`/`refCount()` API 하위
-  호환을 유지해야 한다(설계 §4). rmap/LRU 완전한 소비(승격/강등/회수
-  스캔)는 swap 자체가 없어 이 구현 계획의 범위 밖 - 별도
-  `PN-4859FDE9`(스캔 트리거 정책, 설계자 확인 대기)로 남음. 캐시타입
-  불일치 처리는 `PN-81223433`.
-- **현재 상태**: **미해결 - 설계 확정, 구현 대기.**
+  일관성(§3) 필드를 포함한 64바이트 `PageFrame` 구조체를 확정했다.
+- **[완료, 2026-09-18, commit `bd43196`, PN-2FC5ED36 항목1-2]**
+  `page_frame_allocator.h`/`.cpp`가 기존 `uint16_t` 배열을 실제
+  `PageFrame[]`(64바이트, `static_assert` 확인)로 교체 완료 - 코드를
+  직접 읽어 설계와 대조한 결과 필드/플래그/주석 전부 `SP-6CEFBE9B`
+  §1/§2/§5와 정확히 일치함을 확인(설계 이탈 없음). `retain()`/
+  `refCount()` API 시그니처 불변, `PG_RESERVED`/`numaNode` 실제
+  세팅, 신규 `frameFor(physAddr)` 접근자까지 계획대로 구현됨. QEMU
+  3개 표준 시나리오 무회귀 실측 확인.
+- **[완료, 2026-09-18, commit `dea9f1c`, PN-2FC5ED36 항목3-4]**
+  `insertRmap()`/`removeRmap()`(page_frame_allocator.cpp)을 코드로
+  직접 확인 - `SP-6CEFBE9B` §6.2(삽입/제거 규칙)·§7.2 1단계(최초
+  진입 시 inactive 리스트 push, 중복 삽입 방지)와 정확히 일치.
+  `ProcessAddressSpaceManager`의 `mapRegion`/`registerFixedRegion`/
+  `resizeAnonymousRegion`(Anonymous 매핑 지점 3곳 전부) → `insertRmap`,
+  `kRollbackMapped`/`unmapRegion`/`unmapAll` → `removeRmap` 배선
+  확인. `freeOrder()`에 설계 문서엔 없던 방어적 rmap/LRU 청소까지
+  구현 세션이 스스로 추가(정상 경로의 안전망, 설계 이탈이 아니라
+  타당한 보강). devmgr+fs 2-프로세스 실측(15+12회) 무크래시 확인.
+- **의도적으로 남은 잔여 항목(둘 다 이 문서의 "갭"이 아니라 아직
+  실사용처가 없는 것으로 판단 - 각자 명확한 미래 트리거가 있어
+  `PN-2FC5ED36`은 completed로 종결하고 아래로 분리 추적)**:
+  1. `kHandleCowWriteFault`의 rmap "이동"(COW 새 프레임으로 엔트리
+     이전) - `fork()`(`PN-44C91D6E`) 착수 전까지는 COW 자체가 트리거될
+     길이 없어 검증 불가능이라 미배선(합리적 판단) - `PN-44C91D6E`
+     착수 시 함께 배선.
+  2. LRU §7.2 2단계(`PG_ACCESSED` 세팅) - `paging.cpp` 전수 확인
+     결과 참조 0건(미배선 맞음) - v1은 재폴트 경로 자체가 거의 없어
+     소비처가 없다는 판단이 타당함(`SP-6CEFBE9B` §7.3 기존 합의와
+     일치) - swap 착수 시(`PN-4859FDE9`) 재검토.
+  3. `elf::loadIntoAddressSpace()`의 PT_LOAD 세그먼트가 `VmaBacking::
+     Anonymous`로 등록되는지는 `elf.cpp`가 이 저장소 `minicore/kernel`
+     밖에 있어 미확인(`PN-2FC5ED36`에 참고용으로 남김, Anonymous가
+     아니면 rmap 커버리지에 조용한 공백 가능성 - 다음에 ELF 로딩
+     경로를 손댈 세션이 확인 권장).
+- **부수 확인**: 같은 날 `PN-9E2CC631`(FileBacked 캐시 정책)도
+  완료돼 `SP-6CEFBE9B` §6.3/§7.4가 "Anonymous/FileBacked 공유 LRU"로
+  갱신됐다(정책 확정, 코드는 fs 서비스 실코드 대기).
+- **현재 상태**: **완전 해소** - 설계가 요구한 구조체/rmap/LRU 1단계
+  전부 코드로 구현·검증됨. 캐시타입 불일치 처리는 `PN-81223433`, swap
+  스캔 트리거 정책은 `PN-4859FDE9`, COW rmap 이동은 `PN-44C91D6E`
+  착수 시로 계속 별도 추적.
 
 ## §2. 점검 완료 - 갭 없음 확인
 

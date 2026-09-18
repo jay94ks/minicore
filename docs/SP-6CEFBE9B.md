@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-6CEFBE9B
   status: approved
-  updatedAt: 2026-09-18T08:50:25.249Z
+  updatedAt: 2026-09-18T10:05:32.137Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -228,13 +228,27 @@ PageFrameList gInactiveList;  // 회수 후보 - 리스트 끝(tail)에 가까�
 1. **신규 진입**: `PG_SWAPPABLE`인 프레임이 처음 매핑되면(§6.2 삽입
    시점) `gInactiveList` 뒤(head)에 넣는다 - Linux와 동일하게 "처음
    보는 페이지는 일단 의심"(바로 active에 넣지 않음).
-2. **재접근 감지**: 폴트 처리 경로가 이미 매핑된 프레임에 다시
-   접근하면 `PG_ACCESSED`(§2)를 세팅한다(x86 하드웨어 Accessed
-   비트를 그대로 반영 - 별도 소프트웨어 스캔 없이 폴트 시점에 값만
-   복사).
-3. **승격(inactive → active)**: inactive 리스트를 스캔하다가
-   `PG_ACCESSED`가 켜진 프레임을 만나면 active로 옮기고 비트를
-   지운다(second-chance) - **스캔을 누가 언제 돌릴지(회수 압박 시
+2. **재접근 감지 — [정정, 2026-09-18, 설계자 opinion] 폴트 기반이
+   아니라 스캔 기반**: 최초 작성 시점엔 "폴트 처리 경로가 재접근을
+   감지해 그 시점에 `PG_ACCESSED`를 세팅한다"고 잘못 적었다 - 이미
+   `PAGE_PRESENT`인 페이지를 다시 읽거나 쓰는 것은 x86_64에서
+   **애초에 폴트를 일으키지 않는다**(CPU가 트랩 없이 PTE의 하드웨어
+   Accessed 비트만 자동으로 세팅) - v1처럼 즉시 매핑 위주라 지연
+   매핑/재폴트 경로가 거의 없다는 사실과 무관하게, 애초에 "폴트로
+   재접근을 감지한다"는 전제 자체가 틀렸다. 실제로 재접근을 관찰하는
+   유일한 방법은 **3단계의 스캔이 각 프레임의 PTE를 직접 walk해
+   하드웨어 Accessed 비트를 읽고(있으면 `PG_ACCESSED`에 반영 후
+   PTE 쪽은 클리어) 그 자리에서 곧장 승격까지 처리하는 것**이다 -
+   즉 이 2단계는 별도 메커니즘이 아니라 3단계 스캔의 일부다(Linux의
+   페이지 회수 스캐너가 하는 일과 동일 - refault와 무관하게 항상
+   PTE 스캔으로 age를 판정). 지연 매핑/재폴트 경로가 없다는 점은
+   오히려 "이 스캔이 Accessed 비트를 관찰하는 유일한 경로"라는
+   뜻이라, 스캔 자체(§8-1, `PN-4859FDE9`)를 설계하지 않고는 이 상태
+   전이를 아예 구현할 수 없다 - 두 항목이 사실상 하나의 결정이라는
+   점을 명확히 한다.
+3. **승격(inactive → active)**: 위 스캔이 걸으며 `PG_ACCESSED`가
+   켜진 프레임을 만나면 active로 옮기고 비트를 지운다(second-chance)
+   - **스캔을 누가 언제 돌릴지(회수 압박 시
    동기? 별도 커널 스레드? 주기?)는 이 문서 범위 밖**(§8) - 자료구조와
    전이 규칙만 확정, 스캔 트리거 정책은 `PageFrameAllocator`의 기존
    §2.4 고갈 정책(즉시 nullptr, 비블로킹 - `SP-D7013B26`과 같은 전역
