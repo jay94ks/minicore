@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T17:07:13.085Z
+  updatedAt: 2026-09-18T20:09:59.547Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -278,7 +278,7 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   재개 경로(CR3가 이미 맞는 경우)엔 추가 비용 없음.
 - **현재 상태**: **완전 해소.**
 
-### 1-K. `PageFrame` 구조체 - 구조체 교체 + rmap/LRU 1단계 배선 (부분 해소 - COW rmap 이동 미배선 확인, PN-610CA401로 추적)
+### 1-K. `PageFrame` 구조체 - 구조체 교체 + rmap/LRU 1단계 배선 (완전 해소 - COW rmap 이동, PN-610CA401 완료 commit `a696970`)
 
 - **출처**: `SP-6CEFBE9B`("물리 페이지 프레임 메타데이터 — PageFrame
   구조체", 2026-09-18 approved)가 rmap(§6)/swap LRU(§7)/캐시타입
@@ -325,9 +325,14 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 - **부수 확인**: 같은 날 `PN-9E2CC631`(FileBacked 캐시 정책)도
   완료돼 `SP-6CEFBE9B` §6.3/§7.4가 "Anonymous/FileBacked 공유 LRU"로
   갱신됐다(정책 확정, 코드는 fs 서비스 실코드 대기).
-- **현재 상태**: **부분 해소** - 구조체/rmap/LRU 1단계 골격은 코드로
-  구현·검증됐으나, 위 잔여 항목1(COW rmap 이동)이 트리거 발생 후에도
-  실제로 미배선임이 확인돼 `PN-610CA401`(scheduled)로 분리 추적 중.
+- **현재 상태**: **완전 해소.** 구조체/rmap/LRU 1단계 골격에 이어,
+  위 잔여 항목1(COW rmap 이동)도 `PN-610CA401`(completed, commit
+  `a696970`, 2026-09-19)로 `kHandleCowWriteFault`에
+  `removeRmap(oldPhys,...)`/`insertRmap(newPhys,...)` 호출을 추가해
+  마저 배선했다 - QEMU 회귀 3종(PVH no-initrd SMP1/SMP4, GRUB 실제
+  initrd SMP4) 무회귀 확인. rmap 소비자(swap 스캔 `PN-4859FDE9`)는
+  여전히 미착수라 이 배선의 직접적인 관찰 가능한 효과는 아직 없지만,
+  설계(`SP-6CEFBE9B` §6.2)가 요구한 부기 자체는 이제 코드와 일치한다.
   캐시타입 불일치 처리는 `PN-81223433`, swap 스캔 트리거 정책은
   `PN-4859FDE9` 착수 시로 계속 별도 추적.
 
