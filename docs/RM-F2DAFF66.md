@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T15:32:17.202Z
+  updatedAt: 2026-09-18T17:07:13.085Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1308,6 +1308,41 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   무회귀 확인. **갭 없음(§2 전체)** - §3(하드웨어 캐시 스누핑 여부)은
   여전히 실사용처 없어 열린 질문으로 남아 있으나 이는 설계 문서 자신이
   명시적으로 미뤄 둔 범위라 갭이 아님.
+
+- **`SP-245D130B`(ResourceGroup) §10 "요약" 절**: "지금 바로 설계+구현
+  가능"(§1 트리/§2 Process 연결/§3 CPU 쿼터 스로틀/§4 freeze/§5 CPU
+  계정) vs "설계만, 구현은 후속"(§6 메모리)/"전면 보류"(§7 I/O)로
+  나눈 분류를 `PN-4190BBD3`(구현 계획)과 한 줄씩 대조 - §1/§2/§4는
+  실제로 completed+실측 검증됨(2026-09-18, 3-ELF initrd로 루트 그룹
+  가입 경로/`fork()` 경로 둘 다 확인), §3/§5/§6(syscall 번호 등록)은
+  선행 조건이던 `SP-6A563A8F` 승인이 끝나 "착수 가능"으로 정확히
+  갱신돼 있음, §6/§7은 문서 자체가 이미 "후속 PN"으로 명시적으로
+  분리해 둠(§7은 `PN-DEC738B8`, §6은 `PN-A40787C8`로 각각 등록 확인).
+  갭 없음 - 이 문서는 이미 여러 차례(2026-09-17/18) 자체 개정을 거쳐
+  §목차-코드 대조가 실질적으로 상시 반영돼 있는 드문 사례.
+
+- **`SP-2BCE5D60`(fs 커널 서비스) - 점검 대상 아님(코드 자체가 아직
+  없음)**: §7 착수 조건이 스스로 명시하듯 `minicore/fs` 실코드
+  (`PN-452FF696`)가 존재하지 않아 "확정된 설계 vs 실제 코드" 대조가
+  성립하지 않는다 - 이 문서의 §1-§6은 전부 설계뿐이고 구현 착수 전.
+  RM-F2DAFF66의 대상은 "이미 부분 구현된 SP의 뒷부분 항목이 조용히
+  빠지는 패턴"이라 이런 순수 설계-only 문서는 실코드가 생긴 뒤
+  재방문 대상으로 보류(§3에도 다시 안 넣음 - PN-452FF696 완료 시
+  자연히 재검토됨).
+
+- **`SP-B071E628`(pubreg) §6-6 최종 바이너리 와이어 포맷**:
+  `PubregRegistration`(registryId/protocolCode[4]/implementationId[28]/
+  endpoint/featureFlags)/`PubregMessageHeader`/query의 mode/offset/count
+  페이지네이션을 `minicore/pubreg/main.cpp`와 `userland/libs/libmc/
+  pubreg.h`와 한 줄씩 대조 - 예외 없이 설계 그대로 구현돼 있음을
+  확인(`PN-185406F6` 항목4, completed, commit `974adce`). `RM-085694F8`
+  ("Minicore Pubreg 프로토콜 할당표")의 할당 현황이 여전히 "아직
+  없음"으로 남아 있는 것도 실제로는 정확하다 - `PN-185406F6` 검증에
+  쓰인 protocolCode는 TEMP 임의값(devmgr 클라이언트 테스트용, 검증 후
+  `git checkout --`로 완전히 원복)이었을 뿐이고, 이 표에 실제로
+  영구 예약해야 할 "진짜 프로토콜 소비자"는 §5-A/§5-B 확정(커널
+  서비스는 pubreg에 직접 등록 안 함, 대행 릴레이는 범위 밖)에 따라
+  아직 하나도 존재하지 않는다 - 갭 없음.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
