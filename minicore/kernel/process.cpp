@@ -224,7 +224,7 @@ namespace kernel {
 // [SP-6BEAE0C1 §5, PN-543C0CE9 착수 2번째 증분] 동적 Process 풀 - 지금까지
 // 모든 Process 인스턴스는 정적 전역(kmain.cpp의 gInitProcess/
 // gServiceProcess[])이라 컴파일러가 프로그램 시작 시 NSDMI(pml4Phys=0,
-// mainThread=nullptr, pendingSignals의 내부 _head=nullptr 등)를 전부
+// threads의 내부 _head=nullptr, pendingSignals의 내부 _head=nullptr 등)를 전부
 // 실제로 적용해 준다 - 그래서 Resurrect(§6.2)가 그 위에 init()을 다시
 // 불러도(pendingSignals.clear() 등) 항상 "이미 한 번은 진짜로 생성된
 // 적 있는 객체" 상태였다.
@@ -264,7 +264,17 @@ bool Process::init() {
     if (!pml4Phys) {
         return false;
     }
-    mainThread = nullptr;
+    // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] `mainThread = nullptr;`
+    // (raw 포인터 대입)를 대체 - children/openBridges와 동일한 이유로
+    // 매번 명시적으로 clear()한다(Resurrect가 같은 정적 Process를
+    // 재사용할 수 있으므로 이전 생애의 스레드 목록이 새 생애로 새어
+    // 들어가면 안 된다). clear()는 ChunkedList 자신이 각 슬롯의
+    // SharedPtr을 T{}로 되돌려 강한 참조를 실제로 내려놓는다(chunked_list.h
+    // 참고) - 다만 이 시점엔 실제로 채워져 있을 리 없다(Resurrect는
+    // 항상 destroy()/좀비 회수를 먼저 거친 뒤에만 같은 Process를
+    // 재사용하므로, threads는 그 회수 절차에서 이미 비워져 있다 - 이
+    // clear()는 순수 방어적 재확인).
+    threads.clear();
     lastFault = FaultInfo{};
     // 프로세스 트리(§6) - Resurrect(§6.2)가 같은 정적 Process를
     // 재사용할 수 있으므로, 이전 생애의 부모/자식 관계가 새 생애로
@@ -641,7 +651,21 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
     // submitterTask 관련 기능(CR3 동기화/유저 포인터 검증)만 못 쓰게
     // 될 뿐 프로세스 기동 자체는 그 없이도 가능했던 기존 동작이다.
     thread->ensureSelfRef();
-    mainThread = thread;
+    // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] `mainThread = thread;`
+    // (raw 포인터 단일 대입)를 대체 - `threads`(process.h)에 이
+    // 스레드의 `sharedSelf()`(방금 ensureSelfRef()로 반드시 채워진
+    // `_selfRef`와 컨트롤 블록을 공유)를 등록한다. 실패(슬랩 고갈)해도
+    // 이 함수 자체를 실패시키지 않는다 - `thread`는 여전히 유효하고
+    // 호출부가 그대로 enqueue할 수 있다(ensureSelfRef() 실패를 이미
+    // 같은 이유로 무시하는 바로 위 관례와 동일), 다만 이 경우 그
+    // 스레드는 `Process::threads`로 관찰되지 않는다(프로세스 조회/
+    // 좀비 회수 등 threads를 순회하는 코드에서 안 보임 - v1은 항상
+    // 이 execImage() 호출부(SpawnProcessHandler/kSpawnInitProcess/
+    // kSpawnServiceProcesses)가 곧바로 첫 스레드를 만드는 것이라 이
+    // 슬랩 고갈 시나리오 자체가 이미 다른 이유로 실패하는 경로들과
+    // 같은 급의 드문 경우).
+    threads.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+    threads.insert(thread->sharedSelf());
 
     // [신규, 2026-09-17, SP-B26CDBDD §6.2, PN-158B6B2F] 메모리 사용량
     // coarse 계정 - PT_LOAD 세그먼트 memsz 합 + 유저 스택 크기(위에서
@@ -675,6 +699,17 @@ UserThread* Process::execImage(const elf::Image& image, UserThread* thread, cons
     // 채운 뒤에만 호출 가능 - 템플릿이 없으면(v1 유저 바이너리 전부
     // 해당) 즉시 true라 사실상 no-op.
     if (!makeUserTlsInstance(thread)) {
+        // [신규, 2026-09-18, SP-76250478, PN-0EB2FABF] 이 함수의 기존
+        // 실패 계약("호출부가 UserThread::release(thread)+Process::
+        // destroy()로 되돌린다")은 안 바뀐다 - 다만 방금 위에서
+        // `threads`에 이 thread를 이미 등록해 뒀으므로, 그 계약대로
+        // 호출부가 곧장 release()를 부르기 전에 여기서 먼저 컨테이너
+        // 슬롯을 지워 둬야 한다(process.h의 threads 문서 주석 "순서
+        // 중요" 참고 - 그러지 않으면 호출부의 release() 이후
+        // `threads`가 이미 반납된 메모리를 가리키는 채로 남고, 그
+        // 컨테이너의 청크 메모리 자체도 Process 소멸 시 반납될 기회를
+        // 못 만난다, Process::destroy()는 threads를 안 건드리므로).
+        threads.clear();
         return nullptr;
     }
 
@@ -701,13 +736,22 @@ bool Process::raiseSignal(SignalNumber number) {
     // 이라 `.lock()`으로 유효성을 확인해야 한다 - 대상 Mutex/Semaphore가
     // kMakeShared로 안 만들어졌으면 빈 값이라 이 강제 웨이크업만
     // 조용히 스킵된다(task.h의 blockedOn 주석 참고).
-    if (mainThread) {
-        if (SharedPtr<Waitable> waitable = mainThread->blockedOn.lock()) {
-            waitable->cancel(mainThread, WaitCancelReason::Signal);
+    // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛 `if (mainThread)`
+    // 단일 분기를 `threads` 전체 순회로 대체 - 지금은 프로세스당
+    // 스레드가 여전히 하나뿐이라 관찰 가능한 동작은 동일하다(process.h의
+    // raiseSignal() 문서 주석에 POSIX 시맨틱 미정 사항을 기록해 뒀다 -
+    // 이 순회는 "대기 중인 모든 스레드를 깨운다"는 보수적 동작).
+    threads.forEach([&](SharedPtr<UserThread>& threadRef, auto*) {
+        UserThread* t = threadRef.get();
+        if (!t) {
+            return;
+        }
+        if (SharedPtr<Waitable> waitable = t->blockedOn.lock()) {
+            waitable->cancel(t, WaitCancelReason::Signal);
         }
         // [신규, 2026-09-18, PN-B5C2845A] Kill/Terminate는 위
         // `blockedOn`(Waitable 기반 블로킹) 강제 웨이크업만으로는
-        // `mainThread`가 `Syscall::wait()`(`acceptFromChannel`/
+        // 대상이 `Syscall::wait()`(`acceptFromChannel`/
         // `connectChannel`/`ChannelRead`/`ChannelWrite` 등)로 파킹된
         // 경우에 절대 도달하지 못한다(PN-B5C2845A 발견 - `Scheduler::
         // parkCurrent()`는 `blockedOn`을 전혀 안 씀). Kill/Terminate
@@ -720,9 +764,9 @@ bool Process::raiseSignal(SignalNumber number) {
         // 실제로 파킹돼 있지 않으면(pendingSyscalls가 비어있거나 전부
         // 이미 끝남) 이 호출은 그냥 아무 일도 안 하는 것과 같다.
         if (number == SignalNumber::Kill || number == SignalNumber::Terminate) {
-            Scheduler::cancelPendingSyscalls(mainThread);
+            Scheduler::cancelPendingSyscalls(t);
         }
-    }
+    });
     return true;
 }
 
@@ -1164,12 +1208,24 @@ public:
             args->hadZombieChild = true;
             args->reapedPid = zombie->processId;  // [수정, PN-C39882D0] 포인터값 대신 ProcessId
             args->exitCode = zombie->exitCode;
-            // mainThread는 아직 SharedPtr 관리 대상이 아니다(PN-B4987BF6
-            // 별도 계획, Task 자체를 SharedPtr로 옮기는 더 위험한 작업 -
-            // 이번 범위 밖) - 명시적으로 계속 반납해야 한다.
-            if (zombie->mainThread) {
-                UserThread::release(zombie->mainThread);
-            }
+            // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛
+            // `if (zombie->mainThread) UserThread::release(...)` 단일
+            // 반납을 `zombie->threads` 전체 순회로 대체 - 슬랩 반납
+            // 자체는 여전히 raw 포인터 기반 `UserThread::release()`가
+            // 명시적으로 담당한다(syscall.h/process.h의 threads 문서
+            // 주석 참고 - SharedPtr 컨테이너로 바뀌었어도 실제 반납
+            // 계약은 그대로). **순서 중요**: `threads.clear()`를
+            // release() 호출보다 먼저 실행하면 안 된다 - 그러면 컨테이너
+            // 자신의 SharedPtr 사본이 먼저 사라지는 건 무해하지만(no-op
+            // 삭제자), 아래 forEach 자체가 이미 비워진 목록을 순회하게
+            // 돼 release()가 한 번도 안 불린다. 그래서 먼저 forEach로
+            // 전부 release()한 뒤에 clear()로 컨테이너 슬롯을 정리한다.
+            zombie->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
+                if (UserThread* t = threadRef.get()) {
+                    UserThread::release(t);
+                }
+            });
+            zombie->threads.clear();
             // [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2] 좀비가
             // 지금 여기서 실제로 회수(reap)되므로, 그 ProcessId 슬롯도
             // 지금 해제한다(위 zombie->processId를 이미 읽은 뒤라 순서
@@ -1225,7 +1281,7 @@ public:
         // 일치하는 것만 대상으로 인정한다. 좀비(이미 죽어 주소공간이
         // 반납된 자식)에게 신호를 보내는 건 무의미하므로 함께 걸러낸다
         // - `raiseSignal()` 자체는 좀비에도 안전하게 호출 가능하지만
-        // (mainThread가 이미 반납됐을 수 있어 그냥 pendingSignals에만
+        // (threads가 이미 비어 있을 수 있어 그냥 pendingSignals에만
         // 쌓이고 끝) 아무 효과가 없어 혼란만 준다.
         SharedPtr<Process> target;
         self->children.forEach([&](SharedPtr<Process>& child, auto*) {
@@ -1407,7 +1463,11 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     thread->forkResumeFrame.rax = 0;
     thread->init(kResumeForkedRing3, nullptr);
     thread->ensureSelfRef();
-    proc->mainThread = thread;
+    // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] execImage()와 동일한
+    // 대체(위 execImage()의 threads.insert() 문서 주석 참고) - fork()
+    // 자식도 스레드를 정확히 하나만 만드므로 관찰 가능한 동작은 동일.
+    proc->threads.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+    proc->threads.insert(thread->sharedSelf());
 
     // TLS 인스턴스(PN-22E5E9E7 항목5/6) - 부모가 PT_TLS 템플릿을 갖고
     // 있었으면 그 사실 자체도 복제해야 makeUserTlsInstance()가 자식용
@@ -1420,6 +1480,14 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     proc->tlsTemplateMemsz = parentProc->tlsTemplateMemsz;
     proc->tlsTemplateAlign = parentProc->tlsTemplateAlign;
     if (!proc->makeUserTlsInstance(thread)) {
+        // [신규, 2026-09-18, SP-76250478, PN-0EB2FABF] 바로 위에서
+        // `proc->threads`에 이미 이 thread를 등록해 뒀으므로, 실제
+        // 슬랩 반납(UserThread::release()) 전에 그 컨테이너 슬롯부터
+        // 지운다(process.h의 threads 문서 주석 - "순서 중요" 참고,
+        // 반대 순서면 컨테이너가 이미 반납된 메모리를 가리키는 채로
+        // procShared.reset()을 맞는다) - clear()가 이 하나뿐인 슬롯의
+        // 청크 메모리까지 반납한다(chunked_list.h 참고).
+        proc->threads.clear();
         UserThread::release(thread);
         procShared.reset();
         frame->rax = static_cast<uint64_t>(kInvalidProcessId);
@@ -1429,6 +1497,8 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     // 프로세스 트리 등록 - SpawnProcessHandler 5단계와 동일한 패턴.
     parentProc->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
     if (!parentProc->children.insert(procShared)) {
+        // 위와 동일한 이유로 release() 전에 threads부터 정리한다.
+        proc->threads.clear();
         UserThread::release(thread);
         procShared.reset();
         frame->rax = static_cast<uint64_t>(kInvalidProcessId);

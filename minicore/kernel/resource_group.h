@@ -85,11 +85,19 @@ public:
     void addMember(const WeakPtr<Process>& proc);
     void removeMember(Process* proc);
 
-    // 그룹 소속 전체 프로세스의 mainThread를 순회하며 Ready/Running인
-    // 것만 Blocked로 전환 대상 표시(§4의 한계 참고). 이미 다른 이유로
-    // Blocked인 Task(디버그 정지 등)는 건드리지 않는다.
+    // [정정, 2026-09-18, SP-76250478/PN-0EB2FABF 조사 중 발견] 이
+    // 주석은 실제 구현과 이미 어긋나 있었다(freeze() 자신은 순회 없이
+    // `frozen` 플래그만 세운다 - 실제 정지는 각 Task가 다음
+    // `Scheduler::onTick()`을 탈 때 `kCheckAndMarkFrozen()`이 지연
+    // 적용한다, resource_group.cpp 참고) - "그룹 소속 전체 프로세스의
+    // 스레드가 다음 디스패치 시점에 지연 정지된다"로 정정. §4의 한계
+    // 참고. 이미 다른 이유로 Blocked인 Task(디버그 정지 등)는
+    // 건드리지 않는다.
     void freeze();
-    // freeze()가 실제로 멈춘(Process::frozenByGroup) 것만 다시 깨운다.
+    // freeze()가 실제로 멈춘(Process::frozenByGroup) 것만 다시 깨운다 -
+    // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] `Process::threads`
+    // (process.h)의 스레드 전부를 재개 대상으로 순회한다(옛 단일
+    // mainThread 재개에서 확장, resource_group.cpp 참고).
     // [신규, 2026-09-17, SP-245D130B §9-4] `debugSession.pausedByDebugger`
     // 도 함께 서 있으면 `frozenByGroup`만 내리고 실제로 깨우지는
     // 않는다(debug_session.h 문서 주석 참고) - 사유가 여러 개면 전부

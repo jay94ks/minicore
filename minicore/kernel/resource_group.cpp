@@ -84,8 +84,15 @@ void ResourceGroup::thaw() {
     // 참고 - 반대 방향은 미래의 `DebugContinue`가 책임진다).
     toWake.forEach([](SharedPtr<Process>& proc, auto*) {
         proc->frozenByGroup = false;
-        if (proc->mainThread && !proc->debugSession.pausedByDebugger) {
-            Scheduler::enqueue(Scheduler::currentCoreIndex(), proc->mainThread);
+        // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛 `proc->mainThread`
+        // 단일 재개를 `proc->threads` 전체 순회로 대체 - 지금은 프로세스당
+        // 스레드가 여전히 하나뿐이라 관찰 가능한 동작은 동일하다.
+        if (!proc->debugSession.pausedByDebugger) {
+            proc->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
+                if (UserThread* t = threadRef.get()) {
+                    Scheduler::enqueue(Scheduler::currentCoreIndex(), t);
+                }
+            });
         }
     });
 }

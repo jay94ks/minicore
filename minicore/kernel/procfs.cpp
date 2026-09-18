@@ -133,10 +133,23 @@ kernel::uint32_t kFormatStatus(kernel::Process* proc, char* buf, kernel::uint32_
     kAppendStr(buf, bufCap, pos, "\n");
 
     kAppendStr(buf, bufCap, pos, "ThreadState:\t");
-    if (!proc->mainThread) {
+    // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛 `proc->mainThread`
+    // 단일 필드를 대체 - 지금은 프로세스당 스레드가 여전히 하나뿐이라
+    // `threads`의 첫 번째(유일한) 스레드 상태를 보고하는 것으로
+    // 관찰 가능한 동작은 동일하다. **[알려진 한계]** 스레드가 여럿이
+    // 되면(`CreateThread` 착수 후) 이 한 줄짜리 요약은 더 이상 전체를
+    // 대표하지 못한다 - `/proc/<pid>/task/<tid>/status`류로 쪼갤지,
+    // 여러 줄로 나열할지는 그 착수 세션이 결정할 순수 구현 세부
+    // (RM-23F4B687 §4).
+    kernel::UserThread* firstThread = nullptr;
+    proc->threads.find([&](const kernel::SharedPtr<kernel::UserThread>& t) {
+        firstThread = t.get();
+        return firstThread != nullptr;
+    });
+    if (!firstThread) {
         kAppendStr(buf, bufCap, pos, "None");
     } else {
-        switch (proc->mainThread->state) {
+        switch (firstThread->state) {
             case kernel::TaskState::Ready:
                 kAppendStr(buf, bufCap, pos, "Ready");
                 break;

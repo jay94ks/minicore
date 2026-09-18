@@ -266,8 +266,8 @@ public:
         // [중요] 여기서는 하드웨어 DR0-3/DR7에 아무것도 쓰지 않는다 -
         // 이 syscall을 호출한 스레드(디버거 자신)가 지금 이 코어에서
         // 실행 중이라 DR 레지스터를 건드리면 디버거 자신에게 영향을
-        // 준다. 실제 하드웨어 반영은 대상(target->mainThread)이 다음
-        // 디스패치될 때 `Scheduler::onTick()` 등이 부르는
+        // 준다. 실제 하드웨어 반영은 대상(target->threads의 스레드)이
+        // 다음 디스패치될 때 `Scheduler::onTick()` 등이 부르는
         // `kSyncDebugRegs()`(scheduler.cpp, SP-83A07867 §3.2 네 번째
         // 훅)가 그 시점에 대상 자신의 코어에서 대신 한다 - §5가 이미
         // "다음 디스패치에서 반영, 최악의 경우 한 타임퀀텀 지연"이라고
@@ -443,8 +443,19 @@ public:
         // frozenByGroup이 이미 서 있어(kCheckAndMarkFrozen) 나중에
         // ResourceGroup::thaw()가 대신 깨운다.
         target->debugSession.pausedByDebugger = false;
-        if (target->mainThread && !(target->group && target->group->frozen)) {
-            Scheduler::enqueue(Scheduler::currentCoreIndex(), target->mainThread);
+        // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛 `target->mainThread`
+        // 단일 재개를 `target->threads` 전체 순회로 대체 - 지금은
+        // 프로세스당 스레드가 여전히 하나뿐이라 관찰 가능한 동작은
+        // 동일하다. 진짜 멀티스레드 디버깅(대상 스레드를 개별
+        // 지정/재개)은 이 증분 스코프 밖(SP-9A6D579F가 이 설계의
+        // 실제 소비자로 대기 중, debug_session.h §1-A/§3.4/§3.5의
+        // targetThread 파라미터 참고).
+        if (!(target->group && target->group->frozen)) {
+            target->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
+                if (UserThread* t = threadRef.get()) {
+                    Scheduler::enqueue(Scheduler::currentCoreIndex(), t);
+                }
+            });
         }
         args->error = ChannelError::None;
         co_return;

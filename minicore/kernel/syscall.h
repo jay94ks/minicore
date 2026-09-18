@@ -75,6 +75,15 @@ constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpoint
 // 그쪽에서 쓰고 있었음).
 uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1);
 
+// [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] 프로세스 안에서만
+// 유일한(전역 유일 아님) 스레드 식별자 - `Process::threads`가 단일
+// `mainThread` 포인터를 대체하며 함께 도입됐다(process.h 참고). 16비트로
+// 좁힌 이유는 설계자 opinion 그대로("16비트 정수로, 프로세스 내에서만
+// 유일") - 프로세스 하나가 65535개 넘는 스레드를 가질 일은 없다(아래
+// kMaxThreadsPerProcess, process.h 참고).
+using ThreadId = uint16_t;
+constexpr ThreadId kInvalidThreadId = 0xFFFFu;
+
 // 유저 프로세스에 속한 스레드의 커널 쪽 표현(SP-04EE2A18, 설계자 지시
 // 2026-09-14 - "커널 Task와 쓰레드는 다른 개념이다... 내부적으로 Task를
 // 상속받아 유저 쓰레드를 구현해도 상관없다"). 이 이름 자체는 제안일
@@ -85,11 +94,19 @@ uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1);
 // 상속 - `AsyncTask::waitingTask`(WeakPtr<Task>)가 "이 UserThread가
 // 아직 살아있는지"를 `.lock()`으로 확인할 수 있으려면 이 객체가 자기
 // 컨트롤 블록을 가져야 한다. **강한 소유권 모델 자체는 안 바뀐다** -
-// `Process::mainThread`(raw UserThread*)가 여전히 유일한 진짜
-// 소유자이고 `UserThread::release()`가 여전히 그 시점에 실제로
-// 반납한다(아래 `_selfRef` 주석 참고 - 외부에서 관찰되는 lifecycle은
-// 100% 동일, `EnableSharedFromThis`는 순수하게 WeakPtr 관찰자 지원을
-// 위한 부가 기능일 뿐이다).
+// [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] `Process::mainThread`
+// (raw UserThread*) 단일 필드가 `Process::threads`(ChunkedList<
+// SharedPtr<UserThread>, 16>)로 바뀌었지만, 그 컨테이너에 담기는
+// `SharedPtr<UserThread>`는 이 클래스의 기존 `_selfRef`와 정확히 같은
+// no-op 삭제자 인스턴스를 그대로 복사해 넣은 것뿐이다 - **실제 슬랩
+// 메모리 반납은 여전히 `UserThread::release()`가 명시적으로 담당**
+// 한다(아래 `_selfRef` 주석 참고). `threads`는 "누가 이 스레드를
+// 프로세스의 스레드 목록에 포함시켰는가"라는 소속 정보의 컨테이너일
+// 뿐, SharedPtr의 참조 카운트가 0이 된다고 슬랩 메모리가 자동으로
+// 반납되지는 않는다 - 호출부는 반드시 `threads`에서 슬롯을 지운
+// **뒤에** `UserThread::release()`를 불러야 한다(반대 순서면 다른
+// 관찰자가 그 사이 컨테이너를 순회하다 이미 반납된 메모리를 살아있는
+// 스레드로 오인할 수 있다).
 class UserThread : public Task, public EnableSharedFromThis<UserThread> {
 public:
     // [신규, 2026-09-17, PN-B4987BF6] `AsyncTask::waitingTask`를
@@ -101,6 +118,15 @@ public:
     // 것뿐이다(별칭 대상이 `this`를 `Task*`로 업캐스트한 주소).
     WeakPtr<Task> weakAsTask() { return WeakPtr<Task>(sharedFromThis(), static_cast<Task*>(this)); }
 
+    // [신규, 2026-09-18, SP-76250478, PN-0EB2FABF] `Process::threads`
+    // (process.h)에 이 스레드 자신을 등록하려는 외부 호출부(process.cpp의
+    // execImage()/fork() - UserThread의 멤버 함수가 아니다)는
+    // `sharedFromThis()`(protected)에 접근할 수 없어 `weakAsTask()`와
+    // 동일한 이유로 이 공개 래퍼가 필요하다. 반환된 SharedPtr은 이
+    // 스레드의 `_selfRef`와 컨트롤 블록을 공유하는 별개의 강한 참조
+    // 인스턴스일 뿐 - 클래스 문서 주석대로 실제 슬랩 반납은 여전히
+    // `UserThread::release()`가 명시적으로 담당한다.
+    SharedPtr<UserThread> sharedSelf() { return sharedFromThis(); }
 
     // 대기 중(아직 wait()/waitForMultipleSyscall()/
     // waitAnyForMultipleSyscall()로 소비되지 않은) syscall 하나 -
@@ -172,6 +198,28 @@ public:
     // UserThread는 이 필드를 전혀 안 씀(전부 0으로 남음).
     InterruptFrame forkResumeFrame{};
 
+    // [신규, 2026-09-18, SP-76250478 §2.1/§3/§3.1, PN-0EB2FABF] 멀티스레드
+    // 유저 프로세스 지원 - `Process::threads`(process.h)에 담기면서
+    // 함께 도입된 필드들. **이 증분(첫 착수)에서는 구조체만 마련하고
+    // 아무도 값을 세팅/소비하지 않는다** - `CreateThread`/
+    // `SelfTerminateThread`/`Join`/`Detach` syscall(전부 후속 증분)이
+    // 실제로 이 필드들을 배선한다. 지금은 프로세스당 스레드가 정확히
+    // 하나뿐이라(`execImage()`/fork()가 유일한 스레드 생성 경로) 전부
+    // 기본값에 머문다.
+    ThreadId threadId = kInvalidThreadId;  // CreateThread가 발급(§2.1)
+    bool isZombie = false;   // 이 스레드 자신의 좀비 상태(§3) - Process::
+                             // isZombie(프로세스 트리 좀비, §6)와는 별개
+                             // 축이다. 정상 종료 후 아직 Join되지 않은
+                             // 상태를 표현한다.
+    int32_t exitCode = 0;    // SelfTerminateThread가 기록(§3 항목2)
+    bool detached = false;   // §3 항목3 - 세팅되면 좀비 단계를 건너뛰고
+                             // SelfTerminateThread가 그 자리에서 즉시 회수
+    // §3.1 - 이 스레드가 좀비가 되는 순간(SelfTerminateThreadHandler가)
+    // 직접 깨워야 할 Join() 대기자(있다면 단 하나, v1은 다중 joiner
+    // 미지원). AsyncTask는 이 파일 위 #include "async_task.h"로 이미
+    // 완전한 타입이라 WeakPtr<AsyncTask>를 바로 멤버로 둘 수 있다.
+    WeakPtr<AsyncTask> joinerAsyncTask;
+
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든
     // 필드가 0/nullptr NSDMI라 memset 결과가 실제 생성자 결과와 동일,
@@ -180,9 +228,12 @@ public:
     //
     // [수정, 2026-09-17, PN-B4987BF6] **외부에서 관찰되는 계약은 전혀
     // 안 바뀐다** - `allocate()`가 여전히 raw 포인터를 돌려주고,
-    // `Process::mainThread`가 여전히 그 유일한 진짜 소유자이며,
-    // `release()`가 여전히 그 소유자가 다 쓴 시점에 명시적으로 반납을
-    // 결정한다. 내부적으로만 `_selfRef`(아래)를 통해 `kMakeShared`의
+    // [수정, 2026-09-18, SP-76250478/PN-0EB2FABF] `Process::threads`가
+    // 여전히 그 유일한 진짜 소유자이며(위 클래스 문서 주석 참고 -
+    // `mainThread` 단일 필드에서 컨테이너로 바뀌었을 뿐 "명시적 반납"
+    // 계약 자체는 그대로), `release()`가 여전히 그 소유자가 다 쓴
+    // 시점에 명시적으로 반납을 결정한다. 내부적으로만 `_selfRef`(아래)를
+    // 통해 `kMakeShared`의
     // 컨트롤 블록을 곁다리로 붙여 `weakAsTask()`/`WeakPtr<Task>`
     // 관찰자가 성립하게 한다.
     static UserThread* allocate();
@@ -208,8 +259,10 @@ public:
 private:
     // [신규, 2026-09-17, PN-B4987BF6] `allocate()`가 `kMakeShared`로
     // 만든 강한 참조를 스스로 붙들고 있다가 `release()`가 명시적으로
-    // 놓는다 - "실제 소유자는 여전히 Process::mainThread(raw pointer)"
-    // 라는 기존 계약을 그대로 유지하면서, `EnableSharedFromThis`가
+    // 놓는다 - "실제 소유자는 여전히 Process::threads가 붙든 명시적
+    // 반납 계약"(2026-09-18, SP-76250478/PN-0EB2FABF 갱신 - 옛
+    // `mainThread` raw pointer에서 컨테이너로 바뀌었을 뿐 계약은 동일)
+    // 이라는 기존 계약을 그대로 유지하면서, `EnableSharedFromThis`가
     // 필요로 하는 컨트롤 블록만 곁다리로 살려 두는 최소 장치다(no-op
     // 삭제자를 써서 `release()`가 `GenericSlabAllocator::free()`를
     // 직접 부르는 지금 방식과 정확히 같은 타이밍에 실제 반납이

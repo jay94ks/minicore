@@ -65,8 +65,13 @@ constexpr SyscallEndpointId kSyscallEndpointDebugGetRegisters = kMakeSyscallEndp
 constexpr SyscallEndpointId kSyscallEndpointDebugSetRegisters = kMakeSyscallEndpointId(7, 6);
 
 // [SP-9A6D579F §3.1] DR0-DR3 하드웨어 슬롯 수와 동일 - 스레드마다
-// 별도 슬롯이 아니라 프로세스당(사실상 mainThread 고정, 멀티스레드
-// 디버깅은 PN-2E4E9D79 완료 전까지 범위 밖) 공유.
+// 별도 슬롯이 아니라 프로세스당 공유. [갱신, 2026-09-18, PN-0EB2FABF
+// (구 PN-2E4E9D79)] "프로세스당 스레드 하나뿐"이라는 옛 전제(`Process::
+// mainThread`)는 SP-76250478로 걷어냈지만, 이 `DebugSession` 자체는
+// 여전히 스레드 구분 없이 프로세스 전체에 하나뿐이다 - 진짜 멀티스레드
+// 디버깅(스레드별 브레이크포인트/레지스터)은 그 소비자인 SP-9A6D579F
+// §1-A/§3.4/§3.5의 targetThread 파라미터가 실제로 추가될 때까지 범위
+// 밖으로 남는다(아래 각 Debug*Args 문서 주석도 동일).
 constexpr uint32_t kMaxDebugBreakpoints = 4;
 
 // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304] `InterruptFrame`
@@ -168,10 +173,13 @@ struct DebugDetachArgs {
 };
 
 // [신규, 2026-09-17, SP-9A6D579F §3.4] targetThread 파라미터는 넣지
-// 않는다 - §1-A(멀티스레드 유저 프로세스 지원, PN-2E4E9D79)가 아직
-// 없어 "프로세스당 스레드 하나"가 사실상 불변조건이므로, 그 필드가
-// 있어도 항상 mainThread 고정일 수밖에 없다(과설계 방지,
-// RM-23F4B687 §4) - 그 계획이 완료되면 이 struct에 추가한다.
+// 않는다 - [갱신, 2026-09-18, PN-0EB2FABF(구 PN-2E4E9D79)]
+// `Process::threads` 자료구조 자체는 여러 스레드를 담을 수 있게 됐지만,
+// 실제로 두 번째 이상의 스레드를 만드는 `CreateThread` syscall이 아직
+// 없어 "프로세스당 스레드 하나"가 여전히 사실상 불변조건이다 - 그
+// 필드가 있어도 항상 그 유일한 스레드 고정일 수밖에 없다(과설계 방지,
+// RM-23F4B687 §4) - `CreateThread`가 실제로 착수되면 이 struct에
+// 추가한다.
 struct DebugSetBreakpointArgs {
     int64_t targetProcessId = -1;
     uint32_t slot = 0;  // 0..kMaxDebugBreakpoints-1
@@ -195,8 +203,8 @@ struct DebugSetSingleStepArgs {
 };
 
 // [신규, 2026-09-17, SP-9A6D579F §3.5] targetThread 없음 - 위
-// DebugSetBreakpointArgs와 동일한 이유(PN-2E4E9D79 완료 전까지
-// mainThread 고정).
+// DebugSetBreakpointArgs와 동일한 이유(`CreateThread`가 실제로
+// 착수되기 전까지는 프로세스당 스레드가 여전히 하나뿐).
 struct DebugContinueArgs {
     int64_t targetProcessId = -1;
     // out

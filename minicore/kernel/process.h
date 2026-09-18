@@ -83,8 +83,17 @@ inline uint32_t kResurrectIntervalMinutes(uint32_t consecutiveFailures) {
 // 쓰레드는 다른 개념"(설계자 지시, 2026-09-14)이라는 구분을 그대로
 // 이어받아, Process는 **주소공간(전용 PML4)의 소유자**이고
 // `UserThread`(Task 상속)는 그 안에서 실제로 스케줄링되는 실행
-// 흐름이다 - 지금은 프로세스당 스레드 하나만 지원(v1, 멀티스레드
-// 프로세스는 후속 과제).
+// 흐름이다.
+//
+// [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛 "v1: 프로세스당
+// 스레드 하나" 제약을 걷어내는 멀티스레드 지원 착수 - 자료구조(아래
+// `threads`)는 여러 `UserThread`를 담을 수 있게 됐지만, **이 증분은
+// 그 자료구조 전환까지만 다룬다** - 실제로 두 번째 이상의 스레드를
+// 만드는 경로(`CreateThread` syscall)는 아직 없어(execImage()/fork()
+// 둘 다 여전히 스레드를 정확히 하나만 만듦) 지금도 프로세스당 스레드는
+// 항상 하나다. `SelfTerminateThread`/`Join`/`Detach` syscall과 §3의
+// 스레드별 종료 정책은 후속 증분이 이어받는다(SP-76250478 §2.2/§3/§3.1
+// 참고).
 //
 // **범위 안내**: 이 구조체는 "주소공간 소유 + 유저 모드 폴트 정보
 // 보관" 부분만 다룬다(§2-B가 명시적으로 요구하는 부분, 지금 바로
@@ -120,6 +129,15 @@ constexpr ProcessId kInvalidProcessId = -1;
 // (process.cpp, 테이블 자체는 파일 스코프 static)가 공유하는 상수.
 constexpr uint32_t kMaxProcessTableSlots = 65535;
 
+// [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] 프로세스 하나가
+// 가질 수 있는 스레드 수 상한 - 설계자 opinion("최대 갯수는 커널
+// 전역 설정으로 제어할 수 있어야하고, 이를 초과하면 단순히
+// CreateThread를 실패시키면 된다") 그대로, 무한정 스레드를 만들어
+// 커널 전역 자원(슬랩 등)을 고갈시키는 것을 막는 단일 전역 상한이다.
+// 정확한 값은 순수 구현 세부(실측 후 조정 가능, RM-23F4B687 §4) -
+// `CreateThread` syscall(후속 증분)이 실제로 이 상수를 검사한다.
+constexpr uint32_t kMaxThreadsPerProcess = 256;
+
 // [신규, 2026-09-17, PN-E2A114C1, DC-21647E46/QU-76409699 "(B) 포함으로
 // 읽자"] `EnableSharedFromThis<Process>` 상속 - `Process`의 모든
 // 인스턴스가 이제 `kMakeShared<Process>(...)`로 감싸져 관리되므로(아래
@@ -150,8 +168,23 @@ public:
     };
 
     uint64_t pml4Phys = 0;        // 이 프로세스 전용 주소공간의 PML4 물리 프레임(Paging::createAddressSpace)
-    UserThread* mainThread = nullptr;  // v1: 프로세스당 스레드 하나(위 클래스 주석 참고)
     FaultInfo lastFault;
+
+    // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] 옛 단일
+    // `UserThread* mainThread` 필드를 대체 - 이 프로세스가 소유한 모든
+    // 스레드. 청크 용량 16은 설계자 opinion 그대로("한 노드당 16개
+    // 정도" - children/openBridges(청크 8)보다 크게, 스레드는 다른
+    // 프로세스 자원보다 더 많이 생길 여지가 크다는 취지). 담기는
+    // `SharedPtr<UserThread>`는 그 스레드 자신의 `_selfRef`(syscall.h)와
+    // 같은 no-op 삭제자 인스턴스를 복사한 것뿐이라, 실제 슬랩 반납은
+    // 여전히 `UserThread::release()`가 명시적으로 담당한다(syscall.h의
+    // 클래스 문서 주석 참고) - **소비하는 코드는 반드시 이 목록에서
+    // 슬롯을 지운 뒤에 `UserThread::release()`를 불러야 한다**(반대
+    // 순서면 그 사이 다른 관찰자가 이미 반납된 메모리를 살아있는
+    // 스레드로 오인할 수 있다). `ensureAllocator()`는 `children`/
+    // `openBridges`와 동일한 관례로 삽입 시점에 호출한다.
+    static constexpr uint32_t kMaxThreadsChunkCapacity = 16;
+    ChunkedList<SharedPtr<UserThread>, kMaxThreadsChunkCapacity> threads;
 
     // [확정, 2026-09-16, QU-52253384 답변] 프로세스 트리(SP-6BEAE0C1
     // §6) - 이 프로세스를 만든 부모(SpawnProcess 호출자). 최초
@@ -242,8 +275,9 @@ public:
     // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째 증분(2/2)]
     // 좀비 상태 - self-terminate 시(SelfTerminateHandler::onExec)
     // `destroy()`로 주소공간은 즉시 반납하지만, `parent != nullptr`이면
-    // 이 Process 구조체 자신(및 `mainThread`)은 그 자리에서 바로 반납하지
-    // 않고 좀비로 남겨 부모가 `wait()`(RM-48E1E610 35번)로 회수(reap)할
+    // 이 Process 구조체 자신(및 `threads`가 담고 있던 UserThread들)은
+    // 그 자리에서 바로 반납하지 않고 좀비로 남겨 부모가 `wait()`
+    // (RM-48E1E610 35번)로 회수(reap)할
     // 때까지 보존한다 - POSIX 좀비 프로세스와 동일한 개념. `parent ==
     // nullptr`(고정 스폰 KernelService, 또는 SpawnProcess의 caller가
     // 이론상 없었던 경우)이면 이 필드는 아예 세팅되지 않는다 - 회수할
@@ -425,8 +459,10 @@ public:
     //   불필요 수준).
     // - syscall MSR 경로(STAR/LSTAR/SFMASK)가 아직 없어 유저 코드는
     //   반드시 `int 0x80`으로만 트랩해야 한다(PN-124C105B 남은 항목).
-    // - 프로세스당 스레드 하나 전제(위 클래스 주석과 동일) - thread는
-    //   호출부가 소유(동적 할당/해제는 이번 범위 밖, PN-40E976F2).
+    // - 이 함수 자신은 여전히 스레드를 정확히 하나만 만든다(그 스레드를
+    //   `threads`에 등록하는 것까지가 이 함수의 몫, 위 클래스 주석
+    //   참고) - thread 자체는 호출부가 소유(동적 할당/해제는 이번
+    //   범위 밖, PN-40E976F2).
     // [확장, PN-E35294B8 항목2, QU-B9EB45E4 답변] argvEnvpScratch가
     // 있으면(SpawnProcessHandler가 이미 유저 argv/envp를 검증+복사해
     // 넘긴 것) 그 문자열 데이터까지 실은 완전한 SysV 초기 스택 프레임을
@@ -450,9 +486,18 @@ public:
     bool makeUserTlsInstance(UserThread* thread);
 
     // Signal 전달(SP-0666DB3C §4.4, PN-71E50394 항목 2) - number를
-    // pendingSignals에 기록하고, mainThread가 지금 대기 중이면
-    // (blockedOn != nullptr) 그 자리에서 즉시 강제로 깨운다(§9.5,
-    // Waitable::cancel 경유). mainThread가 실행 중/비대기 상태면 여기서는
+    // pendingSignals에 기록하고, `threads`의 각 스레드가 지금 대기
+    // 중이면(blockedOn != nullptr) 그 자리에서 즉시 강제로 깨운다
+    // (§9.5, Waitable::cancel 경유). [수정, 2026-09-18, SP-76250478,
+    // PN-0EB2FABF] 옛 "mainThread 하나만 깨움"에서 "threads의 전부를
+    // 순회해 각각 깨움"으로 바뀌었다 - 지금은 프로세스당 스레드가
+    // 여전히 하나뿐이라 관찰 가능한 동작은 동일하지만, 여러 스레드가
+    // 동시에 각자 다른 대상에 blocked될 수 있게 되면 이 순회가
+    // 실제로 의미를 갖는다. **POSIX 시맨틱 미정 사항**: 신호를 어느
+    // 스레드에 전달해야 하는지(하나만/임의/전체)는 이 순회가 아직
+    // 명시적으로 결정하지 않는다 - 지금은 "대기 중인 모든 스레드를
+    // 강제로 깨운다"는 보수적 동작으로 남겨 두고, 실사용처가 생기면
+    // 재검토한다(RM-23F4B687 §4). 실행 중/비대기 상태 스레드는 여기서는
     // 아무 것도 더 하지 않는다 - 체크포인트 방식(실행 중인 코드가 다음
     // syscall 진입/ring3 재진입 시점에 pendingSignals를 확인하는 것)은
     // 아직 어디에도 배선돼 있지 않다(별도 후속 항목). 실패(자원 고갈)

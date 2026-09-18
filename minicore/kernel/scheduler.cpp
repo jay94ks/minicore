@@ -721,10 +721,24 @@ void kWakeCoreIfIdle(uint32_t coreIndex) {
 // (retireTask)만으로는 이 UserThread가 쓰던 유저 주소공간이 그대로
 // 남는다. self-terminate는 항상 isUserLevel Task에서만 제출되므로
 // (kTaskOnFallingToEnd의 분기 참고) target을 UserThread로 안전하게
-// 캐스팅할 수 있다 - v1은 프로세스당 스레드 하나뿐이라(process.h
-// 클래스 문서) 이 스레드가 끝나는 순간이 곧 그 Process 전체가 끝나는
-// 순간과 같다. `process` 필드는 execImage()가 항상 채워 두지만
-// (process.cpp의 `thread->process = this;`) 방어적으로 null 확인한다.
+// 캐스팅할 수 있다.
+//
+// [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] **이 핸들러는 지금도
+// "이 스레드가 끝나는 순간이 곧 Process 전체가 끝나는 순간"이라고
+// 가정한 채 무조건 `process->destroy()`를 부른다 - `Process::threads`
+// (process.h)가 여러 스레드를 담을 수 있게 됐지만, 그 목록에서 정말
+// 여러 스레드가 동시에 살아있는 경로(`CreateThread` syscall)가 아직
+// 없어 오늘은 이 가정이 여전히 항상 참이다.** `SelfTerminateThread`
+// syscall(SP-76250478 §3 항목2, 후속 증분)이 착수되면 이 가정이 깨진다
+// - 그 syscall이 착수될 때 이 핸들러의 자연 종료 경로(`kTaskFallingToEnd`
+// 전용, 위 kSyscallEndpointSelfTerminate 문서 참고)는 "프로세스 전체를
+// 강제 종료"(§3 항목1, 미처리 예외 경로)로 의미가 좁혀져야 하고,
+// 정상적인 개별 스레드 종료는 별도 핸들러가 `userThread`를
+// `process->threads`에서 좀비 표시만 하고 `destroy()`는 그 목록이
+// 실제로 비었을 때만 호출해야 한다(process.cpp WaitHandler의 좀비
+// 스레드 회수 로직과 대칭). `process` 필드는 execImage()가 항상 채워
+// 두지만(process.cpp의 `thread->process = weakFromThis();`) 방어적으로
+// null 확인한다.
 // §6.4 비필수 서비스 재스폰 예약(DelayedExecutionQueue::schedule)의
 // 콜백 인자 - `respawn`(프로세스별 고정 스폰 헬퍼)과
 // `consecutiveFailures`(그 헬퍼가 새 Process에 그대로 이어 담을 값)를
@@ -820,7 +834,8 @@ public:
 
             // 부모가 있으면(SpawnProcess로 만들어진 트리 멤버) 좀비로
             // 남겨 부모의 wait()(RM-48E1E610 35번)를 기다린다 - Process
-            // 구조체/mainThread 반납은 WaitHandler(process.cpp)가 회수
+            // 구조체/threads(process.h)가 담고 있던 UserThread들의 반납은
+            // WaitHandler(process.cpp)가 회수
             // 시점에 담당한다(이제 SharedPtr 마지막 강한 참조 소멸을
             // 통해서 - process.cpp WaitHandler 참고). 부모가 없으면
             // (고정 스폰 KernelService, 또는 SpawnProcessHandler 주석의
