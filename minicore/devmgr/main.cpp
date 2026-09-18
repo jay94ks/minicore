@@ -58,12 +58,22 @@ extern "C" void _start() {
         }
     }
 
-    // TODO(PN-BD9AAE2F 다음 증분): §4a-2(설정 로드)/§3.2(드라이버
-    // 매칭)/§5(드라이버 자식 스폰)/§7(핫플러그 대기)가 이어붙을 자리 -
-    // 지금은 gDevices/gMappedAddr/gIoPermError에 실제로 채워지는지만
-    // 확인 대상(다음 세션이 QEMU에서 검증). 유저랜드에 로그 출력
-    // syscall이 아직 없어(fs/tty 서비스 미착수) 이 자리에서 직접
-    // 관측할 방법이 없다 - 종료 후 커널 쪽에서 확인하는 임시
-    // 방법(TEMP 로그 breadcrumb)으로 검증한다.
-    mc::selfTerminate(0);
+    // [수정, 2026-09-18, PN-11B3D2BB] devmgr는 `kSpawnServiceProcesses()`
+    // 가 `ProcessStartFlags::essential = true`로 스폰하는 KernelService다
+    // (kmain.cpp) - `essential==true`인 프로세스가 실행을 마치면(크래시든
+    // 정상 종료든 무관하게) 커널이 "죽었다"고 보고 즉시 패닉한다
+    // (process.h의 `ProcessStartFlags::essential` 문서 주석, scheduler.cpp
+    // "PANIC - essential service died" 분기). 예전엔 위 검증이 끝나자마자
+    // `mc::selfTerminate(0)`을 불렀는데, 이건 §3.3 syscall 왕복 검증까지만
+    // 하는 TEMP 스텁이 실수로 essential 계약을 어긴 것이었다(실측으로
+    // 확인 - devmgr 단독/devmgr+fs initrd로 GRUB 부팅할 때마다 100%
+    // "PANIC - essential service died: devmgr"). `fs`(minicore/fs/main.cpp)
+    // 가 이미 하고 있는 것과 같은 관례로, 실제 서비스 루프(§3.2 드라이버
+    // 매칭/§5 드라이버 자식 스폰/§7 핫플러그 대기)가 아직 없는 지금은
+    // 그 자리를 대신할 최소한의 무한 대기로 막아 둔다 - 절대 종료하지
+    // 않는다는 essential 계약만 만족시키는 TEMP 자리표시자, §7이 실제
+    // 핫플러그 이벤트 대기(syscall 기반 블로킹)로 대체할 것.
+    for (;;) {
+        asm volatile("pause");
+    }
 }
