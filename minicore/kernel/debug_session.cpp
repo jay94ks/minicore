@@ -136,9 +136,29 @@ public:
             co_return;
         }
 
-        target->debugSession = DebugSession{};
+        // [수정, 2026-09-18, PN-87D6B615 남은 범위 2번 착수 중 발견]
+        // 예전엔 여기서 `target->debugSession = DebugSession{};`로
+        // 세션 전체를 통째로 새로 만들었는데, 이러면 `pausedByDebugger`
+        // (+`savedRegisters`/`liveFramePtr`)까지 항상 초기화돼 버린다 -
+        // 이 필드들은 "세션 설정"이 아니라 **디버기 자신의 실제 실행
+        // 상태**(디버거가 붙어 있든 없든 참이어야 할 사실)라 세션을
+        // 새로 여는 이 시점에 지워지면 안 된다. 구체적으로
+        // `SpawnProcess`의 `kSpawnDebugStart`(process.cpp)가 자식을
+        // 만들며 이미 `pausedByDebugger=true`로 세워 뒀는데, 여기서
+        // 그걸 지우면 바로 다음에 오는 `DebugContinue`가
+        // "`pausedByDebugger`가 아니다"로 오판해 `NotFound`를 돌려줘
+        // 그 자식을 영원히 재개할 방법이 없어진다(이 세션이 실제
+        // initrd E2E를 준비하며 코드 추적으로 발견 - 지금까지 이
+        // 조합(kSpawnDebugStart + 진짜 DebugAttach)이 한 번도 실제로
+        // 실행된 적이 없어 드러나지 않았던 버그). 세션 설정 필드만
+        // 새로 초기화하고 실제 정지 상태(`pausedByDebugger`/
+        // `savedRegisters`/`liveFramePtr`)는 그대로 둔다.
         target->debugSession.active = true;
         target->debugSession.debuggerProcess = WeakPtr<Process>(caller);
+        for (auto& bp : target->debugSession.breakpoints) {
+            bp = DebugBreakpoint{};
+        }
+        target->debugSession.singleStepPending = false;
         args->error = ChannelError::None;
         co_return;
     }
