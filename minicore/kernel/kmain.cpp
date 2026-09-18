@@ -35,6 +35,7 @@
 #include "syscall_fastpath.h"
 #include "timer.h"
 #include "tlb_shootdown.h"
+#include "user_sync.h"
 #include "vfs_syscall.h"
 
 namespace {
@@ -654,6 +655,11 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 무관 - 아래쪽 kSpawnInitProcess() 직전에서 그대로 호출된다.
     kernel::ResourceGroupService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: resourcegroup join/create/destroy/setcpuquota/freeze/thaw syscall endpoints registered");
+
+    // [신규, 2026-09-18, SP-0666DB3C §17, PN-E82744B1] 위와 같은 이유로
+    // BSP에서 한 번만 - 그룹 8(Sync)의 Mutex/Semaphore 8종.
+    kernel::UserSyncService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: mutex/semaphore create/destroy/lock/unlock/wait/post syscall endpoints registered");
 
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).

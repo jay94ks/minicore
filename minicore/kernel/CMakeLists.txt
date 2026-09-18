@@ -40,6 +40,7 @@ add_library(minicore_kernel OBJECT
     tls.cpp
     resource_group.cpp
     rcu.cpp
+    user_sync.cpp
 )
 
 target_link_libraries(minicore_kernel PUBLIC libkenv libelf libkcont minicore_libs_x86_64)
