@@ -23,6 +23,14 @@ bool gLiveFsCpioFound = false;
 // 뜻) - 실제 포인터/객체 대신 고정된 sentinel 값 하나로 충분하다.
 constexpr kernel::uint64_t kInitrdCpioHandleValue = 1;
 
+// [신규, 2026-09-19, PN-770A28FB] `/sys/live` 루트 디렉터리 핸들 -
+// 실제 객체가 없는(named/kernel/proc/resourcegroup 네 하위 경로 +
+// initrd.cpio 파일 하나를 나열하는) 고정 sentinel. `kProcFsHandleTagBit`
+// (비트1)/`kProcFsGlobalHandleBit`(비트2)/`kResourceGroupHandleTagBit`
+// (비트3)/`kResourceGroupRootHandleBit`(비트4)/`kInitrdCpioHandleValue`
+// (=1) 어느 것과도 겹치지 않도록 비트5를 쓴다.
+constexpr kernel::uint64_t kLiveFsRootDirHandleValue = 1ULL << 5;
+
 bool kHasPrefix(const char* s, kernel::uint32_t sLen, const char* prefix, kernel::uint32_t prefixLen) {
     return sLen >= prefixLen && memcmp(s, prefix, prefixLen) == 0;
 }
@@ -153,6 +161,12 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
     static constexpr char kProcPrefix[] = "proc/";
     static constexpr char kResourceGroupPrefix[] = "resourcegroup/";
 
+    // [신규, 2026-09-19, PN-770A28FB] "/sys/live" 자체(마운트 경로와
+    // 정확히 일치, 접두사 없는 빈 relPath) - 루트 디렉터리.
+    if (relPathLen == 0) {
+        return kernel::OpenResult{kernel::FileHandle{kLiveFsRootDirHandleValue}, true, kernel::VfsError::None};
+    }
+
     if (kHasPrefix(relPath, relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
         const char* rest = relPath + (sizeof(kProcPrefix) - 1);
         const kernel::uint32_t restLen = relPathLen - (sizeof(kProcPrefix) - 1);
@@ -243,6 +257,13 @@ kernel::ReadResult kLiveFsReadImpl(kernel::FileHandle handle, kernel::uint64_t o
 // kLiveFsReadImpl의 같은 주석 참고).
 void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
     static constexpr char kInitrdCpioPath[] = "initrd.cpio";
+    if (args->relPathLen == 0) {
+        // [신규, 2026-09-19, PN-770A28FB] 루트 디렉터리 자신.
+        args->size = 0;
+        args->isDirectory = true;
+        args->error = kernel::VfsError::None;
+        return;
+    }
     if (kEqualsExact(args->relPath, args->relPathLen, kInitrdCpioPath, sizeof(kInitrdCpioPath) - 1)) {
         if (!gLiveFsCpioFound) {
             args->error = kernel::VfsError::NotFound;
@@ -254,6 +275,50 @@ void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
         return;
     }
     args->error = kernel::VfsError::InvalidArgument;
+}
+
+// [신규, 2026-09-19, PN-770A28FB] `/sys/live` 루트 나열 - v1 스코프는
+// 이 루트 하나뿐이다(named/kernel 하위 테이블 자체의 순회 API가 아직
+// 없어 그 안쪽까지 나열하는 것은 후속 - PN-770A28FB "다음 세션 설계
+// 청사진" 5번 참고). 고정 배열이라 `index`는 그 배열의 원소 번호
+// 그대로.
+struct LiveFsRootEntry {
+    const char* name;
+    kernel::uint32_t nameLength;
+    bool isDirectory;
+};
+
+constexpr LiveFsRootEntry kLiveFsRootEntries[] = {
+    {"named", 5, true},
+    {"kernel", 6, true},
+    {"initrd.cpio", 11, false},
+    {"proc", 4, true},
+    {"resourcegroup", 13, true},
+};
+constexpr kernel::uint32_t kLiveFsRootEntryCount =
+    static_cast<kernel::uint32_t>(sizeof(kLiveFsRootEntries) / sizeof(kLiveFsRootEntries[0]));
+
+void kLiveFsReaddirImpl(kernel::KernelFsReaddirArgs* args) {
+    if (args->dirHandle.value != kLiveFsRootDirHandleValue) {
+        // [v1 축소 범위] 이 핸들이 가리키는 대상이 디렉터리가 아니거나
+        // (파일 핸들로 Readdir 시도) 아직 나열을 지원하지 않는
+        // 디렉터리(named//kernel//proc//resourcegroup/ 안쪽 - 위 문서
+        // 주석 참고)다.
+        args->hasMore = false;
+        args->error = kernel::VfsError::InvalidHandle;
+        return;
+    }
+    if (args->index >= kLiveFsRootEntryCount) {
+        args->hasMore = false;
+        args->error = kernel::VfsError::None;  // 정상 종료(Read의 EOF와 동일한 뜻)
+        return;
+    }
+    const LiveFsRootEntry& entry = kLiveFsRootEntries[args->index];
+    memcpy(args->entry.name, entry.name, entry.nameLength);
+    args->entry.nameLength = entry.nameLength;
+    args->entry.isDirectory = entry.isDirectory;
+    args->hasMore = true;
+    args->error = kernel::VfsError::None;
 }
 
 }  // namespace
@@ -319,11 +384,9 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
             break;
         }
         case KernelFsOpCode::Readdir: {
-            // v1 미구현 - mount_table.h 문서 주석 참고(디렉터리 엔트리
-            // 나열 ABI 자체가 아직 설계돼 있지 않음).
-            auto* args = static_cast<KernelFsReaddirArgs*>(argsRaw);
-            args->entryCount = 0;
-            args->error = VfsError::InvalidArgument;
+            // [갱신, 2026-09-19, PN-770A28FB] 루트 디렉터리 나열 -
+            // kLiveFsReaddirImpl 문서 주석 참고(v1 스코프).
+            kLiveFsReaddirImpl(static_cast<KernelFsReaddirArgs*>(argsRaw));
             break;
         }
     }

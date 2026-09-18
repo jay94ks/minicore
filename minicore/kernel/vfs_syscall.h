@@ -165,6 +165,23 @@ struct UnlinkArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-19, PN-770A28FB, SP-7CC5693A §3.2] 디렉터리를 먼저
+// `Open()`으로 열어 얻은 `fd`에 대해 반복 호출하는 스트리밍 나열 -
+// 매 호출마다 다음 엔트리 하나(커서는 `Process::FileDescriptor::offset`
+// 이 소유 - Read가 바이트 오프셋을 쓰는 것과 동일한 관례, mount_table.h
+// 의 `KernelFsReaddirArgs` 문서 주석 참고). `hasMore=false`면 이미
+// 끝났다는 뜻(`name`은 무의미) - Read의 `bytesRead==0` EOF 관례와
+// 동일한 결.
+struct ReaddirArgs {
+    int32_t fd = -1;
+    // out
+    char name[64] = {};
+    uint32_t nameLength = 0;
+    bool isDirectory = false;
+    bool hasMore = false;
+    ChannelError error = ChannelError::None;
+};
+
 // [갱신, SP-E9B44929] Vfs 그룹(3).
 constexpr SyscallEndpointId kSyscallEndpointMount = kMakeSyscallEndpointId(3, 0);
 constexpr SyscallEndpointId kSyscallEndpointUnmount = kMakeSyscallEndpointId(3, 1);
@@ -177,12 +194,13 @@ constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
 constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9);
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
+constexpr SyscallEndpointId kSyscallEndpointReaddir = kMakeSyscallEndpointId(3, 11);
 constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
 constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 13개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 14개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 

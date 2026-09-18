@@ -106,11 +106,8 @@ struct KernelFsReadArgs {
 // 하위 경로(named/initrd.cpio/kernel/<name>)가 전부 본질적으로
 // 읽기 전용 뷰라, write/mkdir/rmdir/unlink는 항상 PermissionDenied를
 // 반환한다(실제 쓰기 가능한 KernelFsDriver 구현체가 생기면 그때
-// 이 가정을 재검토). Readdir은 디렉터리 엔트리 나열 ABI 자체가 아직
-// 이 프로젝트 어디에도 설계돼 있지 않아(SP-2AAD7C8D §9.3 Readdir
-// syscall 미착수) `entryCount`만 두고 실제 나열은 미구현 -
-// InvalidArgument로 응답한다(CLAUDE.md 규칙 4 - 없는 설계를 임의로
-// 채우지 않음).
+// 이 가정을 재검토). Readdir ABI는 아래 `KernelFsReaddirArgs` 참고 -
+// [갱신, 2026-09-19, PN-770A28FB] 더 이상 미구현이 아니다.
 struct KernelFsWriteArgs {
     KernelFsOpCode op = KernelFsOpCode::Write;
     FileHandle handle;
@@ -156,12 +153,29 @@ struct KernelFsUnlinkArgs {
     VfsError error = VfsError::None;
 };
 
+// [갱신, 2026-09-19, PN-770A28FB] `SP-7CC5693A` §3.2가 이미 스케치해
+// 둔 미래 `FileSystemDriver::readdir()`(디렉터리를 `Open()`으로 먼저
+// 열어 얻은 핸들에 순차적으로 인덱스를 하나씩 조회, POSIX
+// opendir()+readdir()과 같은 결)와 정합성을 맞춘 스트리밍 방식으로
+// 확정 - `EnumerateDevices`류 배치 방식은 채택하지 않는다(PN-770A28FB
+// 조사 결론). 커서(`index`)는 `Process::FileDescriptor::offset`을
+// 그대로 재사용한다(Read가 바이트 오프셋으로 쓰는 것과 동일한 관례 -
+// 새 커서 상태 테이블을 별도로 두지 않는다, RM-23F4B687 §4) - 값
+// 자체는 "이 디렉터리에서 몇 번째 엔트리를 요청하는지"를 뜻하는
+// 0-based 인덱스.
+struct VfsDirEntry {
+    char name[64] = {};
+    uint32_t nameLength = 0;
+    bool isDirectory = false;
+};
+
 struct KernelFsReaddirArgs {
     KernelFsOpCode op = KernelFsOpCode::Readdir;
-    const char* relPath = nullptr;
-    uint32_t relPathLen = 0;
+    FileHandle dirHandle;  // in: Open()이 돌려준 디렉터리 핸들
+    uint64_t index = 0;    // in: 0부터 시작하는 조회 인덱스
     // out
-    uint32_t entryCount = 0;  // v1: 항상 0(위 "v1 축소 범위" 참고)
+    VfsDirEntry entry;
+    bool hasMore = false;  // true면 entry가 이번 인덱스의 유효한 항목, false면 이미 끝(entry 무의미, Read의 EOF와 동일한 뜻)
     VfsError error = VfsError::None;
 };
 

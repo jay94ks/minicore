@@ -384,6 +384,73 @@ public:
 
 ReadHandler gReadHandler;
 
+// [신규, 2026-09-19, PN-770A28FB] ReadHandler와 동일한 fd 조회 패턴 -
+// 커서는 유저 버퍼가 아니라 fd 자신의 `offset`(여기서는 "몇 번째
+// 엔트리인지"라는 인덱스 의미로 재사용)이라 kValidateVfsBuffer가
+// 필요 없다(CloseHandler와 같은 이유).
+class ReaddirHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ReaddirArgs*>(argsRaw);
+        SharedPtr<Process> process = kProcessFromSubmitter(task);
+        if (!process) {
+            args->hasMore = false;
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        const int32_t fd = args->fd;
+        auto* slot = process->fileDescriptors.find([fd](const Process::FileDescriptor& e) { return e.fd == fd; });
+        if (!slot) {
+            args->hasMore = false;
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        if (slot->value.kind != MountKind::KernelDriver) {
+            args->hasMore = false;
+            args->error = ChannelError::NotSupported;  // Channel 경로 - PN-EA4EE935 스코프 밖
+            co_return;
+        }
+        if (!slot->value.isDirectory) {
+            args->hasMore = false;
+            args->error = ChannelError::InvalidHandle;  // 파일 fd로 Readdir 시도
+            co_return;
+        }
+
+        KernelFsReaddirArgs kfsArgs;
+        kfsArgs.dirHandle = slot->value.fsHandle;
+        kfsArgs.index = slot->value.offset;
+        AsyncTask* fsTask = AsyncTask::submit(slot->value.kernelDriver->subjectCode(), 0, &kfsArgs,
+                                               /*autoFree=*/false);
+        if (!fsTask) {
+            args->hasMore = false;
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // 실측 발견, PN-EA4EE935 - OpenHandler 주석 참고
+        AsyncTaskAwaiter(fsTask).await();
+
+        if (kfsArgs.error != VfsError::None) {
+            args->hasMore = false;
+            args->error = kMapVfsError(kfsArgs.error);
+            co_return;
+        }
+        args->hasMore = kfsArgs.hasMore;
+        args->error = ChannelError::None;
+        if (!kfsArgs.hasMore) {
+            co_return;  // 끝 - name은 무의미, offset도 더 진행하지 않는다
+        }
+        memcpy(args->name, kfsArgs.entry.name, kfsArgs.entry.nameLength);
+        args->nameLength = kfsArgs.entry.nameLength;
+        args->isDirectory = kfsArgs.entry.isDirectory;
+        slot->value.offset += 1;  // §9.2 - 커널(fd 테이블)이 커서를 소유(Read의 바이트 오프셋과 동일 관례)
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ReaddirHandler gReaddirHandler;
+
 class WriteHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
@@ -642,6 +709,7 @@ void VfsSyscallService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointWrite, &gWriteHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointLseek, &gLseekHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointStat, &gStatHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointReaddir, &gReaddirHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointMkdir, &gMkdirHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointUnlink, &gUnlinkHandler);
 }
