@@ -1392,6 +1392,23 @@ void Scheduler::onTick(InterruptFrame* frame) {
     // isr_common_stub -> iretq로 이어진다(자기 자신의 InterruptFrame
     // 그대로).
     kContextSwitch(&current->savedRsp, next->savedRsp);
+    // [수정, 2026-09-18, PN-B5FD7B75, 설계자 승인(QU-29793535, 방향 A)]
+    // 이 줄이 바로 그 "재개 지점"이다 - current가 나중에 이 Task-to-Task
+    // 직접 전환으로 다시 선택되면(다른 코어의 onTick()이 next로 이
+    // current를 고르거나, 이 코어의 runLoop() idle→Task 경로가 골라도)
+    // 실행이 정확히 여기(kContextSwitch 호출 바로 다음)로 돌아온다.
+    // SP-83A07867 §3.2가 원래 "CR3 재동기화 필요 재개 지점은 정확히
+    // 세 곳(kTaskStartTrampoline/yieldCurrent/parkCurrent 재개)"으로
+    // 확정했지만, 이 네 번째 재개 지점은 그 목록에서 빠져 있었다 -
+    // runLoop()의 idle→Task 디스패치가 "재개 지점이 스스로 CR3를
+    // 동기화한다"고 신뢰하고 CR3 동기화를 생략하기 때문에, 이 지점이
+    // 스스로 동기화하지 않으면 CR3가 전혀 재동기화되지 않은 채 current
+    // 자신의 ring3 코드가 실행돼 즉시 #PF로 죽는다(실측 재현,
+    // PN-B5FD7B75 재현 로그 참고). kSyncCr3의 skip-if-same 최적화
+    // 덕분에 이미 next->userPml4Phys로 CR3가 그대로인 다른 흔한
+    // 재개 경로(예: 다른 코어가 이 Task를 이어서 실행할 때는 그
+    // 코어 자신의 CR3만 신경 쓰면 됨)에서는 추가 비용이 없다.
+    kSyncCr3(current);
 }
 
 void Scheduler::requestForcedMigration(uint32_t fromCore, uint32_t targetCore) {
@@ -1479,6 +1496,11 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     kSyncDebugRegs(next);
     kSyncFsBase(next);
     kContextSwitch(&current->savedRsp, next->savedRsp);
+    // [수정, 2026-09-18, PN-B5FD7B75] onTick()의 동일 지점과 정확히
+    // 같은 이유 - 이 Task-to-Task 직접 전환도 current의 재개 지점을
+    // 여기(kContextSwitch 바로 다음)에 남기므로, onTick()과 똑같이
+    // 네 번째 재개 지점에 해당한다. 같은 함수 위의 onTick() 주석 참고.
+    kSyncCr3(current);
 }
 
 // [신규, 2026-09-17, PN-2008220B] kTaskStartTrampoline과 동일한
