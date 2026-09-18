@@ -674,6 +674,33 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             task->state = AsyncTaskState::Running;
         }
         gCurrentAsyncTask[coreIndex] = task;
+        // [신규, 2026-09-19, PN-584DB994 재검증 중 실측 발견 - 위
+        // coroHandle 분기가 이미 고친 것과 정확히 같은 CR3 미동기화
+        // 버그의 두 번째 사례] 이 분기는 최초 진입(kTaskStartTrampoline
+        // -> kAsyncTaskEntryWrapper, 그 자신이 진입 시 별도로
+        // kSyncCr3ForAsyncExecEntry를 부른다)뿐 아니라, `co_await`을
+        // 전혀 안 쓰고 onExec() 본문 중간에서 직접
+        // `AsyncTask::yield()`를 반복 호출하는 "busy-yield" 패턴(예:
+        // ConnectChannelHandler::onExec의 `while (!req.done) {
+        // AsyncTask::yield(); }`, user_sync.cpp의 MutexLock/
+        // SemaphoreWait - 둘 다 AsyncMutex/AsyncSemaphore의
+        // YieldingPolicy가 내부적으로 이 패턴을 쓴다)의 **재개**
+        // 지점이기도 하다. 최초 진입 때와 달리 재개 시점엔 이
+        // AsyncTask 전용 스택이 `AsyncTask::yield()`의
+        // `kContextSwitch` 반환 지점(onExec 본문 한가운데, 예: 위
+        // while 루프 다음 줄의 `args->bridge = ...`처럼 제출자의 유저
+        // 포인터를 그대로 역참조하는 코드)으로 곧장 떨어지는데, 그
+        // 사이 리액터가 다른 Task/AsyncTask를 실행하며 CR3를 얼마든지
+        // 바꿔 놨을 수 있어 이 지점의 CR3가 이 AsyncTask 제출자의
+        // 주소공간이라는 보장이 전혀 없었다 - 실측으로 Page Fault(때로
+        // GPF/Invalid Opcode, cr3가 다른 Task의 것이거나
+        // gBootPml4Phys) 재현(pn584db994_connector/accepter TEMP
+        // 유저랜드 스트레스 하네스, GRUB SMP4, 40회 중 8회 재현).
+        // 최초 진입 시에는 `kAsyncTaskEntryWrapper` 자신의 내부
+        // 동기화가 이미 같은 값으로 한 번 더 맞추므로(두 번째 호출은
+        // "이미 맞음"을 확인만 하고 실제 `mov cr3`는 스킵) 무해한
+        // 중복이다.
+        const uint64_t savedPml4ForStackpoolResume = kSyncCr3ForAsyncExecEntry(task);
         {
             // AsyncTask 프레임워크의 원래 설계 의도(kAsyncTaskEntryWrapper
             // 주석 참고 - "AsyncTask를 실행하는 동안 바깥 kernel::Task
@@ -686,6 +713,9 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             PreemptionGuard guard;
             kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
         }
+        // [PN-584DB994] coroHandle 분기와 동일 - 리액터/idle 컨텍스트로
+        // 돌아가기 전 CR3를 이 재개/진입 이전 값으로 되돌린다.
+        kRestoreCr3AfterAsyncExecEntry(savedPml4ForStackpoolResume);
         gCurrentAsyncTask[coreIndex] = nullptr;
     }
 
