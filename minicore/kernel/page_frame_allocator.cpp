@@ -4,6 +4,7 @@
 #include "lapic.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "libkmm/slab.h"
 #include "paging.h"
 
 namespace {
@@ -46,6 +47,45 @@ kernel::uint32_t gNodeCount = 1;
 // 2바이트에서 64바이트로 늘었다.
 kernel::PageFrame* gPageFrames = nullptr;
 kernel::uint64_t gPageFrameCount = 0;
+
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §7.1] swap LRU 전역
+// active/inactive 이중 연결 리스트 - `PageFrame::lruPrev`/`lruNext`로
+// 스레딩한다(새 자료구조 추가 없음, Linux `struct page`의 `lru`
+// 필드와 같은 패턴). 이 증분은 §7.2 1단계(신규 매핑 시 inactive 뒤에
+// 삽입)만 배선한다 - 승격/강등/회수(2-5단계)는 스캔 트리거 자체가
+// 아직 없어 범위 밖(SP-6CEFBE9B §7.3, §8 항목1).
+struct PageFrameList {
+    kernel::PageFrame* head = nullptr;
+    kernel::PageFrame* tail = nullptr;
+};
+PageFrameList gActiveList;
+PageFrameList gInactiveList;
+
+void kLruPushBack(PageFrameList& list, kernel::PageFrame* frame) {
+    frame->lruPrev = list.tail;
+    frame->lruNext = nullptr;
+    if (list.tail) {
+        list.tail->lruNext = frame;
+    } else {
+        list.head = frame;
+    }
+    list.tail = frame;
+}
+
+void kLruUnlink(PageFrameList& list, kernel::PageFrame* frame) {
+    if (frame->lruPrev) {
+        frame->lruPrev->lruNext = frame->lruNext;
+    } else {
+        list.head = frame->lruNext;
+    }
+    if (frame->lruNext) {
+        frame->lruNext->lruPrev = frame->lruPrev;
+    } else {
+        list.tail = frame->lruPrev;
+    }
+    frame->lruPrev = nullptr;
+    frame->lruNext = nullptr;
+}
 
 kernel::uint64_t kAlignUp(kernel::uint64_t value, kernel::uint64_t align) {
     return (value + align - 1) & ~(align - 1);
@@ -443,6 +483,52 @@ PageFrame* PageFrameAllocator::frameFor(uint64_t physAddr) {
     return &gPageFrames[idx];
 }
 
+bool PageFrameAllocator::insertRmap(uint64_t physAddr, Process* owner, uint64_t virtAddr) {
+    PageFrame* frame = frameFor(physAddr);
+    if (!frame) {
+        return false;
+    }
+    auto* entry = static_cast<RmapEntry*>(GenericSlabAllocator::alloc(sizeof(RmapEntry)));
+    if (!entry) {
+        return false;
+    }
+    *entry = RmapEntry{};
+    entry->owner = owner;
+    entry->virtAddr = virtAddr;
+    entry->next = frame->rmapHead;
+    frame->rmapHead = entry;
+    frame->mapCount = static_cast<uint16_t>(frame->mapCount + 1);
+    // SP-6CEFBE9B §7.2 1단계 - 이 프레임이 처음 스왑 추적 대상이 되는
+    // 순간(PG_SWAPPABLE이 꺼져 있던 상태)에만 inactive 리스트에 넣는다 -
+    // COW 등으로 두 번째 이상 rmap 엔트리가 붙는 경우는 이미 리스트에
+    // 있으므로 다시 넣지 않는다.
+    if (!(frame->flags & kPageFrameFlagSwappable)) {
+        frame->flags |= kPageFrameFlagSwappable;
+        kLruPushBack(gInactiveList, frame);
+    }
+    return true;
+}
+
+void PageFrameAllocator::removeRmap(uint64_t physAddr, Process* owner, uint64_t virtAddr) {
+    PageFrame* frame = frameFor(physAddr);
+    if (!frame) {
+        return;
+    }
+    RmapEntry** cur = &frame->rmapHead;
+    while (*cur) {
+        if ((*cur)->owner == owner && (*cur)->virtAddr == virtAddr) {
+            RmapEntry* dead = *cur;
+            *cur = dead->next;
+            GenericSlabAllocator::free(dead, sizeof(RmapEntry));
+            if (frame->mapCount > 0) {
+                frame->mapCount = static_cast<uint16_t>(frame->mapCount - 1);
+            }
+            return;
+        }
+        cur = &(*cur)->next;
+    }
+}
+
 void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
     // COW로 공유된 적 있는 4KiB 페이지(order 0)는 카운트가 0으로
     // 돌아올 때까지 실제로 반납하지 않는다 - retain()을 한 번도 안
@@ -454,6 +540,30 @@ void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
             if (--gPageFrames[idx].refCount != 0) {
                 return;
             }
+        }
+    }
+    // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §6.2/§7.2] 이 프레임이
+    // 정말로 버디 free list에 되돌아가기 직전 - rmap/LRU 소속을 전부
+    // 청소한다. 정상 경로라면 `removeRmap()`이 호출부(unmapRegion 등)
+    // 에서 이미 rmapHead를 비웠어야 하지만, 방어적 마지막 안전망으로
+    // 남은 엔트리가 있으면 여기서 강제로 반납한다 - 이 프레임은 이제
+    // 완전히 다른 매핑으로 재사용될 수 있어 낡은 rmap을 남기면 다음
+    // 소유자의 페이지 폴트 처리에서 엉뚱한 프로세스를 가리키게 된다.
+    if (order == 0) {
+        if (PageFrame* frame = frameFor(physAddr)) {
+            if (frame->flags & kPageFrameFlagSwappable) {
+                kLruUnlink(frame->flags & kPageFrameFlagActive ? gActiveList : gInactiveList, frame);
+            }
+            RmapEntry* entry = frame->rmapHead;
+            while (entry) {
+                RmapEntry* next = entry->next;
+                GenericSlabAllocator::free(entry, sizeof(RmapEntry));
+                entry = next;
+            }
+            frame->rmapHead = nullptr;
+            frame->mapCount = 0;
+            frame->flags &= static_cast<uint16_t>(
+                ~(kPageFrameFlagSwappable | kPageFrameFlagActive | kPageFrameFlagAccessed));
         }
     }
     const uint32_t node = kNodeForAddress(physAddr);

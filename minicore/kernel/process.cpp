@@ -318,7 +318,7 @@ bool Process::init() {
     tlsTemplateMemsz = 0;
     tlsTemplateAlign = 0;
     hasTlsTemplate = false;
-    addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil);
+    addressSpace.init(pml4Phys, kMmapRegionFloor, kMmapRegionCeil, this);
     // Resurrect(§6.2)가 같은 정적 Process를 재사용할 수 있으므로,
     // 이전 생애의 신호 상태가 새 생애로 새어 들어가지 않도록 매번
     // 명시적으로 리셋한다(pml4Phys/addressSpace와 동일한 이유).

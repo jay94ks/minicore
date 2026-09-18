@@ -25,6 +25,8 @@
 
 namespace kernel {
 
+class Process;  // 포인터로만 참조(ProcessAddressSpaceManager::_owner, rmap용) - 전체 정의는 process.h
+
 enum class VmaBacking : uint32_t {
     Anonymous,      // v1 유일하게 실제로 동작 - mapRegion()이 그 자리에서 PageFrameAllocator로 즉시 채운다
     FixedPhysical,  // 물리주소가 이미 정해짐(MMIO/DMA 버퍼) - 프레임 소유권은 호출부, 이 관리자는 반납 안 함
@@ -69,8 +71,16 @@ public:
     // 프로세스의 주소공간. regionFloor/regionCeil: mmap 가능 영역
     // (§6-3 "코드 공간 위쪽 ~ 스택 하단 사이 전부" - 정확한 경계는
     // 호출부가 정한다, 아직 execImage()와 연동되지 않아 지금은 호출부
-    // 자유. 위 클래스 문서의 8-슬롯 제약을 고려해 정한다).
-    void init(uint64_t pml4Phys, uint64_t regionFloor, uint64_t regionCeil);
+    // 자유. 위 클래스 문서의 8-슬롯 제약을 고려해 정한다). owner:
+    // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §6.2] 이 주소공간을
+    // 소유한 Process - mapRegion()/registerFixedRegion()/
+    // resizeAnonymousRegion()이 Anonymous 프레임을 매핑할 때마다
+    // `PageFrameAllocator::insertRmap(phys, owner, vaddr)`를 부르는 데
+    // 쓴다(rmap의 "어떤 프로세스"가 바로 이 값). `Process::init()`
+    // 호출부가 항상 `this`를 넘겨야 한다 - nullptr로 두면(v1엔 그런
+    // 호출부가 없음) rmap/LRU 배선이 조용히 생략된다(방어적, 새 실패
+    // 경로를 만들지 않음).
+    void init(uint64_t pml4Phys, uint64_t regionFloor, uint64_t regionCeil, Process* owner);
 
     // length를 4KiB로 올림해 findGap으로 빈 자리를 찾고 등록한다.
     // Anonymous면 그 자리에서 물리 페이지를 확보해 즉시 매핑까지
@@ -133,6 +143,7 @@ private:
     uint64_t _pml4Phys = 0;
     uint64_t _regionFloor = 0;
     uint64_t _regionCeil = 0;
+    Process* _owner = nullptr;
     Spinlock _lock;
     MapleTree _tree;
 };

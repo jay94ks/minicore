@@ -18,13 +18,21 @@ kernel::uint64_t kAlignUp4K(kernel::uint64_t size) {
 // 매핑해 둔 상태에서 실패해 되돌릴 때 공용으로 쓴다 - mapRegion()의
 // 두 실패 지점(페이지 고갈 도중/tree.store 포화)이 정확히 같은 롤백을
 // 반복해야 해서 헬퍼로 뺐다. FixedPhysical은 프레임을 반납하지 않는다
-// (소유권이 호출부에 있음, address_space.h의 문서 주석 참고).
+// (소유권이 호출부에 있음, address_space.h의 문서 주석 참고). owner:
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §6.2] Anonymous 프레임을
+// 실제로 반납(`freePage`)하기 **전에** 그 (owner, vaddr) rmap 엔트리를
+// 먼저 지운다 - `KernelAddressSpaceManager`(소유 프로세스 개념이 없음)
+// 호출부는 항상 nullptr을 넘긴다(그 경우 rmap 자체가 애초에 삽입된
+// 적이 없으므로 제거도 조용히 생략).
 void kRollbackMapped(kernel::uint64_t pml4Phys, kernel::uint64_t start, kernel::uint64_t mappedBytes,
-                     kernel::VmaBacking backing) {
+                     kernel::VmaBacking backing, kernel::Process* owner) {
     for (kernel::uint64_t off = 0; off < mappedBytes; off += kPageSize4K) {
         const kernel::uint64_t physAddr = kernel::Paging::translatePage(start + off, pml4Phys);
         kernel::Paging::unmapPage(start + off, pml4Phys);
         if (backing == kernel::VmaBacking::Anonymous && physAddr) {
+            if (owner) {
+                kernel::PageFrameAllocator::removeRmap(physAddr, owner, start + off);
+            }
             kernel::PageFrameAllocator::freePage(physAddr);
         }
     }
@@ -34,10 +42,12 @@ void kRollbackMapped(kernel::uint64_t pml4Phys, kernel::uint64_t start, kernel::
 
 namespace kernel {
 
-void ProcessAddressSpaceManager::init(uint64_t pml4Phys, uint64_t regionFloor, uint64_t regionCeil) {
+void ProcessAddressSpaceManager::init(uint64_t pml4Phys, uint64_t regionFloor, uint64_t regionCeil,
+                                       Process* owner) {
     _pml4Phys = pml4Phys;
     _regionFloor = regionFloor;
     _regionCeil = regionCeil;
+    _owner = owner;
     _tree.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
     _tree.init();
 }
@@ -79,10 +89,18 @@ bool ProcessAddressSpaceManager::mapRegion(uint64_t length, uint64_t prot, VmaBa
             physAddr = fixedPhysAddr + mappedBytes;
         }
         Paging::mapPage(start + mappedBytes, physAddr, prot | PAGE_USER, _pml4Phys);
+        // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §6.2] 방금 실제로
+        // 매핑한 Anonymous 페이지의 rmap 삽입 - "요구 페이징 폴트나
+        // COW 폴트가 PTE에 매핑하는 순간"과 동급인 v1의 실제 매핑
+        // 시점(§6.2 "삽입" 원문 그대로, 여기는 즉시 매핑이라 그 시점이
+        // 바로 지금이다).
+        if (backing == VmaBacking::Anonymous) {
+            PageFrameAllocator::insertRmap(physAddr, _owner, start + mappedBytes);
+        }
     }
 
     if (mappedBytes < lengthAligned) {
-        kRollbackMapped(_pml4Phys, start, mappedBytes, backing);
+        kRollbackMapped(_pml4Phys, start, mappedBytes, backing, _owner);
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
@@ -90,7 +108,7 @@ bool ProcessAddressSpaceManager::mapRegion(uint64_t length, uint64_t prot, VmaBa
     if (!_tree.store(vma->start, vma->end, vma)) {
         // v1 MapleTree는 최대 kMapleArangeSlotCount(10)개 엔트리로
         // 제한된다(§6-5) - 이미 매핑한 페이지 전부 롤백.
-        kRollbackMapped(_pml4Phys, start, lengthAligned, backing);
+        kRollbackMapped(_pml4Phys, start, lengthAligned, backing, _owner);
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
@@ -116,7 +134,7 @@ bool ProcessAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
     }
     auto* vma = static_cast<Vma*>(value);
 
-    kRollbackMapped(_pml4Phys, alignedAddr, lengthAligned, vma->backing);
+    kRollbackMapped(_pml4Phys, alignedAddr, lengthAligned, vma->backing, _owner);
     _tree.erase(rangeStart, rangeEnd);
     GenericSlabAllocator::free(vma, sizeof(Vma));
 
@@ -154,6 +172,22 @@ bool ProcessAddressSpaceManager::registerFixedRegion(uint64_t start, uint64_t le
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
+
+    // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §6.2] 이 함수는
+    // `mapRegion()`과 달리 페이지를 직접 매핑하지 않는다(호출부 - ELF
+    // 로더/유저 스택 설정 - 가 이미 끝내 둠, 위 클래스 선언부 문서
+    // 주석 참고) - 그래서 rmap 삽입도 매핑 루프 안이 아니라 여기서
+    // 등록된 범위를 다시 훑으며 한다. `Paging::translatePage()`로
+    // 호출부가 이미 매핑해 둔 물리주소를 그대로 읽어올 뿐, 새로
+    // 매핑/할당하지 않는다.
+    if (backing == VmaBacking::Anonymous) {
+        for (uint64_t off = 0; off < length; off += kPageSize4K) {
+            const uint64_t physAddr = Paging::translatePage(start + off, _pml4Phys);
+            if (physAddr) {
+                PageFrameAllocator::insertRmap(physAddr, _owner, start + off);
+            }
+        }
+    }
     return true;
 }
 
@@ -184,14 +218,17 @@ bool ProcessAddressSpaceManager::resizeAnonymousRegion(uint64_t start, uint64_t 
             if (!physAddr) {
                 break;
             }
-            Paging::mapPage(start + oldLenAligned + mappedDelta, physAddr, vma->prot | PAGE_USER, _pml4Phys);
+            const uint64_t vaddr = start + oldLenAligned + mappedDelta;
+            Paging::mapPage(vaddr, physAddr, vma->prot | PAGE_USER, _pml4Phys);
+            PageFrameAllocator::insertRmap(physAddr, _owner, vaddr);
         }
         if (mappedDelta < newLenAligned - oldLenAligned) {
-            kRollbackMapped(_pml4Phys, start + oldLenAligned, mappedDelta, VmaBacking::Anonymous);
+            kRollbackMapped(_pml4Phys, start + oldLenAligned, mappedDelta, VmaBacking::Anonymous, _owner);
             return false;
         }
     } else {
-        kRollbackMapped(_pml4Phys, start + newLenAligned, oldLenAligned - newLenAligned, VmaBacking::Anonymous);
+        kRollbackMapped(_pml4Phys, start + newLenAligned, oldLenAligned - newLenAligned, VmaBacking::Anonymous,
+                         _owner);
         // [PN-D132A1E9/QU-DE2828A1] 힙 축소(Brk 감소)로 실제로
         // 언맵된 범위만 - 성장 경로는 이전에 없던 주소에 새로 매핑할
         // 뿐이라 다른 코어가 그 주소의 stale 매핑을 들고 있을 수
@@ -210,7 +247,8 @@ bool ProcessAddressSpaceManager::resizeAnonymousRegion(uint64_t start, uint64_t 
         // 있다, 실측된 적 없어 새 DC 없이 주석으로만 남김) 원래
         // 범위로 재등록을 시도한다.
         if (newLenAligned > oldLenAligned) {
-            kRollbackMapped(_pml4Phys, start + oldLenAligned, newLenAligned - oldLenAligned, VmaBacking::Anonymous);
+            kRollbackMapped(_pml4Phys, start + oldLenAligned, newLenAligned - oldLenAligned, VmaBacking::Anonymous,
+                             _owner);
         }
         _tree.store(rangeStart, rangeEnd, vma);
         return false;
@@ -239,7 +277,8 @@ void ProcessAddressSpaceManager::unmapAll() {
     });
 
     for (uint32_t i = 0; i < count; ++i) {
-        kRollbackMapped(_pml4Phys, entries[i].start, entries[i].end - entries[i].start + 1, entries[i].vma->backing);
+        kRollbackMapped(_pml4Phys, entries[i].start, entries[i].end - entries[i].start + 1, entries[i].vma->backing,
+                         _owner);
         GenericSlabAllocator::free(entries[i].vma, sizeof(Vma));
     }
     // [수정, 2026-09-16, PN-7FF5DA89 QA 중 발견] 예전엔 `_tree.init()`을
@@ -340,13 +379,13 @@ bool KernelAddressSpaceManager::mapRegion(uint64_t length, uint64_t flags, uint6
     }
 
     if (mappedBytes < lengthAligned) {
-        kRollbackMapped(gKernelMasterPml4Phys, start, mappedBytes, VmaBacking::Anonymous);
+        kRollbackMapped(gKernelMasterPml4Phys, start, mappedBytes, VmaBacking::Anonymous, nullptr);
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
 
     if (!gKernelAddressSpaceTree.store(vma->start, vma->end, vma)) {
-        kRollbackMapped(gKernelMasterPml4Phys, start, lengthAligned, VmaBacking::Anonymous);
+        kRollbackMapped(gKernelMasterPml4Phys, start, lengthAligned, VmaBacking::Anonymous, nullptr);
         GenericSlabAllocator::free(vma, sizeof(Vma));
         return false;
     }
@@ -372,7 +411,7 @@ bool KernelAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
     }
     auto* vma = static_cast<Vma*>(value);
 
-    kRollbackMapped(gKernelMasterPml4Phys, alignedAddr, lengthAligned, vma->backing);
+    kRollbackMapped(gKernelMasterPml4Phys, alignedAddr, lengthAligned, vma->backing, nullptr);
     gKernelAddressSpaceTree.erase(rangeStart, rangeEnd);
     GenericSlabAllocator::free(vma, sizeof(Vma));
 

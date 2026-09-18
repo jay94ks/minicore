@@ -127,12 +127,31 @@ public:
     // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] physAddr가 속한
     // `PageFrame`을 직접 찾는다 - direct map 추적 범위 밖이거나 아직
     // init()이 안 끝났으면 nullptr(방어적, retain()/refCount()가 이미
-    // 쓰던 것과 같은 범위 검사). rmap/LRU 배선(SP-6CEFBE9B §6.2/§7.2,
-    // 이 계획의 3/4번 항목)이 다음 증분에서 이 접근자로 직접
-    // `PageFrame::rmapHead`/`flags`를 갱신하게 된다 - 지금은 아직
-    // 아무 호출부도 없다(구조체가 실제로 쓸모 있으려면 있어야 하는
-    // 최소 접근자라 미리 둔다).
+    // 쓰던 것과 같은 범위 검사).
     static PageFrame* frameFor(uint64_t physAddr);
+
+    // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §6.2/§7.2] rmap 삽입 -
+    // Anonymous 백킹 프레임이 (owner, virtAddr)에 실제로 매핑되는
+    // 순간(`ProcessAddressSpaceManager::mapRegion`/`registerFixedRegion`/
+    // `resizeAnonymousRegion`이 호출) 부른다. `RmapEntry`를
+    // `GenericSlabAllocator`(32B 버킷)로 확보해 `rmapHead`에 push하고
+    // `mapCount++`, 이 프레임이 처음 스왑 대상이 되는 순간(`PG_SWAPPABLE`
+    // 이 꺼져 있던 상태)이면 `PG_SWAPPABLE`을 켜고 §7.2 1단계대로
+    // 전역 inactive 리스트 뒤에 넣는다. physAddr가 추적 범위 밖이거나
+    // 슬랩 고갈이면 false(호출부는 매핑 자체를 되돌릴 필요는 없다 -
+    // 이 실패는 "회수 후보 목록에서 빠짐"일 뿐 매핑 자체의 유효성과
+    // 무관하다, RM-23F4B687 §4 - 새 에러 경로를 늘리지 않는다).
+    static bool insertRmap(uint64_t physAddr, Process* owner, uint64_t virtAddr);
+
+    // rmap 제거 - `(owner, virtAddr)`와 정확히 일치하는 엔트리 하나만
+    // 찾아 제거하고 `mapCount--`(리스트가 프레임당이라 못 찾아도
+    // 조용히 아무 일도 안 함 - 방어적). `unmapRegion`/`unmapAll`/
+    // `resizeAnonymousRegion`(축소)이 실제 페이지 해제(`freePage`)
+    // **이전에** 불러야 한다 - `freeOrder`가 프레임을 진짜로 버디
+    // 목록에 되돌리는 순간 남은 rmap 엔트리를 전부 강제로 청소하지만
+    // (방어적 마지막 안전망), 정상 경로는 이 함수로 먼저 깨끗하게
+    // 정리하는 쪽이다.
+    static void removeRmap(uint64_t physAddr, Process* owner, uint64_t virtAddr);
 };
 
 }  // namespace kernel
