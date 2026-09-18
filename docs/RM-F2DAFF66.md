@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T09:54:10.125Z
+  updatedAt: 2026-09-18T10:44:44.049Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1262,6 +1262,16 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   적어 뒀다. 예방 조치를 걸어 두지 않았다면 그냥 조용히 빠졌을
   가능성이 있는 항목이 **이번엔 미착수 상태로나마 openly 추적**된
   사례 - 이 문서(§4)의 목적이 실제로 작동함을 확인.
+
+- **`SP-76250478`(멀티스레드 유저 프로세스 지원) → `PN-0EB2FABF`**:
+  2026-09-18 approved, 구현 계획 `PN-0EB2FABF`(scheduled) 등록 완료 -
+  아직 코드는 없음. §2.1(`Process::threads`/`ThreadId`/`UserThread`
+  종료 필드)/§2.2(`CreateThread`)/§3 항목2-3(`SelfTerminateThread`,
+  좀비/Join 정책)/§3.1(`Join`/`Detach` 진짜 블로킹, `joinerAsyncTask`)
+  다섯 항목을 커밋이 올라오는 대로 실제 코드와 대조 - 특히 여러
+  syscall을 한 번에 나열하는 설계라 §1-A(`Task::numaNode`)류 "뒷부분
+  항목 누락" 패턴을 주의 깊게 점검한다(4개 syscall 중 일부만 반영되고
+  나머지가 조용히 빠지는 경우).
 
 ## §5. 기록 규칙
 
