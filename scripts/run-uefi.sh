@@ -14,7 +14,7 @@ ESP_DIR="${BUILD_DIR}/esp"
 OVMF_CODE="${MINICORE_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_SRC="${MINICORE_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS_RW="${BUILD_DIR}/OVMF_VARS_4M.rw.fd"
-TIMEOUT_SECS="${MINICORE_QEMU_TIMEOUT:-8}"
+TIMEOUT_SECS="${MINICORE_QEMU_TIMEOUT:-10}"
 
 cmake -S "${ROOT_DIR}/minicore/boot-uefi" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/minicore/boot-uefi/cmake/toolchain-uefi-x86_64.cmake" \
@@ -28,6 +28,18 @@ cp "${BUILD_DIR}/bootx64.efi" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 # OVMF_VARS는 QEMU가 실행 중 써야 해서 읽기전용 시스템 사본을 매번
 # 새로 복사한다(원본 오염 방지).
 cp "${OVMF_VARS_SRC}" "${OVMF_VARS_RW}"
+
+# [실측 확인, 2026-09-18] 이 스크립트를 곧바로 연달아 재실행하면
+# (이전 QEMU가 timeout으로 막 SIGTERM 종료된 직후) 가끔 OVMF가
+# BdsDxe 로그조차 못 찍고 조용히 멈춘 채 timeout까지 가는 현상을
+# 재현했다(펌웨어 로직 문제가 아니라 - 재시도하면 정상 재현되고, 이후
+# 정상 부팅 시 메모리맵 파싱 결과까지 전부 올바르게 나옴을 확인) -
+# 직전 QEMU 프로세스가 /mnt/c(NTFS 백엔드) 위의 pflash 파일 핸들을
+# 완전히 놓기 전에 다음 실행의 cp/열기가 겹치는 것으로 추정된다.
+# sleep 1로는 4회 중 1회 여전히 재현됐고, sleep 2로 늘리자 4회 연속
+# 무결 - 완전히 없앴다는 보장은 아니지만(타이밍 의존이라 0%로
+# 단언 불가) 반복 재현 빈도를 크게 낮췄다.
+sleep 2
 
 echo "--- QEMU(OVMF UEFI) 부팅, ESP=${ESP_DIR} (최대 ${TIMEOUT_SECS}초) ---"
 set +e
