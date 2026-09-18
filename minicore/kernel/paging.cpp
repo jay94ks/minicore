@@ -6,6 +6,8 @@
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 #include "page_frame_allocator.h"
+#include "process.h"
+#include "scheduler.h"
 #include "x86_64/msr.h"
 
 namespace {
@@ -313,9 +315,39 @@ bool kHandleCowWriteFault(kernel::uint64_t faultAddr) {
     pt[ptIndex] = newPhys | preservedFlags | kernel::PAGE_PRESENT | kernel::PAGE_WRITABLE;
     kInvalidatePage(va);
 
+    // [완료, 2026-09-19, PN-610CA401, SP-6CEFBE9B §6.2] rmap "이동" -
+    // PN-44C91D6E(fork())가 완료되며 "착수 시 함께 배선"하겠다고
+    // 예고해 둔 잔여 항목(RM-F2DAFF66 §1-K). 이 프로세스는 이제
+    // oldPhys를 더 이상 매핑하지 않고 newPhys를 매핑하므로, rmap
+    // 리스트도 그대로 따라가야 한다 - 안 그러면 oldPhys에 이 프로세스/
+    // 가상주소를 가리키는 스테일 엔트리가 남고 newPhys는 rmap이 비어
+    // 회수 후보 판단에서 조용히 빠진다(둘 다 지금은 관찰 가능한
+    // 버그가 아니다 - rmap 소비자(swap 스캔, PN-4859FDE9)가 아직
+    // 없어서다). `#PF`는 그 폴트를 낸 코드가 실행 중이던 바로 그
+    // 주소공간에서만 발생하므로(이 함수 문서 주석 그대로) 이 시점의
+    // `Scheduler::currentTask()`는 항상 이 COW 프레임을 실제로
+    // 매핑 중이던 그 UserThread 자신이다(kHandleUserBreakpointHit
+    // 등 다른 원시 ISR/예외 컨텍스트 함수와 동일한 전제 - AsyncTask
+    // onExec()의 "currentTask() 오용" 함정(PN-5BBD4301)과는 다른
+    // 상황: 그건 리액터가 나중에 다른 코어/컨텍스트에서 대신 실행하는
+    // 비동기 경로라 currentTask()가 제출자를 안 가리키는 문제였지만,
+    // #PF는 그 자체가 폴트를 낸 Task의 동기적 실행 흐름 안이라 항상
+    // 정확하다).
+    kernel::Task* faultingTask = kernel::Scheduler::currentTask();
+    kernel::Process* owner = nullptr;
+    if (faultingTask && faultingTask->isUserLevel) {
+        auto* faultingThread = static_cast<kernel::UserThread*>(faultingTask);
+        kernel::SharedPtr<kernel::Process> proc = faultingThread->process.lock();
+        owner = proc.get();
+    }
+    kernel::PageFrameAllocator::removeRmap(oldPhys, owner, va);
+    kernel::PageFrameAllocator::insertRmap(newPhys, owner, va);
+
     // oldPhys 몫의 공유 참조를 하나 반납한다 - retain()/freePage의
     // 기존 카운팅 관례 그대로(0이 되지 않는 한 실제 반납 안 됨, 다른
     // 주소공간이 여전히 이 프레임을 갖고 있으면 그쪽 몫은 그대로 남음).
+    // removeRmap()을 freePage() 이전에 먼저 부른다 - PageFrameAllocator
+    // 문서 주석(removeRmap)이 명시한 순서 그대로.
     kernel::PageFrameAllocator::freePage(oldPhys);
     return true;
 }
