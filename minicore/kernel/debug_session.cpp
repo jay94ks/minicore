@@ -414,6 +414,22 @@ public:
                 rflags |= kRflagsTrapFlag;
                 target->debugSession.singleStepPending = false;  // 한 번 쓰이면 소비됨
             }
+            // [수정, 2026-09-18, PN-87D6B615 남은 범위 2번 실측 E2E 중
+            // 발견] RFLAGS.RF(Resume Flag, 비트 16, 0x10000)를 세우지
+            // 않으면, 정지 사유가 하드웨어 실행 브레이크포인트(B0-B3)
+            // 였을 때 재개 직후 CPU가 같은 명령어를 다시 인출하며 그
+            // 브레이크포인트 조건을 즉시 재검사해 또 트랩한다(Intel
+            // SDM Vol.3 §17.3.1.1 - RF는 "IRETQ 직후 딱 한 명령어
+            // 동안 명령어 브레이크포인트 재인식을 억제"하는 용도로
+            // 정확히 이 상황을 위해 존재) - 그 결과 dbgtarget이
+            // 실제로 한 걸음도 전진하지 못한 채 같은 RIP에서 영원히
+            // 재정지하는 것을 실측으로 발견했다(devmgr+dbgtarget E2E
+            // 하네스, PN-87D6B615). 싱글스텝(TF) 재개에는 원래
+            // 영향이 없으므로(RF는 명령어 브레이크포인트 재인식만
+            // 억제, TF 트랩 메커니즘과는 독립적) 정지 사유와 무관하게
+            // 항상 세워도 안전하다.
+            constexpr uint64_t kRflagsResumeFlag = 0x10000;
+            rflags |= kRflagsResumeFlag;
             frame->rflags = rflags;
             frame->rspOld = snap.rsp;
             frame->ssOld = snap.ss;
