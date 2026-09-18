@@ -119,6 +119,16 @@ isr_common_stub:
     mov rdi, rsp
     call kIsrHandler
 
+    /* [신규, PN-44C91D6E, fork() 자식 재개 경로] 순수 레이블 추가 -
+     * 기존 흐름(위 call 직후 자연히 여기로 떨어짐)은 전혀 안 바뀐다.
+     * kResumeForkedRing3(process.cpp)가 자기 스택 위에 InterruptFrame과
+     * 정확히 같은 레이아웃(rax..r15,vector,errorCode,rip,cs,rflags,
+     * rspOld,ssOld 순, 위 push 순서와 바이트 단위로 일치)을 만든 뒤
+     * 이 레이블로 직접 jmp해 재사용한다 - "부모가 트랩한 바로 그
+     * 지점에서 자식이 재개"하는 걸 이 검증된 pop+iretq 시퀀스 그대로
+     * 구현한다. */
+    .global isr_common_epilogue
+isr_common_epilogue:
     pop rax
     pop rbx
     pop rcx

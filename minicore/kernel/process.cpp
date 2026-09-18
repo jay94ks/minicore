@@ -125,6 +125,98 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
     __builtin_unreachable();
 }
 
+// [신규, PN-44C91D6E, fork() 자식 재개 경로] `kEnterRing3`와 정반대
+// 전제 - 고정 entryPoint/새 스택이 아니라, 부모가 트랩한 시점의 전체
+// InterruptFrame(`UserThread::forkResumeFrame`, fork() 핸들러가
+// 부모 프레임을 복사해 rax만 0으로 덮어써 채워 둔다)을 그대로 iretq해
+// "부모가 트랩한 바로 그 지점에서" 재개한다. 세그먼트 셀렉터 reload +
+// `kSyncFsBaseToUser` 순서는 `kEnterRing3`와 완전히 동일(그 함수
+// 문서 주석이 이미 실측으로 확인해 둔 "셀렉터 reload가 FS_BASE를
+// 지운다" 함정을 그대로 피한다).
+[[noreturn]] void kResumeForkedRing3(void*) {
+    auto* self = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+    // 로컬 스택 복사본 - 아래 인라인 asm이 이 사본의 주소 하나만
+    // 읽어 그 자리에서 바로 push하므로, self->forkResumeFrame 원본을
+    // 이후 다시 쓸 필요가 없다(1회성 소비).
+    const kernel::InterruptFrame frame = self->forkResumeFrame;
+
+    static_assert(kernel::kGdtUserDataSelector == 0x1b, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
+    static_assert(kernel::kGdtUserCodeSelector == 0x23, "gdt.h 값이 바뀌면 아래 asm 리터럴도 같이 바꿀 것");
+    static_assert(sizeof(kernel::InterruptFrame) == 176,
+                  "InterruptFrame 크기가 바뀌면 아래 push 오프셋도 같이 재확인할 것");
+
+    asm volatile(
+        "mov $0x1b, %%ax\n\t"
+        "mov %%ax, %%ds\n\t"
+        "mov %%ax, %%es\n\t"
+        "mov %%ax, %%fs\n\t"
+        "mov %%ax, %%gs\n\t"
+        :
+        :
+        : "rax", "memory");
+
+    kernel::kSyncFsBaseToUser(self);
+
+    // isr_common_stub(isr.S)의 push 순서(r15..rax, 마지막 push=rax가
+    // 최저 주소)와 정확히 같은 레이아웃을 이 함수 자신의 스택 위에
+    // 그대로 재현한 뒤 isr_common_epilogue(같은 pop+iretq 시퀀스,
+    // 이미 실전 검증됨)로 점프한다. `%0`(frame의 주소) 레지스터
+    // **하나만** 읽고 다른 GPR은 전혀 건드리지 않는다 - `push m64`는
+    // 스택 포인터만 갱신할 뿐 스크래치 레지스터가 필요 없어서다(레지스터
+    // 별로 값을 옮겨 담았다가 나중에 그 레지스터를 또 다른 필드의 주소
+    // 계산에 재사용하다 꼬이는 위험을 원천적으로 피한다).
+    asm volatile(
+        "push %c[ssOld](%0)\n\t"
+        "push %c[rspOld](%0)\n\t"
+        "push %c[rflags](%0)\n\t"
+        "push %c[cs](%0)\n\t"
+        "push %c[rip](%0)\n\t"
+        "push %c[errorCode](%0)\n\t"
+        "push %c[vector](%0)\n\t"
+        "push %c[r15](%0)\n\t"
+        "push %c[r14](%0)\n\t"
+        "push %c[r13](%0)\n\t"
+        "push %c[r12](%0)\n\t"
+        "push %c[r11](%0)\n\t"
+        "push %c[r10](%0)\n\t"
+        "push %c[r9](%0)\n\t"
+        "push %c[r8](%0)\n\t"
+        "push %c[rbp](%0)\n\t"
+        "push %c[rdi](%0)\n\t"
+        "push %c[rsi](%0)\n\t"
+        "push %c[rdx](%0)\n\t"
+        "push %c[rcx](%0)\n\t"
+        "push %c[rbx](%0)\n\t"
+        "push %c[rax](%0)\n\t"
+        "jmp isr_common_epilogue\n\t"
+        :
+        : "r"(&frame),
+          [rax] "i"(__builtin_offsetof(kernel::InterruptFrame, rax)),
+          [rbx] "i"(__builtin_offsetof(kernel::InterruptFrame, rbx)),
+          [rcx] "i"(__builtin_offsetof(kernel::InterruptFrame, rcx)),
+          [rdx] "i"(__builtin_offsetof(kernel::InterruptFrame, rdx)),
+          [rsi] "i"(__builtin_offsetof(kernel::InterruptFrame, rsi)),
+          [rdi] "i"(__builtin_offsetof(kernel::InterruptFrame, rdi)),
+          [rbp] "i"(__builtin_offsetof(kernel::InterruptFrame, rbp)),
+          [r8] "i"(__builtin_offsetof(kernel::InterruptFrame, r8)),
+          [r9] "i"(__builtin_offsetof(kernel::InterruptFrame, r9)),
+          [r10] "i"(__builtin_offsetof(kernel::InterruptFrame, r10)),
+          [r11] "i"(__builtin_offsetof(kernel::InterruptFrame, r11)),
+          [r12] "i"(__builtin_offsetof(kernel::InterruptFrame, r12)),
+          [r13] "i"(__builtin_offsetof(kernel::InterruptFrame, r13)),
+          [r14] "i"(__builtin_offsetof(kernel::InterruptFrame, r14)),
+          [r15] "i"(__builtin_offsetof(kernel::InterruptFrame, r15)),
+          [vector] "i"(__builtin_offsetof(kernel::InterruptFrame, vector)),
+          [errorCode] "i"(__builtin_offsetof(kernel::InterruptFrame, errorCode)),
+          [rip] "i"(__builtin_offsetof(kernel::InterruptFrame, rip)),
+          [cs] "i"(__builtin_offsetof(kernel::InterruptFrame, cs)),
+          [rflags] "i"(__builtin_offsetof(kernel::InterruptFrame, rflags)),
+          [rspOld] "i"(__builtin_offsetof(kernel::InterruptFrame, rspOld)),
+          [ssOld] "i"(__builtin_offsetof(kernel::InterruptFrame, ssOld))
+        : "memory");
+    __builtin_unreachable();
+}
+
 }  // namespace
 
 namespace kernel {

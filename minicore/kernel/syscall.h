@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_SYSCALL_H
 
 #include "async_task.h"
+#include "interrupt_frame.h"
 #include "libkenv/chunked_list.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
@@ -160,6 +161,16 @@ public:
     // 싣는 배선(syscall 진입/이탈, ring3 첫 진입)은 항목7 몫** - 이
     // 필드는 값을 마련해 두기만 한다.
     uint64_t userFsBase = 0;
+
+    // [신규, PN-44C91D6E, fork() 자식 재개 경로] fork() syscall이 자식
+    // UserThread를 만들 때 부모가 트랩한 시점의 전체 InterruptFrame을
+    // 그대로 복사해(rax만 0으로 덮어씀) 여기 담아 둔다 -
+    // `kResumeForkedRing3`(process.cpp)가 `Task::entry`로 처음 실행될
+    // 때 이 값을 그대로 iretq해 "부모가 트랩한 바로 그 지점에서 재개"
+    // 한다(execImage()의 `kEnterRing3`이 항상 고정 entryPoint+새
+    // 스택을 가정하는 것과 정반대 경로). fork() 자식이 아닌 모든
+    // UserThread는 이 필드를 전혀 안 씀(전부 0으로 남음).
+    InterruptFrame forkResumeFrame{};
 
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든
