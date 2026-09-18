@@ -648,6 +648,37 @@ bool Paging::isUserRangeValid(uint64_t virtualAddr, uint64_t length, uint64_t pm
     return true;
 }
 
+// [신규, 2026-09-19, PN-C6CDC26A] paging.h 문서 주석 참고 - 4KiB
+// 경계까지만 유효를 보장한다(translatePage()가 2MiB 거대 페이지를
+// 만나도 그 안의 정확한 오프셋을 돌려주지만, 이 함수는 debug_session.cpp
+// kCopyDebuggeeMemory()와 동일한 관례로 항상 4KiB 단위로만 잘라
+// 돌려준다 - 단순함 우선, RM-23F4B687 §4).
+void* kResolveUserPointer(uint64_t pml4Phys, uint64_t userVa, uint64_t size, uint64_t* outValidLen) {
+    if (size == 0) {
+        return nullptr;
+    }
+    const uint64_t pageBase = userVa & ~(kPageSize4K - 1);
+    const uint64_t pageOffset = userVa - pageBase;
+    uint64_t validLen = kPageSize4K - pageOffset;
+    if (validLen > size) {
+        validLen = size;
+    }
+    if (!Paging::isUserRangeValid(userVa, validLen, pml4Phys)) {
+        return nullptr;
+    }
+    const uint64_t phys = Paging::translatePage(pageBase, pml4Phys);
+    if (!phys) {
+        return nullptr;
+    }
+    // translatePage()가 이미 pageBase를 4KiB로 재정렬해 버리므로
+    // (2MiB 거대 페이지 오프셋 계산은 이 함수가 항상 4KiB로만 잘라
+    // 쓰는 이상 여기서 필요 없다), 여기서 pageOffset을 직접 더한다.
+    if (outValidLen) {
+        *outValidLen = validLen;
+    }
+    return reinterpret_cast<void*>(kPhysToVirt(phys) + pageOffset);
+}
+
 uint64_t Paging::currentPml4Phys() {
     return kCurrentPml4Phys();
 }

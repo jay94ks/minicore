@@ -227,6 +227,45 @@ public:
     static void destroyAddressSpace(uint64_t pml4Phys);
 };
 
+// [신규, 2026-09-19, PN-C6CDC26A, 설계자 지시] AsyncTask가 유저
+// 포인터를 안전하게 만지는 방법을 "제출자 프로세스의 CR3로 직접
+// 전환했다가 되돌리는" 방식(async_task.cpp의
+// kSyncCr3ForAsyncExecEntry/kRestoreCr3AfterAsyncExecEntry)에서
+// "CR3는 그대로 두고 물리주소 기반으로 직접 접근"하는 방식으로 옮기기
+// 위한 공용 원시 연산 - 설계자 지시 원문("제 3자의 입장에서 유저영역을
+// 해당 코어에서 구동되는 주소 공간에 맵핑해서 그냥 보면 되는거거든")
+// 그대로: `pml4Phys` 기준으로 `userVa`가 실제 유저 매핑돼 있는지
+// `Paging::isUserRangeValid()`로 검증하고, `Paging::translatePage()`로
+// 얻은 물리 프레임을 `kPhysToVirt()`(모든 CR3에 공유되는 higher-half
+// direct map)로 접근한다 - CR3를 단 한 번도 바꾸지 않는다.
+//
+// **페이지 경계를 넘지 않는다** - `debug_session.cpp`의
+// `kCopyDebuggeeMemory()`와 동일한 이유(direct map은 물리적으로
+// 연속이지만, 유저 VA가 연속이라고 해서 그 뒤에 있는 물리 프레임까지
+// 연속이라는 보장이 전혀 없다). `[userVa, userVa+size)`가 페이지
+// 경계를 넘으면 그 경계까지만 유효한 것으로 잘라 돌려준다 - 호출부가
+// `outValidLen`(더 긴 범위가 필요하면 그 값만큼만 쓰고 다음 페이지는
+// 이 함수를 다시 호출)으로 실제 유효 길이를 받아 나눠 처리할 책임을
+// 진다(정확히 kCopyDebuggeeMemory의 chunk 분할 루프와 같은 관례).
+//
+// 반환값은 그 물리 프레임 안에서 `userVa`가 가리키는 정확한 오프셋의
+// **커널 VA**(그대로 역참조 가능) - 매핑이 없거나(`isUserRangeValid`
+// 실패) `size==0`이면 `nullptr`, `outValidLen`은 건드리지 않는다.
+//
+// [갱신, 2026-09-19] 이 헬퍼 자체는 신설했지만, `async_task.cpp`의
+// 기존 CR3 스왑 메커니즘(kSyncCr3ForAsyncExecEntry류)은 **아직
+// 이 헬퍼로 교체하지 않았다** - 실제 코드 조사 결과, 그 스왑은
+// `kAsyncTaskEntryWrapper` 진입 시 "이 onExec() 실행 구간 전체" 동안
+// 암묵적으로 CR3가 맞다고 가정하고 유저 포인터를 직접 역참조하는
+// 코드베이스 전역 관례(channel.cpp/pnp.cpp/process.cpp/
+// debug_session.cpp 등 사실상 모든 AsyncTaskHandler::onExec() 구현)를
+// 떠받치고 있어, 그 스왑 자체를 제거하려면 그 모든 소비처를 이
+// 헬퍼로 **동시에** 마이그레이션해야 한다 - 이건 계획이 예상했던
+// "async_task.cpp 하나만의 좁은 1단계"보다 훨씬 넓은 범위라 설계자
+// 확인 없이 임의로 진행하지 않는다(CLAUDE.md 규칙 4) - PN-C6CDC26A
+// 본문의 "실제 코드 조사 결과" 절 참고.
+void* kResolveUserPointer(uint64_t pml4Phys, uint64_t userVa, uint64_t size, uint64_t* outValidLen);
+
 // [신규, 2026-09-18, SP-8D206F11 §2.3] Paging::initPatForThisCore()가
 // 세팅한 IA32_PAT 슬롯 중 소프트웨어가 실제로 고를 수 있는 4개만
 // 노출한다(인덱스2 UC-/5~7은 1~3의 미러라 별도 값을 둘 이유가 없음).
