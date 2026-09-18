@@ -77,7 +77,26 @@ SharedPtr<Process> kFindDebuggableChild(const SharedPtr<Process>& caller, int64_
         if (target || !child) {
             return;
         }
-        if (reinterpret_cast<int64_t>(child.get()) == targetProcessId) {
+        // [수정, 2026-09-18, PN-87D6B615 남은 범위 2번 착수 중 발견]
+        // PN-C39882D0(ProcessId 세대 태그 슬롯 인코딩 마이그레이션)가
+        // `SpawnProcessArgs::pid`/`WaitArgs::targetPid`를 raw
+        // `reinterpret_cast<int64_t>(Process*)`에서 `Process::processId`
+        // (kAllocateProcessId() 발급값)로 옮겼는데, 그 커밋은 명시적으로
+        // "SpawnProcess/Wait만" 다룬다고 범위를 밝히며 Kill의 의도적
+        // 과도기적 raw-pointer 비교는 별도로 언급했다(process.h
+        // ProcessId 문서 주석) - 하지만 debug_session.cpp의 이 함수는
+        // 그 목록 어디에도 언급되지 않은 채 예전 raw-pointer 비교
+        // (`reinterpret_cast<int64_t>(child.get())`)로 그대로 남아
+        // 있었다. 즉 실제 SpawnProcess 호출자가 반환받은(ProcessId
+        // 인코딩) pid를 그대로 DebugAttach 등의 targetProcessId로
+        // 넘기면 이 비교가 항상 실패해 PermissionDenied만 돌려줬다 -
+        // Kill과 달리 이건 의도된 과도기적 예외가 아니라 단순히 그
+        // 마이그레이션 커밋이 놓친 파일이었다(문서화된 예외 목록에
+        // 없음). `child->processId`(SpawnProcess로 만들어진 자식만
+        // kAllocateProcessId()로 채워짐 - 고정 스폰 KernelService는
+        // 애초에 이 트리에 없어 이 비교 대상이 아님)로 바꿔 실제 pid
+        // ABI와 맞춘다.
+        if (child->processId == targetProcessId) {
             target = child;
         }
     });
