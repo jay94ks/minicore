@@ -31,6 +31,14 @@ constexpr kernel::uint64_t kInitrdCpioHandleValue = 1;
 // (=1) 어느 것과도 겹치지 않도록 비트5를 쓴다.
 constexpr kernel::uint64_t kLiveFsRootDirHandleValue = 1ULL << 5;
 
+// [신규, 2026-09-19, PN-770A28FB] `/sys/live/named`/`/sys/live/kernel`
+// 디렉터리 핸들 - 위 루트 핸들과 같은 이유로 상태 없는 고정
+// sentinel(각각 `NamedObjectTable`/`KernelReservedTable` 전체를
+// 나열한다는 뜻일 뿐, 특정 인스턴스를 가리키지 않음). 비트6/7을 써서
+// 루트 핸들(비트5)과도 겹치지 않는다.
+constexpr kernel::uint64_t kLiveFsNamedDirHandleValue = 1ULL << 6;
+constexpr kernel::uint64_t kLiveFsKernelDirHandleValue = 1ULL << 7;
+
 bool kHasPrefix(const char* s, kernel::uint32_t sLen, const char* prefix, kernel::uint32_t prefixLen) {
     return sLen >= prefixLen && memcmp(s, prefix, prefixLen) == 0;
 }
@@ -122,6 +130,22 @@ KernelReservedEntry* KernelReservedTable::find(const char* name, uint32_t nameLe
     return nullptr;
 }
 
+bool KernelReservedTable::getByIndex(uint32_t index, char* outName, uint32_t* outNameLength) {
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < kMaxKernelReservedEntries; ++i) {
+        if (!gEntries[i].used) {
+            continue;
+        }
+        if (seen == index) {
+            memcpy(outName, gEntries[i].name, gEntries[i].nameLen);
+            *outNameLength = gEntries[i].nameLen;
+            return true;
+        }
+        ++seen;
+    }
+    return false;
+}
+
 LiveFs& LiveFs::instance() {
     static LiveFs gInstance;
     return gInstance;
@@ -165,6 +189,15 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
     // 정확히 일치, 접두사 없는 빈 relPath) - 루트 디렉터리.
     if (relPathLen == 0) {
         return kernel::OpenResult{kernel::FileHandle{kLiveFsRootDirHandleValue}, true, kernel::VfsError::None};
+    }
+
+    // [신규, 2026-09-19, PN-770A28FB] "named"/"kernel" 자신(끝에 "/"
+    // 없이 정확히 일치) - 그 하위 이름을 나열하는 디렉터리.
+    if (kEqualsExact(relPath, relPathLen, kNamedPrefix, sizeof(kNamedPrefix) - 2)) {
+        return kernel::OpenResult{kernel::FileHandle{kLiveFsNamedDirHandleValue}, true, kernel::VfsError::None};
+    }
+    if (kEqualsExact(relPath, relPathLen, kKernelPrefix, sizeof(kKernelPrefix) - 2)) {
+        return kernel::OpenResult{kernel::FileHandle{kLiveFsKernelDirHandleValue}, true, kernel::VfsError::None};
     }
 
     if (kHasPrefix(relPath, relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
@@ -257,8 +290,18 @@ kernel::ReadResult kLiveFsReadImpl(kernel::FileHandle handle, kernel::uint64_t o
 // kLiveFsReadImpl의 같은 주석 참고).
 void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
     static constexpr char kInitrdCpioPath[] = "initrd.cpio";
+    static constexpr char kNamedDirName[] = "named";
+    static constexpr char kKernelDirName[] = "kernel";
     if (args->relPathLen == 0) {
         // [신규, 2026-09-19, PN-770A28FB] 루트 디렉터리 자신.
+        args->size = 0;
+        args->isDirectory = true;
+        args->error = kernel::VfsError::None;
+        return;
+    }
+    if (kEqualsExact(args->relPath, args->relPathLen, kNamedDirName, sizeof(kNamedDirName) - 1) ||
+        kEqualsExact(args->relPath, args->relPathLen, kKernelDirName, sizeof(kKernelDirName) - 1)) {
+        // [신규, 2026-09-19, PN-770A28FB] "named"/"kernel" 자신.
         args->size = 0;
         args->isDirectory = true;
         args->error = kernel::VfsError::None;
@@ -277,11 +320,8 @@ void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
     args->error = kernel::VfsError::InvalidArgument;
 }
 
-// [신규, 2026-09-19, PN-770A28FB] `/sys/live` 루트 나열 - v1 스코프는
-// 이 루트 하나뿐이다(named/kernel 하위 테이블 자체의 순회 API가 아직
-// 없어 그 안쪽까지 나열하는 것은 후속 - PN-770A28FB "다음 세션 설계
-// 청사진" 5번 참고). 고정 배열이라 `index`는 그 배열의 원소 번호
-// 그대로.
+// [신규, 2026-09-19, PN-770A28FB] `/sys/live` 루트 나열 - 고정 배열이라
+// `index`는 그 배열의 원소 번호 그대로.
 struct LiveFsRootEntry {
     const char* name;
     kernel::uint32_t nameLength;
@@ -299,26 +339,60 @@ constexpr kernel::uint32_t kLiveFsRootEntryCount =
     static_cast<kernel::uint32_t>(sizeof(kLiveFsRootEntries) / sizeof(kLiveFsRootEntries[0]));
 
 void kLiveFsReaddirImpl(kernel::KernelFsReaddirArgs* args) {
-    if (args->dirHandle.value != kLiveFsRootDirHandleValue) {
-        // [v1 축소 범위] 이 핸들이 가리키는 대상이 디렉터리가 아니거나
-        // (파일 핸들로 Readdir 시도) 아직 나열을 지원하지 않는
-        // 디렉터리(named//kernel//proc//resourcegroup/ 안쪽 - 위 문서
-        // 주석 참고)다.
-        args->hasMore = false;
-        args->error = kernel::VfsError::InvalidHandle;
+    if (args->dirHandle.value == kLiveFsRootDirHandleValue) {
+        if (args->index >= kLiveFsRootEntryCount) {
+            args->hasMore = false;
+            args->error = kernel::VfsError::None;  // 정상 종료(Read의 EOF와 동일한 뜻)
+            return;
+        }
+        const LiveFsRootEntry& entry = kLiveFsRootEntries[static_cast<kernel::uint32_t>(args->index)];
+        memcpy(args->entry.name, entry.name, entry.nameLength);
+        args->entry.nameLength = entry.nameLength;
+        args->entry.isDirectory = entry.isDirectory;
+        args->hasMore = true;
+        args->error = kernel::VfsError::None;
         return;
     }
-    if (args->index >= kLiveFsRootEntryCount) {
-        args->hasMore = false;
-        args->error = kernel::VfsError::None;  // 정상 종료(Read의 EOF와 동일한 뜻)
+
+    // [신규, 2026-09-19, PN-770A28FB] "named"/"kernel" 나열 -
+    // `NamedObjectTable`/`KernelReservedTable`이 각각 실제 저장소를
+    // 순회한다. 두 테이블 모두 "이름 붙은 오브젝트 = 파일"이라
+    // isDirectory는 항상 false(Channel 엔드포인트 자신은 디렉터리가
+    // 아님).
+    if (args->dirHandle.value == kLiveFsNamedDirHandleValue) {
+        kernel::uint32_t nameLength = 0;
+        if (!kernel::NamedObjectTable::getByIndex(static_cast<kernel::uint32_t>(args->index), args->entry.name,
+                                                   &nameLength)) {
+            args->hasMore = false;
+            args->error = kernel::VfsError::None;
+            return;
+        }
+        args->entry.nameLength = nameLength;
+        args->entry.isDirectory = false;
+        args->hasMore = true;
+        args->error = kernel::VfsError::None;
         return;
     }
-    const LiveFsRootEntry& entry = kLiveFsRootEntries[args->index];
-    memcpy(args->entry.name, entry.name, entry.nameLength);
-    args->entry.nameLength = entry.nameLength;
-    args->entry.isDirectory = entry.isDirectory;
-    args->hasMore = true;
-    args->error = kernel::VfsError::None;
+    if (args->dirHandle.value == kLiveFsKernelDirHandleValue) {
+        kernel::uint32_t nameLength = 0;
+        if (!kernel::KernelReservedTable::getByIndex(static_cast<kernel::uint32_t>(args->index), args->entry.name,
+                                                      &nameLength)) {
+            args->hasMore = false;
+            args->error = kernel::VfsError::None;
+            return;
+        }
+        args->entry.nameLength = nameLength;
+        args->entry.isDirectory = false;
+        args->hasMore = true;
+        args->error = kernel::VfsError::None;
+        return;
+    }
+
+    // [v1 축소 범위] 이 핸들이 가리키는 대상이 디렉터리가 아니거나
+    // 아직 나열을 지원하지 않는 디렉터리(proc//resourcegroup/ 안쪽 -
+    // 각 서비스가 개념상 pid/그룹별 동적 목록이라 후속 과제로 남김)다.
+    args->hasMore = false;
+    args->error = kernel::VfsError::InvalidHandle;
 }
 
 }  // namespace

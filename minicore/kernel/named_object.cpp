@@ -81,4 +81,21 @@ void NamedObjectTable::release(const char* name, uint64_t nameLength) {
     }
 }
 
+bool NamedObjectTable::getByIndex(uint32_t index, char* outName, uint32_t* outNameLength) {
+    SpinlockGuard guard(gLock);
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < kMaxNamedObjects; ++i) {
+        if (!gSlots[i].used) {
+            continue;
+        }
+        if (seen == index) {
+            memcpy(outName, gSlots[i].name, gSlots[i].nameLength);
+            *outNameLength = static_cast<uint32_t>(gSlots[i].nameLength);
+            return true;
+        }
+        ++seen;
+    }
+    return false;
+}
+
 }  // namespace kernel

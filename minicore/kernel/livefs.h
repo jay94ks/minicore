@@ -41,6 +41,11 @@ public:
     // 조회한 뒤 호출자 ProcessRole/스폰 이름 검사를 추가한다(§2.0,
     // 이 함수 자신은 그 권한 검사를 하지 않는다).
     static KernelReservedEntry* find(const char* name, uint32_t nameLen);
+
+    // [신규, 2026-09-19, PN-770A28FB] `/sys/live/kernel/` 나열(Readdir)
+    // 전용 - `NamedObjectTable::getByIndex`와 동일한 관례("사용 중인"
+    // 슬롯만 순서대로 센 몇 번째인지).
+    static bool getByIndex(uint32_t index, char* outName, uint32_t* outNameLength);
 };
 
 // initrd.cpio 아카이브 원본 전체를 담는 v1 상한(SP-7CC5693A §2.4,

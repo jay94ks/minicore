@@ -41,6 +41,13 @@ public:
     // 이 이름을 반납해 재사용 가능하게 한다 - 없는 이름이면 아무 일도
     // 안 한다.
     static void release(const char* name, uint64_t nameLength);
+
+    // [신규, 2026-09-19, PN-770A28FB] `/sys/live/named/` 나열(Readdir)
+    // 전용 - 인덱스는 "사용 중인 슬롯만 순서대로 센 몇 번째인지"를
+    // 뜻한다(빈 슬롯은 건너뜀, `KernelFsReaddirArgs::index`와 동일한
+    // 관례). 있으면 이름/길이를 채우고 true, 범위를 벗어나면 false
+    // (Readdir의 EOF 신호로 그대로 이어짐).
+    static bool getByIndex(uint32_t index, char* outName, uint32_t* outNameLength);
 };
 
 }  // namespace kernel
