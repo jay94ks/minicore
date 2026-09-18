@@ -548,6 +548,37 @@ private:
     T* _ptr = nullptr;
 };
 
+// [신규, 2026-09-18, SP-CA3C3E57 §6-A.2, 설계자 의견] `DontDeref<T>`가
+// 메우는 자리(비소유·비역참조) 바로 옆자리 - **비소유지만 역참조는
+// 필요한** 포인터(예: debug_session.cpp의 임시 raw 포인터류)를 위한
+// 타입. `DontDeref<T>`와의 차이는 딱 operator*/operator-> 유무 하나뿐
+// - 이 포인터의 생존은 이 타입 자신이 전혀 보장하지 않는다, 호출부가
+// 더 오래 사는 무언가(SharedPtr/스택 변수 등)로 보장해야 한다는 계약을
+// 타입으로 드러낼 뿐이다(SP-CA3C3E57 §9 - "비소유, 역참조 필요, 생존은
+// 호출부 책임" 자리에 이 타입을 쓴다. 대상이 죽을 수 있어 매번 생존을
+// 확인해야 하면 이 타입이 아니라 기존 WeakPtr<T>::lock()을 쓴다).
+// DontDeref<T>와 마찬가지로 ref-counting이 전혀 없는 순수 값 래퍼라
+// placement new 없이 raw 슬랩 메모리 위에 그대로 대입해도 안전하다.
+// **기존 코드 일괄 교체는 하지 않는다**(RM-23F4B687 §4 - 회귀 위험
+// 대비 이득이 낮음) - 새로 작성되는 코드부터 이 관례를 따른다.
+template <typename T>
+class ObserverPtr {
+public:
+    ObserverPtr() = default;
+    explicit ObserverPtr(T* ptr) : _ptr(ptr) {}
+
+    T& operator*() const { return *_ptr; }
+    T* operator->() const { return _ptr; }
+    explicit operator bool() const { return _ptr != nullptr; }
+    T* get() const { return _ptr; }
+
+    bool operator==(const ObserverPtr& other) const { return _ptr == other._ptr; }
+    bool operator!=(const ObserverPtr& other) const { return !(*this == other); }
+
+private:
+    T* _ptr = nullptr;
+};
+
 }  // namespace kernel
 
 #endif  // MINICORE_LIBS_LIBKENV_SHARED_PTR_H
