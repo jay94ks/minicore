@@ -6,7 +6,70 @@
 
 namespace kernel {
 
+class Process;  // 포인터로만 참조(RmapEntry::owner) - 전체 정의는 process.h(SP-6BEAE0C1)
+
 constexpr uint32_t kPfaMaxNumaNodes = 8;  // Acpi::kAcpiMaxNumaNodes와 맞춘 상한
+
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §2] PageFrame::flags 비트 -
+// 지금 이 증분이 실제로 세팅하는 건 PG_RESERVED뿐이다(bump 예약 구간/
+// 커널 이미지 구간). 나머지 넷(PG_HEAD/PG_ACTIVE/PG_ACCESSED/
+// PG_SWAPPABLE)은 구조체 계약(§2)의 일부로 지금 값을 확정해 두되,
+// 실제로 켜고 끄는 로직(버디 병합, rmap/LRU 삽입·제거)은 후속 증분
+// (SP-6CEFBE9B §6.2/§7.2, 이 계획의 3/4번 항목)이 배선한다 - 지금은
+// 항상 0으로 남는다.
+constexpr uint16_t kPageFrameFlagReserved = 1U << 0;   // PG_RESERVED - 할당 대상 아님
+constexpr uint16_t kPageFrameFlagHead = 1U << 1;       // PG_HEAD - order>0 블록의 첫 프레임(페이지 병합용, 미배선)
+constexpr uint16_t kPageFrameFlagActive = 1U << 2;     // PG_ACTIVE - active LRU 리스트 소속(미배선)
+constexpr uint16_t kPageFrameFlagAccessed = 1U << 3;   // PG_ACCESSED - 최근 참조됨(미배선)
+constexpr uint16_t kPageFrameFlagSwappable = 1U << 4;  // PG_SWAPPABLE - rmap/LRU 추적 대상(미배선)
+
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §5] rmap 엔트리 -
+// `PageFrame::rmapHead`가 가리키는 단일 연결 리스트의 노드 하나("이
+// 프레임이 어떤 프로세스의 어떤 가상주소에 매핑돼 있는지" 한 쌍).
+// `GenericSlabAllocator`(SP-D7013B26) 32B 버킷을 그대로 재사용한다
+// (새 전용 할당자를 만들지 않음, RM-23F4B687 §4) - 이 증분은 구조체
+// 정의만 두고 실제 삽입/제거(SP-6CEFBE9B §6.2)는 후속 증분이 배선한다.
+struct RmapEntry {
+    Process* owner = nullptr;
+    uint64_t virtAddr = 0;
+    RmapEntry* next = nullptr;
+};
+
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] 물리 프레임 하나
+// (4KiB)당 정확히 하나 - `PageFrameAllocator::init()`이 direct map
+// 크기만큼 이 배열을 커널 이미지 바로 뒤에 bump 예약한다(기존
+// `uint16_t` COW 참조 카운트 배열을 대체 - SP-6BEAE0C1 §11-3과 동일한
+// 배치 패턴). 캐시 라인 크기(64바이트)에 고정 - 원소 하나의 크기가
+// 바뀌면 이미 bump 예약된 배열 전체를 다시 자리 잡아야 하므로(파급력),
+// 예비 공간(`reserved`)을 넉넉히 남겨 둔다.
+struct PageFrame {
+    // --- 참조/공유 ---
+    uint16_t refCount = 0;   // 총 참조 카운트(COW+공유 메모리 등) - PageFrameAllocator::retain()/refCount()가 그대로 접근
+    uint16_t mapCount = 0;   // 실제 PTE가 가리키는 횟수(SP-6CEFBE9B §6, 아직 미배선)
+
+    // --- 버디/캐시 메타데이터 ---
+    uint8_t order = 0;              // 버디 오더, free 블록 head에서만 유효(아직 미배선 - 값은 항상 0)
+    uint8_t numaNode = 0;           // Acpi::cpuNumaNode()류와 같은 노드 번호 - init()이 채움
+    uint16_t flags = 0;             // 위 kPageFrameFlag* 조합
+    uint8_t lastCacheType = 0;      // SP-8D206F11 §2.3 CacheType(아직 미배선)
+    uint8_t cacheTypeAssigned = 0;  // 위와 동일
+
+    // --- rmap(SP-6CEFBE9B §6, 아직 미배선 - 항상 nullptr) ---
+    RmapEntry* rmapHead = nullptr;
+
+    // --- swap LRU 연결(SP-6CEFBE9B §7, 아직 미배선 - 항상 nullptr) ---
+    PageFrame* lruPrev = nullptr;
+    PageFrame* lruNext = nullptr;
+
+    // 지금은 어떤 필드도 배정하지 않는다(CLAUDE.md 규칙 4 - 설계 확정
+    // 전 임의 배정 금지) - 구조체 stride를 다시 바꾸지 않고 흡수할
+    // 여유로 남겨 둔다. 정확한 크기는 위 필드들의 실제 컴파일러 정렬
+    // (포인터 필드의 8바이트 경계 패딩 포함)에 따라 정해지므로,
+    // 64바이트 전체에서 그 나머지를 그대로 채운다 - 아래
+    // static_assert가 어긋나면 이 배열 크기만 조정한다.
+    uint8_t reserved[24];
+};
+static_assert(sizeof(PageFrame) == 64, "PageFrame은 캐시 라인 크기(64바이트)로 고정 - SP-6CEFBE9B §1");
 
 // 물리 페이지 프레임 buddy 할당자 (DS-D4E5C451 - "페이지 단위 +
 // buddy allocator", NUMA 노드별로 실제로 분리 - 2026-09-14 설계자
@@ -60,6 +123,16 @@ public:
     // 필요 없음).
     static void retain(uint64_t physAddr);
     static uint32_t refCount(uint64_t physAddr);  // 0 = 추적 안 됨(소유자 1개)
+
+    // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] physAddr가 속한
+    // `PageFrame`을 직접 찾는다 - direct map 추적 범위 밖이거나 아직
+    // init()이 안 끝났으면 nullptr(방어적, retain()/refCount()가 이미
+    // 쓰던 것과 같은 범위 검사). rmap/LRU 배선(SP-6CEFBE9B §6.2/§7.2,
+    // 이 계획의 3/4번 항목)이 다음 증분에서 이 접근자로 직접
+    // `PageFrame::rmapHead`/`flags`를 갱신하게 된다 - 지금은 아직
+    // 아무 호출부도 없다(구조체가 실제로 쓸모 있으려면 있어야 하는
+    // 최소 접근자라 미리 둔다).
+    static PageFrame* frameFor(uint64_t physAddr);
 };
 
 }  // namespace kernel

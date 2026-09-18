@@ -35,14 +35,17 @@ struct Node {
 Node gNodes[kernel::kPfaMaxNumaNodes];
 kernel::uint32_t gNodeCount = 1;
 
-// [SP-6BEAE0C1 §11-3] COW 공유 카운트 배열 - 프레임 개수는 실행 중
-// 실측한 Paging::directMapLimit()(4~512GiB 동적)에 맞춰 init()에서
-// 정해지므로 정적 배열이 아니라 커널 이미지 바로 뒤 물리 공간을
-// bump 방식으로 예약해 둔다(직접 매핑 범위 안이라 별도 매핑 없이
-// kPhysToVirt로 바로 접근 가능 - Paging::init()이 이 호출보다 먼저
-// 전체 direct map을 이미 확정해 둠).
-kernel::uint16_t* gCowRefCounts = nullptr;
-kernel::uint64_t gCowRefCountFrames = 0;
+// [수정, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] 기존 "COW 참조
+// 카운트 하나만 있는 uint16_t 배열"(SP-6BEAE0C1 §11-3)을 여러 필드를
+// 가진 `PageFrame` 구조체 배열로 대체 - 프레임 개수는 실행 중 실측한
+// Paging::directMapLimit()(4~512GiB 동적)에 맞춰 init()에서 정해지므로
+// 정적 배열이 아니라 커널 이미지 바로 뒤 물리 공간을 bump 방식으로
+// 예약해 둔다(직접 매핑 범위 안이라 별도 매핑 없이 kPhysToVirt로 바로
+// 접근 가능 - Paging::init()이 이 호출보다 먼저 전체 direct map을
+// 이미 확정해 둠). 배치 패턴 자체는 기존과 동일 - 원소 크기만
+// 2바이트에서 64바이트로 늘었다.
+kernel::PageFrame* gPageFrames = nullptr;
+kernel::uint64_t gPageFrameCount = 0;
 
 kernel::uint64_t kAlignUp(kernel::uint64_t value, kernel::uint64_t align) {
     return (value + align - 1) & ~(align - 1);
@@ -168,6 +171,37 @@ constexpr int kMaxRangeNodes = 128;
 RangeNode gRangeNodeMap[kMaxRangeNodes];
 int gRangeNodeMapCount = 0;
 
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] [start,end) 범위의
+// 각 PageFrame::numaNode를 채운다 - kAssignRangeToNode가 실제로 그
+// 범위를 어느 노드의 buddy 트리에 넣기로 확정한 직후에만 부른다
+// (kPartitionRangeByAffinity가 이미 SRAT 기준으로 쪼개 둔 조각이라
+// 여기서 다시 노드를 판정할 필요는 없다 - 그대로 받아쓴다).
+void kSetPageFrameNode(kernel::uint64_t start, kernel::uint64_t end, kernel::uint32_t node) {
+    if (!gPageFrames) {
+        return;
+    }
+    const kernel::uint64_t startFrame = start / kPageSize;
+    const kernel::uint64_t endFrame = (end + kPageSize - 1) / kPageSize;
+    for (kernel::uint64_t f = startFrame; f < endFrame && f < gPageFrameCount; ++f) {
+        gPageFrames[f].numaNode = static_cast<kernel::uint8_t>(node);
+    }
+}
+
+// [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §2] [start,end) 범위의
+// 각 PageFrame::flags에 flag를 켠다(끄기는 아직 이 증분의 소비자가
+// 없어 별도 함수를 안 둔다 - RM-23F4B687 §4). start/end는 정렬 안 돼
+// 있어도 안전(내부에서 4KiB 단위로 올림/내림).
+void kSetPageFrameFlags(kernel::uint64_t start, kernel::uint64_t end, kernel::uint16_t flag) {
+    if (!gPageFrames || start >= end) {
+        return;
+    }
+    const kernel::uint64_t startFrame = start / kPageSize;
+    const kernel::uint64_t endFrame = (end + kPageSize - 1) / kPageSize;
+    for (kernel::uint64_t f = startFrame; f < endFrame && f < gPageFrameCount; ++f) {
+        gPageFrames[f].flags |= flag;
+    }
+}
+
 void kAssignRangeToNode(kernel::uint64_t start, kernel::uint64_t end, kernel::uint32_t node) {
     if (start >= end) {
         return;
@@ -176,6 +210,7 @@ void kAssignRangeToNode(kernel::uint64_t start, kernel::uint64_t end, kernel::ui
         node = 0;  // 방어적 fallback
     }
     kAddRegionToBuddy(gNodes[node], start, end);
+    kSetPageFrameNode(start, end, node);
     if (gRangeNodeMapCount < kMaxRangeNodes) {
         gRangeNodeMap[gRangeNodeMapCount++] = {start, end, node};
     }
@@ -298,24 +333,44 @@ void PageFrameAllocator::init(const HvmMemmapEntry* memmap, uint32_t entryCount,
     const auto memmapArrayAddr = reinterpret_cast<uint64_t>(memmap);
     const auto memmapArrayEnd = memmapArrayAddr + static_cast<uint64_t>(entryCount) * sizeof(HvmMemmapEntry);
 
-    // [SP-6BEAE0C1 §11-3] COW 참조 카운트 배열을 커널 이미지 바로 뒤에
-    // bump 예약 - 프레임 개수는 실측한 direct map 범위(mappedLimit)
-    // 기준이라 커널마다/부팅마다 크기가 다를 수 있다.
-    gCowRefCountFrames = mappedLimit / kPageSize;
-    const uint64_t cowArrayBytes = gCowRefCountFrames * sizeof(uint16_t);
-    const uint64_t cowArrayStart = kAlignUp(kernelPhysEnd, kPageSize);
-    const uint64_t cowArrayEnd = kAlignUp(cowArrayStart + cowArrayBytes, kPageSize);
+    // [수정, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] `PageFrame` 배열을
+    // 커널 이미지 바로 뒤에 bump 예약 - 기존 COW 참조 카운트
+    // uint16_t 배열(SP-6BEAE0C1 §11-3)과 정확히 같은 배치 패턴,
+    // 원소 크기만 64바이트로 커졌다. 프레임 개수는 실측한 direct map
+    // 범위(mappedLimit) 기준이라 커널마다/부팅마다 크기가 다를 수
+    // 있다.
+    gPageFrameCount = mappedLimit / kPageSize;
+    const uint64_t pageFrameArrayBytes = gPageFrameCount * sizeof(PageFrame);
+    const uint64_t pageFrameArrayStart = kAlignUp(kernelPhysEnd, kPageSize);
+    const uint64_t pageFrameArrayEnd = kAlignUp(pageFrameArrayStart + pageFrameArrayBytes, kPageSize);
 
     kSubtractReservedFromList(ranges, count, 0, kLowReservedEnd);
     kSubtractReservedFromList(ranges, count, kernelPhysStart, kernelPhysEnd);
-    kSubtractReservedFromList(ranges, count, cowArrayStart, cowArrayEnd);
+    kSubtractReservedFromList(ranges, count, pageFrameArrayStart, pageFrameArrayEnd);
     kSubtractReservedFromList(ranges, count, startInfoAddr, startInfoAddr + startInfoSize);
     kSubtractReservedFromList(ranges, count, memmapArrayAddr, memmapArrayEnd);
 
-    gCowRefCounts = reinterpret_cast<uint16_t*>(kPhysToVirt(cowArrayStart));
-    for (uint64_t i = 0; i < gCowRefCountFrames; ++i) {
-        gCowRefCounts[i] = 0;
+    gPageFrames = reinterpret_cast<PageFrame*>(kPhysToVirt(pageFrameArrayStart));
+    // memset(0)이면 충분하다 - PageFrame의 모든 필드가 0/nullptr을
+    // "추적 안 됨/미배선 상태"로 삼는 NSDMI와 정확히 같은 값이라(이
+    // 프로젝트 전역의 "전부 0 = 아직 실제 생성자를 부른 적 없는
+    // 상태"와 동일한 관례, Process::allocate()의 memset(0)과 같은
+    // 근거), 필드별로 개별 초기화할 필요가 없다.
+    for (uint64_t i = 0; i < gPageFrameCount; ++i) {
+        gPageFrames[i] = PageFrame{};
     }
+
+    // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §2] PG_RESERVED -
+    // usable range에서 방금 빼낸(kSubtractReservedFromList) 다섯
+    // 구간 전부가 "할당 대상 아님"이므로, 그 프레임들에도 실제로
+    // 표시해 둔다(지금까지는 버디 트리에 안 들어간다는 사실 자체로만
+    // "예약됨"을 표현했으나, PageFrame이 생긴 이상 그 사실을 플래그로도
+    // 조회 가능하게 한다 - 새 소비자는 아직 없음, 순수 정보 제공).
+    kSetPageFrameFlags(0, kLowReservedEnd, kPageFrameFlagReserved);
+    kSetPageFrameFlags(kernelPhysStart, kernelPhysEnd, kPageFrameFlagReserved);
+    kSetPageFrameFlags(pageFrameArrayStart, pageFrameArrayEnd, kPageFrameFlagReserved);
+    kSetPageFrameFlags(startInfoAddr, startInfoAddr + startInfoSize, kPageFrameFlagReserved);
+    kSetPageFrameFlags(memmapArrayAddr, memmapArrayEnd, kPageFrameFlagReserved);
 
     const bool haveAffinityInfo = Acpi::memoryAffinityCount() > 0;
     for (int i = 0; i < count; ++i) {
@@ -365,19 +420,27 @@ uint64_t PageFrameAllocator::allocOrder(uint32_t order) {
 
 void PageFrameAllocator::retain(uint64_t physAddr) {
     const uint64_t idx = physAddr / kPageSize;
-    if (!gCowRefCounts || idx >= gCowRefCountFrames) {
+    if (!gPageFrames || idx >= gPageFrameCount) {
         return;  // 방어적 - direct map 밖 주소는 애초에 이 할당자가 준 적 없음
     }
-    uint16_t& count = gCowRefCounts[idx];
+    uint16_t& count = gPageFrames[idx].refCount;
     count = (count == 0) ? 2 : static_cast<uint16_t>(count + 1);
 }
 
 uint32_t PageFrameAllocator::refCount(uint64_t physAddr) {
     const uint64_t idx = physAddr / kPageSize;
-    if (!gCowRefCounts || idx >= gCowRefCountFrames) {
+    if (!gPageFrames || idx >= gPageFrameCount) {
         return 0;
     }
-    return gCowRefCounts[idx];
+    return gPageFrames[idx].refCount;
+}
+
+PageFrame* PageFrameAllocator::frameFor(uint64_t physAddr) {
+    const uint64_t idx = physAddr / kPageSize;
+    if (!gPageFrames || idx >= gPageFrameCount) {
+        return nullptr;
+    }
+    return &gPageFrames[idx];
 }
 
 void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
@@ -385,10 +448,10 @@ void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
     // 돌아올 때까지 실제로 반납하지 않는다 - retain()을 한 번도 안
     // 받은 페이지는 항상 0이라 기존 호출부 전부 이 분기를 그대로
     // 지나쳐 원래 동작과 동일하다(SP-6BEAE0C1 §11-3).
-    if (order == 0 && gCowRefCounts) {
+    if (order == 0 && gPageFrames) {
         const uint64_t idx = physAddr / kPageSize;
-        if (idx < gCowRefCountFrames && gCowRefCounts[idx] != 0) {
-            if (--gCowRefCounts[idx] != 0) {
+        if (idx < gPageFrameCount && gPageFrames[idx].refCount != 0) {
+            if (--gPageFrames[idx].refCount != 0) {
                 return;
             }
         }
