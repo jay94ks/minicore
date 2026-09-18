@@ -51,6 +51,7 @@ enum class ChannelError : uint32_t {
     PermissionDenied,      // [신규, PN-87D6B615] 호출자가 이 작업을 수행할 자격이 없음(예: DebugAttach - 대상의 직계 부모가 아님, SP-9A6D579F §3.2)
     AlreadyExists,         // [신규, PN-87D6B615] 이미 같은 자원/상태가 존재해 요청이 무의미함(예: DebugAttach - 이 대상에 이미 다른 디버거의 세션이 있음, SP-9A6D579F §7 영구 불변조건)
     Interrupted,           // [신규, PN-B5C2845A] 대기 도중 호출자 자신이 Kill/Terminate 대상이 돼 강제로 실패 완료됨(QU-8E137FFD 답변 - "얘들을 실패시키면 되잖아")
+    NotEmpty,              // [신규, PN-4190BBD3, SP-6A563A8F §5-A] ResourceGroupDestroy - 자식/멤버가 남아있는 그룹은 삭제 거부(Linux cgroup과 동일한 "비어있음 강제")
 };
 
 // 링버퍼 크기 정책(설계 문서 "링버퍼 크기 정책") - 호출부는 정확한

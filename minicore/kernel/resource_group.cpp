@@ -4,6 +4,7 @@
 #include "process.h"
 #include "scheduler.h"
 #include "syscall.h"
+#include "timer.h"
 
 namespace kernel {
 
@@ -13,11 +14,64 @@ ResourceGroup gRootResourceGroup;
 
 namespace {
 constexpr char kRootResourceGroupName[] = "root";
+
+// [신규, 2026-09-19, SP-6A563A8F §5-A] gRootResourceGroup은 정적
+// 전역이라 절대 GenericSlabAllocator::free()로 반납돼선 안 된다 -
+// UserThread::_selfRef(syscall.h)와 동일한 no-op 삭제자 관례.
+void kNoOpReleaseResourceGroup(ResourceGroup*) {}
+
+// gRootResourceGroup.weakFromThis()가 영구히 유효하도록 붙잡아 두는
+// 강한 참조 - 이 SharedPtr 자체가 사라지면 컨트롤 블록의 강한 카운트가
+// 0이 돼 weakFromThis()가 죽은 참조를 돌려주므로, 파일 스코프 정적으로
+// 커널 수명 내내 살려 둔다.
+SharedPtr<ResourceGroup> gRootResourceGroupSelfRef;
+
+bool kNamesEqual(const char* a, uint32_t aLen, const char* b, uint32_t bLen) {
+    if (aLen != bLen) {
+        return false;
+    }
+    for (uint32_t i = 0; i < aLen; ++i) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void kCopyName(char* dst, uint64_t dstCapacity, const char* src, uint32_t srcLen) {
+    const uint32_t copyLen = srcLen < dstCapacity ? srcLen : static_cast<uint32_t>(dstCapacity);
+    memcpy(dst, src, copyLen);
+}
+
+// [신규, 2026-09-19, SP-245D130B §8] 이름으로 그룹을 찾는 DFS - 루트
+// 자신부터 확인.
+ResourceGroup* kFindResourceGroupByNameFrom(ResourceGroup* node, const char* name, uint32_t nameLength) {
+    if (!node) {
+        return nullptr;
+    }
+    if (kNamesEqual(node->name, static_cast<uint32_t>(node->nameLength), name, nameLength)) {
+        return node;
+    }
+    ResourceGroup* found = nullptr;
+    node->children.forEach([&](SharedPtr<ResourceGroup>& child, auto*) {
+        if (found || !child) {
+            return;
+        }
+        found = kFindResourceGroupByNameFrom(child.get(), name, nameLength);
+    });
+    return found;
+}
+
 }  // namespace
 
 void kResourceGroupInit() {
     memcpy(gRootResourceGroup.name, kRootResourceGroupName, sizeof(kRootResourceGroupName) - 1);
     gRootResourceGroup.nameLength = sizeof(kRootResourceGroupName) - 1;
+    // [신규, 2026-09-19, SP-6A563A8F §5-A] self-ref 트릭 - resource_group.h
+    // 클래스 문서 주석 참고. Resurrect(재부팅 없는 재사용)가 이 정적
+    // 전역에는 적용되지 않으므로(커널 자체가 한 번만 부팅) 매번 다시
+    // 만들 필요 없이 여기서 한 번만 채우면 커널 수명 내내 유효하다.
+    gRootResourceGroupSelfRef = kMakeShared<ResourceGroup>(&gRootResourceGroup, &kNoOpReleaseResourceGroup);
 }
 
 void ResourceGroup::addMember(const WeakPtr<Process>& proc) {
@@ -97,6 +151,26 @@ void ResourceGroup::thaw() {
     });
 }
 
+ResourceGroup* ResourceGroup::allocate() {
+    void* raw = GenericSlabAllocator::alloc(sizeof(ResourceGroup));
+    if (!raw) {
+        return nullptr;
+    }
+    memset(raw, 0, sizeof(ResourceGroup));
+    return reinterpret_cast<ResourceGroup*>(raw);
+}
+
+void ResourceGroup::release(ResourceGroup* group) {
+    GenericSlabAllocator::free(group, sizeof(ResourceGroup));
+}
+
+void ResourceGroup::destroy() {
+    // ResourceGroupDestroyHandler가 호출 전 이미 "비어있음"을 강제해
+    // 두므로 실제로는 항상 빈 컨테이너의 clear()다 - 방어적으로만.
+    children.clear();
+    memberProcesses.clear();
+}
+
 bool kCheckAndMarkFrozen(Task* task) {
     if (!task->isUserLevel) {
         return false;
@@ -111,6 +185,346 @@ bool kCheckAndMarkFrozen(Task* task) {
     }
     proc->frozenByGroup = true;
     return true;
+}
+
+ResourceGroup* kResourceGroupOf(Task* task) {
+    if (!task->isUserLevel) {
+        return nullptr;  // 커널 자체 Task는 그룹 소속 아님(SP-B26CDBDD §3.2와 동일 전제)
+    }
+    auto* thread = static_cast<UserThread*>(task);
+    SharedPtr<Process> proc = thread->process.lock();
+    return proc ? proc->group : nullptr;
+}
+
+bool kCheckAndResetCpuPeriod(ResourceGroup* group) {
+    if (!group || group->cpu.periodTicks == 0) {
+        return false;  // 무제한 그룹 - 스로틀 대상 아님
+    }
+    const uint64_t now = Timer::tickCount();
+    if (now - group->cpu.periodStartTick >= group->cpu.periodTicks) {
+        group->cpu.periodStartTick = now;
+        group->cpu.usedTicksInPeriod = 0;
+    }
+    return group->cpu.usedTicksInPeriod >= group->cpu.quotaTicks;
+}
+
+bool kValidateChildQuotaAgainstParent(ResourceGroup* parent, ResourceGroup* changingChild, uint32_t newPeriodTicks,
+                                       uint32_t newQuotaTicks) {
+    if (!parent || parent->cpu.periodTicks == 0) {
+        return true;  // 부모 무제한(또는 대상이 루트 자신) - 항상 허용
+    }
+    // 쿼터를 "비율"(quota/period)로 정규화해 비교한다 - 자식마다 다른
+    // periodTicks를 가질 수 있으므로 절대값(quotaTicks) 합산은 의미가
+    // 없다. 고정소수점 스케일은 SP-B26CDBDD §2.1의 kVruntimeScale과
+    // 같은 이유로 정수 나눗셈 0-버림을 피한다.
+    constexpr uint64_t kRatioScale = 1000000;  // ppm 단위
+    auto ratioOf = [](uint32_t quota, uint32_t period) -> uint64_t {
+        return period == 0 ? 0 : (static_cast<uint64_t>(quota) * kRatioScale) / period;
+    };
+    uint64_t siblingSumRatio = 0;
+    parent->children.forEach([&](SharedPtr<ResourceGroup>& child, auto*) {
+        ResourceGroup* c = child.get();
+        if (!c || c == changingChild) {
+            return;  // 변경 대상 자신은 새 값으로 아래에서 따로 더함
+        }
+        siblingSumRatio += ratioOf(c->cpu.quotaTicks, c->cpu.periodTicks);
+    });
+    siblingSumRatio += ratioOf(newQuotaTicks, newPeriodTicks);
+    const uint64_t parentRatio = ratioOf(parent->cpu.quotaTicks, parent->cpu.periodTicks);
+    return siblingSumRatio <= parentRatio;
+}
+
+bool kCallerInAncestorChain(Process& caller, ResourceGroup& target) {
+    ResourceGroup* callerGroup = caller.group;
+    if (!callerGroup) {
+        return false;  // 이론상 도달 불가 - SpawnProcess/fork가 항상 최소 루트에 가입시킴
+    }
+    ResourceGroup* cur = &target;
+    while (cur) {
+        if (cur == callerGroup) {
+            return true;
+        }
+        SharedPtr<ResourceGroup> parent = cur->parent.lock();
+        cur = parent.get();
+    }
+    return false;
+}
+
+ResourceGroup* kFindResourceGroupByName(const char* name, uint32_t nameLength) {
+    return kFindResourceGroupByNameFrom(&gRootResourceGroup, name, nameLength);
+}
+
+namespace {
+
+class ResourceGroupJoinHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupJoinArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* target = kFindResourceGroupByName(args->name, args->nameLength);
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *target)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        caller->joinResourceGroup(target);
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupJoinHandler gResourceGroupJoinHandler;
+
+class ResourceGroupCreateHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupCreateArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* parent = args->parentNameLength == 0
+                                     ? &gRootResourceGroup
+                                     : kFindResourceGroupByName(args->parentName, args->parentNameLength);
+        if (!parent) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *parent)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        // 이름 유일성 - SP-245D130B §8의 원 제안(형제간 유일)보다 넓게,
+        // 트리 전체에서 유일하도록 강제한다 - `kFindResourceGroupByName()`
+        // (Join/SetCpuQuota/Freeze/Thaw/Destroy 전부가 재사용하는 조회
+        // 함수)이 이름 하나로 그룹 하나를 찾는 평평한 조회를 전제하므로,
+        // 형제간에만 유일하면 트리 다른 곳의 동명 그룹과 뒤섞인다(착수
+        // 세션이 실측 코드 조사로 발견해 넓힌 것 - RM-23F4B687 §4).
+        if (kFindResourceGroupByName(args->name, args->nameLength)) {
+            args->error = ChannelError::AlreadyExists;
+            co_return;
+        }
+
+        ResourceGroup* raw = ResourceGroup::allocate();
+        if (!raw) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        SharedPtr<ResourceGroup> child = kMakeShared<ResourceGroup>(raw);
+        if (!child) {
+            ResourceGroup::release(raw);
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        kCopyName(child->name, sizeof(child->name), args->name, args->nameLength);
+        child->nameLength = args->nameLength;
+        child->parent = parent->selfWeak();
+        // CPU 컨트롤(§2)은 기본값 그대로 무제한(periodTicks=0) - 생성
+        // 시점에 자동으로 쿼터가 걸리지 않는다(명시적으로
+        // ResourceGroupSetCpuQuota를 따로 호출해야 함).
+        parent->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+        parent->children.insert(child);  // 부모가 진짜 소유자(SharedPtr)
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupCreateHandler gResourceGroupCreateHandler;
+
+class ResourceGroupDestroyHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupDestroyArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* target = kFindResourceGroupByName(args->name, args->nameLength);
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        SharedPtr<ResourceGroup> parent = target->parent.lock();
+        if (!parent) {
+            args->error = ChannelError::PermissionDenied;  // 루트 그룹은 삭제 불가
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *target)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        // ChunkedList에 empty()가 없어(libkenv/chunked_list.h) forEach로
+        // 직접 확인한다 - 청크가 비어 있으면 콜백이 한 번도 안 불린다.
+        bool childrenEmpty = true;
+        target->children.forEach([&](SharedPtr<ResourceGroup>&, auto*) { childrenEmpty = false; });
+        bool membersEmpty = true;
+        target->memberProcesses.forEach([&](WeakPtr<Process>&, auto*) { membersEmpty = false; });
+        if (!childrenEmpty || !membersEmpty) {
+            args->error = ChannelError::NotEmpty;  // Linux cgroup과 동일한 "비어있음 강제"
+            co_return;
+        }
+        auto* slot = parent->children.find(
+            [target](const SharedPtr<ResourceGroup>& c) { return c.get() == target; });
+        if (slot) {
+            parent->children.erase(slot);  // SharedPtr 해제 - 참조 카운트 0에서 자기 소멸(destroy())
+        }
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupDestroyHandler gResourceGroupDestroyHandler;
+
+class ResourceGroupSetCpuQuotaHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupSetCpuQuotaArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* target = kFindResourceGroupByName(args->name, args->nameLength);
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *target)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        if (args->periodTicks != 0 && args->quotaTicks > args->periodTicks) {
+            args->error = ChannelError::InvalidArgument;  // 주기보다 많은 실행 시간은 무의미
+            co_return;
+        }
+        SharedPtr<ResourceGroup> parent = target->parent.lock();
+        if (!kValidateChildQuotaAgainstParent(parent.get(), target, args->periodTicks, args->quotaTicks)) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        target->cpu.periodTicks = args->periodTicks;
+        target->cpu.quotaTicks = args->quotaTicks;
+        // [확정, 2026-09-18, QU-8ED9EBD2 답변 - "설정 시점부터 새 주기가
+        // 깨끗하게 시작"] 재설정 이전 주기의 사용량이 새 주기로 넘어와
+        // 즉시 스로틀 상태가 되지 않도록 여기서 함께 리셋한다 -
+        // kCheckAndResetCpuPeriod() 자체는 자연 롤오버 전용(이 즉시
+        // 리셋은 이 핸들러만의 책임).
+        target->cpu.usedTicksInPeriod = 0;
+        target->cpu.periodStartTick = Timer::tickCount();
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupSetCpuQuotaHandler gResourceGroupSetCpuQuotaHandler;
+
+class ResourceGroupFreezeHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupFreezeArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* target = kFindResourceGroupByName(args->name, args->nameLength);
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *target)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        target->freeze();
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupFreezeHandler gResourceGroupFreezeHandler;
+
+class ResourceGroupThawHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupThawArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* target = kFindResourceGroupByName(args->name, args->nameLength);
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *target)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        target->thaw();
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupThawHandler gResourceGroupThawHandler;
+
+}  // namespace
+
+void ResourceGroupService::registerSyscallEndpoints() {
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupJoin, &gResourceGroupJoinHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupCreate, &gResourceGroupCreateHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupDestroy, &gResourceGroupDestroyHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupSetCpuQuota, &gResourceGroupSetCpuQuotaHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupFreeze, &gResourceGroupFreezeHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupThaw, &gResourceGroupThawHandler);
 }
 
 }  // namespace kernel

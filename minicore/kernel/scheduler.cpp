@@ -1352,7 +1352,37 @@ Task* Scheduler::pickNext(uint32_t coreIndex) {
         task = gRtQueues[coreIndex].popFront();
     }
     if (!task) {
-        task = gNormalQueues[coreIndex].popMin();
+        // [신규, 2026-09-19, SP-6A563A8F §4] CPU 쿼터 스로틀 - 이번
+        // 주기 쿼터를 소진한 그룹 소속 Task는 건너뛰고 큐에 도로
+        // 넣는다. `OrderedList`는 popMin()만 지원해 "일부만 보고
+        // 도로 넣기"를 자연스럽게 못 하므로, 스로틀된 후보를 이
+        // 호출 안에서만 사는 임시 배열에 모아 뒀다가 되돌린다 -
+        // vruntime은 건드리지 않는다(이미 큐에 있던 값을 그대로
+        // 되돌리는 것이지 "새로 큐에 들어가는" 경로가 아니므로
+        // SP-B26CDBDD §2.3 굶주림 방지 보정은 다시 적용 안 함).
+        constexpr uint32_t kMaxHeldThrottledCandidates = 32;
+        Task* held[kMaxHeldThrottledCandidates];
+        uint32_t heldCount = 0;
+        while ((task = gNormalQueues[coreIndex].popMin()) != nullptr) {
+            ResourceGroup* group = kResourceGroupOf(task);
+            if (!group || !kCheckAndResetCpuPeriod(group)) {
+                break;  // 그룹 없음(비정상, 방어적) 또는 스로틀 아님 - 이 Task를 뽑는다
+            }
+            if (heldCount < kMaxHeldThrottledCandidates) {
+                held[heldCount++] = task;
+            }
+            task = nullptr;  // 계속 탐색
+            if (heldCount == kMaxHeldThrottledCandidates) {
+                // 비정상적으로 많은 그룹이 동시 스로틀 - 더 찾지 않고
+                // 이번 틱은 그냥 "대신 돌릴 게 없음"으로 취급한다(다음
+                // 틱에 재시도). RM-23F4B687 §4 - v1 상한은 넉넉히 잡아
+                // 실사용에서 닿지 않게 한다.
+                break;
+            }
+        }
+        for (uint32_t i = 0; i < heldCount; ++i) {
+            gNormalQueues[coreIndex].insert(held[i]);
+        }
     }
     if (task) {
         // 큐에서 실제로 빠져나온 순간 inRunQueue를 내려야 한다 -
@@ -1565,6 +1595,14 @@ void Scheduler::onTick(InterruptFrame* frame) {
                     if (ResourceGroup* group = proc->group) {
                         group->accounting.totalCpuTicks += 1;  // 쿼터 없어도 항상 집계(SP-245D130B §5)
                         if (group->cpu.periodTicks != 0) {      // 쿼터 활성 그룹만
+                            // [신규, 2026-09-19, SP-6A563A8F §3] 증가 전에
+                            // 먼저 주기 롤오버를 확인한다 - 안 그러면
+                            // usedTicksInPeriod가 주기 경계 없이 무한정
+                            // 누적된다(pickNext()의 스로틀 판정 쪽만
+                            // 롤오버를 확인하는 것으로는 불충분 - 이
+                            // 그룹이 한동안 pickNext()에서 안 뽑히면
+                            // 여기서만 계속 늘어남).
+                            kCheckAndResetCpuPeriod(group);
                             group->cpu.usedTicksInPeriod += 1;
                         }
                     }

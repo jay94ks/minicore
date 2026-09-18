@@ -648,6 +648,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::VfsSyscallService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: vfs mount/unmount/resolve-path/open/close/read/write syscall endpoints registered");
 
+    // ResourceGroup syscall 6종(SP-245D130B §8/SP-6A563A8F §5-A/§7,
+    // PN-4190BBD3) - 위와 같은 이유로 BSP에서 한 번만. gRootResourceGroup
+    // 자체의 초기화(kResourceGroupInit())는 이 등록과 독립적이라 순서
+    // 무관 - 아래쪽 kSpawnInitProcess() 직전에서 그대로 호출된다.
+    kernel::ResourceGroupService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: resourcegroup join/create/destroy/setcpuquota/freeze/thaw syscall endpoints registered");
+
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).
     kernel::TlbShootdown::init();
