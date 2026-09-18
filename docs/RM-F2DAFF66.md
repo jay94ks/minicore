@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T03:17:30.110Z
+  updatedAt: 2026-09-18T07:54:35.962Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -217,6 +217,85 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   실제 취소 레이스 왕복은 `PN-C4611402`와 동일하게 코드 감사로 검증
   (재현 수단 자체가 `PN-B5C2845A` 대기 중이라 동일한 제약).
 - **현재 상태**: **완전 해소.**
+
+### 1-J. `SP-83A07867`(CR3 동기화 통합) §3.2 - Task-to-Task 직접 전환이
+"CR3 재동기화 필요 지점 정확히 세 곳" 목록에서 빠짐 (코드 갭,
+완전 해소, 2026-09-18, commit `fb06753`)
+
+- **출처**: minicore-88이 `PN-87D6B615` "남은 범위 2번" E2E 재현 중
+  실측 발견(`PN-B5FD7B75`) - `SP-83A07867` §3.2가 "CR3 재동기화가
+  필요한 재개 지점은 정확히 `kTaskStartTrampoline`/`yieldCurrent`
+  재개/`parkCurrent` 재개 이 세 곳뿐"이라고 확정해 둔 전제가 실측으로
+  깨졌다.
+- **문제**: `Scheduler::onTick()`의 Task-to-Task 직접 전환
+  (`kContextSwitch(&current->savedRsp, next->savedRsp)`)이
+  `current->savedRsp`를 `onTick()` 함수 본문 한가운데(그
+  `kContextSwitch` 호출 바로 다음 줄)에 남기는데, 이 지점이 그
+  "정확히 세 곳" 목록에 없다. 나중에 이 `current`가 `runLoop()`의
+  idle→Task 디스패치 경로(§3.2가 "도착 지점이 항상 그 세 곳 중
+  하나이므로 CR3 재동기화 불필요"라고 명시한 바로 그 최적화)로
+  재선택되면 CR3가 전혀 재동기화되지 않아, 재개된 Task가 자기 코드를
+  실행하는 순간 즉시 #PF로 죽는다.
+- **재현**: 단일 코어(SMP=1)에서 devmgr이 자신의 자식(dbgtarget)을
+  DebugContinue로 같은 코어에서 즉시 Ready시킨 뒤, devmgr 자신의
+  `submit()`/`wait()` 사이 짧은 구간에 스케줄러 틱이 끼어드는 정확한
+  타이밍 경쟁 - 실측 재현율 ~3회 중 1-2회. `ring3 #PF task=devmgr
+  rip=cr2=0x400052 cr3=0x106000`(devmgr 고유 pml4Phys는 0x1633000)
+  으로 CR3-RIP 불일치가 시나리오와 정확히 일치함을 로그로 확인. 이전
+  "코어 간 마이그레이션 가설"은 이 실측으로 기각됨(단일 코어에서도
+  재현) - 진짜 원인은 같은 코어 안에서의 preemption 타이밍 경쟁.
+- **왜 지금까지 안 드러났는가**: 이 버그는 "한 코어에 동시에 Ready인
+  서로 다른 두 Task"가 있어야 발현되는데, 기존 스케줄러 테스트는
+  대부분 멀티코어라 두 번째 Task가 대개 Push/Pull로 다른 코어로
+  가버려 `onTick()`의 Task-to-Task 분기 자체가 잘 안 트리거됐다.
+  단일 코어 + 같은 코어에서 즉시 Ready(디버그 세션)라는 이 세션
+  전체에서 처음 만들어진 조합이라 처음 드러남.
+- **조치**: `QU-29793535`(설계자 답변 대기, `PN-B5FD7B75`에 세 후보
+  정리) - (A) `onTick()`의 그 `kContextSwitch` 다음 줄에
+  `kSyncCr3(current)` 추가(권장 - §3.2의 "트랩 진입점에서 동기화"
+  철학과 대칭), (B) `runLoop()` idle 디스패치가 항상
+  `kSyncCr3(next)` 호출(§3.2 최적화 포기, 안전하지만 불필요한 호출
+  추가), (C) 둘 다(과설계 가능성). 스케줄러 핫패스라 이 세션은 직접
+  QEMU 검증 없이 발행하지 않는다는 원칙대로 구현 전 확인을 구한
+  상태 - 아직 미수정.
+- **[답변, 2026-09-18]** `QU-29793535` 설계자 답변: "스위칭이 일어나는
+  순간에 CR3를 바꾸는게 맞다고 생각이 드는데." - (A)안(그 `kContextSwitch`
+  다음 줄에 `kSyncCr3(current)` 추가) 채택으로 확인됨. minicore-88이
+  질의 소유자로 직접 확인·resolved 처리(2026-09-18 05:39) - 이
+  세션의 relay 불필요.
+- **[완전 해소, 2026-09-18, commit `fb06753`]** `Scheduler::onTick()`의
+  그 `kContextSwitch` 다음 줄에 `kSyncCr3(current)` 추가 - 정확히
+  방향 A 그대로 구현됨. **부수 발견**: `Scheduler::onForcedMigration()`
+  도 동일한 `kContextSwitch(&current->savedRsp, next->savedRsp)`
+  Task-to-Task 직접 전환 패턴을 갖고 있어 같은 네 번째 재개 지점
+  문제에 노출돼 있음을 구현 세션이 스스로 찾아내 같은 수정을 함께
+  적용함(원 버그 리포트/설계자 답변엔 `onTick()`만 언급됐으나 같은
+  결함 클래스를 능동적으로 확장 점검한 사례). devmgr+dbgtarget E2E
+  하네스로 SMP1 + 동시 Ready 유저 태스크 2개 조합 재현 - 수정 전
+  100% 재현(4번째 Task-to-Task 전환에서 cr3=gBootPml4Phys로 #PF),
+  수정 후 8회 반복 무크래시(그중 6회는 이 취약 경로가 실제로 실행됨을
+  breadcrumb으로 확인). `kSyncCr3`의 skip-if-same 최적화로 흔한
+  재개 경로(CR3가 이미 맞는 경우)엔 추가 비용 없음.
+- **현재 상태**: **완전 해소.**
+
+### 1-K. `PageFrame` 구조체 - 설계는 approved, 코드는 아직 기존 `uint16_t` 배열 (발견됨, 미해결)
+
+- **출처**: `SP-6CEFBE9B`("물리 페이지 프레임 메타데이터 — PageFrame
+  구조체", 2026-09-18 approved)가 rmap(§6)/swap LRU(§7)/캐시타입
+  일관성(§3) 필드를 포함한 64바이트 `PageFrame` 구조체를 확정했다 -
+  이 문서 자체가 승인 직후 이 감사 문서에 스스로 등록하는 사례(작성
+  세션이 곧 이 RM-F2DAFF66도 관리하는 세션).
+- **실제 코드**: `page_frame_allocator.cpp`는 여전히
+  `SP-6BEAE0C1` §11-3 당시의 `uint16_t` 참조 카운트 배열뿐이다 -
+  `PageFrame` 구조체/`RmapEntry`/rmap 삽입·제거/LRU 리스트 전부
+  코드에 아직 없다.
+- **조치**: `PN-2FC5ED36`(PageFrame 구조체 실제 구현, planned)로
+  추적 - 구조체 교체 자체는 기존 `retain()`/`refCount()` API 하위
+  호환을 유지해야 한다(설계 §4). rmap/LRU 완전한 소비(승격/강등/회수
+  스캔)는 swap 자체가 없어 이 구현 계획의 범위 밖 - 별도
+  `PN-4859FDE9`(스캔 트리거 정책, 설계자 확인 대기)로 남음. 캐시타입
+  불일치 처리는 `PN-81223433`.
+- **현재 상태**: **미해결 - 설계 확정, 구현 대기.**
 
 ## §2. 점검 완료 - 갭 없음 확인
 
@@ -1088,22 +1167,53 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   minicore-88이 PN-87D6B615 본문에 이미 매우 상세히 자체 기록해 둠 -
   이 항목은 교차 참조용 짧은 기록.
 
+- **[신규, 2026-09-18] `PN-49C2F890`(#DB 브레이크포인트 즉시 Blocked
+  전환, commit `00fb1e7`) - 설계 대 코드 즉시 대조**: 이 세션이
+  QU-396C2692(즉시 블록 지시)/QU-8172431E(IST4 공유 스택 위험, 코어당
+  동시 파킹 1개 제한 정책 확정)를 직접 relay했던 바로 그 결정이
+  구현까지 완료된 걸 확인해 바로 검증 - `debug_session.cpp`/`idt.cpp`
+  diff를 한 줄씩 대조. `kHandleUserBreakpointHit()`이 `gDebugParkedOnCore
+  [coreIndex]`가 비어 있을 때만 `Scheduler::parkCurrent()`를 직접
+  호출해 즉시 파킹(정확히 지시된 메커니즘), 이미 서 있으면 기존
+  지연 경로(pausedByDebugger만 세움)로 안전하게 대체 - QU-8172431E
+  "코어당 동시 파킹 1개 제한" 그대로. `coreIndex`가 파킹 시점에
+  지역변수로 캡처돼 있어, 재개가 로드밸런싱으로 **다른 코어**에서
+  일어나도(idt.cpp 주석이 직접 명시) `gDebugParkedOnCore[coreIndex]
+  = false`가 여전히 "원래 그 IST4를 점유했던" 코어의 플래그를
+  정확히 내린다 - 실행 중인 코어가 아니라 점유 대상 코어 기준으로
+  풀리는 것이 맞는 설계. `Scheduler::onTick()`의 기존
+  `kIsPausedByDebugger()` 지연 경로(scheduler.cpp)는 제거되지 않고
+  "두 번째 동시 히트" 케이스의 fallback으로 의도적으로 남겨졌다 -
+  이 세션이 relay에서 "제거해도 되는지 판단 필요"로 남겨 뒀던 질문에
+  구현 세션이 "유지"로 정확히 답한 셈. `kSaveDebugRegistersSnapshot()`
+  도 파킹 직전으로 이동해 `DebugGetRegisters`/`SetRegisters`(§3.5)
+  호환 유지. DR6 클리어를 콜백 호출 **전**으로 옮긴 동반 수정도
+  재개가 다른 코어에서 일어날 수 있다는 것과 정확히 같은 근거로
+  정당함(자체 발견/자체 수정, 새 설계 결정 아님 - RM 항목 대상
+  아니지만 감사 과정에서 근거까지 확인). QEMU devmgr 브레이크포인트
+  실측 + GRUB SMP4 스트레스 무회귀 대조까지 완료. **갭 없음.**
+
+- **[신규, 2026-09-18] `SP-9A6D579F`(DebugSession, approved) - §목차
+  나열형 대조 완료**: `PN-87D6B615`가 항목1(자료구조)/항목2(부모-자식
+  권한, `kFindDebuggableChild`/`submitterTask.lock()` 사용 확인)에
+  더해, 이번 세션이 직접 relay·감사한 항목3-8(브레이크포인트 설정/
+  싱글스텝/정지-재개/레지스터 조회-설정/메모리 읽기-쓰기, `RM-48E1E610`
+  그룹7 call0-8 전부 "구현 완료")까지 전부 단일 스레드 기준으로
+  완료·검증됐다. **유일하게 남은 것은 §1-A(멀티스레드 디버깅)**인데,
+  이는 설계 문서 자신이 처음부터 "프로세스가 여러 스레드를 가질 수
+  있는 인프라 자체가 없다"는 선행 조건 부재를 이유로 별도 계획
+  `PN-2E4E9D79`(여전히 `planned`, 미착수)로 명시적으로 분리해 뒀다 -
+  숨겨진 누락이 아니라 처음부터 openly 추적된 후속 과제. **갭 없음**
+  (§1-A 범위를 제외한 나머지 전부).
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
 결과를 이 절에서 §1(발견) 또는 §2(갭 없음)로 옮긴다:
 
-- [ ] `SP-9A6D579F`(DebugSession) - **[갱신, 2026-09-17] PN-87D6B615
-  착수됨.** 항목1(자료구조)/항목2(부모-자식 권한, 일부) 구현·실왕복
-  검증 완료(`debug_session.cpp`에서 `kFindDebuggableChild`/
-  `submitterTask.lock()` 사용 직접 grep 재확인 - PN-5BBD4301류
-  실수 없이 처음부터 올바르게 작성됨). 항목2의 KernelService 예외는
-  `QU-764C5624`(Kill 스코프) 답변과 연동 대기 중임을 코드 관계도에도
-  기록해 둠 - 별도 질의 중복 없이 잘 처리됨. **항목3-9(브레이크포인트/
-  싱글스텝/#DB ISR/메모리 대행/이벤트 통지/멀티스레드)는 여전히
-  미착수이나 계획 자신의 체크리스트로 이미 openly 추적 중** - 전부
-  완료되면 그때 전체를 §목차 방법론으로 재대조.
+- [ ] (`SP-9A6D579F` 항목은 §2로 이동 - 2026-09-18 갱신 완료)
+
 (`SP-B1E258D8`(RCU) 항목은 approved 전환 + `PN-495C11B7` 구현
 완료까지 끝나 아래 §2로 이동했다.)
 (`PN-C4611402`의 "실제 취소 레이스" 재검증 - `PN-B5C2845A`가 열어

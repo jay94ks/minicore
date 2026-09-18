@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2BCE5D60
-  status: review
-  updatedAt: 2026-09-18T02:35:59.935Z
+  status: approved
+  updatedAt: 2026-09-18T07:31:00.445Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -70,6 +70,47 @@ v1은 `libelf`처럼 매크로로 컴파일 모드만 구분해 두면 되고, �
 
 ## 3. 공통 드라이버 인터페이스 - `FileSystemDriver`
 
+### 3.0 공통 블록 장치 인터페이스 - `BlockDevice` — [확정, 2026-09-18, 설계자 지시]
+
+`FileSystemDriver::mount`이 받는 `BlockDevice*`가 실제로 무엇을
+노출하는지는 지금까지 "AHCI 등에서 넘어온 블록 장치(AhciBlockDevice류)"
+로만 지칭되고 구체 시그니처가 없었다(`SP-C2670F69` §4 항목2가 이
+공백을 명시적으로 남겨 뒀음) - 이 절이 그 인터페이스를 확정한다.
+AHCI/USB/향후 NVMe 등 어떤 저장장치 드라이버든 파일시스템 드라이버
+(§3.1)에게는 동일한 모양으로 보여야 하므로, `FileSystemDriver`와
+마찬가지로 하드웨어 종류와 무관한 추상 인터페이스로 둔다:
+
+```cpp
+// fs 서비스 내부(유저랜드) - 파일시스템 드라이버(§3.1)가 소비하는 쪽.
+// LBA(논리 블록 주소) 단위로만 이야기하고, 그 아래 AHCI/USB/NVMe 등
+// 실제 전송 프로토콜은 전혀 알지 못한다.
+class BlockDevice {
+public:
+    virtual uint32_t blockSize() const = 0;   // 보통 512 또는 4096
+    virtual uint64_t blockCount() const = 0;  // 용량 = blockSize() * blockCount()
+    virtual bool readBlocks(uint64_t lba, uint32_t count, void* buf) = 0;
+    virtual bool writeBlocks(uint64_t lba, uint32_t count, const void* buf) = 0;
+    // 컨트롤러/장치 자체 쓰기 캐시를 안정 매체까지 밀어낸다(AHCI의
+    // FLUSH CACHE류 ATA 명령에 대응) - 저널링 파일시스템(ext4)의
+    // 배리어/커밋 지점에서 필수.
+    virtual bool flush() = 0;
+    // 최적화용 힌트 - 미지원 장치/드라이버는 항상 true(아무것도 안
+    // 하고 성공 처리)를 반환해도 무방하다(SSD TRIM처럼 데이터 정확성엔
+    // 영향 없음).
+    virtual bool trim(uint64_t lba, uint32_t count) = 0;
+};
+
+// SP-C2670F69 §3.1의 AhciPort 하나를 감싸는 첫 번째(그리고 현재
+// 유일한) 실제 구현.
+class AhciBlockDevice : public BlockDevice { /* SP-C2670F69 §3.1 참고, 후속 */ };
+```
+
+§3.1의 `FileSystemDriver::mount`와 §4의 `SwapBackend::mount`는 둘 다
+이 인터페이스를 받는다 - 파일시스템 드라이버/swapfs 백엔드 어느 쪽도
+device가 AHCI인지 USB인지 알 필요가 없다.
+
+### 3.1 파일시스템 드라이버 인터페이스
+
 `SP-9DD4F3EA` §3.2(PnP `DeviceManager`/드라이버 매칭 패턴)와 같은
 결 - `fs` 서비스 내부에 드라이버 종류와 무관한 인터페이스를 둔다.
 설계자 지시("표준 파일 API들도 모두 설계에 포함시켜")에 따라 open/
@@ -92,7 +133,14 @@ struct DirEntry {
 
 class FileSystemDriver {
 public:
-    virtual bool mount(BlockDevice* device) = 0;   // AHCI 등에서 넘어온 블록 장치(SP-C2670F69 §3.1의 AhciBlockDevice류)
+    // readOnly: 부팅 초기 임시 읽기전용 마운트를 지원하기 위한 것 -
+    // §5.1의 부팅 필수 마운트(루트/`/sys` - 스왑은 대상 아님, §5.1
+    // 정정 참고) 단계가 true로 호출한다.
+    virtual bool mount(BlockDevice* device, bool readOnly) = 0;   // BlockDevice 정의는 위 §3.0 참고
+    // [신규, 2026-09-18, 설계자 지시] readOnly=true로 마운트된 대상을
+    // 쓰기 가능으로 전환한다(§5 - init이 /sys/etc/mtab을 읽은 뒤 호출) -
+    // 이미 writable 상태에서 호출하면 아무 효과 없이 true.
+    virtual bool remount(bool writable) = 0;
     virtual OpenResult open(const char* relPath, uint32_t relPathLen, uint32_t flags) = 0;
     virtual void close(FileHandle handle) = 0;
     virtual ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) = 0;
@@ -149,7 +197,10 @@ using SwapSlot = uint64_t;
 
 class SwapBackend {
 public:
-    virtual bool mount(BlockDevice* device) = 0;  // FileSystemDriver::mount와 동일 관례
+    // [정정, 2026-09-18, 설계자 지시] readOnly 파라미터 없음 - 스왑은
+    // 절대 읽기 전용으로 마운트되면 안 된다(아래 §5.1 참고), 그래서
+    // FileSystemDriver::mount(§3.1)와 달리 이 구분 자체가 없다.
+    virtual bool mount(BlockDevice* device) = 0;
     // 물리 페이지 하나(PL-2D3184BC/커널 페이지 크기, 4KiB 가정)를
     // 슬롯에 기록/조회 - 파일 오프셋이 아니라 슬롯 번호로 직접 색인.
     virtual bool writeSlot(SwapSlot slot, const void* page) = 0;
@@ -211,6 +262,57 @@ class SwapfsBackend : public SwapBackend { /* 후속 */ };
    실제로 라우팅하기 시작한다 - 이 시점부터 다른 유저 프로세스의
    `Open`/`Read`/`Write` 등이 정상 응답을 받는다.
 
+### 5.1 부팅 필수 마운트와 `/sys/etc/mtab` — [확정, 2026-09-18, 설계자 지시]
+
+위 1~6단계는 "장치가 발견된 뒤 슈퍼블록을 판별해 마운트"하는 일반
+절차를 다룬다. 그런데 루트 파티션(`/`)과 `/sys` 파티션(기본적으로
+루트에 통합될 수 있음, 필요하면 별도 파티션으로 분리 가능) 자체는
+이 일반 절차보다 먼저, 그리고 `/sys/etc/mtab`(설정 파일)조차 아직
+읽을 수 없는 시점에 마운트돼 있어야 한다 - `/sys/etc/mtab` 자체가 그
+마운트 지점들 **안**에 있기 때문이다(닭이 먼저냐 달걀이 먼저냐 문제).
+이를 풀기 위해 부팅을 두 단계로 나눈다:
+
+**1단계 - 부팅 필수 마운트 (initrd 내장 설정)**: 루트 파티션(`/`),
+스왑 파티션, `/sys` 파티션 이 세 곳만 initrd 안에 함께 동봉된 최소
+설정 파일을 근거로 위 2단계보다 먼저 연결한다. **[확정, 2026-09-18,
+설계자 지시]** 이 파일은 `/sys/etc/mtab`(2단계)과 같은 포맷(리눅스
+mtab 포맷)을 쓰고, initrd는 경로 구분을 하지 않으므로(§2.2의
+`devmgr`/`fs`/`net`/`tty`/`pubreg`처럼 고정 이름과 정확히 일치하는
+엔트리를 찾는 방식과 동일한 평면 구조 - `SP-EAB162FC` §2.2) initrd
+안에 그냥 `mtab`이라는 이름으로 최소 구성만 동봉한다 - 별도 경로
+규칙이나 새 파일명은 두지 않는다. 이 중 루트/`/sys`(둘 다 `FileSystemDriver`
+대상, §3.1)는 **읽기 전용**으로 마운트한다 - 이 시점엔 아직
+`/sys/etc/mtab`의 실제 설정을 몰라 "쓰기 가능해야 하는지" 판단할
+근거가 없기 때문에, 안전한 기본값으로 시작한다는 점에서 SP-8D206F11
+§1의 캐시 정책과 같은 "정확성 우선" 원칙을 따른다.
+
+**[정정, 2026-09-18, 설계자 지시] 스왑 파티션은 읽기 전용으로 마운트하면
+안 된다** - `SwapBackend`(§4)는 스왑아웃(페이지 내용을 슬롯에 기록)이
+본질적인 동작이라 읽기 전용이면 그 자체로 기능하지 않는다(파일시스템의
+"나중에 쓰기 가능으로 전환"과 달리, 스왑은 처음부터 쓰기가 가능해야
+의미가 있다). 그래서 `SwapBackend::mount`(§4)엔 애초에 `readOnly`
+파라미터를 두지 않았다 - 스왑은 1단계에서 `SwapBackend::mount`
+한 번으로 곧장 완전히 사용 가능한 상태가 되고, 2단계의 remount 절차
+(아래) 대상이 아니다.
+
+**2단계 - `/sys/etc/mtab` 기반 기본 마운팅 (init 주도)**: `/sys`가
+읽기 전용으로라도 마운트되면 `/sys/etc/mtab`을 읽을 수 있게 된다 -
+`init`이 이 파일을 읽어 전체 시스템의 마운트 설정(리눅스 `/etc/fstab`/
+`mtab`과 같은 역할 - 장치/파티션 ↔ 마운트 지점 ↔ 옵션 매핑)을 확인하고
+"기본 마운팅 작업"을 완료한다. 여기엔 두 가지가 포함된다:
+
+1. 1단계에서 읽기 전용으로 올려 둔 루트/`/sys`(스왑 제외 - 위 §5.1
+   정정 참고, 스왑은 이미 1단계에서 완전히 쓰기 가능함)를, `mtab`
+   설정에 쓰기 가능으로 지정돼 있으면 `FileSystemDriver::remount(true)`
+   (§3.1)로 전환한다.
+2. `mtab`에 나열된 나머지 마운트 지점(위 2단계가 미리 예약해 둔
+   `/sys/etc`/`/sys/bin`/`/home` 등)에 대해, 위 5~6단계의 일반
+   슈퍼블록 감지/드라이버 연결 절차를 진행한다.
+
+이로써 §6 항목3("블록 장치 ↔ 마운트 지점 매칭 규칙")이 답을 얻는다 -
+**설정 파일**(`/sys/etc/mtab`, 리눅스 fstab/mtab과 같은 역할) 기준이며,
+파티션 레이블이나 고정 순서가 아니다.
+
 **커널↔커널서비스 고속 채널 결정(참고, 이미 해소됨)**: 위 2/3단계가
 쓰는 `Mount`/`SignalUserlandReady`/`WaitForUserlandReady`는 `fs`가
 커널 자신과 직접 주고받는 제어 트래픽이라 `DC-6E2500A6`(커널↔커널
@@ -227,10 +329,17 @@ class SwapfsBackend : public SwapBackend { /* 후속 */ };
    블록 장치를 보고 "이건 ext4다/FAT32다"를 판별하는 절차 - 각
    드라이버 착수 시점의 구현 세부(단, 시작 시점은 `SP-7CC5693A` §2.5
    로 이미 확정됨).
-3. **블록 장치 ↔ 마운트 지점 매칭 규칙**(§5 5단계) - 어떤 블록 장치가
-   어떤 마운트 지점(`/sys/etc` vs `/home` 등)을 담당하는지 결정하는
-   기준(설정 파일? 파티션 레이블? 고정 순서?) - fs 서비스 착수 시
-   확정할 열린 질문.
+3. ~~**블록 장치 ↔ 마운트 지점 매칭 규칙**(§5 5단계)~~ - **[해소,
+   2026-09-18, 설계자 지시]** §5.1 참고 - 설정 파일(`/sys/etc/mtab`)
+   기준으로 확정.
+4. ~~**§5.1의 initrd 내장 부팅 필수 마운트 설정 파일의 경로/포맷**~~ -
+   **[해소, 2026-09-18, 설계자 지시]** 리눅스 mtab과 동일 포맷,
+   initrd 안에 경로 없이 `mtab`이라는 이름으로 최소 구성 동봉(§5.1).
+5. ~~**§5.1에서 스왑 파티션의 "읽기 전용" 의미**~~ - **[해소,
+   2026-09-18, 설계자 지시]** "스왑 파티션은 읽기 전용 마운트되면
+   안 된다" - §5.1/§4를 정정해 `SwapBackend::mount`에서 `readOnly`
+   파라미터 자체를 제거하고, 스왑은 1단계에서 곧장 완전히 쓰기
+   가능한 상태로 연결되도록 확정했다.
 
 ## 7. 착수 조건
 

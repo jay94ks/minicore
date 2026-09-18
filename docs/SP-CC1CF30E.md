@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CC1CF30E
-  status: review
-  updatedAt: 2026-09-18T02:26:37.583Z
+  status: approved
+  updatedAt: 2026-09-18T06:56:55.919Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
