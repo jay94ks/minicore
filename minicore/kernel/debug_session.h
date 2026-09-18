@@ -65,13 +65,12 @@ constexpr SyscallEndpointId kSyscallEndpointDebugGetRegisters = kMakeSyscallEndp
 constexpr SyscallEndpointId kSyscallEndpointDebugSetRegisters = kMakeSyscallEndpointId(7, 6);
 
 // [SP-9A6D579F §3.1] DR0-DR3 하드웨어 슬롯 수와 동일 - 스레드마다
-// 별도 슬롯이 아니라 프로세스당 공유. [갱신, 2026-09-18, PN-0EB2FABF
-// (구 PN-2E4E9D79)] "프로세스당 스레드 하나뿐"이라는 옛 전제(`Process::
-// mainThread`)는 SP-76250478로 걷어냈지만, 이 `DebugSession` 자체는
-// 여전히 스레드 구분 없이 프로세스 전체에 하나뿐이다 - 진짜 멀티스레드
-// 디버깅(스레드별 브레이크포인트/레지스터)은 그 소비자인 SP-9A6D579F
-// §1-A/§3.4/§3.5의 targetThread 파라미터가 실제로 추가될 때까지 범위
-// 밖으로 남는다(아래 각 Debug*Args 문서 주석도 동일).
+// 별도 슬롯이 아니라 프로세스당 공유. [갱신, 2026-09-19, PN-06A7C439]
+// 멀티스레드 디버깅이 실제로 착수된 뒤에도 이 결론은 그대로다 - 하드웨어
+// DR 레지스터 자체가 프로세스당 4개뿐이라 브레이크포인트는 영구히
+// process-wide다(targetThread를 받지 않음). 대신 진짜 스레드별 상태
+// (정지 순간의 레지스터 스냅숏/싱글스텝 요청)는 `UserThread`(syscall.h)
+// 로 옮겼다 - 자세한 내용은 PN-06A7C439 본문 참고.
 constexpr uint32_t kMaxDebugBreakpoints = 4;
 
 // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304] `InterruptFrame`
@@ -79,16 +78,10 @@ constexpr uint32_t kMaxDebugBreakpoints = 4;
 // ISR 자신의 장부일 뿐 "레지스터"가 아니다(디버거 입장에서 의미 없는
 // 필드를 읽고 쓰게 하지 않기 위한 최소 API 위생, RM-23F4B687 §4). 그
 // 외 필드는 `InterruptFrame`과 정확히 같은 이름/순서 - `kSaveDebugRegistersSnapshot()`
-// 이 필드별로 복사한다.
-struct DebugRegisterSnapshot {
-    uint64_t rax = 0, rbx = 0, rcx = 0, rdx = 0, rsi = 0, rdi = 0, rbp = 0;
-    uint64_t r8 = 0, r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
-    uint64_t rip = 0;
-    uint64_t cs = 0;
-    uint64_t rflags = 0;
-    uint64_t rsp = 0;
-    uint64_t ss = 0;
-};
+// 이 필드별로 복사한다. [승격, 2026-09-19, PN-06A7C439] `DebugRegisterSnapshot`
+// 정의 자체는 `syscall.h`로 옮겼다(`UserThread::debugSavedRegisters`가
+// 값 타입으로 직접 담기 위함) - 이 파일은 그 include를 통해 그대로
+// 재사용한다.
 
 struct DebugBreakpoint {
     // [신규, 2026-09-17, SP-9A6D579F §3.4] DR7의 R/Wi 필드와 대응
@@ -119,16 +112,6 @@ struct DebugSession {
     // 않는다).
     WeakPtr<Process> debuggerProcess;
     DebugBreakpoint breakpoints[kMaxDebugBreakpoints];
-    // [구현 완료, 2026-09-17, SP-9A6D579F §3.4] `DebugSetSingleStep`이
-    // 세우는(또는 내리는) 요청 플래그 - 이름 그대로 "한 번 쓰이면
-    // 소비되는" 값이다. `DebugContinue`가 재개 직전 write-back할 때
-    // 이 값이 true면 `savedRegisters.rflags`의 TF 비트(0x100)를 세운
-    // 뒤 이 플래그를 즉시 false로 되돌리고(한 번의 DebugSetSingleStep
-    // 호출은 정확히 한 번의 다음 DebugContinue에만 적용), false면 TF
-    // 비트를 강제로 지운다(정지 사유가 싱글스텝 트랩 자신이었을 때
-    // `savedRegisters.rflags`에 TF=1이 그대로 남아 있어 그걸 그냥
-    // 되쓰면 무한 싱글스텝에 빠지는 것을 막는다).
-    bool singleStepPending = false;
 
     // [신규, 2026-09-17, SP-245D130B §9-4 답변("정지 사유 구분 플래그를
     // 둬야해")] §3.4/§3.5(브레이크포인트/싱글스텝/kSpawnDebugStart,
@@ -146,18 +129,14 @@ struct DebugSession {
     // 확인해야 한다 - 이 주석이 그 요구사항을 미리 남겨 둔다.
     bool pausedByDebugger = false;
 
-    // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
-    // `kSaveDebugRegistersSnapshot()`이 `pausedByDebugger`를 세우는
-    // 바로 그 순간(Scheduler::onTick()) 함께 채운다 - `DebugGetRegisters`/
-    // `DebugSetRegisters`는 이 값 복사본만 읽고 쓴다. `liveFramePtr`는
-    // 그 값이 실려 있던 진짜 살아있는 `InterruptFrame`(이 디버기 자신의
-    // 커널 스택 위, 아직 그 자리에 그대로 있음)의 주소 - 어떤 syscall
-    // args에도 노출하지 않는 내부 전용 필드로, `DebugContinue`가 재개
-    // 직전 `savedRegisters`를 여기 다시 써넣어(write-back) 반영한
-    // 뒤 즉시 `nullptr`로 되돌린다(재사용/댕글링 방지 - 이 Task가
-    // 다시 정지하기 전까지는 무효).
-    DebugRegisterSnapshot savedRegisters;
-    InterruptFrame* liveFramePtr = nullptr;
+    // [갱신, 2026-09-19, PN-06A7C439] `singleStepPending`/`savedRegisters`/
+    // `liveFramePtr`은 여기 process-wide로 두지 않는다 - `pausedByDebugger`
+    // 는 프로세스 전체를 한꺼번에 세우는 all-stop 플래그라 그대로 두는
+    // 게 맞지만("§7 진짜 갭" 분석은 PN-06A7C439 본문 참고), 여러 스레드가
+    // 각자 다른 순간에 실제로 정지해 들어올 수 있게 된 이상 "정지된 그
+    // 순간의 값" 자체는 스레드마다 독립이어야 한다 - `UserThread::
+    // debugSavedRegisters`/`debugLiveFramePtr`/`debugSingleStepPending`
+    // (syscall.h)로 옮겼다.
 };
 
 struct DebugAttachArgs {
@@ -172,14 +151,16 @@ struct DebugDetachArgs {
     ChannelError error = ChannelError::None;
 };
 
-// [신규, 2026-09-17, SP-9A6D579F §3.4] targetThread 파라미터는 넣지
-// 않는다 - [갱신, 2026-09-18, PN-0EB2FABF(구 PN-2E4E9D79)]
-// `Process::threads` 자료구조 자체는 여러 스레드를 담을 수 있게 됐지만,
-// 실제로 두 번째 이상의 스레드를 만드는 `CreateThread` syscall이 아직
-// 없어 "프로세스당 스레드 하나"가 여전히 사실상 불변조건이다 - 그
-// 필드가 있어도 항상 그 유일한 스레드 고정일 수밖에 없다(과설계 방지,
-// RM-23F4B687 §4) - `CreateThread`가 실제로 착수되면 이 struct에
-// 추가한다.
+// [갱신, 2026-09-19, PN-06A7C439] `CreateThread`가 실제로 착수된 뒤에도
+// targetThread를 **여전히 넣지 않는다** - 옛 주석의 예고("착수되면
+// 추가한다")와 달리, 실제 코드 조사(kSyncDebugRegs, scheduler.cpp) 결과
+// 이 필드는 애초부터 스레드별이 아니라 process-wide가 맞는 설계임이
+// 확정됐다: DR0-3 하드웨어 슬롯 수(4개)와 정확히 일치하고
+// (`kMaxDebugBreakpoints` 문서 주석 참고), `kSyncDebugRegs()`도 매
+// 디스패치마다 "그 스레드가 속한 프로세스"의 브레이크포인트를 무조건
+// 다시 싣는다 - 스레드마다 다른 브레이크포인트를 걸 수 있게 하려면
+// DR 레지스터 자체를 스레드별로 가상화해야 하는데 하드웨어가 프로세스당
+// 4개뿐이라 그럴 수 없다.
 struct DebugSetBreakpointArgs {
     int64_t targetProcessId = -1;
     uint32_t slot = 0;  // 0..kMaxDebugBreakpoints-1
@@ -190,21 +171,27 @@ struct DebugSetBreakpointArgs {
     ChannelError error = ChannelError::None;
 };
 
-// [구현 완료, 2026-09-17, SP-9A6D579F §3.4] targetThread 없음 - 위
-// DebugSetBreakpointArgs와 동일한 이유. 이 호출 자체는 재개하지 않고
-// `DebugSession::singleStepPending`만 세우거나 내린다 - 실제 RFLAGS.TF
-// 반영은 그다음 `DebugContinue`가 write-back할 때 한다(debug_session.h
-// 상단 `singleStepPending` 문서 주석 참고).
+// [갱신, 2026-09-19, PN-06A7C439] `targetThread` 추가 - 여러 스레드가
+// 동시에 정지해 있을 수 있게 된 이상(all-stop, `DebugSession::
+// pausedByDebugger` 문서 주석 참고) "어느 스레드"의 다음 재개에
+// 싱글스텝을 적용할지 반드시 구분해야 한다. 이 호출 자체는 재개하지
+// 않고 그 스레드의 `UserThread::debugSingleStepPending`(syscall.h)만
+// 세우거나 내린다 - 실제 RFLAGS.TF 반영은 그다음 `DebugContinue`가
+// write-back할 때 한다.
 struct DebugSetSingleStepArgs {
     int64_t targetProcessId = -1;
+    ThreadId targetThread = kInvalidThreadId;
     bool enable = false;
     // out
     ChannelError error = ChannelError::None;
 };
 
-// [신규, 2026-09-17, SP-9A6D579F §3.5] targetThread 없음 - 위
-// DebugSetBreakpointArgs와 동일한 이유(`CreateThread`가 실제로
-// 착수되기 전까지는 프로세스당 스레드가 여전히 하나뿐).
+// [갱신, 2026-09-19, PN-06A7C439] targetThread를 넣지 않는다(위
+// DebugSetSingleStepArgs와 반대 결론) - `DebugContinue`는 이 프로세스의
+// 정지된 스레드 **전부**(`UserThread::debugLiveFramePtr != nullptr`인
+// 스레드 전부)를 한 번에 write-back하고 프로세스 전체를 재개하는
+// all-stop→continue-all 시맨틱을 그대로 유지한다("이 스레드만 재개"하는
+// 선택적 재개는 이 계획(PN-06A7C439) 범위 밖 - 필요해지면 별도 계획).
 struct DebugContinueArgs {
     int64_t targetProcessId = -1;
     // out
@@ -236,24 +223,27 @@ struct DebugWriteMemoryArgs {
     ChannelError error = ChannelError::None;
 };
 
-// [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304] targetThread
-// 없음(위 DebugContinueArgs와 동일한 이유). `out`은 호출자(디버거)
-// 소유의 `DebugRegisterSnapshot` 버퍼 - 대상이 정지 상태(`pausedByDebugger`)
-// 가 아니면 `NotFound`.
+// [갱신, 2026-09-19, PN-06A7C439] `targetThread` 추가 - DebugSetSingleStepArgs
+// 와 동일한 이유(여러 스레드가 동시에 정지해 있을 수 있어 "어느
+// 스레드"인지 구분 필요). `out`은 호출자(디버거) 소유의
+// `DebugRegisterSnapshot` 버퍼 - 대상 스레드가 정지 상태
+// (`UserThread::debugLiveFramePtr != nullptr`)가 아니면 `NotFound`.
 struct DebugGetRegistersArgs {
     int64_t targetProcessId = -1;
+    ThreadId targetThread = kInvalidThreadId;
     DebugRegisterSnapshot* out = nullptr;  // 유저 포인터(호출자=디버거 소유 버퍼)
     // out
     ChannelError error = ChannelError::None;
 };
 
-// DebugGetRegistersArgs와 대칭 - `in`에서 읽어 대상의 `DebugSession::
-// savedRegisters`에 반영한다. 실제로 재개 시(DebugContinue) 살아있는
-// 프레임에 write-back된다(debug_session.h 상단 주석 참고) - 이 호출
-// 자체는 재개하지 않는다(그룹 freeze 여부와 무관하게 항상 사본만
-// 갱신, 별도로 DebugContinue를 불러야 함).
+// DebugGetRegistersArgs와 대칭(targetThread 포함) - `in`에서 읽어 대상
+// 스레드의 `UserThread::debugSavedRegisters`(syscall.h)에 반영한다.
+// 실제로 재개 시(DebugContinue) 그 스레드의 살아있는 프레임에
+// write-back된다 - 이 호출 자체는 재개하지 않는다(그룹 freeze 여부와
+// 무관하게 항상 사본만 갱신, 별도로 DebugContinue를 불러야 함).
 struct DebugSetRegistersArgs {
     int64_t targetProcessId = -1;
+    ThreadId targetThread = kInvalidThreadId;
     const DebugRegisterSnapshot* in = nullptr;  // 유저 포인터(호출자=디버거 소유 버퍼)
     // out
     ChannelError error = ChannelError::None;

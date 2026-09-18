@@ -134,6 +134,24 @@ constexpr ThreadId kInvalidThreadId = 0xFFFFu;
 // **뒤에** `UserThread::release()`를 불러야 한다(반대 순서면 다른
 // 관찰자가 그 사이 컨테이너를 순회하다 이미 반납된 메모리를 살아있는
 // 스레드로 오인할 수 있다).
+// [승격, 2026-09-19, SP-9A6D579F §3.5, PN-06A7C439] 원래 debug_session.h
+// 전용이었으나, `UserThread::debugSavedRegisters`(아래)가 값 타입으로
+// 이 struct를 직접 담아야 해서 여기로 옮겼다(async_task.h의
+// `AsyncTaskWeakRef` 승격과 동일한 순환-include 회피 패턴 -
+// debug_session.h가 이미 이 헤더를 include하므로 그쪽은 그대로 이
+// 정의를 재사용한다). `InterruptFrame` 자체를 syscall ABI로 그대로
+// 노출하지 않는 이유(`vector`/`errorCode` 제외) 등 상세 문서는
+// debug_session.h 상단 주석 참고 - 필드 목록만 여기로 이동.
+struct DebugRegisterSnapshot {
+    uint64_t rax = 0, rbx = 0, rcx = 0, rdx = 0, rsi = 0, rdi = 0, rbp = 0;
+    uint64_t r8 = 0, r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
+    uint64_t rip = 0;
+    uint64_t cs = 0;
+    uint64_t rflags = 0;
+    uint64_t rsp = 0;
+    uint64_t ss = 0;
+};
+
 class UserThread : public Task, public EnableSharedFromThis<UserThread> {
 public:
     // [신규, 2026-09-17, PN-B4987BF6] `AsyncTask::waitingTask`를
@@ -290,6 +308,33 @@ public:
     // 이 대신 회수).
     uint64_t threadStackBase = 0;
     uint64_t threadStackSize = 0;
+
+    // [신규, 2026-09-19, SP-9A6D579F §1-A/§3.5, PN-06A7C439] 이 스레드가
+    // 디버거에 의해 정지된 순간의 레지스터 상태 - 원래
+    // `Process::debugSession`에 프로세스당 하나만 있었으나, `pausedByDebugger`
+    // (여전히 process-wide 플래그, debug_session.h 참고)로 인해 같은
+    // 프로세스의 여러 스레드가 서로 다른 코어에서 각자 다른 순간에
+    // 동시에 정지 상태로 들어갈 수 있게 된 이상 "정지된 그 순간의 값"
+    // 자체는 스레드마다 독립적이어야 한다(process당 하나면 두 번째로
+    // 정지하는 스레드가 첫 번째 스레드의 스냅숏/살아있는 프레임을
+    // 덮어써 버리는 레이스가 생김). `kSaveDebugRegistersSnapshot()`
+    // (debug_session.cpp)이 이 스레드가 실제로 Blocked로 전환되는 그
+    // 순간(onTick() 재스케줄 결정 지점, 또는 #DB ISR이 즉시 파킹하는
+    // 경로)에 채운다.
+    DebugRegisterSnapshot debugSavedRegisters;
+    // nullptr이 아니면 "이 스레드가 지금 유효한 정지 스냅숏을 갖고
+    // 있다"는 뜻 - `DebugGetRegisters`/`DebugSetRegisters`(targetThread로
+    // 이 스레드를 골랐을 때)와 `DebugContinue`(정지된 스레드 전부를
+    // 순회할 때)가 이 조건으로 "이 스레드가 지금 대상이 될 수 있는지"를
+    // 판단한다. 그 살아있는 진짜 `InterruptFrame`(이 스레드 자신의 커널
+    // 스택 위, 아직 그 자리에 그대로 있음)의 주소 - `DebugContinue`가
+    // 재개 직전 `debugSavedRegisters`를 여기 다시 써넣은(write-back) 뒤
+    // 즉시 `nullptr`로 되돌린다(재사용/댕글링 방지).
+    InterruptFrame* debugLiveFramePtr = nullptr;
+    // 이 스레드에 대해서만 적용되는 다음 DebugContinue의 싱글스텝 요청 -
+    // "한 번 쓰이면 소비되는" 값(debug_session.h의 옛 `DebugSession::
+    // singleStepPending` 문서 주석과 동일한 의미, 스레드별로 독립됨).
+    bool debugSingleStepPending = false;
 
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든

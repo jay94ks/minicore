@@ -34,7 +34,11 @@ void kSaveDebugRegistersSnapshot(Task* task, InterruptFrame* frame) {
     if (!proc || !proc->debugSession.active) {
         return;
     }
-    DebugRegisterSnapshot& snap = proc->debugSession.savedRegisters;
+    // [갱신, 2026-09-19, PN-06A7C439] 스냅숏은 이제 `proc->debugSession`이
+    // 아니라 이 스레드 자신(`thread`)에 찍는다 - 여러 스레드가 각자 다른
+    // 순간에 정지해 들어올 수 있어(all-stop, `pausedByDebugger`는
+    // 여전히 process-wide) 스냅숏 자체는 스레드별로 독립이어야 한다.
+    DebugRegisterSnapshot& snap = thread->debugSavedRegisters;
     snap.rax = frame->rax;
     snap.rbx = frame->rbx;
     snap.rcx = frame->rcx;
@@ -55,7 +59,7 @@ void kSaveDebugRegistersSnapshot(Task* task, InterruptFrame* frame) {
     snap.rflags = frame->rflags;
     snap.rsp = frame->rspOld;
     snap.ss = frame->ssOld;
-    proc->debugSession.liveFramePtr = frame;
+    thread->debugLiveFramePtr = frame;
 }
 
 namespace {
@@ -102,6 +106,86 @@ SharedPtr<Process> kFindDebuggableChild(const SharedPtr<Process>& caller, int64_
         }
     });
     return target;
+}
+
+// [신규, 2026-09-19, SP-9A6D579F §1-A/§3.4/§3.5, PN-06A7C439]
+// `DebugSetSingleStep`/`DebugGetRegisters`/`DebugSetRegisters`가
+// targetThread로 지목한 스레드를 찾는다 - 없으면 nullptr(호출부가
+// `NotFound`로 대응, 이 파일 전역 관례).
+UserThread* kFindThreadById(SharedPtr<Process>& proc, ThreadId id) {
+    UserThread* found = nullptr;
+    proc->threads.forEach([&](SharedPtr<UserThread>& t, auto*) {
+        if (!found && t && t->threadId == id) {
+            found = t.get();
+        }
+    });
+    return found;
+}
+
+// [갱신, 2026-09-19, PN-06A7C439] `DebugContinueHandler`가 하던 write-back
+// 로직을 그대로 뽑아 옮긴 것뿐(동작 변화 없음) - 이제 `Process::
+// debugSession`의 process당 하나뿐인 liveFramePtr/savedRegisters/
+// singleStepPending이 아니라 이 `thread` 자신의 것을 쓴다는 점만 다르다
+// (여러 스레드가 각자 정지해 있을 수 있어 DebugContinueHandler가 이
+// 함수를 대상 프로세스의 정지된 스레드마다 반복 호출한다). 호출 전
+// `thread->debugLiveFramePtr != nullptr`를 반드시 확인해야 한다.
+void kWriteBackDebugFrame(UserThread* thread) {
+    InterruptFrame* frame = thread->debugLiveFramePtr;
+    const DebugRegisterSnapshot& snap = thread->debugSavedRegisters;
+    frame->rax = snap.rax;
+    frame->rbx = snap.rbx;
+    frame->rcx = snap.rcx;
+    frame->rdx = snap.rdx;
+    frame->rsi = snap.rsi;
+    frame->rdi = snap.rdi;
+    frame->rbp = snap.rbp;
+    frame->r8 = snap.r8;
+    frame->r9 = snap.r9;
+    frame->r10 = snap.r10;
+    frame->r11 = snap.r11;
+    frame->r12 = snap.r12;
+    frame->r13 = snap.r13;
+    frame->r14 = snap.r14;
+    frame->r15 = snap.r15;
+    frame->rip = snap.rip;
+    frame->cs = snap.cs;
+    // [구현 완료, 2026-09-17, SP-9A6D579F §3.4] RFLAGS.TF(비트
+    // 8, 0x100)는 savedRegisters.rflags 사본을 그대로 되쓰지
+    // 않고 singleStepPending에 따라 이 자리에서 명시적으로
+    // 세우거나 지운다 - 정지 사유가 싱글스텝 트랩 자신이었을
+    // 경우 snap.rflags에 TF=1이 이미 들어있어(트랩 시점의
+    // 실제 EFLAGS를 그대로 스냅숏했으므로) 그걸 무비판적으로
+    // 되쓰면 다음 명령에서 또 트랩해 무한 싱글스텝에 빠진다 -
+    // DebugSetSingleStep을 다시 호출하지 않는 한 정상 실행으로
+    // 돌아가야 하므로 매번 명시적으로 판단한다(syscall.h
+    // debugSingleStepPending 문서 주석과 대칭).
+    constexpr uint64_t kRflagsTrapFlag = 0x100;
+    uint64_t rflags = snap.rflags & ~kRflagsTrapFlag;
+    if (thread->debugSingleStepPending) {
+        rflags |= kRflagsTrapFlag;
+        thread->debugSingleStepPending = false;  // 한 번 쓰이면 소비됨
+    }
+    // [수정, 2026-09-18, PN-87D6B615 남은 범위 2번 실측 E2E 중
+    // 발견] RFLAGS.RF(Resume Flag, 비트 16, 0x10000)를 세우지
+    // 않으면, 정지 사유가 하드웨어 실행 브레이크포인트(B0-B3)
+    // 였을 때 재개 직후 CPU가 같은 명령어를 다시 인출하며 그
+    // 브레이크포인트 조건을 즉시 재검사해 또 트랩한다(Intel
+    // SDM Vol.3 §17.3.1.1 - RF는 "IRETQ 직후 딱 한 명령어
+    // 동안 명령어 브레이크포인트 재인식을 억제"하는 용도로
+    // 정확히 이 상황을 위해 존재) - 그 결과 dbgtarget이
+    // 실제로 한 걸음도 전진하지 못한 채 같은 RIP에서 영원히
+    // 재정지하는 것을 실측으로 발견했다(devmgr+dbgtarget E2E
+    // 하네스, PN-87D6B615). 싱글스텝(TF) 재개에는 원래
+    // 영향이 없으므로(RF는 명령어 브레이크포인트 재인식만
+    // 억제, TF 트랩 메커니즘과는 독립적) 정지 사유와 무관하게
+    // 항상 세워도 안전하다.
+    constexpr uint64_t kRflagsResumeFlag = 0x10000;
+    rflags |= kRflagsResumeFlag;
+    frame->rflags = rflags;
+    frame->rspOld = snap.rsp;
+    frame->ssOld = snap.ss;
+    // 재사용/댕글링 방지 - 이 스레드가 다시 정지하기 전까지 무효.
+    thread->debugLiveFramePtr = nullptr;
 }
 
 class DebugAttachHandler : public AsyncTaskHandler {
@@ -158,7 +242,17 @@ public:
         for (auto& bp : target->debugSession.breakpoints) {
             bp = DebugBreakpoint{};
         }
-        target->debugSession.singleStepPending = false;
+        // [갱신, 2026-09-19, PN-06A7C439] `singleStepPending`은 이제
+        // 스레드별(`UserThread::debugSingleStepPending`)이라 여기서도
+        // 모든 스레드에 대해 초기화한다 - 위 breakpoints와 같은 "세션
+        // 설정" 범주(요청 대기 플래그일 뿐 실제 실행 상태가 아님), 바로
+        // 위 클래스 문서 주석이 `pausedByDebugger`/스레드별 스냅숏은
+        // 그대로 둬야 한다고 구분해 둔 것과 대칭.
+        target->threads.forEach([](SharedPtr<UserThread>& t, auto*) {
+            if (t) {
+                t->debugSingleStepPending = false;
+            }
+        });
         args->error = ChannelError::None;
         co_return;
     }
@@ -316,12 +410,18 @@ public:
             args->error = ChannelError::PermissionDenied;
             co_return;
         }
-        if (!target->debugSession.pausedByDebugger) {
+        // [갱신, 2026-09-19, PN-06A7C439] process-wide `pausedByDebugger`
+        // 대신 targetThread 자신이 실제로 유효한 정지 스냅숏을 갖고
+        // 있는지(`debugLiveFramePtr != nullptr`)로 검증한다 - 여러
+        // 스레드가 동시에 정지해 있을 수 있어 "이 특정 스레드"가 정지
+        // 상태인지를 정확히 가려야 한다.
+        UserThread* thread = kFindThreadById(target, args->targetThread);
+        if (!thread || !thread->debugLiveFramePtr) {
             args->error = ChannelError::NotFound;
             co_return;
         }
 
-        target->debugSession.singleStepPending = args->enable;
+        thread->debugSingleStepPending = args->enable;
         args->error = ChannelError::None;
         co_return;
     }
@@ -371,71 +471,20 @@ public:
             co_return;
         }
 
-        // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
-        // DebugSetRegisters가 사본(savedRegisters)을 바꿔 뒀을 수
-        // 있으니, 재개 직전 그 값을 살아있는 프레임(liveFramePtr -
-        // 이 Task 자신의 커널 스택 위, 정지 이후 아무도 안 건드림)에
-        // 다시 써넣는다(write-back) - SetRegisters를 안 불렀어도
-        // 같은 값을 그대로 되쓰는 것뿐이라 무해(더티 플래그로 조건부
-        // 분기하는 과설계 없이, RM-23F4B687 §4).
-        if (target->debugSession.liveFramePtr) {
-            InterruptFrame* frame = target->debugSession.liveFramePtr;
-            const DebugRegisterSnapshot& snap = target->debugSession.savedRegisters;
-            frame->rax = snap.rax;
-            frame->rbx = snap.rbx;
-            frame->rcx = snap.rcx;
-            frame->rdx = snap.rdx;
-            frame->rsi = snap.rsi;
-            frame->rdi = snap.rdi;
-            frame->rbp = snap.rbp;
-            frame->r8 = snap.r8;
-            frame->r9 = snap.r9;
-            frame->r10 = snap.r10;
-            frame->r11 = snap.r11;
-            frame->r12 = snap.r12;
-            frame->r13 = snap.r13;
-            frame->r14 = snap.r14;
-            frame->r15 = snap.r15;
-            frame->rip = snap.rip;
-            frame->cs = snap.cs;
-            // [구현 완료, 2026-09-17, SP-9A6D579F §3.4] RFLAGS.TF(비트
-            // 8, 0x100)는 savedRegisters.rflags 사본을 그대로 되쓰지
-            // 않고 singleStepPending에 따라 이 자리에서 명시적으로
-            // 세우거나 지운다 - 정지 사유가 싱글스텝 트랩 자신이었을
-            // 경우 snap.rflags에 TF=1이 이미 들어있어(트랩 시점의
-            // 실제 EFLAGS를 그대로 스냅숏했으므로) 그걸 무비판적으로
-            // 되쓰면 다음 명령에서 또 트랩해 무한 싱글스텝에 빠진다 -
-            // DebugSetSingleStep을 다시 호출하지 않는 한 정상 실행으로
-            // 돌아가야 하므로 매번 명시적으로 판단한다(debug_session.h
-            // singleStepPending 문서 주석과 대칭).
-            constexpr uint64_t kRflagsTrapFlag = 0x100;
-            uint64_t rflags = snap.rflags & ~kRflagsTrapFlag;
-            if (target->debugSession.singleStepPending) {
-                rflags |= kRflagsTrapFlag;
-                target->debugSession.singleStepPending = false;  // 한 번 쓰이면 소비됨
+        // [갱신, 2026-09-19, PN-06A7C439] process당 하나였던 liveFramePtr
+        // 대신, 이 프로세스의 스레드 중 지금 실제로 정지 스냅숏을 갖고
+        // 있는 스레드 전부(`debugLiveFramePtr != nullptr`)를 순회하며
+        // 각자 자기 것으로 write-back한다 - all-stop 시맨틱이라 여러
+        // 스레드가 동시에 정지해 있을 수 있고, `DebugContinue`는
+        // 그 전부를 한 번에 재개한다(§3.5 write-back 자체의 이유는
+        // 변화 없음 - kWriteBackDebugFrame 문서 주석 참고).
+        target->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
+            if (UserThread* t = threadRef.get()) {
+                if (t->debugLiveFramePtr) {
+                    kWriteBackDebugFrame(t);
+                }
             }
-            // [수정, 2026-09-18, PN-87D6B615 남은 범위 2번 실측 E2E 중
-            // 발견] RFLAGS.RF(Resume Flag, 비트 16, 0x10000)를 세우지
-            // 않으면, 정지 사유가 하드웨어 실행 브레이크포인트(B0-B3)
-            // 였을 때 재개 직후 CPU가 같은 명령어를 다시 인출하며 그
-            // 브레이크포인트 조건을 즉시 재검사해 또 트랩한다(Intel
-            // SDM Vol.3 §17.3.1.1 - RF는 "IRETQ 직후 딱 한 명령어
-            // 동안 명령어 브레이크포인트 재인식을 억제"하는 용도로
-            // 정확히 이 상황을 위해 존재) - 그 결과 dbgtarget이
-            // 실제로 한 걸음도 전진하지 못한 채 같은 RIP에서 영원히
-            // 재정지하는 것을 실측으로 발견했다(devmgr+dbgtarget E2E
-            // 하네스, PN-87D6B615). 싱글스텝(TF) 재개에는 원래
-            // 영향이 없으므로(RF는 명령어 브레이크포인트 재인식만
-            // 억제, TF 트랩 메커니즘과는 독립적) 정지 사유와 무관하게
-            // 항상 세워도 안전하다.
-            constexpr uint64_t kRflagsResumeFlag = 0x10000;
-            rflags |= kRflagsResumeFlag;
-            frame->rflags = rflags;
-            frame->rspOld = snap.rsp;
-            frame->ssOld = snap.ss;
-            // 재사용/댕글링 방지 - 이 Task가 다시 정지하기 전까지 무효.
-            target->debugSession.liveFramePtr = nullptr;
-        }
+        });
 
         // [SP-245D130B §9-4 교차 기록, ResourceGroup::thaw()와 대칭]
         // pausedByDebugger는 항상 내려놓지만(디버거가 정지를 풀기로
@@ -443,13 +492,11 @@ public:
         // frozenByGroup이 이미 서 있어(kCheckAndMarkFrozen) 나중에
         // ResourceGroup::thaw()가 대신 깨운다.
         target->debugSession.pausedByDebugger = false;
-        // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 옛 `target->mainThread`
-        // 단일 재개를 `target->threads` 전체 순회로 대체 - 지금은
-        // 프로세스당 스레드가 여전히 하나뿐이라 관찰 가능한 동작은
-        // 동일하다. 진짜 멀티스레드 디버깅(대상 스레드를 개별
-        // 지정/재개)은 이 증분 스코프 밖(SP-9A6D579F가 이 설계의
-        // 실제 소비자로 대기 중, debug_session.h §1-A/§3.4/§3.5의
-        // targetThread 파라미터 참고).
+        // [갱신, 2026-09-19, PN-06A7C439] `target->threads` 전체를
+        // 무조건 재개한다 - `DebugContinueArgs` 문서 주석대로 의도적인
+        // all-stop→continue-all 시맨틱(선택적으로 스레드 하나만 재개하는
+        // 기능은 이 계획 범위 밖, 필요해지면 별도 계획으로 targetThread를
+        // 추가한다).
         if (!(target->group && target->group->frozen)) {
             target->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
                 if (UserThread* t = threadRef.get()) {
@@ -466,9 +513,9 @@ public:
 
 DebugContinueHandler gDebugContinueHandler;
 
-// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615, DC-47000304 (A)
-// 채택] DebugGetRegisters - 대상이 정지 상태여야 하고(그래야
-// savedRegisters/liveFramePtr가 유효), 그 외 권한 검증은
+// [갱신, 2026-09-19, PN-06A7C439] DebugGetRegisters - targetThread로
+// 지목한 그 스레드가 정지 상태여야 하고(그래야 그 스레드 자신의
+// debugSavedRegisters/debugLiveFramePtr가 유효), 그 외 권한 검증은
 // DebugSetBreakpoint와 동일한 패턴.
 class DebugGetRegistersHandler : public AsyncTaskHandler {
 public:
@@ -502,12 +549,13 @@ public:
             args->error = ChannelError::PermissionDenied;
             co_return;
         }
-        if (!target->debugSession.pausedByDebugger) {
+        UserThread* thread = kFindThreadById(target, args->targetThread);
+        if (!thread || !thread->debugLiveFramePtr) {
             args->error = ChannelError::NotFound;
             co_return;
         }
 
-        *args->out = target->debugSession.savedRegisters;
+        *args->out = thread->debugSavedRegisters;
         args->error = ChannelError::None;
         co_return;
     }
@@ -517,10 +565,10 @@ public:
 
 DebugGetRegistersHandler gDebugGetRegistersHandler;
 
-// [신규, 2026-09-17, SP-9A6D579F §3.5, PN-87D6B615, DC-47000304 (A)
-// 채택] DebugSetRegisters - DebugGetRegistersHandler와 대칭(방향만
-// 반대). 이 호출 자체는 재개하지 않는다 - 사본만 갱신, 실제 반영은
-// DebugContinue가 write-back할 때(debug_session.h 상단 주석 참고).
+// [갱신, 2026-09-19, PN-06A7C439] DebugSetRegisters - DebugGetRegistersHandler
+// 와 대칭(방향만 반대, targetThread 포함). 이 호출 자체는 재개하지
+// 않는다 - 그 스레드의 사본(debugSavedRegisters)만 갱신, 실제 반영은
+// DebugContinue가 write-back할 때(syscall.h 상단 주석 참고).
 class DebugSetRegistersHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
@@ -553,12 +601,13 @@ public:
             args->error = ChannelError::PermissionDenied;
             co_return;
         }
-        if (!target->debugSession.pausedByDebugger) {
+        UserThread* thread = kFindThreadById(target, args->targetThread);
+        if (!thread || !thread->debugLiveFramePtr) {
             args->error = ChannelError::NotFound;
             co_return;
         }
 
-        target->debugSession.savedRegisters = *args->in;
+        thread->debugSavedRegisters = *args->in;
         args->error = ChannelError::None;
         co_return;
     }
@@ -786,25 +835,54 @@ bool kHandleUserBreakpointHit(InterruptFrame* frame, uint64_t dr6) {
         return false;
     }
     proc->debugSession.pausedByDebugger = true;
-    // [신규, 2026-09-18, PN-49C2F890] 예전엔 onTick()의 재스케줄
-    // 지점(scheduler.cpp)이 자기 자신의 트랩 프레임으로 이 스냅숏을
-    // 찍었으나, 이제 이 함수 자신이 즉시 파킹하므로 여기서 직접
-    // 찍어야 DebugGetRegisters/SetRegisters(§3.5)가 계속 동작한다 -
-    // `frame`(이 #DB의 IST4 트랩 프레임)은 아래 parkCurrent()로 이
-    // 코어가 파킹돼 있는 동안(gDebugParkedOnCore 가드가 보장) 계속
-    // 유효한 메모리이므로 DebugContinue의 write-back 대상으로 안전.
-    kSaveDebugRegistersSnapshot(task, frame);
 
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
     if (gDebugParkedOnCore[coreIndex]) {
-        // 이미 이 코어에서 다른 디버깅 대상이 파킹돼 있다 - 위 정책상
-        // 이번엔 파킹하지 않고 기존 지연 경로(다음 스케줄러 틱의
-        // kIsPausedByDebugger 검사)로 대체한다. 이 시점엔 그 먼저
-        // 파킹된 Task가 이미 "대체 실행 후보"로 존재하므로
-        // PN-49C2F890 원래 갭은 여기서 발생하지 않는다.
+        // [수정, 2026-09-19, PN-06A7C439 실측 발견 - 진짜 멀티스레드
+        // 동시 히트로 처음 노출된 잠재 버그] 이미 이 코어에서 다른
+        // 디버깅 대상이 파킹돼 있다 - 위 정책상 이번엔 파킹하지 않고
+        // 기존 지연 경로(다음 스케줄러 틱의 kIsPausedByDebugger 검사,
+        // scheduler.cpp)로 대체한다. **여기서 kSaveDebugRegistersSnapshot()
+        // 를 부르면 안 된다** - `frame`은 이 코어의 공유 IST4 트랩
+        // 프레임(고정 최상단 리셋 주소)인데, 이미 다른 스레드가 바로
+        // 그 자리에 `parkCurrent()`로 얼어붙어 있는 중이라(스레드
+        // 하나뿐이던 시절엔 같은 코어에서 진짜 서로 다른 스레드가 동시에
+        // #DB를 두 번 낼 수 없어 드러나지 않았던 gap) 여기서 스냅숏을
+        // 찍으면 그 얼어붙은 프레임 메모리를 이 스레드 것으로 덮어써
+        // 버린다 - 실측 재현: dbgtarget 2-스레드 하네스(PN-06A7C439)에서
+        // 이렇게 얻은 `debugLiveFramePtr`로 두 스레드 모두 write-back한
+        // 뒤 재개하니 한쪽이 커널 주소로 rip가 튀어 Invalid Opcode로
+        // PANIC(스택 내용이 실제로 덮어써졌다는 증거). 이 스레드 자신의
+        // 진짜 스냅숏은 나중에 "지연 경로"(onTick()이 이 스레드 자신의
+        // 전용 커널 스택 위 프레임으로 안전하게 찍음)에서만 채워지게
+        // 그냥 둔다.
         return true;
     }
     gDebugParkedOnCore[coreIndex] = true;
+    // [신규, 2026-09-18, PN-49C2F890] 이 지점부터는 이 코어의 IST4가
+    // 진짜로 이 스레드 전용으로 얼어붙으므로(gDebugParkedOnCore 가드가
+    // 보장) `frame`을 안전하게 스냅숏 대상으로 쓸 수 있다 - 위 분기와
+    // 반대로 여기서만 찍는다(2026-09-18, PN-06A7C439로 위치 이동 -
+    // 원래는 이 가드 확인 전에 무조건 찍고 있었다).
+    //
+    // [알려진 갭, 2026-09-19, PN-06A7C439 실측 발견 - 미해결] 위
+    // gDebugParkedOnCore 재확인이 "같은 코어에서 동시에 두 스레드가
+    // 파킹 시도"만 막을 뿐, **이 스레드가 여기서 parkCurrent()로 얼어붙어
+    // 있는 동안, 같은 코어에서 다른(정지되지 않은) 형제 스레드가 정상
+    // 실행되다가 이 프로세스의 공유 브레이크포인트를 다시 히트하거나
+    // 타이머 틱으로 지연 경로(onTick())를 타는 상호작용까지는 막지
+    // 못한다** - 실제 dbgtarget 2-스레드 하네스(같은 프로세스, 공유
+    // EXECUTE 브레이크포인트)로 재현: 그런 상호작용이 겹치면 이미 정지된
+    // 스레드의 `debugSavedRegisters`가 손상되고(rip가 세그먼트 셀렉터
+    // 값처럼 보이는 임의 값으로 바뀌거나 커널 주소로 튐) 재개 시 Invalid
+    // Opcode/Page Fault로 PANIC한다 - 근본 원인은 아직 확정하지 못했다
+    // (IST4 자체의 재사용은 아닌 것으로 보임 - gIstStacks는 코어별로
+    // 이미 분리돼 있음, PN-EA968DF0 참고). `Process::debugSession`/
+    // `UserThread`의 디버그 필드들이 AsyncReactor(BSP 전용, 직렬화 보장)
+    // 를 거치지 않고 이 함수와 `Scheduler::onTick()`처럼 **원시 ISR/
+    // 스케줄러 틱 컨텍스트에서 여러 코어가 직접 동시에** 건드린다는 점이
+    // 유력한 용의선 - 별도 세션의 집중 조사가 필요(PN-EA968DF0).
+    kSaveDebugRegistersSnapshot(task, frame);
     Scheduler::parkCurrent();  // 재개될 때까지(DebugContinue 등) 여기서 멈춘다
     gDebugParkedOnCore[coreIndex] = false;
     return true;
