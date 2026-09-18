@@ -200,6 +200,13 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
         return kernel::OpenResult{kernel::FileHandle{kLiveFsKernelDirHandleValue}, true, kernel::VfsError::None};
     }
 
+    // [신규, 2026-09-19, PN-770A28FB 항목6] "proc" 자신 - ProcFs가 자기
+    // 루트 디렉터리 핸들을 내주도록 relPathLen==0으로 위임(named/kernel
+    // 과 동일 패턴이나, 그 디렉터리 판정 자체는 ProcFs가 소유).
+    if (kEqualsExact(relPath, relPathLen, kProcPrefix, sizeof(kProcPrefix) - 2)) {
+        return kernel::ProcFs::open(task, "", 0, 0);
+    }
+
     if (kHasPrefix(relPath, relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
         const char* rest = relPath + (sizeof(kProcPrefix) - 1);
         const kernel::uint32_t restLen = relPathLen - (sizeof(kProcPrefix) - 1);
@@ -388,9 +395,20 @@ void kLiveFsReaddirImpl(kernel::KernelFsReaddirArgs* args) {
         return;
     }
 
+    // [신규, 2026-09-19, PN-770A28FB 항목6] "proc" 나열 - `ProcFs`가
+    // 자기 핸들 계열(`kProcFsHandleTagBit`, self/status 핸들과도
+    // 겹치지 않는 이유는 procfs.h 문서 주석 참고)을 스스로 인식해
+    // 처리한다. `ProcFs::readdir()`이 이 핸들이 진짜 자기 루트
+    // 핸들인지까지 다시 확인한다(self/status류 다른 ProcFs 핸들로
+    // Readdir을 시도하면 InvalidHandle).
+    if (args->dirHandle.value & kernel::kProcFsHandleTagBit) {
+        kernel::ProcFs::readdir(args);
+        return;
+    }
+
     // [v1 축소 범위] 이 핸들이 가리키는 대상이 디렉터리가 아니거나
-    // 아직 나열을 지원하지 않는 디렉터리(proc//resourcegroup/ 안쪽 -
-    // 각 서비스가 개념상 pid/그룹별 동적 목록이라 후속 과제로 남김)다.
+    // 아직 나열을 지원하지 않는 디렉터리(resourcegroup/ 안쪽 - 동적
+    // 그룹 목록이라 후속 과제로 남김)다.
     args->hasMore = false;
     args->error = kernel::VfsError::InvalidHandle;
 }
@@ -428,10 +446,12 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
             auto* args = static_cast<KernelFsStatArgs*>(argsRaw);
             static constexpr char kProcPrefix[] = "proc/";
             static constexpr char kResourceGroupPrefix[] = "resourcegroup/";
-            if (kHasPrefix(args->relPath, args->relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1)) {
+            if (kHasPrefix(args->relPath, args->relPathLen, kProcPrefix, sizeof(kProcPrefix) - 1) ||
+                kEqualsExact(args->relPath, args->relPathLen, kProcPrefix, sizeof(kProcPrefix) - 2)) {
+                const bool isExactProc = kEqualsExact(args->relPath, args->relPathLen, kProcPrefix, sizeof(kProcPrefix) - 2);
                 KernelFsStatArgs procArgs = *args;
-                procArgs.relPath = args->relPath + (sizeof(kProcPrefix) - 1);
-                procArgs.relPathLen = args->relPathLen - (sizeof(kProcPrefix) - 1);
+                procArgs.relPath = isExactProc ? "" : args->relPath + (sizeof(kProcPrefix) - 1);
+                procArgs.relPathLen = isExactProc ? 0 : args->relPathLen - (sizeof(kProcPrefix) - 1);
                 ProcFs::stat(task, &procArgs);
                 args->size = procArgs.size;
                 args->isDirectory = procArgs.isDirectory;

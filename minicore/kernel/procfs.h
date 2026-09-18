@@ -62,6 +62,14 @@ public:
     static ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len);
 
     static void stat(AsyncTask* task, KernelFsStatArgs* args);
+
+    // [신규, 2026-09-19, PN-770A28FB 항목6] `/sys/live/proc` 나열 -
+    // `relPathLen==0`으로 `open()`을 호출하면 이 디렉터리 자신의
+    // 핸들(전역 핸들 계열, `kProcFsGlobalHandleBit` 세 번째 인덱스)을
+    // 돌려준다. v1 스코프는 이 최상위 고정 이름 3개(`self`/`meminfo`/
+    // `uptime`)뿐 - 임의 pid 나열은 여전히 `QU-764C5624` 답변 이후로
+    // 미룬다(위 클래스 문서 주석 그대로).
+    static void readdir(KernelFsReaddirArgs* args);
 };
 
 }  // namespace kernel

@@ -60,6 +60,25 @@ constexpr kernel::uint64_t kProcFsMeminfoHandle = kernel::kProcFsHandleTagBit | 
 constexpr kernel::uint64_t kProcFsUptimeHandle = kernel::kProcFsHandleTagBit | kernel::kProcFsGlobalHandleBit | (1ULL << 3);
 constexpr kernel::uint32_t kMaxGlobalStatusLen = 320;  // meminfo가 노드 8개까지 나열할 수 있어 status보다 여유를 둠
 
+// [신규, 2026-09-19, PN-770A28FB 항목6] `/sys/live/proc` 디렉터리
+// 자신 - 같은 전역 핸들 계열의 세 번째 인덱스(0=meminfo, 1=uptime,
+// 2=이 디렉터리)일 뿐, 상태가 없는 고정 sentinel이라 이 계열에
+// 자연스럽게 들어맞는다.
+constexpr kernel::uint64_t kProcFsRootHandle = kernel::kProcFsHandleTagBit | kernel::kProcFsGlobalHandleBit | (2ULL << 3);
+
+struct ProcFsRootEntry {
+    const char* name;
+    kernel::uint32_t nameLength;
+    bool isDirectory;
+};
+constexpr ProcFsRootEntry kProcFsRootEntries[] = {
+    {"self", 4, true},
+    {"meminfo", 7, false},
+    {"uptime", 6, false},
+};
+constexpr kernel::uint32_t kProcFsRootEntryCount =
+    static_cast<kernel::uint32_t>(sizeof(kProcFsRootEntries) / sizeof(kProcFsRootEntries[0]));
+
 // [PN-0C282BB7 §1] PageFrameAllocator가 실제로 추적하는 것은 "남은
 // 페이지 수"뿐(할당자 자체가 총량을 저장하지 않음, page_frame_allocator.cpp
 // 확인 완료) - 그래서 Linux의 MemTotal류를 만들어내지 않고, 실제로
@@ -190,6 +209,12 @@ bool kResolveCallerProcess(kernel::AsyncTask* task, kernel::SharedPtr<kernel::Pr
 namespace kernel {
 
 OpenResult ProcFs::open(AsyncTask* task, const char* relPath, uint32_t relPathLen, uint32_t /*flags*/) {
+    // [신규, 2026-09-19, PN-770A28FB 항목6] "proc" 자신(livefs.cpp가
+    // "proc/" 접두사와 별개로 정확히 일치하는 경우 여기로 위임) -
+    // 루트 디렉터리.
+    if (relPathLen == 0) {
+        return OpenResult{FileHandle{kProcFsRootHandle}, true, VfsError::None};
+    }
     // [PN-0C282BB7] 전역 통계 파일 - 프로세스에 안 매이므로 권한
     // 판정 자체가 없다(procfs.h 참고).
     if (kEqualsExact(relPath, relPathLen, kMeminfoPath, sizeof(kMeminfoPath) - 1)) {
@@ -248,6 +273,13 @@ ReadResult ProcFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t 
 }
 
 void ProcFs::stat(AsyncTask* task, KernelFsStatArgs* args) {
+    if (args->relPathLen == 0) {
+        // [신규, 2026-09-19, PN-770A28FB 항목6] "proc" 자신.
+        args->size = 0;
+        args->isDirectory = true;
+        args->error = VfsError::None;
+        return;
+    }
     if (kEqualsExact(args->relPath, args->relPathLen, kMeminfoPath, sizeof(kMeminfoPath) - 1)) {
         char global[kMaxGlobalStatusLen];
         args->size = kFormatMeminfo(global, kMaxGlobalStatusLen);
@@ -275,6 +307,29 @@ void ProcFs::stat(AsyncTask* task, KernelFsStatArgs* args) {
     char status[kMaxStatusLen];
     args->size = kFormatStatus(proc.get(), status, kMaxStatusLen);
     args->isDirectory = false;
+    args->error = VfsError::None;
+}
+
+void ProcFs::readdir(KernelFsReaddirArgs* args) {
+    if (args->dirHandle.value != kProcFsRootHandle) {
+        // [v1 축소 범위] `self`(디렉터리로 표시되지만 내부는 `status`
+        // 파일 하나뿐 - 그 자체를 다시 나열하는 것은 이번 범위 밖)나
+        // 임의 pid 디렉터리(위 클래스 문서 주석 - QU-764C5624 답변
+        // 대기) - 아직 지원하지 않는다.
+        args->hasMore = false;
+        args->error = VfsError::InvalidHandle;
+        return;
+    }
+    if (args->index >= kProcFsRootEntryCount) {
+        args->hasMore = false;
+        args->error = VfsError::None;  // 정상 종료(Read의 EOF와 동일한 뜻)
+        return;
+    }
+    const ProcFsRootEntry& entry = kProcFsRootEntries[static_cast<uint32_t>(args->index)];
+    memcpy(args->entry.name, entry.name, entry.nameLength);
+    args->entry.nameLength = entry.nameLength;
+    args->entry.isDirectory = entry.isDirectory;
+    args->hasMore = true;
     args->error = VfsError::None;
 }
 
