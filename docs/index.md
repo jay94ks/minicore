@@ -42,13 +42,13 @@
 | [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-16T00:03:46.677Z |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-15T17:44:39.178Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
-| [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-18T13:34:37.731Z |
+| [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-18T18:33:08.963Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-17T00:15:27.234Z |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-18T13:33:33.662Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-18T16:26:01.632Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-18T19:43:28.682Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-17T20:43:51.830Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
-| [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-15T12:46:23.061Z |
+| [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-18T19:00:35.209Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-18T04:23:59.144Z |
 | [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-18T17:07:13.085Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
@@ -102,5 +102,5 @@
 | [SP-ECC59BAE](./SP-ECC59BAE.md) | Running Task 강제 이관(선점형 로드밸런싱) — 설계 제안 | approved | 2026-09-16T02:55:51.632Z |
 | [SP-F146B7F8](./SP-F146B7F8.md) | Minicore Thread-Local/Per-CPU 변수 인프라(TLS/PerCpu) — 설계 제안 | approved | 2026-09-17T07:57:08.800Z |
 | [SP-F15B4A63](./SP-F15B4A63.md) | 지연 실행(타이머/알람) 인프라 — 설계 제안 | approved | 2026-09-16T02:36:33.487Z |
-| [SP-F682B889](./SP-F682B889.md) | 커널 전용 비동기 프레임워크(Task 기반) — 설계 제안 | approved | 2026-09-18T17:13:06.572Z |
+| [SP-F682B889](./SP-F682B889.md) | 커널 전용 비동기 프레임워크(Task 기반) — 설계 제안 | approved | 2026-09-18T17:36:32.930Z |
 | [SP-FAF768AB](./SP-FAF768AB.md) | Minicore 제네릭 컨테이너 템플릿(Node/List/Vector/Rbtree/Map/OrderedList) — 설계 제안 | approved | 2026-09-17T08:31:49.844Z |
