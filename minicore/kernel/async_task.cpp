@@ -421,7 +421,7 @@ void AsyncTask::yield() {
 }
 
 AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
-                              bool autoFree) {
+                              bool autoFree, bool preemptive) {
     void* mem = GenericSlabAllocator::alloc(sizeof(AsyncTask));
     if (!mem) {
         return nullptr;
@@ -457,7 +457,7 @@ AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCo
     // 않으면 아주 빨리 완료되는 작업이 기본값(true)으로 자동 반납될
     // 수 있다(경쟁).
     task->autoFree = autoFree;
-    AsyncReactor::submitCompletion(task);
+    AsyncReactor::submitCompletion(task, preemptive);
     return task;
 }
 

@@ -294,8 +294,30 @@ struct AsyncTask {
     // 또는 전용 스택 확보 실패) nullptr. autoFree=false로 제출하면
     // 리액터가 완료 후에도 반납하지 않는다(호출부가 나중에 결과를
     // 읽고 직접 반납해야 함 - waitForSyscall류의 소비 패턴).
+    //
+    // [신규, 2026-09-18, PN-4FA5F13B 근본 원인 수정] `preemptive`는
+    // 그대로 `AsyncReactor::submitCompletion()`에 전달된다(기본값
+    // false는 기존 동작 그대로 - 이 코어가 다음 idle 분기에서 자연히
+    // 드레인). **`Syscall::submit()`처럼 제출자가 실제로
+    // `Scheduler::parkCurrent()`로 블로킹할 수 있는 경로는 반드시
+    // true를 넘겨야 한다** - `Scheduler::runLoop()`이 `pickNext()`를
+    // `AsyncReactor::drainOnce()`보다 먼저 확인하므로(scheduler.cpp),
+    // 이 코어에 계속 Ready 상태인 다른 Task(예: SpawnProcess로 막
+    // 스폰된, syscall을 전혀 안 쓰는 CPU-bound 자식)가 있으면 그
+    // Task가 계속 뽑히는 한 idle 분기 자체에 영원히 도달하지 못해
+    // drainOnce()가 무기한 굶는다(실측 확인 - 같은 호출자의 두 번째
+    // SpawnProcess부터 재현되던 "wait()가 영원히 안 깨어남" 버그의
+    // 진짜 원인). preemptive=true는 `Lapic::sendFixedIpi()`로 그 코어에
+    // `kAsyncDrainVector` IPI를 걸어 인터럽트 컨텍스트에서 강제로
+    // drainOnce()를 돌게 만들어(async_task.h `submitCompletion` 문서
+    // 참고, 인터럽트 컨텍스트 호출 안전성 이미 문서화됨) 이 굶주림을
+    // 근본적으로 없앤다. vfs_syscall.cpp의 내부 KernelDriver 디스패치처럼
+    // `AsyncTaskAwaiter`/`AsyncTaskGroup::pendingCount()`로 능동
+    // 폴링(`yieldCurrent()` 기반 - 정상적인 라운드로빈으로 언젠가 다시
+    // 스케줄되므로 이 굶주림에 애초에 안 걸림)하는 호출부는 그대로
+    // 기본값(false)이면 충분하다 - 불필요한 IPI 비용을 늘리지 않는다.
     static AsyncTask* submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
-                             bool autoFree = true);
+                             bool autoFree = true, bool preemptive = false);
 };
 
 // 작업 주체(기능)별로 구현 - 실행/실패/취소 셋 다 구현 책임을 진다.

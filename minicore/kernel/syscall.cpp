@@ -190,8 +190,13 @@ AsyncTaskManageCode Syscall::submit(SyscallEndpointId endpointId, void* args) {
     PreemptionGuard guard;
 
     // autoFree=false - 결과를 나중에 wait()/waitForAnyOf()가 직접
-    // 소비/반납한다.
-    AsyncTask* task = AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/false);
+    // 소비/반납한다. preemptive=true - [PN-4FA5F13B 근본 원인 수정]
+    // 이 제출자는 곧 waitForAnyOf()->parkCurrent()로 실제 블로킹할 수
+    // 있다 - IPI로 강제 드레인해야 이 코어에 계속 Ready인 다른 Task가
+    // 있어도(예: 방금 SpawnProcess로 뜬, syscall을 안 쓰는 CPU-bound
+    // 자식) drainOnce()가 idle 분기 도달 실패로 굶지 않는다(async_task.h
+    // submit() 문서 참고).
+    AsyncTask* task = AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/false, /*preemptive=*/true);
     if (!task) {
         return 0;  // Slab 고갈 등
     }
