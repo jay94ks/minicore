@@ -250,59 +250,23 @@ kernel::Spinlock gRegistryLock;
 
 namespace kernel {
 
-// [PN-D01B7D07, SP-F682B889 §3.7] 헤더의 전방 선언(async_task.h)에
-// 대응하는 실제 정의 - AsyncTask 자신의 수명과 완전히 독립적으로
-// 힙에 할당되는 작은 컨트롤 블록. 정확히 두 참여자가 있다: (1)
-// AsyncTask 자신(생성한 쪽, `task->weakRef`로 들고 있음), (2)
-// `DelayedExecutionQueue`에 예약된 타임아웃 콜백(`kOnAsyncTaskTimeout`).
-// 락 없이 두 원자 연산만으로 "AsyncTask가 아직 살아있는지"와 "이
-// 컨트롤 블록 자체를 누가 마지막으로 다 썼는지"를 둘 다 안전하게
-// 판정한다:
-//
-// - `lock()` - 타이머 콜백이 발화 시점에 부른다. 아직 무효화되지
-//   않았으면 그 순간의 `AsyncTask*`를 반환(그 뒤로도 안전하게
-//   역참조할 수 있다 - 왜 안전한지는 `invalidate()`가 반드시
-//   `kReleaseAsyncTask()`"안에서" 실제 반납보다 **먼저** 불린다는
-//   보장 덕분이다: `lock()`이 non-null을 반환했다는 건 그 반환
-//   시점에 아직 무효화 전이었다는 뜻이고, 같은 코어 위에서 순차
-//   실행되는 이 커널에 진짜 동시 실행 경쟁은 없다 - 타임아웃
-//   콜백도 `DelayedExecutionQueue::pump()`도 전부 리액터의 idle
-//   경로에서만 실행되는 협조적 스케줄링이라 인터럽트 컨텍스트를
-//   제외하면 서로 겹치지 않는다).
-// - `invalidate()` - AsyncTask가 실제로 반납되는 바로 그 순간
-//   (`kReleaseAsyncTask()`)에만 부른다 - 이후 `lock()`은 항상
-//   nullptr.
-// - `release()` - "이 컨트롤 블록 자체"의 참조 카운트를 하나 줄이고,
-//   0이 되면(마지막 참여자) 블록 자신을 반납한다. 생성 시 2로
-//   시작(AsyncTask 쪽 몫 1 + 타이머 콜백 쪽 몫 1) - 둘 다 각자 볼일이
-//   끝나면(AsyncTask는 반납 시, 타이머는 발화 시) 정확히 한 번씩
-//   `release()`를 불러야 한다. `DelayedExecutionQueue::cancel()`이
-//   전혀 필요 없다는 게 이 설계의 핵심 - 타이머는 항상 예정대로
-//   발화하고, 이미 끝난 AsyncTask를 가리키면(`lock()==nullptr`)
-//   그냥 조용히 자기 몫만 `release()`하고 끝난다.
-class AsyncTaskWeakRef {
-public:
-    // 이 프로젝트 전역 관례대로 placement new를 쓰지 않는다(raw slab
-    // 메모리 위에 reinterpret_cast로 앉힌 뒤 명시적으로 초기화 -
-    // AsyncTask::init()/chunked_list.h와 동일한 패턴).
-    void init(AsyncTask* target) {
-        _target.store(target);
-        _refCount.store(2);  // AsyncTask 쪽 몫 1 + 타이머 콜백 쪽 몫 1
+// [갱신, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] `AsyncTaskWeakRef`
+// 클래스 정의 자체는 이제 async_task.h에 있다(async_task.cpp 전용
+// 비공개 구현에서 헤더의 공개 재사용 primitive로 승격 - 그 헤더의
+// 클래스 문서 주석 참고, `Join` syscall이 두 번째 소비자가 됐다).
+
+AsyncTaskWeakRef* AsyncTask::ensureWeakRef() {
+    if (weakRef) {
+        return weakRef;  // 이미 있으면 그대로 재사용(멱등)
     }
-
-    AsyncTask* lock() const { return _target.load(); }
-    void invalidate() { _target.store(nullptr); }
-
-    void release() {
-        if (_refCount.fetchSub(1) == 1) {
-            GenericSlabAllocator::free(this, sizeof(AsyncTaskWeakRef));
-        }
+    void* mem = GenericSlabAllocator::alloc(sizeof(AsyncTaskWeakRef));
+    if (!mem) {
+        return nullptr;  // 할당 실패
     }
-
-private:
-    AtomicPtr<AsyncTask> _target;
-    AtomicU32 _refCount;
-};
+    weakRef = reinterpret_cast<AsyncTaskWeakRef*>(mem);
+    weakRef->init(this);
+    return weakRef;
+}
 
 namespace {
 
@@ -323,16 +287,16 @@ void kOnAsyncTaskTimeout(void* arg) {
 }  // namespace
 
 void AsyncTask::scheduleTimeout(uint64_t delayTicks) {
-    if (weakRef) {
+    if (timeoutScheduled) {
         return;  // v1 - 이미 걸려 있으면 두 번째 호출은 무시(설계 문서 그대로)
     }
-    void* mem = GenericSlabAllocator::alloc(sizeof(AsyncTaskWeakRef));
-    if (!mem) {
+    AsyncTaskWeakRef* ref = ensureWeakRef();
+    if (!ref) {
         return;  // 할당 실패 - 타임아웃 없이 계속 진행(치명적이지 않음)
     }
-    weakRef = reinterpret_cast<AsyncTaskWeakRef*>(mem);
-    weakRef->init(this);
-    DelayedExecutionQueue::schedule(delayTicks, &kOnAsyncTaskTimeout, weakRef);
+    timeoutScheduled = true;
+    ref->addRef();  // 타이머 콜백 쪽 몫
+    DelayedExecutionQueue::schedule(delayTicks, &kOnAsyncTaskTimeout, ref);
 }
 
 // [PN-D01B7D07] 이 AsyncTask를 실제로 반납하는 유일한 통로 - 기존에
@@ -343,6 +307,24 @@ void AsyncTask::scheduleTimeout(uint64_t delayTicks) {
 // 전부에 빠짐없이 배선해야 해 QU-0CB8CAEE가 지적한 "새 필드 최소화"
 // 취지와 다시 부딪힌다).
 void kReleaseAsyncTask(AsyncTask* task) {
+    // [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF 조사 중 발견]
+    // **잠재 버그 수정** - `drainOnce()`의 정상 완료 경로(coroHandle.
+    // done()==true)는 이미 여기 도달하기 전에 `coroHandle.destroy()`+
+    // `coroHandle=nullptr`을 직접 해서 이 시점엔 항상 비어 있었지만,
+    // `state==Cancelled` 경로(drainOnce() 상단, `Scheduler::
+    // cancelPendingSyscalls()`가 만드는 경로)는 코루틴이 **suspend된
+    // 채로** 취소될 수 있는데도 coroHandle을 전혀 안 건드리고 곧장
+    // 이 함수로 넘어왔다 - 그러면 코루틴 프레임(및 그 안의 지역
+    // SharedPtr/WeakPtr 등 - 소멸자가 안 불림) 자체가 영원히 누수됐다.
+    // `Join`(§3.1) 착수 전까지는 이 커널의 어떤 onExec()도 실제로
+    // `co_await`로 suspend된 적이 없어(전부 co_return으로 즉시 종료)
+    // 이 경로 자체가 한 번도 실행된 적이 없었던 잠재 버그 - Join의
+    // "대상이 아직 안 끝났으면 정지" 경로가 이 프레임워크의 첫 실제
+    // suspend 지점이라 여기서 처음 발견/수정한다.
+    if (task->coroHandle) {
+        task->coroHandle.destroy();
+        task->coroHandle = nullptr;
+    }
     if (task->weakRef) {
         task->weakRef->invalidate();
         task->weakRef->release();
@@ -371,6 +353,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     allowCoreMigration = false;
     coroHandle = nullptr;
     weakRef = nullptr;
+    timeoutScheduled = false;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
@@ -646,6 +629,22 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         // `coroutine_handle::resume()`만으로 재개한다(리액터 자신의
         // 스택 위에서 직접 실행되는 일반 함수 호출 - 별도 스택 전환
         // 없음, 코루틴 방식이 스택풀 방식보다 가벼운 핵심 이유).
+        //
+        // [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF 실측 발견 -
+        // PN-523B779F "남은 범위" 실제 수정] `kAsyncTaskEntryWrapper`
+        // 문서 주석이 이미 정확히 예고해 둔 그 CR3 미동기화 버그를
+        // 여기서 처음 실제로 겪었다 - `Join`(process.cpp)이 이 코드베이스
+        // 최초로 실제 `co_await` 정지+재개를 쓰는 기능이라, 재개된
+        // 코루틴 본문이 (제출자의) 유저 포인터(`JoinArgs*`)를 그대로
+        // 역참조하는데, 이 지점의 CR3는 재개 시점에 우연히 어떤 값이든
+        // 될 수 있어(제출자의 주소공간이라는 보장이 전혀 없음) 실측으로
+        // Page Fault → PANIC까지 재현됐다(devmgr TEMP 하네스, GRUB SMP4).
+        // `PN-2008220B`가 이미 "위험한 부트 스택" 문제를 없애 둬(idle
+        // 컨텍스트가 이제 전용 higher-half 스택) 이 지점에서 CR3를 바꿔도
+        // 더 이상 안전하지 않을 이유가 없다 - `kAsyncTaskEntryWrapper`와
+        // 정확히 같은 두 헬퍼(`kSyncCr3ForAsyncExecEntry`/
+        // `kRestoreCr3AfterAsyncExecEntry`)를 그대로 재사용한다.
+        const uint64_t savedPml4ForResume = kSyncCr3ForAsyncExecEntry(task);
         task->state = AsyncTaskState::Running;
         gCurrentAsyncTask[coreIndex] = task;
         {
@@ -657,6 +656,9 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             task->coroHandle.resume();
         }
         gCurrentAsyncTask[coreIndex] = nullptr;
+        // [PN-0EB2FABF] kAsyncTaskEntryWrapper와 동일 - 리액터/idle
+        // 컨텍스트로 돌아가기 전 CR3를 이 재개 이전 값으로 되돌린다.
+        kRestoreCr3AfterAsyncExecEntry(savedPml4ForResume);
 
         if (task->coroHandle.done()) {
             task->coroHandle.destroy();

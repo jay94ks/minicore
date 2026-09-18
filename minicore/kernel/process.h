@@ -666,6 +666,52 @@ struct CreateThreadArgs {
     CreateThreadError error = CreateThreadError::None;
 };
 
+// [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] Process 그룹(0) -
+// Join(RM-48E1E610 #7)/Detach(#10 - 옛 8이 Fork와 충돌해 재배정됨,
+// RM-48E1E610 이력 참고).
+constexpr SyscallEndpointId kSyscallEndpointJoin = kMakeSyscallEndpointId(0, 7);
+constexpr SyscallEndpointId kSyscallEndpointDetach = kMakeSyscallEndpointId(0, 10);
+
+// Join/Detach 공통 실패 사유 - 대상은 항상 "호출자와 같은 프로세스의
+// threadId"로 지정한다(CreateThread가 발급한 그 값).
+enum class JoinError : uint32_t {
+    None = 0,
+    NotFound,        // targetThread가 threads에 없음(이미 회수됐거나 애초에 없던 id)
+    Detached,        // 대상이 detached - join 대상이 될 수 없음(POSIX EINVAL과 동일 의미)
+    AlreadyJoining,  // 이미 다른 Join이 이 대상을 기다리는 중(v1은 동시 joiner 1명만 지원)
+    Self,            // 대상이 호출자 자신 - 자기 자신을 join할 수 없음
+    OutOfMemory,     // AsyncTaskWeakRef 슬랩 고갈(정지 등록 실패)
+};
+
+enum class DetachError : uint32_t {
+    None = 0,
+    NotFound,       // targetThread가 threads에 없음
+    Self,           // 대상이 호출자 자신 - 자기 자신을 detach할 이유가 없음(v1은 단순 거부)
+    AlreadyJoining,  // 이미 joinerAsyncTask가 걸려 있음(§3.1 "경쟁 상황이면 에러로 거부")
+};
+
+// [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] Join syscall 인자 -
+// **진짜 블로킹**(Syscall::submit()+wait() 표준 토큰 메커니즘, 대상이
+// 아직 안 끝났으면 호출자를 실제로 재운다 - Wait(35번, 프로세스 좀비
+// 회수)의 "v1은 논블로킹"과 다른 점, process.h WaitArgs 문서 주석
+// 참고). 완료 시점엔 항상 대상이 이미 정리(reap)까지 끝난 상태.
+struct JoinArgs {
+    ThreadId targetThread = kInvalidThreadId;
+    // out
+    int32_t exitCode = 0;
+    JoinError error = JoinError::None;
+};
+
+// [신규, 2026-09-18, SP-76250478 §3 항목3, PN-0EB2FABF] Detach syscall
+// 인자 - 논블로킹(그 자리에서 플래그만 세우고 즉시 끝남, 대상 종료를
+// 기다리지 않는다). 세팅 후 대상이 정상 종료하면 좀비 단계 없이 즉시
+// 회수된다(scheduler.cpp SelfTerminateThreadHandler 참고).
+struct DetachArgs {
+    ThreadId targetThread = kInvalidThreadId;
+    // out
+    DetachError error = DetachError::None;
+};
+
 // [신규, 2026-09-18, PN-44C91D6E, SP-6BEAE0C1] `fork()` - 이 syscall만
 // `int 0x80` 경로에서 유일하게 지원된다(`syscall` 명령 경로는 SYSRET용
 // rcx/r11만 보존해 자식 재개에 필요한 나머지 GPR 스냅샷이 아예 없다 -

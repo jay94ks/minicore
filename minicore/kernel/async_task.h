@@ -154,6 +154,8 @@ private:
     std::coroutine_handle<promise_type> _handle;
 };
 
+struct AsyncTask;  // 포인터로만 참조(AsyncTaskWeakRef 아래) - 전체 정의는 바로 다음
+
 // [PN-D01B7D07, SP-F682B889 §3.7, 설계자 답변 - "lock-free 기반으로
 // 약한 참조를 구현해"] AsyncTask 타임아웃(§3.7)이 겪는 use-after-free
 // 문제(타이머가 울리기 전에 AsyncTask가 이미 반납/재사용될 수 있음)를
@@ -161,10 +163,62 @@ private:
 // 개별 배선을 하는 대신, 독립적으로 힙 할당되는 이 작은 컨트롤
 // 블록으로 해결한다 - AsyncTask 쪽은 포인터 하나(`weakRef`)만 갖고,
 // 실제 무효화/수명 판단은 전부 이 클래스 안에서 원자적으로 끝난다.
-// 자세한 내용은 async_task.cpp 정의부 주석 참고(구현 세부는 이
-// 헤더의 소비자가 알 필요 없음 - `AsyncTask::scheduleTimeout()`만
-// 공개 API).
-class AsyncTaskWeakRef;
+//
+// [갱신, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] 원래 async_task.cpp
+// 안에만 있던 완전 비공개 구현이었으나(주석 원문: "구현 세부는 이
+// 헤더의 소비자가 알 필요 없음 - AsyncTask::scheduleTimeout()만 공개
+// API"), `Join` syscall(process.cpp)이 **똑같은 문제**(정지된 Join
+// AsyncTask를 다른 핸들러(`SelfTerminateThreadHandler`, scheduler.cpp)
+// 가 안전하게 참조/재개해야 함 - 대상 UserThread가 그사이 먼저 죽어도
+// UAF 없이)를 겪어, 이 클래스를 async_task.cpp 전용에서 헤더의 진짜
+// 공개 재사용 primitive로 승격했다(순수 이동 - 로직 변화 없음). 참조
+// 카운트 시작값만 일반화했다: 예전엔 "AsyncTask 쪽 몫 1 + 타이머 쪽
+// 몫 1 = 2"로 고정이었으나, 이제 관찰자가 몇 명이든(타임아웃/Join
+// 둘 다 동시에 걸 수도 있음) `init()`이 "AsyncTask 자신의 몫"인 1로만
+// 시작하고, 새 관찰자가 생길 때마다 `addRef()`를 명시적으로 한 번씩
+// 부른다(`scheduleTimeout()`이 이미 그렇게 갱신됨) - `kReleaseAsyncTask()`
+// 가 여전히 "AsyncTask 쪽 몫" 하나만 `release()`하는 기존 동작은
+// 그대로라 이 일반화가 기존 타임아웃 동작을 바꾸지 않는다.
+//
+// - `lock()` - 아직 무효화되지 않았으면 그 순간의 `AsyncTask*`를
+//   반환(그 뒤로도 안전하게 역참조할 수 있다 - 왜 안전한지는
+//   `invalidate()`가 반드시 `kReleaseAsyncTask()` "안에서" 실제 반납보다
+//   **먼저** 불린다는 보장 덕분이다: `lock()`이 non-null을 반환했다는
+//   건 그 반환 시점에 아직 무효화 전이었다는 뜻이고, 같은 코어 위에서
+//   순차 실행되는 이 커널에 진짜 동시 실행 경쟁은 없다).
+// - `invalidate()` - AsyncTask가 실제로 반납되는 바로 그 순간
+//   (`kReleaseAsyncTask()`)에만 부른다 - 이후 `lock()`은 항상 nullptr.
+// - `addRef()`/`release()` - "이 컨트롤 블록 자체"의 참조 카운트를
+//   늘리고/줄인다, 0이 되면(마지막 참여자) 블록 자신을 반납한다.
+//   각 관찰자(AsyncTask 자신 포함)는 자기 볼일이 끝나면(AsyncTask는
+//   반납 시, 타임아웃은 발화 시, Join은 재개 처리 시) 정확히 자신이
+//   `addRef()`(또는 `init()`의 암묵적 +1)한 만큼만 `release()`를
+//   불러야 한다.
+class AsyncTaskWeakRef {
+public:
+    // 이 프로젝트 전역 관례대로 placement new를 쓰지 않는다(raw slab
+    // 메모리 위에 reinterpret_cast로 앉힌 뒤 명시적으로 초기화 -
+    // AsyncTask::init()/chunked_list.h와 동일한 패턴). AsyncTask 자신의
+    // 몫(1)으로만 시작한다 - 추가 관찰자는 각자 addRef()를 부른다.
+    void init(AsyncTask* target) {
+        _target.store(target);
+        _refCount.store(1);
+    }
+
+    AsyncTask* lock() const { return _target.load(); }
+    void invalidate() { _target.store(nullptr); }
+    void addRef() { _refCount.fetchAdd(1); }
+
+    void release() {
+        if (_refCount.fetchSub(1) == 1) {
+            GenericSlabAllocator::free(this, sizeof(AsyncTaskWeakRef));
+        }
+    }
+
+private:
+    AtomicPtr<AsyncTask> _target;
+    AtomicU32 _refCount;
+};
 
 struct AsyncTask {
     // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이
@@ -263,12 +317,31 @@ struct AsyncTask {
     // "Cancel Source 쪽에 timeout을 유발").
     AsyncTokenSource cancelSource;
 
-    // [PN-D01B7D07, §3.7] scheduleTimeout()이 호출된 적 있으면(최대
-    // 1회, v1 - 한 AsyncTask에 타임아웃을 두 번 거는 것은 지원하지
-    // 않음) 그때 만들어진 약한 참조 컨트롤 블록 - 이 AsyncTask가
+    // [PN-D01B7D07, §3.7] `ensureWeakRef()`(아래)가 처음 호출된 적
+    // 있으면 그때 만들어진 약한 참조 컨트롤 블록 - 이 AsyncTask가
     // 실제로 반납될 때(kReleaseAsyncTask, async_task.cpp) 이 필드를
-    // 보고 무효화/해제한다. 타임아웃이 걸린 적 없으면 계속 nullptr.
+    // 보고 무효화/해제한다(AsyncTask 자신의 몫 하나만). 아직 아무도
+    // 요청한 적 없으면 계속 nullptr. [갱신, 2026-09-18, PN-0EB2FABF]
+    // 이제 타임아웃(`scheduleTimeout()`) 전용이 아니다 - `Join`(process.cpp)
+    // 도 같은 컨트롤 블록을 공유해 쓴다(둘 다 걸려 있어도 안전 -
+    // `ensureWeakRef()`가 이미 있으면 그대로 재사용).
     AsyncTaskWeakRef* weakRef = nullptr;
+
+    // [신규, 2026-09-18, PN-0EB2FABF] `scheduleTimeout()`이 이미 이
+    // AsyncTask에 타임아웃을 건 적 있는지 - `weakRef != nullptr`과는
+    // 이제 별개 축이다(weakRef는 Join도 만들 수 있으므로, "weakRef가
+    // 있다"가 더 이상 "타임아웃이 걸려 있다"를 뜻하지 않는다). v1
+    // "타임아웃은 AsyncTask당 최대 한 번"이라는 기존 불변조건은 이
+    // 플래그 하나로 유지한다.
+    bool timeoutScheduled = false;
+
+    // [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] `weakRef`가
+    // 아직 없으면 새로 만들어(AsyncTask 자신의 몫으로 `init()`) 채우고,
+    // 있으면 그대로 반환(멱등, `ensureSelfRef()`류 관례와 동일) - 실패
+    // (슬랩 고갈) 시 nullptr. **호출부는 반환값이 non-null이면 자신의
+    // 몫만큼 직접 `addRef()`를 불러야 한다** - 이 함수 자체는 관찰자
+    // 등록을 하지 않는다(순수 "블록을 얻기/만들기"만 담당).
+    AsyncTaskWeakRef* ensureWeakRef();
 
     // [PN-D01B7D07, SP-F682B889 §3.7] delayTicks(Timer::tickCount()
     // 단위, DelayedExecutionQueue 재사용) 뒤에도 이 AsyncTask가 아직

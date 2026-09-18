@@ -247,12 +247,25 @@ public:
     // 이 값을 세팅하는 `Detach` syscall(§3 항목3, 후속 증분)이 없어
     // 지금은 항상 false로 남는다.
     bool detached = false;
-    // §3.1 - 이 스레드가 좀비가 되는 순간(SelfTerminateThreadHandler가)
-    // 직접 깨워야 할 Join() 대기자(있다면 단 하나, v1은 다중 joiner
-    // 미지원). AsyncTask는 이 파일 위 #include "async_task.h"로 이미
-    // 완전한 타입이라 WeakPtr<AsyncTask>를 바로 멤버로 둘 수 있다.
-    // **여전히 미배선** - `Join` syscall(후속 증분)이 실제로 세팅한다.
-    WeakPtr<AsyncTask> joinerAsyncTask;
+    // [정정, 2026-09-18, PN-0EB2FABF 4단계 착수 중 발견] §3.1 - 이
+    // 스레드가 좀비가 되는 순간(SelfTerminateThreadHandler가) 직접
+    // 재개시켜야 할 Join() 대기자의 AsyncTask(있다면 단 하나, v1은
+    // 다중 joiner 미지원)를 안전하게 참조하는 값 - **Phase 1이 적어
+    // 둔 `WeakPtr<AsyncTask>` 스케치는 실제로 쓸 수 없었다**: `WeakPtr<T>`
+    // 는 `T`가 `kMakeShared`로 만들어진(또는 `EnableSharedFromThis<T>`
+    // 를 상속한) 대상이어야 컨트롤 블록을 가리킬 수 있는데, `AsyncTask`
+    // 는 항상 raw slab 메모리 위에 놓이는 원시 구조체라(SP-F682B889
+    // §3.1 "처리기가 생성/해제 전부 책임") 그런 컨트롤 블록 자체가
+    // 없다. 이 커널이 "AsyncTask를 그 수명과 독립적으로 안전하게
+    // 관찰"해야 하는 문제를 이미 겪어 풀어 둔 게 `AsyncTaskWeakRef`
+    // (async_task.h, 원래 `AsyncTask::scheduleTimeout()` 전용이었으나
+    // 이번 증분에서 공개 재사용 primitive로 승격, 그 클래스 문서 참고)
+    // - Join도 그 정확히 같은 문제라 그대로 재사용한다. `AsyncTask::
+    // ensureWeakRef()`로 얻고 `addRef()`로 이 필드 몫을 등록, 다 쓰면
+    // (SelfTerminateThreadHandler가 소비한 뒤) `release()`로 그 몫을
+    // 내려놓는다 - process.cpp JoinHandler/scheduler.cpp
+    // SelfTerminateThreadHandler 양쪽 참고.
+    AsyncTaskWeakRef* joinerAsyncTask = nullptr;
 
     // [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] `CreateThread`
     // (process.cpp)가 만든 스레드에서만 쓴다 - `kEnterRing3Thread`

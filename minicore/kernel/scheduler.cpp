@@ -948,7 +948,55 @@ public:
             process->addressSpace.unmapRegion(userThread->threadStackBase, userThread->threadStackSize);
         }
 
-        if (userThread->detached) {
+        // [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] Join()이
+        // 이미 이 스레드를 기다리며 정지해 뒀는지 확인 - process.cpp의
+        // `JoinAwaiter`/`JoinHandler` 문서 주석과 정확히 대응하는 짝.
+        // `detached`와 `joinerAsyncTask`는 서로 배타적이다(JoinHandler는
+        // `detached`인 대상을 거부하고, DetachHandler는 `joinerAsyncTask`
+        // 가 이미 걸린 대상을 거부한다 - §3.1 "경쟁 상황이면 에러로
+        // 거부") - 그래서 아래를 if/else if로 나눠도 안전하다.
+        AsyncTaskWeakRef* joinerRef = userThread->joinerAsyncTask;
+        if (joinerRef) {
+            userThread->joinerAsyncTask = nullptr;
+            // 회수(reap)를 여기서 직접 끝낸다(§3.1 "그 자리에서 직접
+            // 회수까지 마치고 완료 처리") - JoinArgs를 먼저 채운
+            // 다음에 지운다(재개된 Join 코루틴은 target을 다시 안
+            // 건드리므로 순서 자체는 자유롭지만, "결과가 이미 확정된
+            // 뒤에만 재개한다"는 계약을 명확히 하기 위해 회수를
+            // 재개보다 먼저 한다).
+            AsyncTask* joinTask = joinerRef->lock();
+            if (joinTask) {
+                auto* joinArgs = static_cast<JoinArgs*>(joinTask->args);
+                joinArgs->exitCode = userThread->exitCode;
+                joinArgs->error = JoinError::None;
+            }
+            // joinTask가 이미 사라졌어도(조인 호출자가 먼저 죽은 극단적
+            // 경쟁 - JoinHandler::onCancel 문서 주석의 알려진 v1 한계)
+            // 이 스레드 자신은 정상적으로 회수해야 한다 - 아무도 결과를
+            // 못 받을 뿐 UserThread 슬랩이 새면 안 되므로.
+            auto* slot = process->threads.find(
+                [userThread](const SharedPtr<UserThread>& t) { return t.get() == userThread; });
+            if (slot) {
+                process->threads.erase(slot);
+            }
+            UserThread::release(userThread);
+            // 이 필드가 쥐고 있던 "joiner 몫" 하나를 내려놓는다(AsyncTask
+            // 자신의 몫은 그 AsyncTask가 나중에 반납될 때 별도로 처리).
+            joinerRef->release();
+            if (joinTask) {
+                // preemptive=true - 실제로 파킹된 대기자(Join 호출자
+                // 자신이 Syscall::wait()로 재우고 있었을 UserThread)를
+                // 깨우는 경로라 PN-4FA5F13B가 확립한 것과 동일한 이유로
+                // 즉시 드레인을 강제한다.
+                AsyncReactor::submitCompletion(joinTask, /*preemptive=*/true);
+            }
+
+            const bool anyThreadLeft = process->threads.find([](const SharedPtr<UserThread>&) { return true; }) !=
+                                        nullptr;
+            if (!anyThreadLeft) {
+                kFinalizeProcessTermination(process);
+            }
+        } else if (userThread->detached) {
             // §3 항목3 - 좀비 단계를 건너뛰고 그 자리에서 즉시 회수.
             // process.h/syscall.h의 threads 문서 주석 "순서 중요"
             // 그대로 - release() 전에 컨테이너 슬롯부터 지운다.
@@ -974,9 +1022,9 @@ public:
                 kFinalizeProcessTermination(process);
             }
         }
-        // 좀비지만 detached가 아니면: `threads`에 그대로 남겨 둔다 -
-        // `Join`(§3.1, 후속 증분)이 회수할 때까지 UserThread 구조체
-        // 자신(threadId/exitCode 보관용)만 살려 둔다.
+        // 좀비고 detached도 joinerAsyncTask도 없으면: `threads`에 그대로
+        // 남겨 둔다 - 나중에 걸릴 `Join`이 회수할 때까지 UserThread
+        // 구조체 자신(threadId/exitCode 보관용)만 살려 둔다.
         co_return;
     }
     void onFailure(AsyncTask*) override {}

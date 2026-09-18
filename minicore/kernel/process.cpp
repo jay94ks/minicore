@@ -1433,6 +1433,183 @@ public:
 
 CreateThreadHandler gCreateThreadHandler;
 
+// [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] Join이 co_await하는
+// 커스텀 awaiter - "대상이 아직 안 끝났으면 이 코루틴을 정지시키고,
+// SelfTerminateThreadHandler(scheduler.cpp)가 대상 종료 시 대신
+// 재개시킨다"는 SP-76250478 §4가 "착수 세션이 확정할 순수 구현 세부"로
+// 남겨 둔 문제의 실제 구현 - 이 커널 전체에서 `co_await`가 실제로
+// suspend까지 이어지는 최초의 지점이다(기존 onExec들은 전부 co_await
+// 없이 즉시 co_return, async_task.h의 `AsyncTaskWeakRef` 클래스 문서
+// 참고). 그 `AsyncTaskWeakRef`(원래 타임아웃 전용이었으나 이번 증분에서
+// 공개 재사용 primitive로 승격)를 그대로 재사용해 "이 Join AsyncTask가
+// 재개 시점까지 살아있는지"를 그 사이 이 스레드/프로세스가 무슨 일을
+// 겪든 안전하게 관찰 가능하게 만든다.
+class JoinAwaiter {
+public:
+    JoinAwaiter(AsyncTask* joinTask, UserThread* target) : _joinTask(joinTask), _target(target) {}
+
+    bool await_ready() const noexcept { return false; }  // 항상 정지(빠른 경로는 co_await 이전에 이미 처리됨)
+
+    // true를 반환하면 실제로 정지, false면 즉시 재개(할당 실패 등 -
+    // await_resume()의 반환값으로 호출부에 실패를 알린다).
+    bool await_suspend(std::coroutine_handle<>) {
+        AsyncTaskWeakRef* ref = _joinTask->ensureWeakRef();
+        if (!ref) {
+            return false;  // 슬랩 고갈 - 정지하지 않고 곧장 재개
+        }
+        ref->addRef();  // 이 Join(joiner) 쪽 몫 - SelfTerminateThreadHandler가 소비 후 release()
+        _target->joinerAsyncTask = ref;
+        _registered = true;
+        return true;
+    }
+
+    // true면 실제로 정지했다가 재개됨(args는 이미 SelfTerminateThreadHandler
+    // 가 채워 뒀다), false면 await_suspend()가 즉시 재개를 선택(할당 실패).
+    bool await_resume() const noexcept { return _registered; }
+
+private:
+    AsyncTask* _joinTask;
+    UserThread* _target;
+    bool _registered = false;
+};
+
+// [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] Join 본체 - 대상을
+// 호출자 자신의 threads에서 threadId로 찾는다(process.h JoinArgs 문서
+// 주석 참고 - 진짜 블로킹, Wait(35번, 프로세스 좀비 회수)의 "v1은
+// 논블로킹"과 다른 점).
+class JoinHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<JoinArgs*>(argsRaw);
+
+        // WaitHandler/CreateThreadHandler와 동일한 관례(PN-5BBD4301) -
+        // onExec() 안에서 Scheduler::currentTask()를 직접 쓰지 않는다.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!proc) {
+            args->error = JoinError::NotFound;
+            co_return;
+        }
+
+        auto* slot = proc->threads.find(
+            [tid = args->targetThread](const SharedPtr<UserThread>& t) { return t && t->threadId == tid; });
+        if (!slot) {
+            args->error = JoinError::NotFound;
+            co_return;
+        }
+        UserThread* target = slot->value.get();
+        if (target == caller) {
+            args->error = JoinError::Self;
+            co_return;
+        }
+        if (target->detached) {
+            args->error = JoinError::Detached;
+            co_return;
+        }
+        if (target->joinerAsyncTask) {
+            // v1은 대상 하나당 동시 joiner 1명만 지원(§3.1) - 다중
+            // joiner 대기열은 실사용처가 생기면 후속.
+            args->error = JoinError::AlreadyJoining;
+            co_return;
+        }
+
+        if (target->isZombie) {
+            // 빠른 경로 - 이미 좀비(먼저 정상 종료해 뒀음). 그 자리에서
+            // 바로 회수 - 정지할 필요조차 없다.
+            args->exitCode = target->exitCode;
+            args->error = JoinError::None;
+            proc->threads.erase(slot);
+            UserThread::release(target);
+            co_return;
+        }
+
+        // 느린 경로 - 대상이 아직 살아있다. 정지했다가
+        // SelfTerminateThreadHandler(scheduler.cpp)가 대신 깨워 줄 때까지
+        // 기다린다(위 JoinAwaiter 문서 참고). `proc`(SharedPtr)을 이
+        // 코루틴 프레임이 정지 중에도 계속 쥐고 있어, 그동안 이 Process
+        // 가 파괴되지 않는다는 보너스가 있다(코루틴 지역 변수의 소멸자는
+        // 재개/취소 시점까지 전혀 안 불림 - 표준 C++20 코루틴 프레임
+        // 수명 규칙 그대로, 이 프로젝트의 "raw 슬랩엔 placement new
+        // 없음" 관례와는 무관한 완전히 별개의 축).
+        //
+        // **알려진 v1 한계**: 이 Join 자신의 호출자가 정지 중에 먼저
+        // 죽으면(강제 종료 등) `onCancel()`(아래)이 불려 이 코루틴
+        // 프레임은 안전하게 파괴되지만(async_task.cpp kReleaseAsyncTask()
+        // 가 이번 증분에서 고친 부분), `target->joinerAsyncTask`는
+        // 정리되지 않은 채 남는다 - 그 결과 target은 이후 영원히
+        // AlreadyJoining으로 거부되는(다른 스레드가 다시 join 시도해도)
+        // 좀비가 된다. 다중 joiner 대기열과 같은 급의 v1 한계로
+        // 문서화만 하고 감수한다(RM-23F4B687 §4) - 정말 필요해지면
+        // onCancel()에 target까지 전달하도록 별도 내부 상태를 추가한다.
+        const bool registered = co_await JoinAwaiter(task, target);
+        if (!registered) {
+            args->error = JoinError::OutOfMemory;
+        }
+        // registered==true면 args는 이미 SelfTerminateThreadHandler가
+        // 채워 뒀다 - 여기서 더 할 일 없음.
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    // 위 "알려진 v1 한계" 문서 주석 참고 - target->joinerAsyncTask 정리는
+    // 하지 않는다(이 시점엔 target 자체를 모른다 - args/task 어느 쪽에도
+    // 안 실려 있음). 코루틴 프레임 자체의 안전한 파괴는 프레임워크
+    // (kReleaseAsyncTask)가 담당하므로 이 메서드는 할 일이 없다.
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+JoinHandler gJoinHandler;
+
+// [신규, 2026-09-18, SP-76250478 §3 항목3, PN-0EB2FABF] Detach 본체 -
+// 논블로킹(그 자리에서 플래그만 세우고 즉시 끝남).
+class DetachHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<DetachArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!proc) {
+            args->error = DetachError::NotFound;
+            co_return;
+        }
+
+        auto* slot = proc->threads.find(
+            [tid = args->targetThread](const SharedPtr<UserThread>& t) { return t && t->threadId == tid; });
+        if (!slot) {
+            args->error = DetachError::NotFound;
+            co_return;
+        }
+        UserThread* target = slot->value.get();
+        if (target == caller) {
+            args->error = DetachError::Self;
+            co_return;
+        }
+        if (target->joinerAsyncTask) {
+            // §3.1 "joinerAsyncTask가 이미 세팅돼 있는 상태에서 Detach()가
+            // 호출되면(경쟁 상황) 에러로 거부한다" - 설계 문서 그대로.
+            args->error = DetachError::AlreadyJoining;
+            co_return;
+        }
+
+        // [알려진 한계, RM-23F4B687 §4 취지 - 순수 구현 세부] target이
+        // 이미 isZombie(정상 종료했지만 아직 아무도 회수 안 한 상태)
+        // 여도 여기서 즉시 회수하지는 않는다 - 설계 문서는 "정상 종료
+        // *시점*에 detached면 즉시 회수"만 명시했지 "이미 좀비인
+        // 스레드를 뒤늦게 detach하면 그 순간 회수"까지는 요구하지
+        // 않는다. 실사용처가 생기면 이 지점에서 즉시 회수하도록 확장할
+        // 수 있다.
+        target->detached = true;
+        args->error = DetachError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+DetachHandler gDetachHandler;
+
 // [SP-0666DB3C §4.5, RM-48E1E610 29번, PN-71E50394 항목 4] `Kill` 본체 -
 // signal.h의 `KillArgs` 문서 주석 그대로, v1은 호출자 자신의 직계
 // 자식만 대상으로 허용한다(`WaitHandler`와 동일한 스코프/검증 방식).
@@ -1716,6 +1893,8 @@ void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointKill, &gKillHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointSignalAction, &gSignalActionHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointCreateThread, &gCreateThreadHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointJoin, &gJoinHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointDetach, &gDetachHandler);
 }
 
 }  // namespace kernel
