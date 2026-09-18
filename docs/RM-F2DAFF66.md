@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T21:15:41.622Z
+  updatedAt: 2026-09-18T23:39:25.494Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -382,6 +382,19 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   전부 훑는 습관이 유효함을 재확인.
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-19] `SP-DE19BB1C`(커널 영역 TLB 샷다운, IPI
+  기반)** - §2(핵심 메커니즘: Mailbox 구조체/`Lapic::sendFixedIpi`/
+  브로드캐스트/ISR)와 §5(다중 요청 슬롯 확장, 벡터 배정)가 이미
+  확정 표시와 커밋 근거를 갖고 있었는데, 실제 소스(`tlb_shootdown.h/
+  .cpp`, `lapic.h`, `address_space.cpp`)와 전문 대조한 결과 전부
+  정확히 일치함을 재확인 - `TlbShootdownRequest`(요청자 코어 인덱스별
+  슬롯, `gRequests[kAcpiMaxCpus]`)/`gPendingMask[]`(수신자별 Target
+  Pending Mask)/벡터 `0xE0`/`Lapic::sendFixedIpi` 전부 문서 그대로
+  구현돼 있고, `KernelAddressSpaceManager::unmapRegion()`(커널 영역,
+  인자 생략)과 `ProcessAddressSpaceManager::unmapRegion()`/
+  `resizeAnonymousRegion()`(유저 영역, `_pml4Phys` 전달) 세 호출부
+  모두 실제로 존재함을 grep으로 확인 - **갭 없음.**
 
 - **`PN-C4611402`(Channel IPC `onCancel`, "connectChannel 취소:
   대기열에서 자신의 PendingConnectRequest 제거")** - [2026-09-18]
