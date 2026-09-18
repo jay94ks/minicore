@@ -41,3 +41,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/pubreg ${CMAKE_CURRENT_
 # fs(SP-8B6B8D25 §4-A, PN-452FF696) - init/devmgr/pubreg와 동일한
 # 이유의 out-of-tree add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/fs ${CMAKE_CURRENT_BINARY_DIR}/minicore-fs)
+
+# dbgtarget(PN-87D6B615 "남은 범위" 2번, 디버그 세션 E2E 전용 디버기) -
+# init/devmgr/pubreg/fs와 동일한 이유의 out-of-tree add_subdirectory.
+# **부팅 매니페스트(scripts/build-initrd.sh)에는 의도적으로 포함하지
+# 않는다** - minicore/dbgtarget/main.cpp 상단 주석 참고.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/dbgtarget ${CMAKE_CURRENT_BINARY_DIR}/minicore-dbgtarget)
