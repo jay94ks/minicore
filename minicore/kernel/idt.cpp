@@ -571,6 +571,12 @@ constexpr kernel::uint64_t kSyscallVerbFork = 3;
 // 딜따 호출부만 존재).
 extern "C" void kTaskOnFallingToEnd();
 
+// [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `kTaskOnFallingToEnd`
+// 바로 위와 동일한 이유로 헤더 없이 직접 선언(scheduler.cpp 정의) -
+// `SelfTerminateThread` 트랩 특별 취급(아래 kDispatchSyscallVerbBody)이
+// 부른다. `kTaskOnFallingToEnd`와 달리 exitCode를 받는다.
+extern "C" void kThreadOnFallingToEnd(kernel::int32_t exitCode);
+
 // [신규, 2026-09-17, PN-71E50394 항목3 나머지 - SP-0666DB3C §4.4
 // 체크포인트] 실행 중(비대기)인 UserThread도 다음 syscall 진입
 // 시점에 Kill/Terminate가 걸려 있으면 여기서 걸러낸다 - §9.5의
@@ -646,6 +652,31 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1) {
             // 지킨다(kTaskFallingToEndHalt와 동일한 역할).
             if (endpointId == kSyscallEndpointSelfTerminate) {
                 kTaskOnFallingToEnd();
+                asm volatile("sti");
+                for (;;) {
+                    asm volatile("hlt");
+                }
+            }
+            // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF]
+            // `SelfTerminateThread`도 self-terminate와 완전히 같은 이유로
+            // 절대 ring3에 복귀하면 안 된다(syscall.h의
+            // kSyscallEndpointSelfTerminateThread 문서 주석 참고) - 다만
+            // exitCode(SelfTerminateThreadArgs 하나뿐인 필드)를 유저
+            // 포인터(arg1)에서 읽어야 한다는 점만 다르다. 포인터가
+            // 유효하지 않으면(잘못된 유저 프로그램) 방어적으로 0으로
+            // 취급한다 - 이 syscall 자체가 반환하지 않으므로 별도
+            // 에러 코드를 돌려줄 방법이 없다.
+            if (endpointId == kSyscallEndpointSelfTerminateThread) {
+                kernel::int32_t exitCode = 0;
+                auto* current = kernel::Scheduler::currentTask();
+                if (arg1 != 0 && current && current->isUserLevel) {
+                    auto* callerThread = static_cast<kernel::UserThread*>(current);
+                    if (kernel::Paging::isUserRangeValid(arg1, sizeof(kernel::SelfTerminateThreadArgs),
+                                                          callerThread->userPml4Phys)) {
+                        exitCode = reinterpret_cast<kernel::SelfTerminateThreadArgs*>(arg1)->exitCode;
+                    }
+                }
+                kThreadOnFallingToEnd(exitCode);
                 asm volatile("sti");
                 for (;;) {
                     asm volatile("hlt");

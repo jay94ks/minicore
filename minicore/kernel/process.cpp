@@ -1377,11 +1377,13 @@ public:
 
         // SysV 관례상 함수 진입 시점의 RSP%16==8을 흉내낸다(call이
         // 방금 반환주소 8바이트를 push한 것처럼 보이게) - 그 8바이트
-        // 자리에 0을 심어 둔다. `entry`가 §3 항목2(SelfTerminateThread
-        // 트램폴린, 아직 미착수) 없이 실수로 ret하면 주소 0으로 점프
-        // 하는 대신 그 자리에서 곧장 NULL 페이지 폴트로 정직하게
-        // 죽는다(기존 유저 폴트 처리 경로가 그대로 잡음) - 완전히
-        // 정의되지 않은 동작보다 안전한 v1 방어. kSetupInitialUserStack()
+        // 자리에 0을 심어 둔다. `entry`가 유저랜드 트램폴린(§3 항목2,
+        // `SelfTerminateThread`를 대신 호출하는 wrapping) 없이 직접
+        // 실수로 ret하면 주소 0으로 점프하는 대신 그 자리에서 곧장
+        // NULL 페이지 폴트로 정직하게 죽는다(기존 유저 폴트 처리
+        // 경로가 그대로 잡음) - 완전히 정의되지 않은 동작보다 안전한
+        // 방어(트램폴린은 유저랜드 C 런타임 몫이라 커널이 강제할 수
+        // 없다). kSetupInitialUserStack()
         // 과 동일한 이유로 현재 CR3에 기대지 않고 Paging::translatePage()
         // +direct map으로 직접 쓴다(이 onExec()이 reactor 컨텍스트에서
         // 실행 중일 수 있어 proc->pml4Phys가 지금 CR3라는 보장이 없다).
@@ -1397,6 +1399,12 @@ public:
         thread->userPml4Phys = proc->pml4Phys;
         thread->ring3EntryPoint = args->entry;
         thread->ring3UserStackTop = retSlotAddr;
+        // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF]
+        // SelfTerminateThreadHandler(scheduler.cpp)가 이 스레드 종료
+        // 시 unmapRegion()으로 그대로 넘길 값 - syscall.h의 threadStackBase
+        // 문서 주석 참고.
+        thread->threadStackBase = stackBase;
+        thread->threadStackSize = stackSize;
         thread->threadStartArg = args->arg;
         thread->init(kEnterRing3Thread, nullptr);
         thread->ensureSelfRef();

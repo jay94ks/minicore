@@ -756,6 +756,122 @@ void kResurrectSpawnTrampoline(void* arg) {
     GenericSlabAllocator::free(args, sizeof(ResurrectSpawnArgs));
 }
 
+// [신규, 2026-09-18, SP-76250478 §3, PN-0EB2FABF] `SelfTerminateHandler`
+// (call0, "이 스레드가 끝나면 프로세스 전체가 끝난다" - POSIX `exit()`
+// 의미)와 `SelfTerminateThreadHandler`(call9, 아래, "process->threads가
+// 실제로 비었을 때만" 같은 마무리가 필요 - POSIX 마지막 스레드가
+// `pthread_exit()`한 경우와 동일 의미) 양쪽이 공유하는 프로세스 종료
+// 마무리 로직 - 원래 `SelfTerminateHandler::onExec()` 하나에만 있던
+// 코드를 순수 이동한 것뿐(동작 변화 없음, 두 번째 호출부가 생겨 뺐다).
+// `process->destroy()`(주소공간 반납)부터 고아 입양/좀비 마킹/essential
+// 패닉/resurrect 예약까지 전부 담당한다.
+void kFinalizeProcessTermination(SharedPtr<Process>& process) {
+    // Resurrect(SP-EAB162FC §6, 2026-09-16 §6.3/§6.4 개정 반영) -
+    // destroy() 이후에도 Process 객체 자체(캐스팅 근거: 정적/
+    // 장기수명 인스턴스 - destroy()는 주소공간만 반납할 뿐 이
+    // 구조체를 지우지 않는다)는 살아있어 startFlags/
+    // consecutiveFailures를 안전하게 읽을 수 있다. 재스폰은
+    // 기존 주소공간이 완전히 반납된 뒤에 한다(자원 회수 -> 재생성
+    // 순서).
+    const ProcessStartFlags startFlags = process->startFlags;
+    const uint32_t newConsecutiveFailures = process->consecutiveFailures + 1;
+    process->destroy();
+
+    // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째
+    // 증분(2/2)] 고아 입양 - 이 프로세스 자신이 SpawnProcess로
+    // 자식을 만들어 뒀다면(parent가 비어 있는 고정 스폰
+    // KernelService라도 스스로 SpawnProcess를 부를 수 있다 -
+    // devmgr가 PnP 드라이버 자식을 만드는 경우 등), 그 자식들은
+    // 이제 부모를 잃는다. §6 "고아는 init이 입양"에 따라
+    // 살아있는 자식이든 이미 좀비인 자식이든 전부 orphanRoot()로
+    // reparent한다 - 좀비 자식은 reparent만 하고 실제 회수(reap)는
+    // 여전히 init이 나중에 wait()를 불러야 하는 채로 남는다(이
+    // 시점에 자동으로 회수하지 않는다 - §11-2 참고, "init이
+    // 실제로 wait()를 자동 반복 호출하는지"는 커널이 강제할
+    // 정책이 아니라 유저랜드 init 구현의 몫).
+    //
+    // [수정, 2026-09-17, PN-E2A114C1] `children`이 이제 자식의
+    // 유일한 강한 소유자다 - `orphanRoot->children.insert(child)`
+    // 가 그 소유권을 그대로 이어받고(SharedPtr 복사, 강한 참조
+    // +1), 뒤이은 `process->children.clear()`가 옛 소유자
+    // 쪽 몫을 내려놓는다(chunked_list.h 수정 참고) - net
+    // 참조 카운트는 그대로, 소유자만 바뀐다.
+    SharedPtr<Process> orphanRoot = Process::orphanRoot().lock();
+    if (orphanRoot && orphanRoot.get() != process.get()) {
+        process->children.forEach([&](SharedPtr<Process>& child, auto*) {
+            if (!child) {
+                return;
+            }
+            child->parent = WeakPtr<Process>(orphanRoot);
+            orphanRoot->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+            // 실패(슬랩 고갈)해도 그냥 넘어간다 - child->parent는
+            // 이미 orphanRoot로 바뀌었으니 그 자식이 나중에 종료할
+            // 때 좀비로는 남지만, 이 순간 orphanRoot->children
+            // 목록에 못 들어갔다면 root가 그 좀비를 wait()로 찾지
+            // 못한다(드문 자원 고갈 경합 - 새 DC 없이 감수할 수준의
+            // v1 한계, RM-23F4B687 §4).
+            orphanRoot->children.insert(child);
+        });
+    }
+    process->children.clear();
+
+    // 부모가 있으면(SpawnProcess로 만들어진 트리 멤버) 좀비로
+    // 남겨 부모의 wait()(RM-48E1E610 35번)를 기다린다 - Process
+    // 구조체/threads(process.h)가 담고 있던 UserThread들의 반납은
+    // WaitHandler(process.cpp)가 회수
+    // 시점에 담당한다(이제 SharedPtr 마지막 강한 참조 소멸을
+    // 통해서 - process.cpp WaitHandler 참고). 부모가 없으면
+    // (고정 스폰 KernelService, 또는 SpawnProcessHandler 주석의
+    // 이론상 도달 불가 경로) 기존과 완전히 동일하게 아무도
+    // 회수하지 않는 상태로 그냥 남는다 - `gInitProcess`/
+    // `gServiceProcess[]` 전역이 계속 강하게 붙들고 있으므로
+    // 이 지역 변수 `process`가 스코프를 벗어나도 파괴되지 않는다.
+    if (process->parent.lock()) {
+        process->isZombie = true;
+        // exitCode(§6) - 프로세스 트리 좀비의 exitCode는 여전히 0
+        // 고정이다(§6이 다루는 건 Process::exitCode, UserThread::
+        // exitCode - SelfTerminateThread가 기록하는 값, §3 항목2 - 와는
+        // 별개 축이라는 점이 이번 증분으로 더 분명해졌다. 프로세스
+        // exitCode에 실제 값을 물려주는 건 §3.2 "마지막 스레드의
+        // exitCode를 그대로 물려받는다"의 몫으로 후속 증분(Join 완료
+        // 시점)에 배선한다).
+        process->exitCode = 0;
+    }
+
+    if (startFlags.essential) {
+        // §6.3 1번 - resurrect 값과 무관하게 항상 즉시 패닉("커널
+        // 서비스가 죽으면 커널이 정상 동작하지 않는다"는 전제가
+        // 그대로 적용되는 쪽). 이 프로세스의 이름은 spawnName이
+        // memcpy(exactLength)로만 채워지고 나머지는 정적 초기화로
+        // 이미 0(널)이라 항상 안전하게 널종단 문자열로 읽힌다.
+        Serial::write("minicore: PANIC - essential service died: ");
+        Serial::write(process->spawnName);
+        Serial::write("\n");
+        kPanic("Essential service died");
+    } else if (startFlags.resurrect && startFlags.respawn) {
+        // §6.3 2번 - 더 이상 "즉시" 재스폰하지 않는다. §6.4의
+        // 지연/백오프 일정(분 단위)을 DelayedExecutionQueue(§2/§3,
+        // PN-C46DF296)의 틱 단위로 환산해 예약한다 - 100Hz는
+        // timer.h가 문서화한 Timer::tickCount()의 고정 틱 레이트
+        // (HPET/PIT 보정 공통, 새 시간원 도입 없이 그대로 재사용).
+        constexpr uint32_t kTimerTicksPerSecond = 100;
+        const uint32_t intervalMinutes = kResurrectIntervalMinutes(newConsecutiveFailures);
+        const uint64_t delayTicks = static_cast<uint64_t>(intervalMinutes) * 60 * kTimerTicksPerSecond;
+        auto* args = static_cast<ResurrectSpawnArgs*>(GenericSlabAllocator::alloc(sizeof(ResurrectSpawnArgs)));
+        if (args) {
+            args->respawn = startFlags.respawn;
+            args->consecutiveFailures = newConsecutiveFailures;
+            DelayedExecutionQueue::schedule(delayTicks, kResurrectSpawnTrampoline, args);
+        }
+        // args 할당 실패(슬랩 고갈)면 이번 재스폰 시도 자체를
+        // 건너뛴다 - essential=false라 패닉하지 않는다는 정책과
+        // 일관되게, 자원 고갈도 "조용히 재시도를 포기"로 처리한다
+        // (다음에 이 서비스가 다른 경로로 다시 죽을 때 또 시도됨).
+    }
+    // 그 외(resurrect==false): 기존과 동일하게 그냥 종료(재스폰
+    // 없음, 패닉 없음) - §6.3 3번.
+}
+
 class SelfTerminateHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask*, void* args) override {
@@ -776,116 +892,14 @@ public:
         // `WeakPtr<Process>`라 진위(truthiness) 검사가 아니라 `.lock()`
         // 으로 유효성을 확인해야 한다 - 그 결과(`process`, 지역
         // `SharedPtr<Process>`)를 이 블록이 끝날 때까지 붙들고 쓴다.
-        // 이 지역 변수는 "진짜 소유자"가 아니라 임시 강한 참조일 뿐이다
-        // (진짜 소유자는 트리 멤버면 부모의 `children` 슬롯, 루트면
-        // `gInitProcess`/`gServiceProcess[]` 전역 - kmain.cpp) - 이
-        // 함수가 끝나며 스코프를 벗어나도 그 진짜 소유자가 여전히
-        // 살아있는 한 아무 문제 없다.
         SharedPtr<Process> process = userThread->process.lock();
         if (process) {
-            // Resurrect(SP-EAB162FC §6, 2026-09-16 §6.3/§6.4 개정 반영) -
-            // destroy() 이후에도 Process 객체 자체(캐스팅 근거: 정적/
-            // 장기수명 인스턴스 - destroy()는 주소공간만 반납할 뿐 이
-            // 구조체를 지우지 않는다)는 살아있어 startFlags/
-            // consecutiveFailures를 안전하게 읽을 수 있다. 재스폰은
-            // 기존 주소공간이 완전히 반납된 뒤에 한다(자원 회수 -> 재생성
-            // 순서).
-            const ProcessStartFlags startFlags = process->startFlags;
-            const uint32_t newConsecutiveFailures = process->consecutiveFailures + 1;
-            process->destroy();
-
-            // [신규, 2026-09-16, SP-6BEAE0C1 §6, PN-543C0CE9 착수 5번째
-            // 증분(2/2)] 고아 입양 - 이 프로세스 자신이 SpawnProcess로
-            // 자식을 만들어 뒀다면(parent가 비어 있는 고정 스폰
-            // KernelService라도 스스로 SpawnProcess를 부를 수 있다 -
-            // devmgr가 PnP 드라이버 자식을 만드는 경우 등), 그 자식들은
-            // 이제 부모를 잃는다. §6 "고아는 init이 입양"에 따라
-            // 살아있는 자식이든 이미 좀비인 자식이든 전부 orphanRoot()로
-            // reparent한다 - 좀비 자식은 reparent만 하고 실제 회수(reap)는
-            // 여전히 init이 나중에 wait()를 불러야 하는 채로 남는다(이
-            // 시점에 자동으로 회수하지 않는다 - §11-2 참고, "init이
-            // 실제로 wait()를 자동 반복 호출하는지"는 커널이 강제할
-            // 정책이 아니라 유저랜드 init 구현의 몫).
-            //
-            // [수정, 2026-09-17, PN-E2A114C1] `children`이 이제 자식의
-            // 유일한 강한 소유자다 - `orphanRoot->children.insert(child)`
-            // 가 그 소유권을 그대로 이어받고(SharedPtr 복사, 강한 참조
-            // +1), 뒤이은 `process->children.clear()`가 옛 소유자
-            // 쪽 몫을 내려놓는다(chunked_list.h 수정 참고) - net
-            // 참조 카운트는 그대로, 소유자만 바뀐다.
-            SharedPtr<Process> orphanRoot = Process::orphanRoot().lock();
-            if (orphanRoot && orphanRoot.get() != process.get()) {
-                process->children.forEach([&](SharedPtr<Process>& child, auto*) {
-                    if (!child) {
-                        return;
-                    }
-                    child->parent = WeakPtr<Process>(orphanRoot);
-                    orphanRoot->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
-                    // 실패(슬랩 고갈)해도 그냥 넘어간다 - child->parent는
-                    // 이미 orphanRoot로 바뀌었으니 그 자식이 나중에 종료할
-                    // 때 좀비로는 남지만, 이 순간 orphanRoot->children
-                    // 목록에 못 들어갔다면 root가 그 좀비를 wait()로 찾지
-                    // 못한다(드문 자원 고갈 경합 - 새 DC 없이 감수할 수준의
-                    // v1 한계, RM-23F4B687 §4).
-                    orphanRoot->children.insert(child);
-                });
-            }
-            process->children.clear();
-
-            // 부모가 있으면(SpawnProcess로 만들어진 트리 멤버) 좀비로
-            // 남겨 부모의 wait()(RM-48E1E610 35번)를 기다린다 - Process
-            // 구조체/threads(process.h)가 담고 있던 UserThread들의 반납은
-            // WaitHandler(process.cpp)가 회수
-            // 시점에 담당한다(이제 SharedPtr 마지막 강한 참조 소멸을
-            // 통해서 - process.cpp WaitHandler 참고). 부모가 없으면
-            // (고정 스폰 KernelService, 또는 SpawnProcessHandler 주석의
-            // 이론상 도달 불가 경로) 기존과 완전히 동일하게 아무도
-            // 회수하지 않는 상태로 그냥 남는다 - `gInitProcess`/
-            // `gServiceProcess[]` 전역이 계속 강하게 붙들고 있으므로
-            // 이 지역 변수 `process`가 스코프를 벗어나도 파괴되지 않는다.
-            if (process->parent.lock()) {
-                process->isZombie = true;
-                // exitCode(§6) - SelfTerminate syscall 자체가 아직 종료
-                // 코드를 인자로 받지 않는다(kSyscallEndpointSelfTerminate
-                // 문서 주석에 이미 명시된 기존 한계, §4의 인자 전달 규약
-                // 미착수와 같은 급) - 그 인자가 생기기 전까지는 0으로
-                // 고정한다.
-                process->exitCode = 0;
-            }
-
-            if (startFlags.essential) {
-                // §6.3 1번 - resurrect 값과 무관하게 항상 즉시 패닉("커널
-                // 서비스가 죽으면 커널이 정상 동작하지 않는다"는 전제가
-                // 그대로 적용되는 쪽). 이 프로세스의 이름은 spawnName이
-                // memcpy(exactLength)로만 채워지고 나머지는 정적 초기화로
-                // 이미 0(널)이라 항상 안전하게 널종단 문자열로 읽힌다.
-                Serial::write("minicore: PANIC - essential service died: ");
-                Serial::write(process->spawnName);
-                Serial::write("\n");
-                kPanic("Essential service died");
-            } else if (startFlags.resurrect && startFlags.respawn) {
-                // §6.3 2번 - 더 이상 "즉시" 재스폰하지 않는다. §6.4의
-                // 지연/백오프 일정(분 단위)을 DelayedExecutionQueue(§2/§3,
-                // PN-C46DF296)의 틱 단위로 환산해 예약한다 - 100Hz는
-                // timer.h가 문서화한 Timer::tickCount()의 고정 틱 레이트
-                // (HPET/PIT 보정 공통, 새 시간원 도입 없이 그대로 재사용).
-                constexpr uint32_t kTimerTicksPerSecond = 100;
-                const uint32_t intervalMinutes = kResurrectIntervalMinutes(newConsecutiveFailures);
-                const uint64_t delayTicks =
-                    static_cast<uint64_t>(intervalMinutes) * 60 * kTimerTicksPerSecond;
-                auto* args = static_cast<ResurrectSpawnArgs*>(GenericSlabAllocator::alloc(sizeof(ResurrectSpawnArgs)));
-                if (args) {
-                    args->respawn = startFlags.respawn;
-                    args->consecutiveFailures = newConsecutiveFailures;
-                    DelayedExecutionQueue::schedule(delayTicks, kResurrectSpawnTrampoline, args);
-                }
-                // args 할당 실패(슬랩 고갈)면 이번 재스폰 시도 자체를
-                // 건너뛴다 - essential=false라 패닉하지 않는다는 정책과
-                // 일관되게, 자원 고갈도 "조용히 재시도를 포기"로 처리한다
-                // (다음에 이 서비스가 다른 경로로 다시 죽을 때 또 시도됨).
-            }
-            // 그 외(resurrect==false): 기존과 동일하게 그냥 종료(재스폰
-            // 없음, 패닉 없음) - §6.3 3번.
+            // [수정, 2026-09-18, SP-76250478, PN-0EB2FABF] 실제 마무리
+            // 로직은 `kFinalizeProcessTermination()`(위)으로 뺐다 -
+            // 이 핸들러(call0)는 언제나 무조건 프로세스 전체를 끝낸다
+            // (POSIX `exit()` 의미, 다른 스레드가 살아있어도 무관 -
+            // §3 항목1 미처리 예외/신호/자연 종료가 전부 이 경로).
+            kFinalizeProcessTermination(process);
         }
         co_return;
     }
@@ -894,6 +908,82 @@ public:
 };
 
 SelfTerminateHandler gSelfTerminateHandler;
+
+// [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `SelfTerminateThread`
+// (syscall.h의 kSyscallEndpointSelfTerminateThread 문서 주석 참고)의
+// 실제 핸들러 - `SelfTerminateHandler`와 달리 **이 스레드 하나만**
+// 끝낸다(POSIX `pthread_exit()` 의미). args는 `kThreadOnFallingToEnd`
+// (아래)가 `Syscall::submitDetached()`로 넘긴, 종료 대상 UserThread
+// 자신(Task*)이다 - `SelfTerminateHandler`와 완전히 같은 관례(exitCode는
+// 이미 `kThreadOnFallingToEnd`가 `userThread->exitCode`에 심어 뒀다).
+class SelfTerminateThreadHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask*, void* args) override {
+        auto* target = static_cast<Task*>(args);
+        Scheduler::retireTask(target);
+        auto* userThread = static_cast<UserThread*>(target);
+
+        Scheduler::cancelPendingSyscalls(userThread);
+        userThread->pendingSyscalls.clear();
+
+        SharedPtr<Process> process = userThread->process.lock();
+        if (!process) {
+            co_return;
+        }
+
+        // isZombie(§3) - exitCode는 kThreadOnFallingToEnd가 이미 기록.
+        userThread->isZombie = true;
+
+        // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] 이
+        // 스레드는 다시는 실행되지 않으므로(커널 스택은 위 retireTask()
+        // 가 이미 회수) 자기 전용 유저 스택도 즉시 돌려준다 - Join
+        // 여부와 무관하게(§3.1이 회수하는 건 `UserThread` 구조체 자신
+        // 뿐, 스택은 그럴 필요가 없다). `ProcessAddressSpaceManager`가
+        // 최대 8개 VMA만 지원하는 희소 자원이라(address_space.h) 좀비
+        // 상태로 오래 남아 있어도 이 VMA만은 즉시 반납해야 한다.
+        // `execImage()`/fork()가 만든 스레드(threadStackBase==0, 고정
+        // 스택)는 여기서 건드리지 않는다 - `destroy()`의 `unmapAll()`이
+        // 대신 회수.
+        if (userThread->threadStackBase != 0) {
+            process->addressSpace.unmapRegion(userThread->threadStackBase, userThread->threadStackSize);
+        }
+
+        if (userThread->detached) {
+            // §3 항목3 - 좀비 단계를 건너뛰고 그 자리에서 즉시 회수.
+            // process.h/syscall.h의 threads 문서 주석 "순서 중요"
+            // 그대로 - release() 전에 컨테이너 슬롯부터 지운다.
+            auto* slot = process->threads.find(
+                [userThread](const SharedPtr<UserThread>& t) { return t.get() == userThread; });
+            if (slot) {
+                process->threads.erase(slot);
+            }
+            UserThread::release(userThread);
+
+            // [신규, 2026-09-18, SP-76250478 §3.2, PN-0EB2FABF] "프로세스의
+            // 모든 스레드가 종료되는 순간 Process 자신도 좀비화된다" -
+            // v1은 main 스레드가 이 syscall을 쓰도록 배선돼 있지 않아
+            // (유저랜드 트램폴린은 CreateThread가 만든 스레드 전용) 이
+            // 분기가 실제로 마지막 스레드를 지우는 경우는 이론상으로만
+            // 있다(누군가 main에서도 이 syscall을 직접 부르는 극단적
+            // 사용법) - 그래도 POSIX 시맨틱을 정직하게 지키기 위해
+            // 검사한다. ChunkedList에 size()/empty()가 없어 find로
+            // 대신 확인.
+            const bool anyThreadLeft = process->threads.find([](const SharedPtr<UserThread>&) { return true; }) !=
+                                        nullptr;
+            if (!anyThreadLeft) {
+                kFinalizeProcessTermination(process);
+            }
+        }
+        // 좀비지만 detached가 아니면: `threads`에 그대로 남겨 둔다 -
+        // `Join`(§3.1, 후속 증분)이 회수할 때까지 UserThread 구조체
+        // 자신(threadId/exitCode 보관용)만 살려 둔다.
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+SelfTerminateThreadHandler gSelfTerminateThreadHandler;
 
 // [신규, 2026-09-17, SP-B26CDBDD §7, PN-158B6B2F] `SetTaskWeight` -
 // 이번 증분은 `targetPid == kSelfTaskWeightPid`(자기 자신) 경로만
@@ -1015,6 +1105,9 @@ void Scheduler::init() {
     // 예약해 둔 고정 슬롯(PN-71C3D483 완료 전까지는 핸들러 없이
     // 비어 있었다).
     SyscallRegistry::registerHandler(kSyscallEndpointSelfTerminate, &gSelfTerminateHandler);
+    // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF, RM-48E1E610
+    // 그룹0 call9] SelfTerminate와 같은 이유로 BSP에서 한 번만.
+    SyscallRegistry::registerHandler(kSyscallEndpointSelfTerminateThread, &gSelfTerminateThreadHandler);
     // [신규, 2026-09-17, SP-B26CDBDD §7, RM-48E1E610 그룹0 call5]
     SyscallRegistry::registerHandler(kSyscallEndpointSetTaskWeight, &gSetTaskWeightHandler);
     // Push/Pull 로드밸런싱(PN-04D6197A, SP-9525C4C0 §4) - idle 코어
@@ -2069,4 +2162,30 @@ extern "C" void kTaskOnFallingToEnd() {
     // Kernel-Level Task가 계속 커널에 머물러 있는 경우(설계자 지시
     // 2번, 지금 이 프로젝트의 모든 Task가 해당) - 절대 돌아오지 않는다.
     kernel::Scheduler::retireCurrentTask();
+}
+
+// [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `kTaskOnFallingToEnd`
+// (위)의 스레드 전용 대칭 - `idt.cpp`의 `kDispatchSyscallVerbBody`가
+// `kSyscallEndpointSelfTerminateThread` submit을 가로챌 때만 부른다
+// (자연 종료/`syscall` fast path 어느 쪽에서도 호출되지 않는다 - 이
+// syscall은 언제나 명시적이라 자연 반환 경로 자체가 없다). `exitCode`
+// 를 받는다는 점만 `kTaskOnFallingToEnd`와 다르다 - `SelfTerminate`는
+// 아직 종료 코드를 안 쓰지만(그 syscall 문서 주석 참고) `SelfTerminateThread`
+// 는 §3.1의 `Join`이 돌려줄 값이 필요해 애초부터 받는다. Kernel-Level
+// Task 분기가 없다 - 이 syscall은 항상 UserThread 실행 흐름에서만 온다
+// (`syscall.h`의 `Syscall` 클래스 문서 주석과 동일한 전제).
+extern "C" void kThreadOnFallingToEnd(kernel::int32_t exitCode) {
+    kernel::Task* self = kernel::Scheduler::currentTask();
+    if (!self || !self->isUserLevel) {
+        return;  // 이론상 도달 불가 - 방어적으로 그냥 hlt 루프로
+    }
+    auto* userThread = static_cast<kernel::UserThread*>(self);
+    // [PN-0EB2FABF] `SelfTerminateThreadHandler`가 나중에 리액터
+    // 컨텍스트에서 읽을 exitCode를 미리 심어 둔다 - 별도 힙 할당 없이
+    // `Task*` 하나만 args로 넘기는 기존 `kTaskOnFallingToEnd` 관례를
+    // 그대로 재사용하기 위함(UserThread::exitCode 필드는 이미 Phase 1
+    // 에서 마련돼 있었다).
+    userThread->exitCode = exitCode;
+    self->state = kernel::TaskState::Zombie;
+    kernel::Syscall::submitDetached(kernel::kSyscallEndpointSelfTerminateThread, self);
 }

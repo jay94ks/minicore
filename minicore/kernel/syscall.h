@@ -62,6 +62,33 @@ constexpr uint8_t kSyscallCallOf(SyscallEndpointId id) {
 // 트랩이 절대 ring3로 돌아가면 안 된다는 점이 일반 syscall과 다름).
 constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpointId(0, 0);
 
+// [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `SelfTerminate`
+// (위)의 스레드 전용 대칭(RM-48E1E610 그룹0 #9) - `SelfTerminate`는
+// "이 UserThread가 끝나는 순간 Process 전체가 끝난다"(POSIX `exit()`와
+// 동일 의미, 미처리 예외/신호/자연 종료가 전부 이 경로)는 뜻이지만,
+// `SelfTerminateThread`는 "이 스레드 하나만 끝난다"(POSIX `pthread_exit()`
+// 와 동일 의미)는 뜻이다 - `CreateThread`가 만든 스레드가 정상 종료할
+// 때(유저랜드 C 런타임의 스레드 진입 트램폴린이 `entry`의 반환값을
+// 잡아 이 syscall을 대신 호출) 쓴다. **`SelfTerminate`와 마찬가지로
+// 이 syscall도 절대 ring3로 복귀하지 않는다**(아래 `kThreadOnFallingToEnd`
+// 참고) - `idt.cpp`의 `kDispatchSyscallVerbBody`가 이 endpointId도
+// `kSyscallEndpointSelfTerminate`와 동일하게 특별 취급한다. 다만 실제
+// 핸들러(`SelfTerminateThreadHandler`, scheduler.cpp)는 `process->
+// destroy()`를 무조건 부르지 않는다 - `Process::threads`(process.h)에서
+// 이 스레드만 좀비 표시/회수하고, 그 결과 `threads`가 실제로 완전히
+// 비었을 때만(이론상 모든 스레드가 main 포함 이 syscall로 끝나야만
+// 도달) `SelfTerminateHandler`와 같은 프로세스 종료 마무리 로직
+// (`kFinalizeProcessTermination`, scheduler.cpp에 공용으로 뺌)을
+// 부른다.
+constexpr SyscallEndpointId kSyscallEndpointSelfTerminateThread = kMakeSyscallEndpointId(0, 9);
+
+// SelfTerminateThread 인자 - 유일한 입력은 exitCode 하나뿐이고(POSIX
+// `pthread_exit(void*)`의 단순화판, 포인터 대신 정수 하나), out
+// 파라미터가 없다(호출부로 절대 안 돌아오므로 의미가 없음).
+struct SelfTerminateThreadArgs {
+    int32_t exitCode = 0;
+};
+
 // int 0x80/`syscall` 명령 두 트랩 경로가 공유하는 공용 verb 디스패치
 // (PN-124C105B, QU-E7E51931/QU-CD6F68B7로 확정된 ABI 그대로) - RAX=verb
 // (0=submit/1=wait), RDI/RSI=verb별 인자, 반환값이 새 RAX가 된다.
@@ -208,17 +235,23 @@ public:
     // 여전히 미배선 - `SelfTerminateThread`/`Join`/`Detach`(후속
     // 증분)가 실제로 소비한다.
     ThreadId threadId = kInvalidThreadId;  // CreateThread/execImage()/fork()가 발급(§2.1)
-    bool isZombie = false;   // 이 스레드 자신의 좀비 상태(§3) - Process::
-                             // isZombie(프로세스 트리 좀비, §6)와는 별개
-                             // 축이다. 정상 종료 후 아직 Join되지 않은
-                             // 상태를 표현한다.
+    // [갱신, 2026-09-18, PN-0EB2FABF 3단계] `isZombie`/`exitCode`는 이제
+    // 실제로 배선됐다 - `SelfTerminateThreadHandler`(scheduler.cpp)가
+    // 정상 종료 시(§3 항목2) 기록한다. `Process::isZombie`(프로세스
+    // 트리 좀비, §6)와는 별개 축이다.
+    bool isZombie = false;   // 정상 종료 후 아직 Join되지 않은 상태
     int32_t exitCode = 0;    // SelfTerminateThread가 기록(§3 항목2)
-    bool detached = false;   // §3 항목3 - 세팅되면 좀비 단계를 건너뛰고
-                             // SelfTerminateThread가 그 자리에서 즉시 회수
+    // [갱신, 2026-09-18, PN-0EB2FABF 3단계] `detached`도 실제로 배선됐다 -
+    // 세팅돼 있으면 `SelfTerminateThreadHandler`가 좀비 단계를 건너뛰고
+    // 그 자리에서 즉시 `threads`에서 지우고 슬랩까지 반납한다. 아직
+    // 이 값을 세팅하는 `Detach` syscall(§3 항목3, 후속 증분)이 없어
+    // 지금은 항상 false로 남는다.
+    bool detached = false;
     // §3.1 - 이 스레드가 좀비가 되는 순간(SelfTerminateThreadHandler가)
     // 직접 깨워야 할 Join() 대기자(있다면 단 하나, v1은 다중 joiner
     // 미지원). AsyncTask는 이 파일 위 #include "async_task.h"로 이미
     // 완전한 타입이라 WeakPtr<AsyncTask>를 바로 멤버로 둘 수 있다.
+    // **여전히 미배선** - `Join` syscall(후속 증분)이 실제로 세팅한다.
     WeakPtr<AsyncTask> joinerAsyncTask;
 
     // [신규, 2026-09-18, SP-76250478 §2.2, PN-0EB2FABF] `CreateThread`
@@ -228,6 +261,22 @@ public:
     // (ELF `_start`/재개 프레임을 각자 다른 방식으로 쓰므로) 이 필드를
     // 전혀 안 씀(0으로 남음).
     uint64_t threadStartArg = 0;
+
+    // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `CreateThread`
+    // 가 `ProcessAddressSpaceManager::mapRegion()`으로 확보해 준 이
+    // 스레드 전용 스택의 [시작, 길이) - `SelfTerminateThreadHandler`가
+    // 이 스레드가 끝나는 즉시(좀비 단계와 무관하게 - 어차피 다시는
+    // 실행되지 않으므로) `unmapRegion(threadStackBase, threadStackSize)`
+    // 로 그 VMA를 회수하는 데 쓴다. `ProcessAddressSpaceManager`가
+    // 최대 8개 VMA만 지원하는 희소 자원이라(address_space.h 클래스
+    // 문서), 아직 Join되지 않은 좀비 스레드라도 스택만은 즉시
+    // 돌려받아야 한다 - `UserThread` 구조체 자신(threadId/exitCode
+    // 보관용)은 Join()이 회수할 때까지 남지만 스택은 그럴 필요가 없다.
+    // `execImage()`/fork()가 만드는 스레드는 고정 스택(`registerFixedRegion`)
+    // 이라 이 필드를 전혀 안 씀(0으로 남음 - `destroy()`의 `unmapAll()`
+    // 이 대신 회수).
+    uint64_t threadStackBase = 0;
+    uint64_t threadStackSize = 0;
 
     // [SP-6BEAE0C1 §5, PN-543C0CE9] 동적 UserThread 풀 - Process::
     // allocate()/release()와 완전히 같은 이유/같은 안전 전제(모든
