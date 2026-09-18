@@ -206,9 +206,11 @@ constexpr uint32_t kWatchdogCheckIntervalTicks = 100;
 // **부팅 초기 스택(BSP의 kMain()/AP의 kApMain()이 쓰던, 저지대
 // identity map 스택 - PN-58501EAA "중요 발견")만은 예외**다 - 이
 // 스택은 어느 프로세스의 PML4에도 안 들어있는 lower-half 주소라,
-// UserThread의 CR3 아래에서는 접근 자체가 불가능하다. `gIdleSavedRsp`
-// (runLoop()이 처음 Task로 전환하기 직전의 자기 자신 RSP)가 정확히
-// 이 부팅 스택을 가리키므로, 리액터가 자기 할 일을 마치고 다시
+// UserThread의 CR3 아래에서는 접근 자체가 불가능하다. 이 문단 작성
+// 당시엔 `gIdleSavedRsp`(runLoop()이 처음 Task로 전환하기 직전의
+// 자기 자신 RSP, 2026-09-19 PN-D47FBB8D로 `gIdleTask[coreIndex].
+// savedRsp`에 흡수됨)가 정확히 이 부팅 스택을 가리켰으므로, 리액터가
+// 자기 할 일을 마치고 다시
 // `parkCurrent()`로 그 idle 컨텍스트로 되돌아가려 할 때(자기 자신의
 // 안전한 스택 위에서 실행 중이므로 CR3를 바꿔도 안전하다 - kEnterRing3
 // 와 동일한 안전 논리) CR3가 여전히 UserThread의 것으로 남아 있으면
@@ -231,11 +233,32 @@ uint32_t kOrderForCleanup(uint64_t stackSize) {
     return order;
 }
 
-// runLoop()이 이 코어에서 마지막으로 Task를 진입시키기 직전의 자기
-// 자신(idle 컨텍스트) RSP를 저장해 둔다 - yieldCurrent()가 돌아올
-// 자리. onTick()의 Task-to-Task 직접 전환은 이 값을 안 건드린다
-// (idle을 거치지 않고 바로 다음 Task로 가므로).
-uint64_t gIdleSavedRsp[kMaxCores] = {};
+// [갱신, 2026-09-19, PN-D47FBB8D] 예전엔 이 배열(RSP 하나만 저장)이
+// "idle 컨텍스트"의 유일한 표현이었으나, `gCurrentTask[coreIndex]`가
+// idle 상태를 그냥 `nullptr`로만 나타내던 탓에 `Scheduler::pickNext()`
+// 가 idle을 반환 가능한 정식 후보로 다룰 수 없었다 - `onTick()`의
+// `next == nullptr` 분기가 freeze/디버그 정지 검사(`kCheckAndMarkFrozen`/
+// `kIsPausedByDebugger`)를 건너뛰는 실측 버그(PN-D47FBB8D)의 근본
+// 원인이었다(SP-F682B889 §3.4 재정정 참고). 이제 코어당 정확히 하나인
+// 진짜 `Task` 인스턴스(`gIdleTask`, 아래)로 승격했다 - 이 배열은
+// `gIdleTask[coreIndex].savedRsp`로 흡수돼 더 이상 필요 없다(제거됨).
+
+// [신규, 2026-09-19, PN-D47FBB8D] 코어당 정확히 하나 존재하는 idle/
+// 리액터 통합 Task - `TaskClass::Idle`(task.h 문서 주석 참고),
+// `Scheduler::enterIdleLoop()`이 부팅 극초반 딱 한 번 초기화하고,
+// 그 뒤로는 `Scheduler::pickNext()`가 세 큐 모두 비었을 때
+// `onTick()`/`onForcedMigration()`이 대체 후보로 쓰는 유일한 통로다
+// (pickNext() 자신은 이 Task를 절대 반환하지 않는다 - 세 큐 중
+// 어디에도 안 들어가므로 애초에 뽑힐 수 없다, 호출부가 명시적으로
+// 폴백해야 함). **일반 `Task::init()`을 쓰지 않는다** - 부팅 극초반
+// (Page/Slab 할당자가 아직 준비 안 됐을 수 있는 시점, 아래 gIdleStack
+// 문서 주석과 같은 이유)에 구성돼야 해서 `enterIdleLoop()`이 이
+// 구조체의 필드(savedRsp/state/hasEverRun/taskClass)를 직접 채운다 -
+// `kernelStackPhys`/`kernelStackSize`/`kernelFsBase`는 의도적으로
+// 비워 둔다(이 Task는 절대 스스로 종료(cleanup 큐)되거나 ring3/TLS를
+// 쓰지 않으므로 무해 - kSyncRsp0ForDispatch/kSyncFsBase 둘 다
+// isUserLevel==false면 아무 것도 안 함).
+Task gIdleTask[kMaxCores];
 
 // [신규, 2026-09-17, PN-2008220B] 코어별 idle 컨텍스트 전용 스택 -
 // `enterIdleLoop()`이 부팅 극초반(BSP의 kMain()/AP의 kApMain()이
@@ -253,7 +276,12 @@ uint64_t gIdleSavedRsp[kMaxCores] = {};
 alignas(16) uint8_t gIdleStack[kMaxCores][kTaskDefaultKernelStackSize];
 
 // 이 코어에서 지금 실행 중인 Task - runLoop()/onTick()/yieldCurrent()
-// 만 갱신한다. nullptr이면 idle(runLoop이 pickNext/hlt를 돌고 있음).
+// 만 갱신한다. [갱신, 2026-09-19, PN-D47FBB8D] `nullptr`은 이제 오직
+// 부팅 극초반(`startTickOnThisCore()` 호출 이후, 이 코어의
+// `enterIdleLoop()`이 아직 `gIdleTask[coreIndex]`를 구성하기 전)의
+// 좁은 창에서만 나타나는 과도기 값이다 - 그 창을 지나면 항상
+// `&gIdleTask[coreIndex]`(idle/리액터) 아니면 실제 Task를 가리키고,
+// 다시는 bare `nullptr`로 되돌아가지 않는다.
 Task* gCurrentTask[kMaxCores] = {};
 
 // [SP-9F1DB1D8, QU-68D76FC4/QU-E847DB03] gCurrentTask[]의 모든 접근을
@@ -1428,7 +1456,13 @@ void Scheduler::onTick(InterruptFrame* frame) {
         current = gCurrentTask[coreIndex];
     }
     if (!current) {
-        return;  // idle 상태 - runLoop의 hlt가 이 인터럽트로 깨어나 pickNext를 다시 확인한다
+        // [갱신, 2026-09-19, PN-D47FBB8D] 이제 이 분기는 오직 부팅
+        // 극초반(startTickOnThisCore() 호출 이후, 이 코어의
+        // enterIdleLoop()이 아직 gIdleTask[coreIndex]를 구성하기 전)의
+        // 좁은 창에서만 도달한다 - 그 창을 지나면 gCurrentTask는 항상
+        // 실제 Task 아니면 &gIdleTask[coreIndex]를 가리키므로 다시는
+        // 여기 오지 않는다. 방어적으로만 남겨 둔다.
+        return;
     }
 
     Task* next = pickNext(coreIndex);
@@ -1441,54 +1475,11 @@ void Scheduler::onTick(InterruptFrame* frame) {
     // 인터럽트의 `iretq`를 거치지도 않았는데 인터럽트가 다시 켜지고
     // (재중첩 가능), `kSyncCr3(next)`/`kSyncFpu(next)`가 아직 완전히
     // 유효하지 않은 상태를 참조해 크래시할 수 있다(devmgr+dbgtarget
-    // SpawnProcess 연속 호출 하네스로 재현 - 이 next를 그대로 돌려놓고
-    // (`current`가 Zombie라 반드시 몰아내야 하는 경우는 예외 - 그
-    // 경우는 아래 Zombie 전용 분기가 이미 이 대안 안전 경로 자체를
-    // 갖고 있지 않으므로 기존처럼 진행) 이번 틱은 "대신 돌릴 게
-    // 없다"로 취급한다 - 나중에 `runLoop()`의 idle->Task 디스패치
-    // (안전한 첫 디스패치 지점 중 하나, SP-83A07867 §3.2)가 자연스럽게
-    // 집어간다. `current`가 계속 실행되는 것으로 그친다(불필요한
-    // 전환 방지 - 기존 "next==null" 분기와 같은 성격).
+    // SpawnProcess 연속 호출 하네스로 재현) - 이번 틱은 이 next를
+    // 큐에 도로 넣어 둔 채 "당장은 대신 돌릴 게 없다"로 취급한다.
     if (next && !next->hasEverRun && current->state != TaskState::Zombie) {
         enqueue(coreIndex, next);
         next = nullptr;
-    }
-    if (!next) {
-        // [수정, 2026-09-17, PN-9A5C0FC2 실측 발견] `current`가 Zombie면
-        // 그냥 return하지 않는다 - Zombie는 `kTaskOnFallingToEnd()`가
-        // self-terminate/Kill/폴트 종료 지점에서 표시해 둔 뒤 자기
-        // 자신의 커널 스택 위에서 "sti; for(;;) hlt;"를 영원히 도는
-        // 상태(idt.cpp `kDispatchSyscallVerb`/`kCheckSignalCheckpoint`/
-        // `kTerminateFaultingUserTask` 전부 동일 패턴) - 이 Task를 이
-        // 자리에서 실제로 몰아내는 유일한 방법은 **다른 Task로의
-        // task-to-task 직접 전환뿐**이다(아래 Zombie 스킵 분기가
-        // 그 전환을 담당). 그런데 마침 이 순간 이 코어에 대신 돌릴
-        // Task가 하나도 없으면(SMP에서 Pull 로드밸런싱이 원래 이
-        // 코어 몫이었던 Task를 다른 코어로 훔쳐가 버린 경우 등)
-        // 이 Zombie는 **영원히** 이 코어를 점유한 채 hlt만 반복하고,
-        // 이 코어는 다시는 `runLoop()`의 idle 분기(`AsyncReactor::
-        // drainOnce()` 포함)로 돌아가지 못한다 - self-terminate가
-        // 제출해 둔 정리용 AsyncTask(예: "essential 서비스 사망"
-        // 판정)조차 리액터가 못 돌아 영원히 처리되지 않는 실측
-        // 확인된 결함(SMP 2코어 이상에서 100% 재현, 단일 코어는
-        // 이 코어의 큐가 절대 안 비므로 우연히 안 터졌을 뿐). 그래서
-        // Zombie일 때만 예외적으로 `onForcedMigration()`의 idle
-        // 전환과 동일한 방식으로 이 자리에서 강제로 idle 컨텍스트로
-        // 넘긴다 - 그래야 이 코어가 다시 `pickNext`/`drainOnce`를
-        // 돌 기회를 얻는다. Zombie가 아닌 보통의 "그냥 할 일이
-        // 없을 뿐인" Task는 여전히 그대로 계속 실행한다(불필요한
-        // 컨텍스트 전환 방지, 기존 동작 그대로).
-        if (current->state == TaskState::Zombie) {
-            {
-                RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
-                gCurrentTask[coreIndex] = nullptr;
-            }
-            kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
-            // Zombie는 다시 깨어나 이 지점으로 돌아오지 않는다(아무도
-            // 이 savedRsp로 kContextSwitch하지 않음) - 방어적으로만.
-            return;
-        }
-        return;  // 대기 중인 다른 Task 없음 - 그대로 계속 실행(타임퀵텀 소진 안 함)
     }
 
     // Zombie면(PN-71C3D483 - kTaskOnFallingToEnd가 self-terminate 제출
@@ -1513,7 +1504,35 @@ void Scheduler::onTick(InterruptFrame* frame) {
     // 두 사유 중 하나라도 있으면 Blocked - `||` 대신 두 함수를 각각
     // 부르는 이유는 `kCheckAndMarkFrozen()`이 부수효과(frozenByGroup
     // 세팅)가 있어 단락 평가로 건너뛰면 안 되기 때문.
-    if (current->state != TaskState::Zombie) {
+    //
+    // [정정, 2026-09-19, PN-D47FBB8D - 실측으로 발견한 두 번째 버그를
+    // 반영해 재구성] 이 검사(`kCheckAndMarkFrozen`/`kIsPausedByDebugger`)
+    // 는 **`next`의 존재 여부와 무관하게** 항상 평가해야 한다(원래
+    // 발견된 근본 버그) - 하지만 "평가한다"가 "매번 idle로 실제 전환한다"
+    // 는 뜻은 아니다. 처음엔 `next`가 없을 때 무조건 `gIdleTask`로
+    // 폴백해 아래 공용 전환 코드로 흘려보냈는데, 그러면 current가
+    // 멀쩡한(freeze/디버그 정지 어느 쪽도 아닌) 경우에도 매 틱마다
+    // `enqueue(coreIndex, current)` 후 idle로 전환하게 되어 - 이
+    // Task가 큐에 들어가 있는(=다른 코어의 Pull 로드밸런싱이 훔쳐갈 수
+    // 있는) 시점과 이 코어 자신이 실제로 `kContextSwitch`로
+    // `current->savedRsp`를 확정 짓는 시점 사이에 새로운 경쟁 창을
+    // 열어 버렸다(실측 재현: SMP=4에서 #DB 폭주/Page Fault/Unrouted
+    // interrupt로 크래시 - 다른 코어가 아직 안 끝난 전환 중인 Task를
+    // 훔쳐가 낡은 savedRsp로 재개하며 스택이 깨짐). **이 경쟁은 매
+    // 틱(next가 없을 때마다) 열렸었다 - 원래는 진짜 두 실제 Task가
+    // 같은 코어를 경쟁할 때만(드묾) 열리던 것과 달리, 이 폴백 자체가
+    // 그 경쟁을 상시화했다.** 수정: current가 멀쩡하고 `next`도 없으면
+    // (Zombie도, frozen/디버그 정지도 아님) **enqueue도 전환도 전혀
+    // 하지 않고 그냥 return**한다(원래 "next==null이면 return"과
+    // 동일 - 불필요한 전환 방지 최적화를 그대로 되살림). idle로의
+    // 실제 전환은 current가 **정말로 이 코어를 떠나야 하는**
+    // 경우(Zombie 강제 퇴거, 또는 방금 Blocked로 전환됨)에만
+    // 일어난다 - 이 두 경우는 current가 어느 큐에도 들어가지 않으므로
+    // (Zombie/Blocked는 enqueue 대상이 아님) 위와 같은 훔쳐가기 경쟁
+    // 자체가 성립하지 않는다.
+    if (current->state == TaskState::Zombie) {
+        // mustLeaveCore(Zombie) - 아래 `if (!next)` 폴백이 그대로 처리.
+    } else {
         const bool frozenByGroup = kCheckAndMarkFrozen(current);
         const bool pausedByDebugger = kIsPausedByDebugger(current);
         if (frozenByGroup || pausedByDebugger) {
@@ -1529,7 +1548,8 @@ void Scheduler::onTick(InterruptFrame* frame) {
             if (pausedByDebugger) {
                 kSaveDebugRegistersSnapshot(current, frame);
             }
-        } else {
+            // mustLeaveCore(방금 Blocked) - 아래 `if (!next)` 폴백이 처리.
+        } else if (next) {
             // [신규, 2026-09-17, SP-B26CDBDD §3.2/§5, PN-158B6B2F] vruntime/
             // cpuTicksUsed 갱신 + ResourceGroup CPU 계정 - 반드시 enqueue()
             // (그 vruntime을 정렬 키로 삽입 위치를 정한다) 호출보다 먼저다.
@@ -1550,8 +1570,35 @@ void Scheduler::onTick(InterruptFrame* frame) {
                     }
                 }
             }
-            enqueue(coreIndex, current);  // 라운드로빈(vruntime 정렬) - Ready로 재삽입
+            // current가 idle 자신이면(다른 실제 Task로 전환하며 idle을
+            // 내보내는 경우) 절대 enqueue()하지 않는다 - task.h
+            // TaskClass::Idle 문서 주석 참고(vruntime=0 고정이라
+            // popMin()이 매번 idle만 최우선으로 뽑아 실제 작업을 굶길
+            // 수 있음).
+            if (current != &gIdleTask[coreIndex]) {
+                enqueue(coreIndex, current);  // 라운드로빈(vruntime 정렬) - Ready로 재삽입
+            }
+        } else {
+            // current 멀쩡함 + 대신 돌릴 실제 Task도 없음 - 위 문서
+            // 주석대로 아무 것도 안 하고 그냥 계속 실행한다(경쟁 창을
+            // 열지 않기 위해 idle로 억지 전환하지 않음).
+            return;
         }
+    }
+    if (!next) {
+        // mustLeaveCore인데 next가 없는 경우(Zombie 강제 퇴거, 또는
+        // 방금 Blocked됨) - idle로 폴백한다. current는 이미 어느
+        // 큐에도 없는 상태(Zombie/Blocked)라 이 폴백 자체는 위에서
+        // 우려한 "훔쳐가기 경쟁"을 열지 않는다.
+        next = &gIdleTask[coreIndex];
+    }
+    if (next == current) {
+        // 이론상 도달 불가 - `mustLeaveCore`는 idle 자신에 대해서는
+        // 절대 true가 될 수 없고(kCheckAndMarkFrozen/kIsPausedByDebugger
+        // 둘 다 isUserLevel==false인 idle엔 항상 false), current가
+        // 멀쩡한데 next가 없는 경우는 바로 위에서 이미 return해 이
+        // 지점 자체에 도달하지 않는다 - 방어적으로만 남겨 둔다.
+        return;
     }
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
@@ -1647,23 +1694,24 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
     // 이론적으로는 group-frozen/디버그 정지된 Task를 강제 이관하면서
     // 실수로 재큐잉(=재개)할 수 있다 - 별도 세션이 onTick()과
     // 동일한 체크를 여기도 추가할지 판단.
-    if (current->state != TaskState::Zombie) {
+    if (current->state != TaskState::Zombie && current != &gIdleTask[coreIndex]) {
         enqueue(targetCore, current);  // <- onTick()과 유일하게 다른 한
                                         // 줄: 같은 코어가 아니라 targetCore에 재삽입.
+                                        // [갱신, 2026-09-19, PN-D47FBB8D]
+                                        // idle 자신은(이론상 이 API의
+                                        // 대상이 될 일이 거의 없지만)
+                                        // 큐에 절대 안 들어가야 하므로
+                                        // onTick()과 동일하게 제외한다.
     }
+    // [갱신, 2026-09-19, PN-D47FBB8D] onTick()과 동일한 idle 폴백 -
+    // 자세한 이유는 그쪽 문서 주석 참고. 이 함수는 여전히 의도적으로
+    // kCheckAndMarkFrozen()/kIsPausedByDebugger()를 확인하지 않는다(위
+    // "알려진 갭" 문단 그대로 - 이 계획의 범위 밖).
     if (!next) {
-        // 이 코어에 대신 돌릴 다른 Task가 없다 - runLoop()의 idle
-        // 분기로 자연스럽게 떨어지도록 gCurrentTask만 비운다(이 ISR
-        // 자신은 인터럽트 컨텍스트라 여기서 직접 hlt하지 않는다,
-        // onTick()의 idle 분기 "return"과 동일한 원칙).
-        {
-            RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
-            gCurrentTask[coreIndex] = nullptr;
-        }
-        // current 자신의 kContextSwitch는 필요하다 - 원래 실행 흐름
-        // (이 인터럽트가 끼어든 지점)으로 다시는 돌아오지 않고 idle
-        // 스택으로 넘어가야 하기 때문이다.
-        kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+        next = &gIdleTask[coreIndex];
+    }
+    if (next == current) {
+        // current 자신이 이미 idle이었고 대신 돌릴 다른 Task도 없다.
         return;
     }
     {
@@ -1730,12 +1778,32 @@ void Scheduler::enterIdleLoop() {
     *(--sp) = 0;                                                  // r14
     *(--sp) = 0;                                                  // r15
 
+    // [신규, 2026-09-19, PN-D47FBB8D] 이 코어의 idle/리액터를
+    // `gIdleTask[coreIndex]`(진짜 `Task`)로 등록한다 - 일반
+    // `Task::init()`을 쓰지 않는 이유는 위 gIdleTask 선언부 문서
+    // 주석 그대로(부팅 극초반 Page/Slab 할당자 의존 회피, RFLAGS
+    // 보존 등 이 함수 고유의 제약과 안 맞음) - 방금 손으로 지은
+    // 스택 프레임을 그대로 이 Task의 savedRsp로 삼는다.
+    gIdleTask[coreIndex].savedRsp = reinterpret_cast<uint64_t>(sp);
+    gIdleTask[coreIndex].taskClass = TaskClass::Idle;
+    gIdleTask[coreIndex].state = TaskState::Running;
+    // PN-44C91D6E의 "never-run Task를 중첩 인터럽트에서 첫 디스패치
+    // 하면 위험하다"는 우려가 여기는 해당 없다 - 지금 이 함수 자신이
+    // 그 첫 디스패치이고, 인터럽트에 중첩된 게 아니라 이 코어의 순수
+    // 부팅 흐름 그 자체다(kTaskStartTrampoline/kIdleLoopTrampoline이
+    // 똑같이 "가짜 kContextSwitch 프레임"이라는 점만 같을 뿐).
+    gIdleTask[coreIndex].hasEverRun = true;
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
+    }
+
     // 지금 서 있는 스택(BSP의 kMain()/AP의 kApMain()이 쓰던 부팅
     // 스택)은 다시는 돌아오지 않으므로 그 RSP를 저장할 슬롯이 진짜로
     // 필요하지는 않지만, kContextSwitch의 시그니처를 그대로 재사용하기
     // 위해 버리는 지역 변수를 하나 둔다.
     uint64_t discardedOldRsp = 0;
-    kContextSwitch(&discardedOldRsp, reinterpret_cast<uint64_t>(sp));
+    kContextSwitch(&discardedOldRsp, gIdleTask[coreIndex].savedRsp);
     // runLoop()은 [[noreturn]]이라 여기로 절대 돌아오지 않는다 -
     // 컴파일러에게도 그렇게 알려 둔다(이 함수 자신도 [[noreturn]]).
     __builtin_unreachable();
@@ -1837,7 +1905,7 @@ void Scheduler::runLoop() {
         // 동기화하므로, runLoop()은 그 도착 지점이 무엇이든 몰라도
         // 된다(§3.2 - 이 설계의 핵심 이점).
         kSyncRsp0ForDispatch(next);
-        kContextSwitch(&gIdleSavedRsp[coreIndex], next->savedRsp);
+        kContextSwitch(&gIdleTask[coreIndex].savedRsp, next->savedRsp);
         // yieldCurrent()로 되돌아온 경우에만 이 지점으로 온다(onTick의
         // Task-to-Task 직접 전환은 이 프레임을 거치지 않는다) - 다음
         // 루프에서 pickNext가 새 상태를 다시 판단한다. 이 시점의
@@ -1847,7 +1915,13 @@ void Scheduler::runLoop() {
         // 때"(위 hlt 분기)에만 한다.
         {
             RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
-            gCurrentTask[coreIndex] = nullptr;
+            // [갱신, 2026-09-19, PN-D47FBB8D] idle 자신으로 돌아왔다는
+            // 사실을 nullptr이 아니라 실제 Task 포인터로 반영한다 -
+            // gCurrentTask가 다시는 bare nullptr이 되지 않아야
+            // onTick()의 freeze/디버그 정지 검사가 idle로의 전환
+            // 자체도 정상적으로(current==idle이면 그 검사들이 항상
+            // false를 내는 것으로) 거친다.
+            gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
         }
     }
 }
@@ -1887,14 +1961,16 @@ void Scheduler::yieldCurrent() {
     }
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
-        gCurrentTask[coreIndex] = nullptr;
+        // [갱신, 2026-09-19, PN-D47FBB8D] nullptr 대신 idle Task로 -
+        // gIdleTask 선언부/onTick() 문서 주석 참고.
+        gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
     }
     enqueue(coreIndex, current);
     // PN-57CF48DB - idle로 떠나기 전, 아직 current 자신의 안전한
     // 스택 위에 있을 때 CR3를 미리 gBootPml4Phys로 되돌린다(위
     // kSyncCr3ForIdleTransition 문서 주석 참고).
     kSyncCr3ForIdleTransition();
-    kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    kContextSwitch(&current->savedRsp, gIdleTask[coreIndex].savedRsp);
     // **SP-83A07867(QU-892AB38A 설계자 답변, 2026-09-15) - 이 재개
     // 지점이 바로 §3.2 갈래②의 세 곳 중 하나다.** 위 kContextSwitch가
     // 반환한 이 시점은 이미 이 Task 자신의(안전한) 스택으로 넘어온
@@ -1944,7 +2020,8 @@ void Scheduler::parkCurrent() {
     }
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
-        gCurrentTask[coreIndex] = nullptr;
+        // [갱신, 2026-09-19, PN-D47FBB8D] nullptr 대신 idle Task로.
+        gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
     }
     current->state = TaskState::Blocked;
     // yieldCurrent()와의 유일한 차이 - 어느 큐에도 넣지 않는다. 다시
@@ -1954,7 +2031,7 @@ void Scheduler::parkCurrent() {
     // PN-57CF48DB - yieldCurrent()와 같은 이유로 여기서도 idle로
     // 떠나기 전에 CR3를 미리 gBootPml4Phys로 되돌린다.
     kSyncCr3ForIdleTransition();
-    kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    kContextSwitch(&current->savedRsp, gIdleTask[coreIndex].savedRsp);
     // SP-83A07867 §3.2 갈래②의 나머지 한 곳 - yieldCurrent()의 재개
     // 지점과 완전히 동일한 이유로 여기서도 CR3를 동기화한다(위
     // yieldCurrent() 주석 참고 - 이 함수가 첫 실제 소비자가 되기
@@ -1995,7 +2072,8 @@ void Scheduler::retireCurrentTask() {
     }
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
-        gCurrentTask[coreIndex] = nullptr;
+        // [갱신, 2026-09-19, PN-D47FBB8D] nullptr 대신 idle Task로.
+        gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
     }
     current->state = TaskState::Zombie;
     // parkCurrent()와 달리 "누군가 깨워주길" 기다리는 게 아니라 다시는
@@ -2010,7 +2088,7 @@ void Scheduler::retireCurrentTask() {
     // 지점은 재개가 없어(zombie, 다시 뽑히지 않음) 도착 지점에서
     // 뒤늦게 동기화할 기회 자체가 없다.
     kSyncCr3ForIdleTransition();
-    kContextSwitch(&current->savedRsp, gIdleSavedRsp[coreIndex]);
+    kContextSwitch(&current->savedRsp, gIdleTask[coreIndex].savedRsp);
     // 이 지점으로 다시는 돌아오지 않는다(current는 이미 Zombie로
     // 어느 스케줄 큐에도 없어 다시 뽑힐 수 없다) - kAsyncTaskEntryWrapper
     // 와 동일한 패턴의 방어적 무한 루프.

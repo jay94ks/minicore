@@ -39,6 +39,14 @@ enum class TaskState {
 enum class TaskClass {
     Normal,
     RealTime,  // QU-77A52430 - 항상 Normal보다 먼저 스케줄링(구현 예정)
+    // [신규, 2026-09-19, PN-D47FBB8D] 코어당 정확히 하나씩 존재하는
+    // idle/리액터 통합 Task(scheduler.cpp의 gIdleTask[coreIndex]) 전용
+    // 태그 - `Scheduler::pickNext()`의 세 큐(Immediate/RealTime/Normal)
+    // 어디에도 절대 들어가지 않는다(그 큐들에 들어가면 vruntime=0
+    // 고정이라 popMin()이 항상 이 Task를 최우선으로 뽑아 실제 작업을
+    // 영원히 굶길 수 있음) - onTick()이 이 값으로 "지금 idle로/에서
+    // 전환 중인가"를 판단해 enqueue()/vruntime 계정 대상에서 제외한다.
+    Idle,
 };
 
 // affinityMask 비트 i가 1이면 코어 i에서 실행 가능 - "이 코어에서만"
