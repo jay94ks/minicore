@@ -192,6 +192,7 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
 
     savedRsp = reinterpret_cast<uint64_t>(sp);
     state = TaskState::Ready;
+    hasEverRun = false;  // PN-44C91D6E - task.h 문서 주석 참고
 }
 
 }  // namespace kernel

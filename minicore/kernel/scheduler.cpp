@@ -1276,6 +1276,27 @@ void Scheduler::onTick(InterruptFrame* frame) {
     }
 
     Task* next = pickNext(coreIndex);
+    // [신규, 2026-09-18, PN-44C91D6E 근본 원인 수정] `next`가 한 번도
+    // 디스패치된 적 없는 Task(`hasEverRun==false`)면 이 자리(onTick()의
+    // Task-to-Task 직접 전환, 원래 타이머 인터럽트 컨텍스트에 중첩된
+    // 채로 진행됨)에서 첫 디스패치를 시도하지 않는다 - 실측으로 확인된
+    // 근본 원인: `kContextSwitch`의 `popfq`가 `Task::init()`이 심어 둔
+    // `rflags=0x202`(IF=1)를 곧바로 CPU에 반영해, 아직 원래 타이머
+    // 인터럽트의 `iretq`를 거치지도 않았는데 인터럽트가 다시 켜지고
+    // (재중첩 가능), `kSyncCr3(next)`/`kSyncFpu(next)`가 아직 완전히
+    // 유효하지 않은 상태를 참조해 크래시할 수 있다(devmgr+dbgtarget
+    // SpawnProcess 연속 호출 하네스로 재현 - 이 next를 그대로 돌려놓고
+    // (`current`가 Zombie라 반드시 몰아내야 하는 경우는 예외 - 그
+    // 경우는 아래 Zombie 전용 분기가 이미 이 대안 안전 경로 자체를
+    // 갖고 있지 않으므로 기존처럼 진행) 이번 틱은 "대신 돌릴 게
+    // 없다"로 취급한다 - 나중에 `runLoop()`의 idle->Task 디스패치
+    // (안전한 첫 디스패치 지점 중 하나, SP-83A07867 §3.2)가 자연스럽게
+    // 집어간다. `current`가 계속 실행되는 것으로 그친다(불필요한
+    // 전환 방지 - 기존 "next==null" 분기와 같은 성격).
+    if (next && !next->hasEverRun && current->state != TaskState::Zombie) {
+        enqueue(coreIndex, next);
+        next = nullptr;
+    }
     if (!next) {
         // [수정, 2026-09-17, PN-9A5C0FC2 실측 발견] `current`가 Zombie면
         // 그냥 return하지 않는다 - Zombie는 `kTaskOnFallingToEnd()`가
@@ -1381,6 +1402,10 @@ void Scheduler::onTick(InterruptFrame* frame) {
         gCurrentTask[coreIndex] = next;
     }
     next->state = TaskState::Running;
+    // 이 지점에 도달하는 next는 이미 hasEverRun==true였거나(위 분기가
+    // never-run을 걸러냄), current가 Zombie라 예외적으로 그냥 진행한
+    // never-run next뿐이다 - 어느 쪽이든 여기서 true로 확정해 둔다.
+    next->hasEverRun = true;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
@@ -1490,6 +1515,12 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
         gCurrentTask[coreIndex] = next;
     }
     next->state = TaskState::Running;
+    // [신규, 2026-09-18, PN-44C91D6E] onTick()과 같은 이유로 여기서도
+    // 확정해 둔다 - 이 API는 수동/진단 전용이라 지금은 never-run
+    // Task를 실제로 여기서 처음 디스패치할 자동 경로가 없지만, 플래그
+    // 의미(이 Task가 한 번이라도 디스패치된 적 있는지)를 어긋나지
+    // 않게 유지한다.
+    next->hasEverRun = true;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
@@ -1632,6 +1663,12 @@ void Scheduler::runLoop() {
             gCurrentTask[coreIndex] = next;
         }
         next->state = TaskState::Running;
+        // [신규, 2026-09-18, PN-44C91D6E] 이 idle->Task 디스패치가
+        // never-run Task의 안전한 첫 디스패치 지점이다 - 여기서
+        // hasEverRun을 확정해 둬야 onTick()의 직접 전환 분기가 이후
+        // 이 Task를 다시 (불필요하게) never-run으로 오인해 계속
+        // 미루지 않는다.
+        next->hasEverRun = true;
         // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - PN-2008220B
         // 이후로는 "이 idle 컨텍스트의 스택이 안전하지 않을 수 있다"는
         // 이유가 아니라, SP-83A07867이 확정한 CR3 동기화 지점 통합

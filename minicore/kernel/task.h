@@ -133,6 +133,16 @@ struct Task {
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
 
+    // [신규, 2026-09-18, PN-44C91D6E] 이 Task가 실제로 한 번이라도
+    // kContextSwitch의 대상으로 선택돼 그 스택으로 넘어간 적 있는지 -
+    // Task::init() 직후에는 항상 false, `runLoop()`의 idle->Task
+    // 디스패치/`onTick()`의 Task-to-Task 직접 전환 어느 쪽이든 실제
+    // 디스패치 직전에 true로 확정된다. `Scheduler::onTick()`이 이
+    // 플래그로 "한 번도 디스패치된 적 없는 Task를 원래 타이머
+    // 인터럽트에 중첩된 채로 첫 디스패치하면 안전하지 않다"(실측
+    // 확인된 근본 원인 - onTick() 정의부 주석 참고)는 판단을 내린다.
+    bool hasEverRun = false;
+
     // [신규, PN-A74871F2, DC-8EA1E7F6/PL-2D3184BC "Task 자료구조" 절이
     // 원래 요구했으나 구현에서 누락됐던 필드 - RM-F2DAFF66 §1-A 발견]
     // 이 Task를 생성한 코어의 NUMA 노드(`Acpi::cpuNumaNode()`, SRAT
