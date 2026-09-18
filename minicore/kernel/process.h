@@ -3,6 +3,7 @@
 
 #include "address_space.h"
 #include "debug_session.h"
+#include "libkenv/permission.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/types.h"
 #include "mount_table.h"  // MountKind/KernelFsDriver/FileHandle - Process::fileDescriptors(SP-2AAD7C8D §9.2)용
@@ -399,6 +400,27 @@ public:
     // 새 생애로 새어 들어가면 안 된다.
     ChunkedList<PendingSignal, kPendingSignalChunkCapacity> pendingSignals;
     SignalDisposition dispositions[kSignalCount];
+
+    // [신규, 2026-09-18, SP-30FCC8AE §1/§2, PN-617F4E52, PN-88E62419]
+    // 사용자/권한 신원 - SpawnProcess/fork() 시 부모로부터 그대로
+    // 상속되며(process.cpp), kSetuid() 승격 경로는 아직 없다(§1-A,
+    // PN-B6DB692C 후속). 최초 프로세스(init)는 상속받을 부모가 없어
+    // root(0)로 시작한다(kSpawnInitProcess가 init() 직후 값을 바꾸지
+    // 않음 - 아래 기본값 자체가 root). Resurrect(§6.2)가 같은 정적
+    // Process를 재사용할 수 있으므로 init()에서 매번 root로 리셋한다
+    // (dispositions와 동일한 이유) - 스폰 경로가 그 직후 실제 부모
+    // 값으로 덮어쓴다.
+    Uid uid = kRootUid;
+    Gid gid = kRootGid;
+
+    // [신규, SP-30FCC8AE §4] "누가 이 프로세스에 신호를 보낼 수
+    // 있는가" - Kill의 유일한 v1 소비자(kCanSendSignal). §7이 정확한
+    // 기본값을 미정으로 남겨 뒀으므로(실측 후 확정 대상, RM-23F4B687
+    // §4) owner-write 비트만 세운 값으로 시작한다 - "같은 uid의
+    // 프로세스는 서로 신호를 보낼 수 있고, 그 외에는(root/커널/조상
+    // 예외가 아니면) 못 보낸다"는 흔한 Unix 기본값과 같은 모양이다.
+    // 이 값을 바꾸는 syscall은 아직 없다(kSetuid와 마찬가지로 후속).
+    Permission signalPermission = kPermOwnerWrite;
 
     // 프로세스 디버깅(SP-9A6D579F §3.1, PN-87D6B615) - 이 프로세스가
     // "디버기"일 때만 의미가 있다(`active==true`) - 디버기 자신이

@@ -389,6 +389,14 @@ bool Process::init() {
     for (uint32_t i = 0; i < kSignalCount; ++i) {
         dispositions[i] = SignalDisposition::Default;
     }
+    // [신규, SP-30FCC8AE §1/§2] pendingSignals/dispositions와 동일한
+    // 이유(Resurrect 재사용) - 스폰 경로(SpawnProcessHandler/fork())가
+    // init() 직후 실제 부모 uid/gid로 덮어쓴다. 부모가 없는 최초
+    // 프로세스(init)/고정 스폰 KernelService는 이 root 기본값을 그대로
+    // 유지한다.
+    uid = kRootUid;
+    gid = kRootGid;
+    signalPermission = kPermOwnerWrite;
     // 프로세스 디버깅(SP-9A6D579F §3.1, PN-87D6B615) - pendingSignals와
     // 동일한 이유로 매번 리셋(Resurrect §6.2가 같은 정적 Process를
     // 재사용할 수 있으므로 이전 생애의 디버그 세션이 새 생애로 새어
@@ -890,13 +898,12 @@ ProcessId kAllocateProcessId(const SharedPtr<Process>& proc) {
 
 // 안전 해석 - 유저가 넘긴 pid가 무엇이든 인덱스 범위 검사 + generation
 // 일치 확인 + `WeakPtr::lock()`만으로 끝난다(`reinterpret_cast<Process*>`
-// 를 단 한 번도 쓰지 않음). **[범위 안내, PN-C39882D0]** 이 함수는
-// 아직 아무 데도 연결되지 않는다 - `Wait`은 여전히 "직계 자식만"
-// 스코프라 `self->children`을 직접 순회한다. `Kill`의 임의 대상
-// 확장(`PN-88E62419`)이 이 함수의 첫 실사용처가 될 예정(SP-9CB55C5B
-// §3/§4). **[수정, 2026-09-17, PN-AA30E4C8]** 읽기 락(카운터만 증분,
-// 다른 읽기와 동시 진행 가능) - 위 `gProcessTableLock` 문서 주석 참고.
-[[maybe_unused]] SharedPtr<Process> kResolveProcessId(ProcessId pid) {
+// 를 단 한 번도 쓰지 않음). **[수정, 2026-09-18, PN-88E62419]** 첫
+// 실사용처 배선 완료 - `KillHandler::onExec`가 이제 이 함수로 임의
+// 대상을 해석한다(SP-9CB55C5B §3/§4). **[수정, 2026-09-17,
+// PN-AA30E4C8]** 읽기 락(카운터만 증분, 다른 읽기와 동시 진행 가능) -
+// 위 `gProcessTableLock` 문서 주석 참고.
+SharedPtr<Process> kResolveProcessId(ProcessId pid) {
     if (pid == kInvalidProcessId) {
         return {};
     }
@@ -1148,6 +1155,14 @@ public:
         // 루트로.
         procShared->joinResourceGroup(parentProc ? (parentProc->group ? parentProc->group : &gRootResourceGroup)
                                                   : &gRootResourceGroup);
+        // [신규, SP-30FCC8AE §1] uid/gid 상속 - group 상속과 동일한
+        // 패턴/이유(승격 경로가 아직 없어 부모 값을 그대로 물려받는
+        // 것 외엔 선택지가 없다). parentProc이 없으면(도달 불가 방어
+        // 경로) init()이 이미 세팅해 둔 root 기본값 그대로 둔다.
+        if (parentProc) {
+            procShared->uid = parentProc->uid;
+            procShared->gid = parentProc->gid;
+        }
         // parentProc이 이 시점에도 비어 있으면(진짜 root조차 없는 -
         // init도 아직 스폰 안 된 부팅 극초반) 정말 아무도 소유할 수
         // 없다 - 이 역시 이론상 도달 불가(SpawnProcess 자체가 유저
@@ -1610,9 +1625,38 @@ public:
 
 DetachHandler gDetachHandler;
 
-// [SP-0666DB3C §4.5, RM-48E1E610 29번, PN-71E50394 항목 4] `Kill` 본체 -
-// signal.h의 `KillArgs` 문서 주석 그대로, v1은 호출자 자신의 직계
-// 자식만 대상으로 허용한다(`WaitHandler`와 동일한 스코프/검증 방식).
+// [신규, 2026-09-18, SP-30FCC8AE §3/§4, PN-88E62419] Kill의 권한
+// 판정 - §3이 확정한 순서 그대로: (1) 커널/KernelService는 role 자체가
+// 이미 무제한이라 uid 판정을 아예 건너뛴다(uid/gid와 통합 안 함,
+// PN-617F4E52 "설계 시 다뤄야 할 것" 2번 항목 답변), (2) target의
+// **직계 부모**가 caller면 허용(SP-9CB55C5B가 이 관계의 판정 방식을
+// 소유 - "직계 부모"만, 조상 전체가 아니다 - DebugAttach(SP-9A6D579F
+// §3.2, debug_session.cpp `kFindDebuggableChild`)가 이미 같은 관계를
+// 같은 범위로 구현해 둔 기존 선례와 일관성을 맞춘다), (3) 그 외엔
+// `kCheckPermission()`(root 특권 + uid/gid RWX, libkenv/permission.h)
+// 최종 판정 - "w" 비트 하나만 실질적 의미를 가진다(r/x는 Process
+// 자원에 아직 쓰임이 없어 mode 안에서 항상 0으로 취급, target이 그
+// 비트들을 세팅할 방법 자체가 없으므로 자동으로 그렇게 된다).
+bool kCanSendSignal(const Process& caller, const Process& target) {
+    if (caller.role == ProcessRole::KernelService) {
+        return true;
+    }
+    if (SharedPtr<Process> parent = target.parent.lock()) {
+        if (parent.get() == &caller) {
+            return true;
+        }
+    }
+    return kCheckPermission(caller.uid, caller.gid, target.uid, target.gid, target.signalPermission,
+                             kPermOwnerWrite);
+}
+
+// [SP-0666DB3C §4.5, RM-48E1E610 29번, PN-71E50394 항목 4, 수정
+// 2026-09-18 PN-88E62419] `Kill` 본체 - signal.h의 `KillArgs` 문서
+// 주석 그대로. **[갱신, PN-88E62419]** v1의 "호출자 자신의 직계
+// 자식만" 스코프를 걷어내고 `kResolveProcessId()`(SP-9CB55C5B §2,
+// PN-C39882D0 구현 완료)로 임의 대상을 안전하게 해석한 뒤
+// `kCanSendSignal()`(위)로 권한을 판정한다 - 이 함수가
+// `kResolveProcessId`의 첫 실사용처다.
 class KillHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
@@ -1634,24 +1678,20 @@ public:
             co_return;
         }
 
-        // v1 스코프(위 KillArgs 문서 주석 참고) - children에서 정확히
-        // 일치하는 것만 대상으로 인정한다. 좀비(이미 죽어 주소공간이
-        // 반납된 자식)에게 신호를 보내는 건 무의미하므로 함께 걸러낸다
-        // - `raiseSignal()` 자체는 좀비에도 안전하게 호출 가능하지만
+        // 좀비(이미 죽어 주소공간이 반납된 프로세스)에게 신호를 보내는
+        // 건 무의미하므로 존재하지 않는 것과 동일하게 취급한다 -
+        // `raiseSignal()` 자체는 좀비에도 안전하게 호출 가능하지만
         // (threads가 이미 비어 있을 수 있어 그냥 pendingSignals에만
-        // 쌓이고 끝) 아무 효과가 없어 혼란만 준다.
-        SharedPtr<Process> target;
-        self->children.forEach([&](SharedPtr<Process>& child, auto*) {
-            if (target || !child || child->isZombie) {
-                return;
-            }
-            if (reinterpret_cast<int64_t>(child.get()) == args->targetProcessId) {
-                target = child;
-            }
-        });
-
-        if (!target) {
+        // 쌓이고 끝) 아무 효과가 없어 혼란만 준다(v1과 동일한 정책,
+        // 대상 해석 방식만 바뀜).
+        SharedPtr<Process> target = kResolveProcessId(args->targetProcessId);
+        if (!target || target->isZombie) {
             args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        if (!kCanSendSignal(*self, *target)) {
+            args->error = ChannelError::PermissionDenied;
             co_return;
         }
 
@@ -1874,6 +1914,11 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     // 맞춘다(주소공간 전체를 그대로 복제했으므로 - execImage()의 ELF
     // 세그먼트 스캔 대신 이 값을 그대로 쓴다).
     procShared->joinResourceGroup(parentProc->group ? parentProc->group : &gRootResourceGroup);
+    // [신규, SP-30FCC8AE §1] uid/gid 상속 - SpawnProcessHandler와
+    // 동일한 패턴(fork()는 parentProc이 항상 존재하는 경로라 방어적
+    // null 분기 불필요).
+    procShared->uid = parentProc->uid;
+    procShared->gid = parentProc->gid;
     procShared->memoryBytesUsed = parentProc->memoryBytesUsed;
     if (procShared->group) {
         procShared->group->accounting.totalMemoryBytesUsed += procShared->memoryBytesUsed;
