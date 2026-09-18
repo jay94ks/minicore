@@ -362,15 +362,26 @@ void kHandleDebugException(kernel::InterruptFrame* frame) {
     kernel::uint64_t dr6;
     asm volatile("mov %%dr6, %0" : "=r"(dr6));
 
+    // [순서 변경, 2026-09-18, PN-49C2F890] DR6는 CPU가 자동으로
+    // 클리어하지 않는다 - 핸들러가 명시적으로 비워야 한다(SDM Vol.3
+    // §17.2 요구사항, 안 비우면 다음 #DB에서도 낡은 상태 비트가 그대로
+    // 남는다). **반드시 콜백 호출 전에** 비워야 한다 - 콜백
+    // (kHandleUserBreakpointHit)이 이제 Scheduler::parkCurrent()로
+    // 실제 파킹할 수 있고, 재개는 나중에 로드밸런싱이 고른 **다른
+    // 코어**에서 일어날 수 있다(§3.2 갈래② - 반드시 원래 코어로
+    // 되돌아온다는 보장 없음). 예전처럼 "콜백 반환 후" 비우면, 파킹된
+    // 콜백이 재개되는 시점에 실행 중인 코어(원래와 다를 수 있음)의
+    // DR6를 잘못 지우고 원래(#DB가 실제로 발생한) 코어의 DR6는
+    // 영원히 안 지워진 채로 남는다 - 콜백이 항상 그 자리에서 곧장
+    // 반환하던 예전에는 이 순서 문제 자체가 드러날 수 없었다. 콜백의
+    // 로직은 이미 읽어 둔 `dr6` 지역변수 값만 쓰므로 순서를 바꿔도
+    // 동작에 차이가 없다.
+    asm volatile("mov %0, %%dr6" : : "r"(kernel::uint64_t{0}));
+
     bool handled = false;
     if (gDebugCallback != nullptr) {
         handled = gDebugCallback(frame, dr6);  // true면 콜백이 처리 완료
     }
-
-    // DR6는 CPU가 자동으로 클리어하지 않는다 - 핸들러가 명시적으로
-    // 비워야 한다(SDM Vol.3 §17.2 요구사항, 안 비우면 다음 #DB에서도
-    // 낡은 상태 비트가 그대로 남는다).
-    asm volatile("mov %0, %%dr6" : : "r"(kernel::uint64_t{0}));
 
     if (!handled) {
         // 등록된 소비자가 없거나 콜백이 "내 것 아님"이라고 반환 -
