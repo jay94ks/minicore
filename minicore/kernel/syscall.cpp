@@ -129,6 +129,13 @@ void UserThread::release(UserThread* thread) {
     // 그대로다(syscall.h의 _selfRef 주석 참고). 순서가 중요하지 않다 -
     // reset() 다음 줄에서 thread가 가리키는 메모리를 또 만지지 않는다.
     thread->_selfRef.reset();
+    // [신규, 2026-09-19, PN-8726CDBD] fpuContext(UniquePtr)는 아래
+    // GenericSlabAllocator::free()가 raw 메모리를 그냥 반납할 뿐
+    // 소멸자를 부르지 않으므로(이 struct 전체가 memset(0)+init()
+    // 관례, task.h 문서 주석 참고), 여기서 명시적으로 reset()해
+    // 할당돼 있었을 TaskFpuContext를 먼저 반납하지 않으면 그 512바이트
+    // 슬랩 블록이 그대로 샌다.
+    thread->fpuContext.reset();
     GenericSlabAllocator::free(thread, sizeof(UserThread));
 }
 

@@ -690,13 +690,13 @@ constexpr uint64_t kVruntimeScale = 1024;  // 2^10 - 실효 가중치 최댓값(
 // 저장하는 조용한 데이터 손상 버그가 된다 - IPI로 fromCore 자신에게
 // 위임하는 방법도 있지만 매 이관마다 왕복 비용이 커 v1은 채택하지
 // 않는다(§6-항목3 확정). 대신 **이미 안전이 보장된 경우에만 이관을
-// 허용**한다: 이 Task가 FPU를 한 번도 안 썼거나(`!fpuInitialized`),
-// 이미 다른 소유자에게 넘어가 `fpuState`가 최신인 것이 보장된 경우
+// 허용**한다: 이 Task가 FPU를 한 번도 안 썼거나(`!fpuContext`),
+// 이미 다른 소유자에게 넘어가 `fpuContext`가 최신인 것이 보장된 경우
 // (`gFpuOwner[fromCore] != task`) - 그렇지 않으면(정말 이 Task가
 // fromCore의 살아있는 FPU 소유자) false를 반환해 호출부가 이번 이관을
 // 보류(스킵)하게 한다.
 bool kCanMigrateFpuSafely(const Task* task, uint32_t fromCore) {
-    return !task->fpuInitialized || gFpuOwner[fromCore] != task;
+    return !task->fpuContext || gFpuOwner[fromCore] != task;
 }
 
 // [신규, PN-F55FB154] Push가 targetCore로 이관하기 전에, task가 지금
@@ -743,7 +743,9 @@ ForcedMigrationRequest gForcedMigrationRequest;
 // 안전하게 반납(evict)할 수 있다.
 void kEvictFpuBeforeMigration(Task* task, uint32_t fromCore) {
     if (gFpuOwner[fromCore] == task) {
-        asm volatile("fxsave (%0)" : : "r"(task->fpuState) : "memory");
+        // task가 gFpuOwner인 이상 handleFpuTrap()을 이미 거쳤으므로
+        // fpuContext는 항상 non-null이다(이 조건 자체가 그 불변조건).
+        asm volatile("fxsave (%0)" : : "r"(task->fpuContext->buffer) : "memory");
         gFpuOwner[fromCore] = nullptr;
     }
 }
@@ -2302,15 +2304,28 @@ void Scheduler::handleFpuTrap() {
         return;  // 이미 이 Task가 소유자인데 걸린 가짜 트랩(kSyncFpu가 놓친 경우 없음) - 방어적 처리
     }
     if (owner) {
-        asm volatile("fxsave (%0)" : : "r"(owner->fpuState) : "memory");
+        // owner가 gFpuOwner인 이상 fpuContext는 이미 non-null이다
+        // (kEvictFpuBeforeMigration과 동일한 불변조건).
+        asm volatile("fxsave (%0)" : : "r"(owner->fpuContext->buffer) : "memory");
     }
-    if (current->fpuInitialized) {
-        asm volatile("fxrstor (%0)" : : "r"(current->fpuState) : "memory");
+    if (current->fpuContext) {
+        asm volatile("fxrstor (%0)" : : "r"(current->fpuContext->buffer) : "memory");
     } else {
         // 이 Task가 FPU/SSE를 사용하는 게 처음이다 - 이전 소유자가 남긴
         // 낡은 상태를 물려받지 않도록 깨끗한 초기 상태로 시작한다.
         asm volatile("fninit");
-        current->fpuInitialized = true;
+        // [신규, 2026-09-19, PN-8726CDBD] 지연 할당 - 이 Task가 FPU를
+        // 처음 쓰는 이 순간에만 TaskFpuContext를 슬랩에서 확보한다.
+        // 할당 실패(극히 드문 슬랩 고갈)는 커널을 패닉시키지 않고
+        // 그냥 이번엔 fpuContext를 비워 둔 채로 넘어간다 - current는
+        // 방금 fninit으로 이미 깨끗한 하드웨어 상태이므로 즉시 잘못된
+        // 동작을 하지는 않고, 다음 #NM 트랩에서 할당을 다시 시도한다
+        // (메모리 압박이 풀리면 자연히 회복 - 이 실패 경로에 별도
+        // 에러 보고 채널이 없어 조용히 재시도하는 것이 유일한 선택).
+        auto* raw = static_cast<TaskFpuContext*>(GenericSlabAllocator::alloc(sizeof(TaskFpuContext)));
+        if (raw) {
+            current->fpuContext = kMakeUnique(raw);
+        }
     }
     gFpuOwner[coreIndex] = current;
 }

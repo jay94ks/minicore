@@ -193,6 +193,13 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     savedRsp = reinterpret_cast<uint64_t>(sp);
     state = TaskState::Ready;
     hasEverRun = false;  // PN-44C91D6E - task.h 문서 주석 참고
+    // [신규, 2026-09-19, PN-8726CDBD] async_task.h의 AsyncTask::init()이
+    // selfWaitable을 명시적으로 리셋해 두는 것과 같은 이유 - 이 Task가
+    // (memset(0)을 새로 거치지 않고) 재사용되는 경로가 있다면 이전
+    // 수명에서 남은 TaskFpuContext가 새어나가지 않도록 여기서도
+    // 명시적으로 반납한다(fresh memset 직후 호출되는 정상 경로에서는
+    // 이미 nullptr이라 무해한 재확인).
+    fpuContext.reset();
 }
 
 }  // namespace kernel

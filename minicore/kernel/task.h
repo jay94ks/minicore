@@ -64,6 +64,21 @@ constexpr uint64_t kTaskDefaultKernelStackSize = 8UL * 1024UL;  // 8KiB(QU-BA001
 
 using TaskEntry = void (*)(void* arg);
 
+// [신규, 2026-09-19, PN-8726CDBD, 설계자 의견] CR0.TS 기반 lazy FPU/SSE
+// 컨텍스트 저장 영역(SP-83A07867 §8, PN-F258698E)을 Task 밖으로 뺀
+// 얇은 컨테이너 - FXSAVE/FXRSTOR이 요구하는 16바이트 정렬 512바이트
+// 블록만 담는다. Task는 이걸 UniquePtr로만 가리켜(기본 nullptr) FPU를
+// 안 쓰는 Task(커널 전용 Task 등)는 이 512바이트를 아예 안 갖고
+// 다니게 한다 - "이 Task가 FPU를 초기화한 적이 있는가" 판정도
+// 별도 bool 없이 포인터 존재 자체(`Task::fpuContext`)로 단순화된다.
+struct TaskFpuContext {
+    alignas(16) uint8_t buffer[512] = {};
+    // shared_ptr.h의 kDestroyAndFree<T> 기본 삭제자 관례(T::destroy()
+    // 호출 후 슬랩 반납) - 이 struct는 순수 POD라 정리할 게 없어도
+    // 그 관례를 그대로 따르기 위한 빈 구현.
+    void destroy() {}
+};
+
 // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이 구조체의
 // savedRsp 오프셋(항상 첫 필드, 오프셋 0)을 그대로 참조한다 - 필드
 // 순서를 바꾸려면 그쪽 어셈블리도 같이 확인해야 한다.
@@ -297,20 +312,25 @@ struct Task {
     // 실제로 읽는 호출부는 없다(다음 후속 항목).
     WaitCancelReason lastCancelReason = WaitCancelReason::None;
 
-    // CR0.TS 기반 lazy FPU/SSE 컨텍스트 저장 영역(SP-83A07867 §8,
-    // PN-F258698E) - FXSAVE/FXRSTOR이 요구하는 16바이트 정렬 512바이트
-    // 블록. 이 Task가 실제로 마지막 FPU 소유자였던 시점의 스냅샷만
-    // 담는다 - scheduler.cpp의 #NM 핸들러(Scheduler::handleFpuTrap)가
-    // 다른 Task로 소유권이 넘어가는 순간에만 채운다(매 컨텍스트
-    // 스위칭마다 무조건 저장하지 않는 게 이 최적화의 핵심).
-    alignas(16) uint8_t fpuState[512] = {};
-
-    // fpuState가 이 Task 자신의 유효한 저장값을 담고 있는지 - false면
-    // 이 Task가 FPU/SSE를 아직 한 번도 쓴 적이 없다는 뜻이라, #NM
-    // 핸들러가 FXRSTOR 대신 FNINIT로 깨끗한 초기 FPU 상태를 만들고 이
-    // 플래그를 true로 올린다(모든 Task가 정의되지 않은 이전 소유자의
-    // 찌꺼기 상태를 보지 않게 하기 위함).
-    bool fpuInitialized = false;
+    // [수정, 2026-09-19, PN-8726CDBD, 설계자 의견] 예전엔 이 자리에
+    // `fpuState[512]`(FXSAVE/FXRSTOR 블록, 항상 인라인)와
+    // `fpuInitialized`(bool) 두 필드가 직접 있었다 - FPU를 쓰든 안
+    // 쓰든 모든 Task가 이 512바이트를 항상 갖고 다니는 구조였다.
+    // 이제 `TaskFpuContext`(위 정의)로 분리해 `nullptr`이 기본인
+    // `UniquePtr`만 들고 있는다 - 커널 전용 Task처럼 FPU를 아예 안
+    // 쓰면 이 포인터가 계속 `nullptr`로 남아 Task 자체가 가벼워지고,
+    // "FPU를 초기화한 적이 있는가" 판정도 `fpuContext != nullptr`
+    // 확인 하나로 단순해진다. `Scheduler::handleFpuTrap()`(#NM 최초
+    // 히트)이 이 포인터가 비어 있으면 그 시점에 슬랩 할당해 채워
+    // 넣는 지연 할당 패턴을 그대로 유지한다(기존 지연 저장 원칙과
+    // 일관). **memset(0)+init() 관례(placement new 없음, 이 struct
+    // 문서 주석 위쪽 참고) 하에서는 이 UniquePtr의 소멸자가 저절로
+    // 불리지 않는다** - `UserThread::release()`가 raw
+    // `GenericSlabAllocator::free()` 직전에 반드시 `fpuContext.reset()`
+    // 을 먼저 호출해 할당된 `TaskFpuContext`를 명시적으로 반납해야
+    // 한다(syscall.cpp 참고, 안 하면 Task가 죽을 때마다 512바이트
+    // 슬랩 누수).
+    UniquePtr<TaskFpuContext> fpuContext;
 
     // 커널 스택을 새로 할당하고, entry(arg)를 처음 실행할 준비가 된
     // 상태로 초기화한다(트램폴린 스택 프레임 구성) - 스케줄러 큐에
