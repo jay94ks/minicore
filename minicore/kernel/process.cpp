@@ -431,6 +431,19 @@ void Process::destroy() {
     // group이 바뀌지 않는다는 보장이 없으므로 가장 먼저 확실히 처리).
     if (group) {
         group->accounting.totalMemoryBytesUsed -= memoryBytesUsed;
+        // [신규, 2026-09-19, PN-0AC554C2 갱신5, QU-60AB17B6 답변 3번]
+        // "정상 종료의 정리 경로를 그대로 타야돼" - 그런데 실제로
+        // 조사해 보니 그 정리 경로 자체가 이 한 줄을 빠뜨리고 있었다
+        // (joinResourceGroup()이 그룹을 "바꿀 때"만 removeMember를
+        // 불렀지, 이 프로세스가 아예 죽을 때는 아무도 부르지 않음) -
+        // 이 프로세스가 강제종료(Kill)든 정상 종료든 이 destroy()를
+        // 반드시 거치므로(§6 회수 절차), 여기가 그 유일한 진짜
+        // 정리 지점이다. WeakPtr 기반 memberProcesses라 안 지워도
+        // 크래시는 안 나지만(thaw()가 lock() 실패를 방어), 그룹이
+        // 죽은 프로세스를 향한 죽은 WeakPtr을 영원히 들고 있게 되는
+        // 누수였다.
+        group->removeMember(this);
+        group = nullptr;
     }
     memoryBytesUsed = 0;
     if (pml4Phys) {
@@ -837,6 +850,26 @@ bool Process::raiseSignal(SignalNumber number) {
         // 이미 끝남) 이 호출은 그냥 아무 일도 안 하는 것과 같다.
         if (number == SignalNumber::Kill || number == SignalNumber::Terminate) {
             Scheduler::cancelPendingSyscalls(t);
+        }
+        // [신규, 2026-09-19, PN-0AC554C2 갱신5, QU-60AB17B6 답변]
+        // ResourceGroup freeze/디버거 정지는 blockedOn/Waitable을 전혀
+        // 거치지 않는 별도 경로라(kCheckAndMarkFrozen/kIsPausedByDebugger
+        // 가 직접 TaskState::Blocked를 대입, resource_group.h/
+        // debug_session.h 참고) 위 두 강제 웨이크업 경로 중 어디에도
+        // 걸리지 않는다 - 그룹이 계속 freeze 상태로 남거나 디버거가
+        // 세션을 방치하면 이 대상은 Kill을 보내도 절대 종료되지
+        // 않았다. 설계자 답변: "SIGKILL은 강제 종료 동작이고 SIGTERM은
+        // 협조적 종료로 취급" - 그래서 이 우회는 **Kill에만** 적용한다
+        // (Terminate는 협조적이므로 정지가 자연히 풀릴 때의 체크포인트
+        // 처리에 맡긴다 - 그 전까지 pendingSignals에만 쌓인 채 대기).
+        if (number == SignalNumber::Kill && t->state == TaskState::Blocked) {
+            const bool wasFrozenByGroup = frozenByGroup;
+            const bool wasPausedByDebugger = debugSession.pausedByDebugger.load() != 0;
+            if (wasFrozenByGroup || wasPausedByDebugger) {
+                frozenByGroup = false;
+                debugSession.pausedByDebugger.store(0);
+                Scheduler::enqueue(Scheduler::currentCoreIndex(), t);
+            }
         }
     });
     return true;
