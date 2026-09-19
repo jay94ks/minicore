@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-19T02:22:39.095Z
+  updatedAt: 2026-09-19T16:25:41.891Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -382,6 +382,33 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   전부 훑는 습관이 유효함을 재확인.
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-19] `SP-6BEAE0C1`(일반 프로세스 생성 syscall
+  fork/exec류 - 동적 Process 풀/COW/프로세스 트리 원 설계, approved)** -
+  §11의 4개 구체화 항목(프로세스 트리 자료구조/syscall 분할 형태/COW
+  참조 카운트 배치/wait() ABI) 전부 실제로 구현·완료됐음을 코드로
+  확인. §12가 약속한 두 후속 계획도 실제로 등록·완료돼 있음을 확인 -
+  `PN-543C0CE9`(fork/exec류 syscall, completed)와
+  `PN-7FF5DA89`(좀비/고아 프로세스 처리 QA 계획, completed, §6의
+  QA 케이스 1/2/3 그대로) 둘 다 존재. §9 검증 계획이 스스로 "§6/§11
+  확정 반영해 갱신 필요"라고 표시해 둔 채 방치된 것처럼 보였으나,
+  실제 검증은 이 문서 갱신 대신 위 두 후속 PN과 이후 여러 세션(예:
+  이번 세션의 SIGCHLD/Wait 실측)에 걸쳐 흩어져 완료됐다 - 문서 자체의
+  §9 절만 낡아 있을 뿐 실제 코드/검증 갭은 아니다. 갭 없음(문서
+  §9의 "갱신 필요" 문구가 사소하게 낡아 있다는 점만 기록 - 우선순위
+  낮은 문서 정리 대상, 별도 PN 등록까지는 불필요).
+
+- **[점검 완료, 2026-09-19] `SP-6A563A8F`(ResourceGroup CPU 쿼터/freeze/
+  VFS 노출/syscall 확장 설계)** - §2(자료구조)/§3(`kCheckAndResetCpuPeriod()`
+  주기 롤오버)/§4(스로틀 - `pickNext()` 큐 순회 변경)/§5(계층적 쿼터
+  강제)/§5-A(동적 그룹 생성/삭제)/§6(`kResourceGroupOf(Task*)` 헬퍼)/
+  §7(`ResourceGroupSetCpuQuota` 등 syscall 6종)을 실제 소스
+  (`resource_group.h/.cpp`, `scheduler.cpp`)와 `PN-4190BBD3`(completed,
+  전 항목 1-7 + devmgr TEMP 하네스 실측)의 완료 기록에 전부 정확히
+  대응됨을 확인 - 특히 §6처럼 체크리스트 번호에 명시적으로 안 걸려
+  있어 누락되기 쉬운 항목(`kResourceGroupOf`)도 실제로 존재하고
+  `scheduler.cpp:1407`에서 호출되고 있음을 직접 grep으로 확인했다.
+  갭 없음.
 
 - **[점검 완료, 2026-09-19] `SP-30FCC8AE`(사용자/권한 체계, review→
   approved로 전환돼 새로 대상이 된 문서 - §3 절 자신이 다음 후보로
