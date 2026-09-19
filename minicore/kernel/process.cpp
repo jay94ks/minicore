@@ -1986,6 +1986,20 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     // null 분기 불필요).
     procShared->uid = parentProc->uid;
     procShared->gid = parentProc->gid;
+    // [신규, 2026-09-19, SP-EAB162FC §2.1/§2.2, PN-645CF608 항목4]
+    // `ProcessRole`도 부모 그대로 물려받는다 - `ProcessRole` enum
+    // 자신의 문서 주석이 "devmgr/fs/net/tty 및 **그 PnP 드라이버
+    // 자식**"을 KernelService 대상으로 명시해 뒀는데(process.h), PnP
+    // 드라이버 자식은 이제 `fork()`로만 만들어진다(SpawnProcess+argv
+    // 재-exec 방식은 QU-FB7A0CFF로 폐기됨, PN-A0F72A3A 참고) - 이
+    // 한 줄이 없으면 devmgr(KernelService)이 fork()한 드라이버 자식이
+    // 계속 기본값 Normal로 남아 그 문서 주석과 어긋난다. `SpawnProcess`
+    // (완전히 새 이미지를 실행하는 별개 경로)는 의도적으로 상속하지
+    // 않는다 - §1이 금지하는 "재조정/위임 체인"은 새 프로그램에
+    // 무분별하게 권한을 넘기는 경우를 막기 위함이고, fork()는 부모와
+    // 바이트 단위로 동일한 코드를 그대로 이어 실행할 뿐이라 이미 신뢰된
+    // 코드 바깥으로 권한이 새어 나갈 여지가 없다(자기 자신의 복제).
+    procShared->role = parentProc->role;
     procShared->memoryBytesUsed = parentProc->memoryBytesUsed;
     if (procShared->group) {
         procShared->group->accounting.totalMemoryBytesUsed += procShared->memoryBytesUsed;
