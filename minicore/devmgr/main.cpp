@@ -1,8 +1,17 @@
 // minicore/devmgr: SP-9DD4F3EA §6("devmgr 메인 서비스 시퀀스")의 첫
 // 실코드(PN-BD9AAE2F 3번/4번 항목, PN-A0F72A3A가 §3.2 드라이버 매칭/
-// 자식 스폰까지 이어붙였다). v1 매칭 테이블은 AHCI(클래스 매칭) 항목
-// 하나뿐 - §3.4(핫플러그)는 아직 없다.
-#include "ahci.h"
+// 자식 스폰까지 이어붙였다). **[뒤집힘, 2026-09-20, 설계자 답변
+// QU-1FB6A7A4 - "블록 디바이스는 그냥 아예 fs한테 던져버려. 인식/
+// 인식 해제까지 전부."]** AHCI(SP-C2670F69)를 비롯한 블록 스토리지
+// 장치의 인식/드라이버 구동은 devmgr이 아니라 fs(minicore/fs)가
+// 직접 전담하는 것으로 최종 확정됐다 - devmgr이 fork()로 스폰한
+// 이름 없는 드라이버 자식을 fs가 나중에 Channel로 찾아 연결해야
+// 하는 문제(QU-1FB6A7A4가 처음 지적한 설계 공백) 자체가 이 결정으로
+// 사라진다(같은 프로세스 안이라 애초에 핸드오프가 필요 없음). v1
+// 매칭 테이블은 그 결과 빈 상태 - §3.4(핫플러그)를 포함해 devmgr이
+// 실제로 fork() 스폰할 후속 드라이버(예: 비-스토리지 PnP 장치)가
+// 생기면 그때 다시 채운다. `EnumerateDevices` 호출 자체는 devmgr의
+// 일반 PnP 열거 책임(SP-9DD4F3EA §3.1)이라 그대로 남겨 둔다.
 #include "libmc/channel.h"
 #include "libmc/pnp.h"
 #include "libmc/syscall.h"
@@ -19,102 +28,13 @@ mc::uint32_t gDeviceCount = 0;
 // 꺼내 넘겨준 값 - 최초 부팅 시 스폰(kSpawnServiceProcesses)은 항상
 // argc=0/argv=[NULL]이다. **[정정, 2026-09-19, QU-FB7A0CFF 답변]**
 // "드라이버 모드 재진입"을 이 값으로 구분하는 원안(자기 자신을
-// argv={"devmgr","--driver=..."}로 재스폰)은 폐기됐다 - 이제
-// `mc::fork()`(아래) 반환값이 그 역할을 대신한다. 이 전역은 여전히
-// SysV 진입 규약 자체를 보관하는 용도로 남겨 둔다.
+// argv={"devmgr","--driver=..."}로 재스폰)은 폐기됐다 - `mc::fork()`가
+// 그 역할을 대신한다(현재는 실제 fork() 소비자가 없다 - 위 문서
+// 주석 참고). 이 전역은 여전히 SysV 진입 규약 자체를 보관하는
+// 용도로 남겨 둔다.
 mc::int32_t gArgc = 0;
 char** gArgv = nullptr;
 char** gEnvp = nullptr;
-
-// [신규, PN-A0F72A3A 착수 순서 3번(구현)] SP-9DD4F3EA §3.2/§4a-1
-// 매칭 테이블 - v1은 클래스 매칭 항목 하나뿐(AHCI: classCode=1
-// "Mass Storage"/subclass=6 "SATA"). progIf(AHCI 1.0=1)는 아직 구분
-// 안 함 - 정확 일치(vendorId+deviceId) 항목도 아직 없다(후보가 이
-// 하나뿐이라 §4a-1의 특이도 순 정렬/등록 순서 규칙은 실질적으로
-// 적용될 기회가 없음, 후속 드라이버 추가 시 필요).
-constexpr mc::uint32_t kPciClassMassStorage = 1;
-constexpr mc::uint32_t kPciSubclassSata = 6;
-
-bool kMatchesAhci(const mc::DeviceDescriptor& dev) { return dev.classCode == kPciClassMassStorage && dev.subclass == kPciSubclassSata; }
-
-// [신규, PN-A0F72A3A 착수 순서 4번] `DeviceDescriptor::mmioBases[6]`은
-// BAR 인덱스 그대로(mmioBases[0]=BAR0 ... mmioBases[5]=BAR5, 커널 쪽
-// kFillMmioBases()/pnp.cpp 참고) - AHCI의 ABAR는 관례상 BAR5라
-// mmioBases[0]이 아니라 mmioBases[5]에 들어 있는 경우가 흔하다(실측:
-// QEMU ich9-ahci). 첫 번째 실제로 존재하는(0이 아닌) BAR를 찾아
-// 쓴다 - "이 장치의 메모리 매핑 BAR 아무거나 하나"면 충분한 v1
-// 스코프(§3.3 RequestIoPermissionArgs 문서 주석과 동일한 전제).
-mc::uint64_t kFirstMmioBase(const mc::DeviceDescriptor& dev) {
-    for (mc::uint64_t base : dev.mmioBases) {
-        if (base != 0) {
-            return base;
-        }
-    }
-    return 0;
-}
-
-// [신규, PN-4E6EA13D] fork() 자식 프로세스 하나당 AHCI 컨트롤러
-// 인스턴스는 정확히 하나(그 컨트롤러 자신 - 이 자식 프로세스가 매칭된
-// 바로 그 장치) - 파일 스코프 전역인 이유는 kRunAhciDriverChild() 문서
-// 주석 참고(함수-지역 static 초기화 가드 부재).
-ahci::AhciController gAhciController;
-
-// [신규, PN-A0F72A3A 착수 순서 4번, 갱신 PN-4E6EA13D] `mc::fork()`로
-// 분리된 드라이버 자식 프로세스 안에서 실행 - SP-9DD4F3EA §3.2 "자식
-// 쪽" 단계(`RequestIoPermission`으로 BAR/IRQ 확보 -> 자체 Channel
-// 개설)에 이어, `SP-C2670F69` §2-3(AHCI HBA 초기화/포트 초기화/최소
-// 실제 I/O)까지 이어받는다(PN-4E6EA13D). `AhciBlockDevice`(§3.1 상위
-// API, fs 서비스 Channel 프로토콜 연동)는 여전히 범위 밖 - fs 서비스
-// 쪽 프로토콜이 먼저 정해져야 한다. fork() 자식은 devmgr과 별개
-// 프로세스라 essential이 기본 `false`(`Process::allocate()`의
-// zero-init 기본값, `kHandleForkSyscall`이 `startFlags`를 전혀 안
-// 건드림) - 크래시해도 devmgr/다른 드라이버를 끌고 내려가지 않는다
-// (§3.2가 요구하는 장치 격리를 그대로 만족).
-[[noreturn]] void kRunAhciDriverChild(const mc::DeviceDescriptor& dev) {
-    mc::RequestIoPermissionArgs ioArgs;
-    ioArgs.bus = dev.bus;
-    ioArgs.device = dev.device;
-    ioArgs.function = dev.function;
-    ioArgs.mmioBase = kFirstMmioBase(dev);
-    mc::SyscallToken ioToken = mc::submit(mc::kSyscallEndpointRequestIoPermission, &ioArgs);
-    if (ioToken != 0) {
-        mc::wait(ioToken);
-    }
-
-    if (ioArgs.error == mc::ChannelError::None) {
-        // [신규, PN-4E6EA13D] SP-C2670F69 §3.1 `AhciController::init` -
-        // BAR 확보에 성공한 경우에만 의미가 있다(mappedVirtualAddr가
-        // 유효한 ABAR 가상주소). 함수-지역 static 대신 파일 스코프
-        // 전역(gAhciController, 아래)을 쓴다 - 이 유저랜드 툴체인엔
-        // 함수-지역 static의 스레드 안전 1회 초기화 가드(__cxa_guard_*)
-        // 가 없다(freestanding, RM-23F4B687 §4류 - 이 파일이 이미
-        // 전역만 쓰는 gDevices/gDeviceCount와 동일한 관례).
-        if (gAhciController.init(ioArgs.mappedVirtualAddr)) {
-            // §3.1 "최소한의 실제 I/O" 검증 - 실제 장치가 붙어 있는 첫
-            // 포트에 IDENTIFY DEVICE를 발급해 본다. 결과 자체는 지금
-            // 당장 상위 소비자가 없어(AhciBlockDevice 범위 밖) 버려도
-            // 되지만, 실패/성공 여부와 무관하게 계속 살아있어야 하는
-            // 이 함수의 "살아있는 서비스" 계약은 그대로 유지한다.
-            ahci::PortProbeResult probeResult;
-            gAhciController.probeFirstDevice(&probeResult);
-        }
-
-        // 이름 없이 개설(§6 6단계 정정 - SP-B071E628 §5-A/§5-B 확정대로
-        // 커널 서비스/그 드라이버 자식은 pubreg를 아예 모른다).
-        mc::OpenChannelArgs openArgs;
-        mc::SyscallToken openToken = mc::submit(mc::kSyscallEndpointOpenChannel, &openArgs);
-        if (openToken != 0) {
-            mc::wait(openToken);
-        }
-    }
-
-    // BAR 확보/Channel 개설 성공 여부와 무관하게 계속 살아있는다(§3.2 -
-    // 드라이버 프로세스도 devmgr과 동일하게 절대 스스로 종료하지 않는다
-    // 는 "살아있는 서비스" 계약을 따른다, essential 여부와는 별개 축).
-    for (;;) {
-        asm volatile("pause");
-    }
-}
 
 }  // namespace
 
@@ -136,27 +56,12 @@ extern "C" void kDevmgrMain(mc::int32_t argc, char** argv, char** envp) {
         gDeviceCount = args.capacity;  // capacity는 EnumerateDevices onExec()이 "실제로 채운 개수"로 덮어쓴다
     }
 
-    // [교체, 2026-09-19, PN-A0F72A3A 착수 순서 4번] 예전엔 여기서 메모리
-    // 매핑 BAR가 있는 장치마다 무조건 RequestIoPermission을 시험 삼아
-    // 불렀다(실제 드라이버가 없던 시절의 syscall 왕복 검증용 TEMP 스텁,
-    // PN-BD9AAE2F가 이미 검증 완료해 더 이상 필요 없음) - 이제 진짜
-    // §3.2 매칭 루프로 대체한다: devmgr 자신은 더 이상 IO 권한을 직접
-    // 쥐지 않는다(매칭된 드라이버 자식만 쥔다, QU-FB7A0CFF 답변 -
-    // "devmgr 자체가 드라이버로 동작하는 것은 아니고, 내장형 드라이버만
-    // 그렇게 하도록").
-    for (mc::uint32_t i = 0; i < gDeviceCount; ++i) {
-        if (!kMatchesAhci(gDevices[i]) || kFirstMmioBase(gDevices[i]) == 0) {
-            continue;  // 매칭 실패 또는 이 드라이버가 기대하는 조건 미충족(§4a-1 "probe 실패") - 다음 장치로
-        }
-        mc::int64_t pid = mc::fork();
-        if (pid == 0) {
-            kRunAhciDriverChild(gDevices[i]);  // 반환하지 않음
-        }
-        // pid<0(fork 실패)이든 pid>0(부모, 자식 스폰 성공)이든 - 실패해도
-        // 이 장치를 건너뛰고 계속 진행한다(RM-23F4B687 §4 - 장치 하나
-        // 실패가 devmgr 전체를 막으면 안 됨, §4a-1 "모든 후보 실패 시
-        // 로그만 남기고 건너뜀"과 동일한 원칙).
-    }
+    // [뒤집힘, 2026-09-20, QU-1FB6A7A4] 예전엔 여기서 AHCI(§3.2 클래스
+    // 매칭)를 찾아 fork()로 드라이버 자식을 스폰했다 - 이제 블록
+    // 스토리지 장치는 fs가 직접 인식/구동한다(위 파일 문서 주석
+    // 참고). devmgr의 매칭 테이블은 현재 비어 있다 - 다음 비-스토리지
+    // PnP 드라이버가 필요해지면 여기(gDevices/gDeviceCount 순회)에
+    // 그 매칭 루프를 다시 채운다.
 
     // [수정, 2026-09-18, PN-11B3D2BB] devmgr는 `kSpawnServiceProcesses()`
     // 가 `ProcessStartFlags::essential = true`로 스폰하는 KernelService다

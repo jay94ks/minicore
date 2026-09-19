@@ -26,11 +26,110 @@
 // 미구현") - 이번 증분은 각 지점이 라우팅 테이블에 정확히 등록되고
 // 그 소유 Channel의 accept 왕복이 실제 syscall 트랩 경계에서 동작
 // 하는지만 검증한다(accept 즉시 close, pubreg 항목3과 동일 패턴).
+//
+// **[신규, 2026-09-20, QU-1FB6A7A4 답변 - "블록 디바이스는 그냥 아예
+// fs한테 던져버려. 인식/인식 해제까지 전부."]** 블록 스토리지 장치
+// (AHCI 등)의 PCI 열거/매칭/드라이버 구동을 devmgr이 아니라 이
+// 프로세스가 직접 수행한다 - devmgr이 fork()로 스폰한 자식이 개설한
+// 이름 없는 Channel을 이 프로세스가 나중에 찾아야 하는 문제
+// (SP-C2670F69 §3.1이 남겨 둔 설계 공백) 자체가 이 결정으로 사라진다
+// (같은 프로세스 안이므로 핸드오프가 필요 없음). AHCI 실제 하드웨어
+// 코드는 ahci.h/ahci.cpp(PN-4E6EA13D/PN-F60E405A, devmgr에서 이관) -
+// `AhciBlockDevice`(block_device.h `fs::BlockDevice` 구현)까지 이
+// 증분에서 구성하지만, 그걸 실제 `FileSystemDriver::mount()`(§3.1a,
+// libext4/libvfat 자체가 아직 미구현)에 넘기는 건 여전히 범위 밖 -
+// PN-452FF696 항목5.
+#include "ahci.h"
 #include "libmc/channel.h"
+#include "libmc/pnp.h"
 #include "libmc/syscall.h"
 #include "libmc/vfs.h"
 
 namespace {
+
+// [신규, QU-1FB6A7A4] devmgr/main.cpp에 있던 것과 동일한 패턴(이관) -
+// v1 매칭 후보는 AHCI(classCode=1 "Mass Storage"/subclass=6 "SATA")
+// 하나뿐. progIf(AHCI 1.0=1)는 아직 구분 안 함.
+constexpr mc::uint32_t kPciClassMassStorage = 1;
+constexpr mc::uint32_t kPciSubclassSata = 6;
+constexpr mc::uint32_t kMaxDevices = 64;
+
+bool kMatchesAhci(const mc::DeviceDescriptor& dev) {
+    return dev.classCode == kPciClassMassStorage && dev.subclass == kPciSubclassSata;
+}
+
+// `DeviceDescriptor::mmioBases[6]`은 BAR 인덱스 그대로(mmioBases[0]=
+// BAR0 ... mmioBases[5]=BAR5) - AHCI의 ABAR는 관례상 BAR5(실측: QEMU
+// ich9-ahci). 첫 번째 실제로 존재하는(0이 아닌) BAR를 찾아 쓴다.
+mc::uint64_t kFirstMmioBase(const mc::DeviceDescriptor& dev) {
+    for (mc::uint64_t base : dev.mmioBases) {
+        if (base != 0) {
+            return base;
+        }
+    }
+    return 0;
+}
+
+// [신규, QU-1FB6A7A4] fs 프로세스 하나당 AHCI 컨트롤러/블록 장치
+// 인스턴스는 최대 1개(v1 - 컨트롤러 여러 개/포트 여러 개를 각각
+// BlockDevice로 노출하는 건 후속 과제, 지금은 §3.1 "최소한의 실제
+// I/O 검증" 수준). 파일 스코프 전역인 이유는 devmgr에서 쓰던 것과
+// 동일(함수-지역 static의 초기화 가드가 이 프리스탠딩 툴체인엔 없음).
+ahci::AhciController gAhciController;
+ahci::AhciBlockDevice gAhciBlockDevice;
+bool gHasAhciBlockDevice = false;
+
+// [신규, QU-1FB6A7A4] devmgr에서 하던 EnumerateDevices→매칭→
+// RequestIoPermission→HBA 초기화까지 그대로 이 프로세스 안에서
+// 수행한다 - fork() 없이 같은 주소공간이라 Channel 핸드오프 자체가
+// 필요 없다. 실패해도(장치 없음/권한 실패) 이 서비스는 계속
+// 살아있어야 한다(§3.2 "살아있는 서비스" 계약과 동일한 원칙, VFS
+// 마운트 지점 라우팅 자체는 블록 장치 유무와 무관하게 계속 동작해야
+// 하므로).
+void kProbeAndInitAhci() {
+    mc::DeviceDescriptor devices[kMaxDevices];
+    mc::EnumerateDevicesArgs enumArgs;
+    enumArgs.startIndex = 0;
+    enumArgs.capacity = kMaxDevices;
+    enumArgs.outDevices = devices;
+
+    mc::SyscallToken enumToken = mc::submit(mc::kSyscallEndpointEnumerateDevices, &enumArgs);
+    mc::uint32_t deviceCount = 0;
+    if (enumToken != 0 && mc::wait(enumToken) && enumArgs.error == mc::ChannelError::None) {
+        deviceCount = enumArgs.capacity;  // capacity는 onExec()이 "실제로 채운 개수"로 덮어쓴다
+    }
+
+    for (mc::uint32_t i = 0; i < deviceCount; ++i) {
+        if (!kMatchesAhci(devices[i]) || kFirstMmioBase(devices[i]) == 0) {
+            continue;
+        }
+
+        mc::RequestIoPermissionArgs ioArgs;
+        ioArgs.bus = devices[i].bus;
+        ioArgs.device = devices[i].device;
+        ioArgs.function = devices[i].function;
+        ioArgs.mmioBase = kFirstMmioBase(devices[i]);
+        mc::SyscallToken ioToken = mc::submit(mc::kSyscallEndpointRequestIoPermission, &ioArgs);
+        if (ioToken != 0) {
+            mc::wait(ioToken);
+        }
+        if (ioArgs.error != mc::ChannelError::None) {
+            continue;  // 이 장치 실패 - 다음 후보로(RM-23F4B687 §4, 장치 하나 실패가 서비스 전체를 막으면 안 됨)
+        }
+
+        if (!gAhciController.init(ioArgs.mappedVirtualAddr)) {
+            continue;
+        }
+
+        ahci::PortProbeResult probeResult;
+        ahci::AhciPort* port = nullptr;
+        if (gAhciController.probeFirstDevice(&probeResult, &port)) {
+            gAhciBlockDevice.init(port, probeResult.identifyData);
+            gHasAhciBlockDevice = true;
+        }
+        return;  // v1은 첫 매칭 성공 장치 하나만(§3.1 최소 검증 범위)
+    }
+}
 
 struct MountPointSpec {
     const char* path;
@@ -71,6 +170,11 @@ extern "C" void _start() {
             mc::wait(mountToken);
         }
     }
+
+    // [신규, QU-1FB6A7A4] 블록 스토리지 장치 인식/구동 - VFS 마운트
+    // 지점 라우팅 등록 이후, accept 루프 진입 전에 한 번(§3.2 "살아있는
+    // 서비스" 계약과 동일하게 실패해도 이 프로세스는 계속 존재).
+    kProbeAndInitAhci();
 
     for (;;) {
         mc::AcceptFromChannelArgs acceptArgs;
