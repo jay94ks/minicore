@@ -7,6 +7,7 @@
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "waitable.h"
 
 namespace kernel {
 
@@ -220,6 +221,51 @@ private:
     AtomicU32 _refCount;
 };
 
+// [신규, 2026-09-19, PN-0AC554C2/PN-EA968DF0, QU-25E1C297 답변 +
+// docs opinion + QU-B89531F0 답변("제안대로 진행")] AsyncTask 본체는
+// 기존 비동기 프레임워크(AsyncTask::submit 등)에 그대로 제출하고,
+// 이 얇은 래퍼만 `Task::blockedOn` 리스트에 들어간다 - "Task가
+// 대기해야 하는 모든 것을 Waitable로 wrapping"하라는 답변을 AsyncTask
+// 자신을 고치지 않고 만족시키는 자리(AsyncTask는 SharedPtr로 관리되는
+// 타입이 아니라 WeakPtr<Waitable>이 바로 아일리어싱할 SharedPtr
+// 컨트롤 블록이 없다 - 그래서 별도 래퍼가 필요했다).
+//
+// - `isCompleted()` - 대상 AsyncTask가 Completed/Failed/Cancelled에
+//   도달했는지. 대상이 이미 반납돼 `AsyncTaskWeakRef::lock()`이
+//   nullptr을 돌려주면(정상적으로 다 처리되고 사라진 경우) 완료로
+//   간주한다 - 영원히 리스트에 남아 있으면 안 되므로.
+// - `cancel()` - §8 협조적 취소(QU-25E1C297 답변: "각 비동기 작업은
+//   취소 토큰을 내부적으로 유통하여 취소되었으면 탈출하는 메커니즘이
+//   필수") - `AsyncTask::cancelSource`가 이미 정확히 이 트리거 지점을
+//   예고해 뒀다(주석 "SP-0666DB3C §9 Waitable::cancel() 경로(아직
+//   미연동)") - 강제로 죽이지 않고 토큰만 세운다, 실제 탈출은 그
+//   AsyncTaskHandler::onExec() 자신이 `cancelSource.token().
+//   isCancelled()`를 확인해 스스로 해야 한다(아직 기존 핸들러
+//   어디에도 이 확인 지점을 넣지 않았다 - PN-0AC554C2 5단계 계속).
+class AsyncTaskWaitable : public Waitable {
+public:
+    explicit AsyncTaskWaitable(AsyncTaskWeakRef* ref) : _ref(ref) {
+        if (_ref) {
+            _ref->addRef();
+        }
+    }
+
+    ~AsyncTaskWaitable() override {
+        if (_ref) {
+            _ref->release();
+        }
+    }
+
+    // 아래 struct AsyncTask 정의가 끝난 뒤(이 헤더 하단)에 정의한다 -
+    // 이 시점에는 AsyncTask가 아직 전방 선언(불완전 타입)이라
+    // task->state/cancelSource에 접근할 수 없다.
+    bool isCompleted() const override;
+    bool cancel(Task*, WaitCancelReason) override;
+
+private:
+    AsyncTaskWeakRef* _ref;
+};
+
 struct AsyncTask {
     // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이
     // 오프셋(항상 첫 필드)을 그대로 참조한다 - task.h의 Task와 동일한
@@ -327,6 +373,15 @@ struct AsyncTask {
     // `ensureWeakRef()`가 이미 있으면 그대로 재사용).
     AsyncTaskWeakRef* weakRef = nullptr;
 
+    // [신규, 2026-09-19, PN-0AC554C2/PN-EA968DF0, QU-B89531F0 답변]
+    // `ensureWaitable()`(아래)이 처음 호출된 적 있으면 그때 만들어진
+    // 얇은 `Waitable` 래퍼 - AsyncTask 자신이 이 `SharedPtr`을 강하게
+    // 소유하고 있다가, 이 AsyncTask가 실제로 반납될 때(암묵적으로
+    // `SharedPtr` 소멸자가) 함께 해제한다. 순환 참조 없음
+    // (`AsyncTaskWaitable`은 `weakRef`를 통해 이 AsyncTask를 약하게만
+    // 참조). 아직 아무도 요청한 적 없으면 계속 빈 `SharedPtr`.
+    SharedPtr<AsyncTaskWaitable> selfWaitable;
+
     // [신규, 2026-09-18, PN-0EB2FABF] `scheduleTimeout()`이 이미 이
     // AsyncTask에 타임아웃을 건 적 있는지 - `weakRef != nullptr`과는
     // 이제 별개 축이다(weakRef는 Join도 만들 수 있으므로, "weakRef가
@@ -342,6 +397,17 @@ struct AsyncTask {
     // 몫만큼 직접 `addRef()`를 불러야 한다** - 이 함수 자체는 관찰자
     // 등록을 하지 않는다(순수 "블록을 얻기/만들기"만 담당).
     AsyncTaskWeakRef* ensureWeakRef();
+
+    // [신규, 2026-09-19, PN-0AC554C2/PN-EA968DF0, QU-B89531F0 답변
+    // ("제안대로 진행")] `selfWaitable`(아래)이 아직 없으면 `kMakeShared
+    // <AsyncTaskWaitable>(ensureWeakRef())`로 새로 만들어 채우고, 있으면
+    // 그대로 반환(멱등, `ensureWeakRef()`와 동일한 관례) - 실패(슬랩
+    // 고갈, 또는 `ensureWeakRef()` 자체 실패) 시 빈 `SharedPtr`.
+    // 반환값을 `Task::blockedOn`에 `WeakPtr<Waitable>`로 아일리어싱해
+    // 넣는 게 이 함수의 유일한 존재 이유다(`WaitQueue`가 자신을 담은
+    // Mutex/Semaphore의 컨트롤 블록을 빌려 쓰는 것과 동형 - 다만
+    // 여기서는 AsyncTask 자신이 그 "담아 주는 그릇"이다).
+    SharedPtr<AsyncTaskWaitable> ensureWaitable();
 
     // [PN-D01B7D07, SP-F682B889 §3.7] delayTicks(Timer::tickCount()
     // 단위, DelayedExecutionQueue 재사용) 뒤에도 이 AsyncTask가 아직
@@ -392,6 +458,29 @@ struct AsyncTask {
     static AsyncTask* submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
                              bool autoFree = true, bool preemptive = false);
 };
+
+// AsyncTaskWaitable::isCompleted()/cancel() 정의 - struct AsyncTask가
+// 이제 완전한 타입이라 여기서만 task->state/cancelSource에 접근할 수
+// 있다(클래스 선언 자체는 위 AsyncTaskWeakRef 바로 뒤, AsyncTask보다
+// 앞에 있다 - AsyncTask::selfWaitable 필드가 이 타입을 완전한 상태로
+// 필요로 하기 때문).
+inline bool AsyncTaskWaitable::isCompleted() const {
+    AsyncTask* task = _ref ? _ref->lock() : nullptr;
+    if (!task) {
+        return true;
+    }
+    return task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed ||
+           task->state == AsyncTaskState::Cancelled;
+}
+
+inline bool AsyncTaskWaitable::cancel(Task*, WaitCancelReason) {
+    AsyncTask* task = _ref ? _ref->lock() : nullptr;
+    if (!task) {
+        return false;
+    }
+    task->cancelSource.trigger();
+    return true;
+}
 
 // 작업 주체(기능)별로 구현 - 실행/실패/취소 셋 다 구현 책임을 진다.
 // args(작업 주체별 내부 데이터)를 실행 전에 만드는 것도, 실행이

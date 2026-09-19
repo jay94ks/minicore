@@ -268,6 +268,25 @@ AsyncTaskWeakRef* AsyncTask::ensureWeakRef() {
     return weakRef;
 }
 
+// [신규, 2026-09-19, PN-0AC554C2/PN-EA968DF0, QU-B89531F0 답변]
+// `AsyncTaskWaitable`은 `Waitable`을 상속해 vtable을 갖는다 -
+// `kMakeShared`의 기본 관례(memset(0)+init(), 실제 생성자 안 거침)로는
+// vtable 포인터가 설치되지 않아 가상 호출이 즉시 크래시한다(shared_ptr.h
+// 의 "가상 함수가 있는 T" 경고, QU-1D089097이 WaitQueue-in-Mutex에서
+// 이미 실측한 것과 같은 함정) - 그래서 반드시 `kMakeSharedNew`(실제
+// placement new 생성자 호출)를 써야 한다.
+SharedPtr<AsyncTaskWaitable> AsyncTask::ensureWaitable() {
+    if (selfWaitable) {
+        return selfWaitable;  // 이미 있으면 그대로 재사용(멱등)
+    }
+    AsyncTaskWeakRef* ref = ensureWeakRef();
+    if (!ref) {
+        return SharedPtr<AsyncTaskWaitable>();  // 할당 실패
+    }
+    selfWaitable = kMakeSharedNew<AsyncTaskWaitable>(ref);
+    return selfWaitable;
+}
+
 namespace {
 
 void kOnAsyncTaskTimeout(void* arg) {
@@ -353,6 +372,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     allowCoreMigration = false;
     coroHandle = nullptr;
     weakRef = nullptr;
+    selfWaitable = SharedPtr<AsyncTaskWaitable>();
     timeoutScheduled = false;
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
