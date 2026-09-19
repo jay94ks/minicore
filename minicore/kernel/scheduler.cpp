@@ -24,6 +24,7 @@
 #include "syscall.h"
 #include "syscall_fastpath.h"
 #include "timer.h"
+#include "wait_queue.h"
 
 namespace kernel {
 
@@ -1602,7 +1603,18 @@ void Scheduler::onTick(InterruptFrame* frame) {
     } else {
         const bool frozenByGroup = kCheckAndMarkFrozen(current);
         const bool pausedByDebugger = kIsPausedByDebugger(current);
-        if (frozenByGroup || pausedByDebugger) {
+        // [신규, 2026-09-19, PN-0AC554C2 1단계, QU-25E1C297 답변] 세
+        // 번째 조건 - `current->blockedOn`(이제 리스트)이 해소되지 않은
+        // Waitable을 여전히 담고 있으면 이 Task는 Blocked여야 한다.
+        // `kCheckAndMarkFrozen()`과 동일한 이유로 `||` 단락 평가로
+        // 건너뛰면 안 된다(이 함수 자신이 완료된 엔트리를 지우는 부수
+        // 효과를 갖는다) - 매번 반드시 호출한다. 오늘 기준 이 리스트를
+        // 채우는 유일한 경로(WaitQueue)는 채워져 있는 동안 이 Task가
+        // 이미 파킹돼 있어(Scheduler::parkCurrent()로 직접) onTick의
+        // "current" 후보가 될 수 없으므로, 이 조건은 아직 실제로
+        // true가 될 기회가 없다 - 순수 추가, 관찰 가능한 동작 변화 없음.
+        const bool blockedOnPending = kDrainAndCheckBlockedOn(current);
+        if (frozenByGroup || pausedByDebugger || blockedOnPending) {
             current->state = TaskState::Blocked;
             // [신규, 2026-09-17, SP-9A6D579F §3.5, DC-47000304 (A) 채택]
             // 지금 이 지점에서 손에 쥔 frame(이 Task 자신의 커널 스택

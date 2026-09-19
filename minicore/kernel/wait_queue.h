@@ -76,10 +76,32 @@ public:
     // 상태) 아무 일도 하지 않고 false.
     bool cancel(Task* task, WaitCancelReason reason) override;
 
+    // [신규, 2026-09-19, PN-0AC554C2] `WaitQueue` 자신은 여러 Task가
+    // 공유하는 큐라 "이 큐 자체가 완료됐는가"라는 인스턴스 단위 상태를
+    // 갖지 않는다(각 Task별 완료 여부는 여전히 이 큐/`blockedOn`에서
+    // 빠졌는지로만 판단 - wakeOne()/wakeAll()/cancel()이 그 자리에서
+    // 직접 처리). 그래서 항상 `false`를 반환하는 자리표시자다 - 진짜
+    // per-task 완료 신호가 필요해지면(PN-0AC554C2 2단계, Mutex/
+    // Semaphore를 새 구조로 마이그레이션할 때) 이 공유 `WaitQueue`
+    // 대신 "이 큐에 파킹된 특정 Task 하나"를 표현하는 전용 per-wait
+    // `Waitable` 구현체로 교체될 예정이다.
+    bool isCompleted() const override { return false; }
+
 private:
     Spinlock _lock;  // _queue/각 Task의 blockedOn 정리를 보호(짧게만 보유)
     Queue<Task, WaitQueueTraits> _queue;
 };
+
+// [신규, 2026-09-19, PN-0AC554C2 1단계, QU-25E1C297 답변] `task->
+// blockedOn` 리스트를 순회해 `isCompleted()==true`인 엔트리와 이미
+// 대상이 해제된(expired) 엔트리를 제거하고, 순회 후에도 리스트가
+// 비어있지 않으면 true를 반환한다 - `Scheduler::onTick()`의 재스케줄
+// 결정 지점(`kCheckAndMarkFrozen`/`kIsPausedByDebugger`와 같은 자리)이
+// 이 반환값을 세 번째 조건으로 사용한다. `kCheckAndMarkFrozen()`과
+// 동일한 이유로 **부수 효과(리스트 드레인)가 있으니 단락 평가로
+// 건너뛰면 안 된다** - 호출부는 반드시 매번 이 함수를 부른 뒤 결과를
+// 확인해야 한다.
+bool kDrainAndCheckBlockedOn(Task* task);
 
 }  // namespace kernel
 

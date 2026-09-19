@@ -812,9 +812,15 @@ bool Process::raiseSignal(SignalNumber number) {
         if (!t) {
             return;
         }
-        if (SharedPtr<Waitable> waitable = t->blockedOn.lock()) {
-            waitable->cancel(t, WaitCancelReason::Signal);
-        }
+        // [갱신, 2026-09-19, PN-0AC554C2 1단계] `blockedOn`이 리스트로
+        // 바뀌었다 - 오늘 기준 유일한 소비자(WaitQueue)는 여전히 0개
+        // 아니면 1개만 채우므로 동작은 예전과 동일하되, 미래에 여러
+        // Waitable을 동시에 기다리게 되면 전부에 강제 취소를 전파한다.
+        t->blockedOn.forEach([t](WeakPtr<Waitable>& entry, auto*) {
+            if (SharedPtr<Waitable> waitable = entry.lock()) {
+                waitable->cancel(t, WaitCancelReason::Signal);
+            }
+        });
         // [신규, 2026-09-18, PN-B5C2845A] Kill/Terminate는 위
         // `blockedOn`(Waitable 기반 블로킹) 강제 웨이크업만으로는
         // 대상이 `Syscall::wait()`(`acceptFromChannel`/

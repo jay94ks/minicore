@@ -1,5 +1,6 @@
 #include "wait_queue.h"
 
+#include "libkmm/slab.h"
 #include "scheduler.h"
 
 namespace kernel {
@@ -10,7 +11,14 @@ void WaitQueue::parkCurrentAndUnlock(Spinlock& guard, const WeakPtr<Waitable>& s
 
     _lock.lock();
     _queue.enqueue(self);
-    self->blockedOn = selfAsWaitable;
+    // [갱신, 2026-09-19, PN-0AC554C2 1단계] `blockedOn`이 단일
+    // `WeakPtr<Waitable>`에서 리스트로 바뀌었다 - 이 WaitQueue는
+    // 여전히 Task 하나당 엔트리 하나만 채우므로(오늘 기준 유일한
+    // 소비자), 먼저 비워 두고 하나만 넣어 예전과 정확히 같은
+    // "0개 아니면 1개" 불변조건을 유지한다.
+    self->blockedOn.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+    self->blockedOn.clear();
+    self->blockedOn.insert(selfAsWaitable);
     self->parkedCoreIndex = coreIndex;
     // §9.6-3 - 이번 파킹을 새로 시작하는 시점에 리셋한다(지난 번
     // 파킹에서 취소됐던 낡은 값이 이번 파킹에도 남아 있으면 안 됨) -
@@ -29,7 +37,7 @@ void WaitQueue::wakeOne() {
     _lock.lock();
     Task* task = _queue.dequeue();
     if (task) {
-        task->blockedOn = WeakPtr<Waitable>();
+        task->blockedOn.clear();
     }
     _lock.unlock();
 
@@ -68,7 +76,7 @@ void WaitQueue::wakeAll() {
         if (!task) {
             break;
         }
-        task->blockedOn = WeakPtr<Waitable>();
+        task->blockedOn.clear();
         Scheduler::scheduleImmediate(task->parkedCoreIndex, task);
     }
 }
@@ -91,7 +99,7 @@ bool WaitQueue::cancel(Task* task, WaitCancelReason reason) {
         return false;  // 이미 정상적으로 깨어나 떠난 뒤(경쟁 상황)
     }
     List<Task, WaitQueueTraits>::remove(task);
-    task->blockedOn = WeakPtr<Waitable>();
+    task->blockedOn.clear();
     // §9.6-3(설계 문서 pseudocode, 지금까지 미구현이었음) - 재개된
     // 코드가 "정상 웨이크업"과 "강제로 끌려나옴"을 구분할 수 있게.
     task->lastCancelReason = reason;
@@ -99,6 +107,26 @@ bool WaitQueue::cancel(Task* task, WaitCancelReason reason) {
 
     Scheduler::scheduleImmediate(task->parkedCoreIndex, task);
     return true;
+}
+
+// [신규, 2026-09-19, PN-0AC554C2 1단계] wait_queue.h 문서 주석 참고 -
+// 완료된(또는 대상이 이미 해제된) 엔트리를 제거하고, 순회 후 리스트가
+// 비어있지 않은지를 반환한다. `forEach()`가 순회 중 `erase()`를
+// 안전하게 허용한다는 게 이미 문서화돼 있어(ChunkedList::forEach 주석
+// - 그 슬롯의 used만 내릴 뿐 청크/인덱스 구조 자체는 안 바뀜) 별도
+// 임시 버퍼 없이 바로 지운다.
+bool kDrainAndCheckBlockedOn(Task* task) {
+    task->blockedOn.forEach([task](WeakPtr<Waitable>& entry, ChunkedList<WeakPtr<Waitable>, kBlockedOnChunkCapacity>::Slot* slot) {
+        SharedPtr<Waitable> waitable = entry.lock();
+        if (!waitable || waitable->isCompleted()) {
+            task->blockedOn.erase(slot);
+        }
+    });
+    bool nonEmpty = false;
+    task->blockedOn.forEach([&nonEmpty](WeakPtr<Waitable>&, ChunkedList<WeakPtr<Waitable>, kBlockedOnChunkCapacity>::Slot*) {
+        nonEmpty = true;
+    });
+    return nonEmpty;
 }
 
 }  // namespace kernel

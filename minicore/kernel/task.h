@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_TASK_H
 
 #include "libkcont/intrusive_list.h"
+#include "libkenv/chunked_list.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
@@ -10,6 +11,12 @@
 namespace kernel {
 
 class Waitable;  // WeakPtr<Waitable>로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
+
+// [신규, 2026-09-19, PN-0AC554C2 1단계] Task::blockedOn(아래)의
+// ChunkedList 청크 용량 - signal.h의 kPendingSignalChunkCapacity와
+// 같은 관례(작게 시작, 오늘 기준 유일한 소비자 WaitQueue는 Task당
+// 0개 아니면 1개만 채운다 - 실측 후 조정 가능한 구현 세부).
+constexpr uint32_t kBlockedOnChunkCapacity = 4;
 
 // SP-0666DB3C §11 - 명시적(explicit) TLS 슬롯 개수. [갱신, 2026-09-18,
 // PN-22E5E9E7 항목2] 예전엔 Task::tlsSlots(평범한 배열 필드) 크기였으나,
@@ -259,7 +266,20 @@ struct Task {
     // WaitQueue 내부 연결 리스트로 처리됨), 이 필드를 통한 강제
     // cancel()(§9.5, 시그널 전달)만 조용히 무력화된다 - 시그널로 즉시
     // 깨워야 하는 Mutex/Semaphore는 반드시 kMakeShared로 만들어야 한다.
-    WeakPtr<Waitable> blockedOn;
+    //
+    // [갱신, 2026-09-19, PN-0AC554C2 1단계, QU-25E1C297 답변("Task가
+    // 대기해야 하는 모든 것을 Waitable로 wrapping하여 리스트에 담는
+    // 구조로 전환해")] 단일 `WeakPtr<Waitable>`에서 리스트로 승격 -
+    // 이 Task가 동시에 여러 Waitable을 기다릴 수 있게 하고(전부
+    // 해소돼야 블로킹이 풀리는 AND 의미, wait_queue.h의
+    // `kDrainAndCheckBlockedOn` 참고), `Scheduler::onTick()`의 재스케줄
+    // 결정 지점이 이 리스트가 비어있지 않으면 Blocked로 전환하는 새
+    // 메커니즘의 기반이 된다. **1단계(현재)에서는 오늘까지의 유일한
+    // 소비자(WaitQueue)가 여전히 0개 아니면 1개만 채우는 예전과 동일한
+    // 불변조건을 그대로 지킨다** - 실제로 여러 엔트리를 동시에 담는
+    // 것은 이후 단계(pendingSyscalls/디버그 정지 마이그레이션, #DB
+    // wrapping)가 하는 일이다.
+    ChunkedList<WeakPtr<Waitable>, kBlockedOnChunkCapacity> blockedOn;
 
     // WaitQueue(SP-0666DB3C §1/§5-1)가 이 Task를 파킹시킨 코어 - 나중에
     // wakeOne()/cancel()이 Scheduler::scheduleImmediate(parkedCoreIndex,
