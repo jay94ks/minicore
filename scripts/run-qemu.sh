@@ -8,6 +8,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/build"
 TIMEOUT_SECS="${MINICORE_QEMU_TIMEOUT:-5}"
+# [수정, 2026-09-19, PN-9FCD59E6] run-grub.sh와 동일한 관례
+# (MINICORE_QEMU_SMP=4)인데 이 스크립트만 실제로 -smp를 전달하지
+# 않고 있었다 - "PVH no-initrd SMP4" 회귀 시나리오가 이 env var를
+# 세팅해도 조용히 항상 SMP1로 돌고 있던 잠재 갭(디버그 로그가 따로
+# 없어 아무도 눈치채지 못함).
+SMP="${MINICORE_QEMU_SMP:-1}"
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/cmake/toolchain-x86_64.cmake" \
@@ -16,13 +22,14 @@ cmake --build "${BUILD_DIR}" >/dev/null
 
 KERNEL="${BUILD_DIR}/minicore.elf"
 
-echo "--- QEMU 시리얼 출력 (최대 ${TIMEOUT_SECS}초) ---"
+echo "--- QEMU 시리얼 출력 (최대 ${TIMEOUT_SECS}초, SMP=${SMP}) ---"
 set +e
 timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -kernel "${KERNEL}" \
     -serial stdio \
     -display none \
     -no-reboot \
+    -smp "${SMP}" \
     -d cpu_reset,guest_errors \
     -D "${BUILD_DIR}/qemu.log"
 status=$?
