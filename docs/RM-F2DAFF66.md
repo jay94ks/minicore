@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-19T00:06:44.346Z
+  updatedAt: 2026-09-19T01:17:36.334Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1380,6 +1380,24 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   영구 예약해야 할 "진짜 프로토콜 소비자"는 §5-A/§5-B 확정(커널
   서비스는 pubreg에 직접 등록 안 함, 대행 릴레이는 범위 밖)에 따라
   아직 하나도 존재하지 않는다 - 갭 없음.
+
+- **[점검 완료, 2026-09-19, 갭 없음] `SP-201238BB`(lock-free
+  SharedPtr/WeakPtr/UniquePtr 템플릿) → `minicore/libs/libkenv/shared_ptr.h`**:
+  §2(`ControlBlockBase`/`ControlBlock<T,Deleter>`/`SharedPtr<T,Deleter>`/
+  `WeakPtr<T,Deleter>`/`EnableSharedFromThis<T>`/`kMakeShared`)와
+  §2-A(`UniquePtr<T,Deleter>` - `release()`/`reset()`/`initRaw()`/
+  `operator[]` 포함)가 문서 코드블록과 실제 파일에서 API 일치 확인.
+  §2-B(`IntrusiveControlBlock`)는 코드에 없지만 갭이 아니다 - 파일
+  자신의 헤더 주석(shared_ptr.h:31-33)이 "`PN-68871BC9` 자신이 v1
+  적용 대상 미정이라 범위 밖으로 명시해 둔 항목이라 이 파일에는
+  포함하지 않는다"고 밝혀, 착수 당시 이미 확정된 의도적 범위 축소임을
+  코드 스스로 기록해 뒀다(`SP-30FCC8AE`의 ancestor-scope 결정,
+  `PN-88E62419`와 같은 패턴 - 문서가 침묵한 게 아니라 코드가 대신
+  설명). §4.3("구체적 후보 목록")은 문서 자신이 "이 문서는 이 후보들을
+  강제하지 않는다"고 명시한 비구속 후보 나열이라 이 감사 방법론(확정된
+  설계 vs 실제 코드) 대상이 아님 - 대조 불필요. `<type_traits>`
+  베어메탈 부재로 인한 `kIsBaseOf` 자체 구현 대체도 문서 본문에 이미
+  인라인 정정으로 기록돼 있어 별도 갭 아님.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
