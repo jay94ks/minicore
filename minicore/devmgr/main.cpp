@@ -19,6 +19,15 @@ constexpr mc::uint32_t kMaxDevices = 64;
 mc::DeviceDescriptor gDevices[kMaxDevices];
 mc::uint32_t gDeviceCount = 0;
 
+// [신규, PN-A0F72A3A 착수 순서 3번] crt0.S가 실제 SysV 진입 스택에서
+// 꺼내 넘겨준 값 - 최초 부팅 시 스폰(kSpawnServiceProcesses, 기존과
+// 동일하게 argc=0/argv=[NULL])과 §4a-2의 "드라이버 모드 재진입"(자기
+// 자신을 argv={"devmgr","--driver=..."}로 재스폰, 아직 미착수)을
+// 이 값 하나로 구분하게 될 자리 - 이번 증분은 값을 보관만 해 둔다.
+mc::int32_t gArgc = 0;
+char** gArgv = nullptr;
+char** gEnvp = nullptr;
+
 // RequestIoPermission 결과(장치 인덱스별) - 아직 로그 출력 syscall이
 // 없어 커널 쪽에서 TEMP breadcrumb으로 확인하는 용도(§3.3 검증).
 mc::uint64_t gMappedAddr[kMaxDevices] = {};
@@ -27,7 +36,14 @@ bool gIoPermAttempted[kMaxDevices] = {};
 
 }  // namespace
 
-extern "C" void _start() {
+// [교체, PN-A0F72A3A 착수 순서 3번] `_start()` 자신은 이제 crt0.S가
+// 맡는다(SysV 스택 -> 호출 규약 레지스터 변환) - 이 함수가 그 변환된
+// argc/argv/envp를 실제로 받는 진짜 진입점이다.
+extern "C" void kDevmgrMain(mc::int32_t argc, char** argv, char** envp) {
+    gArgc = argc;
+    gArgv = argv;
+    gEnvp = envp;
+
     mc::EnumerateDevicesArgs args;
     args.startIndex = 0;
     args.capacity = kMaxDevices;

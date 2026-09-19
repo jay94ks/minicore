@@ -5,7 +5,7 @@
 # userland/ 빌드 트리를 그대로 재사용한다(minicore/init/CMakeLists.txt
 # 와 동일한 out-of-tree 관례 - 이 파일도 그 빌드 트리 안에서만
 # 구성된다, 단독 configure 불가).
-add_executable(devmgr main.cpp)
+add_executable(devmgr crt0.S main.cpp)
 
 set_target_properties(devmgr PROPERTIES
     LINK_DEPENDS ${MINICORE_USERLAND_LINKER_SCRIPT}
