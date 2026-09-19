@@ -1999,6 +1999,17 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     // 무분별하게 권한을 넘기는 경우를 막기 위함이고, fork()는 부모와
     // 바이트 단위로 동일한 코드를 그대로 이어 실행할 뿐이라 이미 신뢰된
     // 코드 바깥으로 권한이 새어 나갈 여지가 없다(자기 자신의 복제).
+    // [알려진 스코프 캐벗, 2026-09-19, minicore-8a 교차 확인] 이 한 줄은
+    // "PnP 드라이버 자식"으로 좁히지 않고 "부모가 KernelService면
+    // fork() 자식도 무조건 KernelService"로 넓게 구현했다 - 지금은
+    // devmgr의 PnP 드라이버 스폰이 이 커널의 유일한 fork() 소비처라
+    // 관찰 가능한 차이가 없지만, 위 `ProcessRole::Normal`의 문서
+    // 주석("fork()/exec() 등 일반 경로로 만들어진 모든 프로세스")과는
+    // 결이 살짝 다르다 - "PnP 드라이버 자식만" 좁게 의도했는지
+    // "KernelService의 모든 fork 자식"을 의도했는지는 여전히 암묵적
+    // 해석이다. 두 번째 fork() 소비처(예: KernelService의 워커 풀)가
+    // 실제로 생기는 시점에 재확인 필요 - 지금은 관찰 가능한 차이가
+    // 없어 질의를 미룬다(CLAUDE.md 규칙 4).
     procShared->role = parentProc->role;
     procShared->memoryBytesUsed = parentProc->memoryBytesUsed;
     if (procShared->group) {
