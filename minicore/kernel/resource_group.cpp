@@ -62,6 +62,30 @@ ResourceGroup* kFindResourceGroupByNameFrom(ResourceGroup* node, const char* nam
     return found;
 }
 
+// [신규, 2026-09-19, PN-770A28FB 항목7] `kFindResourceGroupByNameFrom`
+// 과 동일한 DFS pre-order 순회이나, 이름이 아니라 "몇 번째로 방문한
+// 노드인지"(0-based, 루트 자신도 포함)로 찾는다 - `KernelFsReaddirArgs::
+// index`와 동일한 관례(named/kernel의 `getByIndex()`와 같은 패턴을
+// 트리 구조에 맞게 확장). `visited`는 호출자가 0으로 초기화해 넘기고,
+// 이 함수가 각 노드를 방문할 때마다 증가시킨다.
+ResourceGroup* kGetResourceGroupByIndexFrom(ResourceGroup* node, uint32_t targetIndex, uint32_t& visited) {
+    if (!node) {
+        return nullptr;
+    }
+    if (visited == targetIndex) {
+        return node;
+    }
+    ++visited;
+    ResourceGroup* found = nullptr;
+    node->children.forEach([&](SharedPtr<ResourceGroup>& child, auto*) {
+        if (found || !child) {
+            return;
+        }
+        found = kGetResourceGroupByIndexFrom(child.get(), targetIndex, visited);
+    });
+    return found;
+}
+
 }  // namespace
 
 void kResourceGroupInit() {
@@ -342,6 +366,10 @@ uint32_t kFormatCpuStat(ResourceGroup* group, char* buf, uint32_t bufCap) {
 }  // namespace
 
 OpenResult ResourceGroupFs::open(const char* relPath, uint32_t relPathLen) {
+    if (relPathLen == 0) {
+        // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신.
+        return OpenResult{FileHandle{kResourceGroupDirHandleValue}, true, VfsError::None};
+    }
     uint32_t nameLen = 0;
     if (!kSplitResourceGroupPath(relPath, relPathLen, &nameLen)) {
         return OpenResult{FileHandle{}, false, VfsError::NotFound};
@@ -363,7 +391,7 @@ OpenResult ResourceGroupFs::open(const char* relPath, uint32_t relPathLen) {
 }
 
 ReadResult ResourceGroupFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) {
-    if ((handle.value & kResourceGroupHandleTagBit) == 0) {
+    if ((handle.value & kResourceGroupHandleTagBit) == 0 || handle.value == kResourceGroupDirHandleValue) {
         return ReadResult{0, VfsError::InvalidHandle};
     }
     ResourceGroup* group = (handle.value & kResourceGroupRootHandleBit)
@@ -383,6 +411,13 @@ ReadResult ResourceGroupFs::read(FileHandle handle, uint64_t offset, void* buf, 
 }
 
 void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsStatArgs* args) {
+    if (relPathLen == 0) {
+        // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신.
+        args->size = 0;
+        args->isDirectory = true;
+        args->error = VfsError::None;
+        return;
+    }
     uint32_t nameLen = 0;
     if (!kSplitResourceGroupPath(relPath, relPathLen, &nameLen)) {
         args->error = VfsError::NotFound;
@@ -402,6 +437,27 @@ void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsSta
     char statText[kMaxCpuStatLen];
     args->size = kFormatCpuStat(group, statText, kMaxCpuStatLen);
     args->isDirectory = false;
+    args->error = VfsError::None;
+}
+
+void ResourceGroupFs::readdir(KernelFsReaddirArgs* args) {
+    if (args->dirHandle.value != kResourceGroupDirHandleValue) {
+        args->hasMore = false;
+        args->error = VfsError::InvalidHandle;
+        return;
+    }
+    uint32_t visited = 0;
+    ResourceGroup* node =
+        kGetResourceGroupByIndexFrom(&gRootResourceGroup, static_cast<uint32_t>(args->index), visited);
+    if (!node) {
+        args->hasMore = false;
+        args->error = VfsError::None;  // 정상 종료(Read의 EOF와 동일한 뜻)
+        return;
+    }
+    memcpy(args->entry.name, node->name, node->nameLength);
+    args->entry.nameLength = static_cast<uint32_t>(node->nameLength);
+    args->entry.isDirectory = true;  // 그룹은 전부 <name>/cpu.stat을 담는 디렉터리
+    args->hasMore = true;
     args->error = VfsError::None;
 }
 

@@ -213,6 +213,13 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
         return kernel::ProcFs::open(task, rest, restLen, 0);
     }
 
+    // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신 -
+    // ResourceGroupFs가 자기 루트 디렉터리 핸들을 내주도록 relPathLen==0
+    // 으로 위임("proc"과 동일 패턴).
+    if (kEqualsExact(relPath, relPathLen, kResourceGroupPrefix, sizeof(kResourceGroupPrefix) - 2)) {
+        return kernel::ResourceGroupFs::open("", 0);
+    }
+
     if (kHasPrefix(relPath, relPathLen, kResourceGroupPrefix, sizeof(kResourceGroupPrefix) - 1)) {
         const char* rest = relPath + (sizeof(kResourceGroupPrefix) - 1);
         const kernel::uint32_t restLen = relPathLen - (sizeof(kResourceGroupPrefix) - 1);
@@ -406,9 +413,18 @@ void kLiveFsReaddirImpl(kernel::KernelFsReaddirArgs* args) {
         return;
     }
 
+    // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 나열 -
+    // `ResourceGroupFs`가 자기 핸들 계열(`kResourceGroupHandleTagBit`)을
+    // 스스로 인식해 처리한다(cpu.stat 파일 핸들과도 겹치지 않는 이유는
+    // resource_group.h 문서 주석 참고) - `ResourceGroupFs::readdir()`이
+    // 이 핸들이 진짜 디렉터리 핸들인지까지 다시 확인한다.
+    if (args->dirHandle.value & kernel::kResourceGroupHandleTagBit) {
+        kernel::ResourceGroupFs::readdir(args);
+        return;
+    }
+
     // [v1 축소 범위] 이 핸들이 가리키는 대상이 디렉터리가 아니거나
-    // 아직 나열을 지원하지 않는 디렉터리(resourcegroup/ 안쪽 - 동적
-    // 그룹 목록이라 후속 과제로 남김)다.
+    // 아직 나열을 지원하지 않는 디렉터리다.
     args->hasMore = false;
     args->error = kernel::VfsError::InvalidHandle;
 }
@@ -457,9 +473,15 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
                 args->isDirectory = procArgs.isDirectory;
                 args->error = procArgs.error;
             } else if (kHasPrefix(args->relPath, args->relPathLen, kResourceGroupPrefix,
-                                   sizeof(kResourceGroupPrefix) - 1)) {
-                ResourceGroupFs::stat(args->relPath + (sizeof(kResourceGroupPrefix) - 1),
-                                      args->relPathLen - (sizeof(kResourceGroupPrefix) - 1), args);
+                                   sizeof(kResourceGroupPrefix) - 1) ||
+                       kEqualsExact(args->relPath, args->relPathLen, kResourceGroupPrefix,
+                                    sizeof(kResourceGroupPrefix) - 2)) {
+                const bool isExactResourceGroup = kEqualsExact(args->relPath, args->relPathLen, kResourceGroupPrefix,
+                                                                sizeof(kResourceGroupPrefix) - 2);
+                ResourceGroupFs::stat(isExactResourceGroup ? "" : args->relPath + (sizeof(kResourceGroupPrefix) - 1),
+                                      isExactResourceGroup ? 0
+                                                            : args->relPathLen - (sizeof(kResourceGroupPrefix) - 1),
+                                      args);
             } else {
                 kLiveFsStatImpl(args);
             }

@@ -281,20 +281,36 @@ constexpr uint64_t kResourceGroupHandleTagBit = 1ULL << 3;
 constexpr uint64_t kResourceGroupRootHandleBit = 1ULL << 4;
 constexpr uint64_t kResourceGroupRootCpuStatHandle = kResourceGroupHandleTagBit | kResourceGroupRootHandleBit;
 
+// [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신(디렉터리
+// 나열 대상) - 위 두 핸들(동적 그룹 포인터|비트3, 루트 cpu.stat)과
+// 겹치지 않도록 비트5를 함께 세운다(LiveFs의 `kLiveFsRootDirHandleValue`
+// 도 비트5를 쓰지만 그쪽은 `kResourceGroupHandleTagBit`(비트3) 없이
+// 단독 값이라 이 상수(비트3+비트5)와 절대 같아질 수 없다). 실제 동적
+// 그룹 포인터(| 비트3)와도 안 겹치는 이유는 kResourceGroupRootCpuStatHandle
+// 문서 주석과 동일 - 진짜 힙 포인터는 이렇게 작은 값이 될 수 없다.
+constexpr uint64_t kResourceGroupDirHandleValue = kResourceGroupHandleTagBit | (1ULL << 5);
+
 // `LiveFs`의 "resourcegroup/" 하위 경로 위임 대상 - `ProcFs`와 동일한
-// 구조(별도 계층 상속 없는 순수 헬퍼). v1 스코프는 `<name>/cpu.stat`
-// 하나뿐 - 그 외 경로는 NotFound. `SP-6A563A8F` §5가 `meminfo`/
-// `uptime`(procfs.h) 선례를 명시적으로 재사용 대상으로 지목했으므로,
-// 그 선례와 동일하게 호출자 권한 제약 없이 항상 읽을 수 있다(특정
-// 프로세스에 종속되지 않는 그룹 통계). 동적 그룹 핸들은 `Process*`
-// 핸들과 동일한 v1 한계(Open~Read 사이에 그룹이 Destroy되면 댕글링
-// 가능, procfs.h의 `read()` 문서 주석과 동일한 처지)를 그대로 물려
-// 받는다.
+// 구조(별도 계층 상속 없는 순수 헬퍼). `<name>/cpu.stat` 파일 읽기 +
+// "resourcegroup" 자신의 디렉터리 나열(그룹 트리 전체를 DFS pre-order로
+// 평탄화, PN-770A28FB 항목7) 둘 다 지원 - 그 외 경로는 NotFound.
+// `SP-6A563A8F` §5가 `meminfo`/`uptime`(procfs.h) 선례를 명시적으로
+// 재사용 대상으로 지목했으므로, 그 선례와 동일하게 호출자 권한 제약
+// 없이 항상 읽을 수 있다(특정 프로세스에 종속되지 않는 그룹 통계).
+// 동적 그룹 핸들은 `Process*` 핸들과 동일한 v1 한계(Open~Read 사이에
+// 그룹이 Destroy되면 댕글링 가능, procfs.h의 `read()` 문서 주석과
+// 동일한 처지)를 그대로 물려 받는다.
 class ResourceGroupFs {
 public:
     static OpenResult open(const char* relPath, uint32_t relPathLen);
     static ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len);
     static void stat(const char* relPath, uint32_t relPathLen, KernelFsStatArgs* args);
+
+    // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 나열 -
+    // `index`는 트리를 루트부터 DFS pre-order로 순회했을 때 몇 번째
+    // 노드인지(루트 자신도 0번째로 포함). 각 그룹은 전부 디렉터리로
+    // 보고한다(`<name>/cpu.stat` 파일을 담고 있으므로).
+    static void readdir(KernelFsReaddirArgs* args);
 };
 
 }  // namespace kernel
