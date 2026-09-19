@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-18T15:12:39.093Z
+  updatedAt: 2026-09-19T16:37:09.310Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -381,25 +381,72 @@ Channel IPC에 `exclusivePreemptive` 플래그만 얹으면 충분(Tier B).
 Tier A(전용 공유메모리 링버퍼)는 현재 실사용처 없음. 이 시퀀스는
 그대로 유효하다.
 
-**[갱신, 2026-09-18, PN-A0F72A3A 조사] 5단계("드라이버 자식 스폰")의
-실제 구현 방식 확정** - §3.2가 이미 "정적 링크 + 자식 프로세스로
-분리 실행"이라고 확정해 둔 것을, `PN-543C0CE9`(SpawnProcess 구현)의
-`SpawnProcessArgs`/`kSetupInitialUserStack`(process.cpp) 코드 감사로
-구체화했다: devmgr은 자기 자신의 ELF 원본 바이트를(`/sys/live/
-initrd.cpio`를 Open+Read해 `libcpio`로 자기 이름 엔트리를 찾아) 그대로
-`SpawnProcessArgs::imageBuffer`로 넘겨 **자기 자신을 다시 스폰**하고,
-`argv`(예: `{"devmgr", "--driver=ahci"}`)로 자식에게 "어떤 드라이버로
-실행돼야 하는지"를 알린다 - 별도 드라이버 ELF 파일은 initrd에 없다.
-`kSetupInitialUserStack`을 직접 읽어 확인한 결과 **커널 쪽 argv/envp
-스택 레이아웃(`[argc][argv...][NULL][envp...][NULL][auxv AT_NULL]`,
-표준 SysV x86-64 프로세스 시작 규약 그대로)은 이미 완전히 구현
-완료돼 있다** - `initialRsp`가 정확히 이 프레임의 시작(`argc` 위치)을
-가리키도록 `ring3UserStackTop`에 설정된다. **다만 유저랜드
-(`userland/libs/libmc`)에는 이 프레임을 실제로 읽어 `main(argc,
-argv)` 형태로 넘겨주는 crt0 진입 스텁이 아직 없다** - 지금까지 어떤
-유저 프로그램도 argv를 실제로 소비한 적이 없어(전부 `extern "C" void
-_start()`, 인자 없음) 이 스텁 자체가 없었다는 뜻이다. 이 스텁을
-추가하는 작업은 지금 당장 착수하지 않는다 - 아직 실사용 소비자가
-없어(RM-23F4B687 §4) devmgr의 드라이버 모드 재진입이 실제로 착수될
-때(PN-A0F72A3A) 함께 만든다.
+**[갱신, 2026-09-18, PN-A0F72A3A 조사, 2026-09-19 QU-FB7A0CFF 답변으로
+번복됨] 5단계("드라이버 자식 스폰")의 실제 구현 방식 확정**
+
+~~§3.2가 이미 "정적 링크 + 자식 프로세스로 분리 실행"이라고 확정해
+둔 것을, `PN-543C0CE9`(SpawnProcess 구현)의 `SpawnProcessArgs`/
+`kSetupInitialUserStack`(process.cpp) 코드 감사로 구체화했다: devmgr은
+자기 자신의 ELF 원본 바이트를(`/sys/live/initrd.cpio`를 Open+Read해
+`libcpio`로 자기 이름 엔트리를 찾아) 그대로 `SpawnProcessArgs::
+imageBuffer`로 넘겨 자기 자신을 다시 스폰하고, `argv`(예: `{"devmgr",
+"--driver=ahci"}`)로 자식에게 "어떤 드라이버로 실행돼야 하는지"를
+알린다.~~ **[번복, 2026-09-19, QU-FB7A0CFF 답변]** 이 argv 재-exec
+방식은 폐기한다 - 같은 클래스의 PCI 컨트롤러가 여러 개일 때 argv만
+으로는 "정확히 어느 물리 장치를 맡을지"까지 못 실어 나른다는 문제를
+질의했더니, 설계자가 인코딩 방식을 고르는 대신 접근 자체를 바꾸라고
+답변했다: **"devmgr 자체가 드라이버로 동작하는 것은 아니고, 내장형
+드라이버만 그렇게 하도록 하고, `fork` API가 추가되었으니, 이걸
+사용하도록 해."**(`fork()`는 `PN-44C91D6E`로 이미 구현 완료 -
+`kSyscallEndpointFork`/`kHandleForkSyscall`, POSIX와 동일하게 부모
+주소공간 전체를 COW로 복제하고 부모는 자식 `ProcessId`를, 자식은
+`rax=0`을 반환값으로 받는다).
+
+**새 설계**: devmgr이 `probe()` 성공 시 `SpawnProcess`(자기 자신을
+다시 이미지로 로드하는 방식)로 **재-exec**하는 대신 `fork()`를
+호출한다 - `fork()`는 그 시점 devmgr의 전체 메모리(어떤
+`DeviceDescriptor`가 매칭됐는지, 어떤 드라이버 함수를 실행해야
+하는지 등 지역/전역 변수 전부)를 자식이 그대로 물려받으므로, §4a-2가
+겪던 "그 정보를 argv로 어떻게 실어 나를지"라는 문제 자체가 성립하지
+않는다 - **부모가 fork() 호출 직전에 그 정보를 평범한 지역 변수에
+담아 두기만 하면, 자식은 물려받은 그 변수를 그대로 읽는다**(별도
+IPC/인코딩 불필요). `fork()` 반환값으로 부모/자식을 가르는 표준
+POSIX 관례(`pid == 0`이면 자식)를 그대로 쓴다:
+
+```cpp
+// devmgr 매칭 루프 안, probe() 성공 직후
+int64_t pid = mc::fork();
+if (pid == 0) {
+    // 자식 - 방금 matched된 driver/device는 이미 이 스택/전역에 있다.
+    driver->run(device);  // 반환하지 않음(devmgr의 essential 무한 대기와 동일 계약)
+} else if (pid > 0) {
+    // 부모 - 계속 다음 장치 매칭으로 진행
+} else {
+    // fork 실패 - 로그만 남기고 이 장치는 건너뜀(패닉하지 않음)
+}
+```
+
+"내장형 드라이버"라는 표현은 드라이버가 **별도 ELF 파일이 아니라
+devmgr 실행 파일에 정적 링크된 함수(§3.2 원안 그대로)**라는 뜻을
+다시 한번 확정한 것 - 달라진 건 그 함수를 별도 프로세스에서 실행
+시키는 **방법**(재-exec+argv → fork())뿐이다. `initrd`에 별도
+드라이버 ELF가 없다는 §3.2/구 5단계의 전제는 여전히 유효.
+
+**남은 구현 세부(순수 구현, PN-A0F72A3A가 착수하며 정함)**:
+- `userland/libs/libmc`에 `mc::fork()` 유저랜드 트랩 래퍼 신설 -
+  `kSyscallEndpointFork`가 아니라 `kSyscallVerbFork`(=3, 공용
+  submit/wait verb 0/1/2와 다른 특수 verb - idt.cpp
+  `kHandleSyscallTrap`이 직접 가로챔)이므로 `submit()`/`wait()`와는
+  다른 트랩 형태(`int $0x80`에 RAX=3만 싣고 RDI/RSI 불필요)가 필요.
+- 드라이버 함수 시그니처/등록 테이블(§3.2의 "매칭 테이블")의 구체적
+  C++ 형태 - 순수 구현 세부.
+- fork() 자식이 이후 essential 계약(부모 devmgr과 마찬가지로 자기
+  드라이버 함수에서 절대 반환하지 않아야 함 - 단, 자식 자신은
+  `ProcessStartFlags::essential`이 아닐 가능성이 높음, 크래시해도
+  devmgr 전체를 끌고 내려가지 않아야 한다는 §3.2의 격리 목적과
+  일치하는지 착수 세션이 확인)와 어떻게 상호작용하는지.
+- crt0/argv 소비 스텁은 더 이상 이 경로에 필요 없다(fork()는 새
+  ELF를 로드하지 않으므로 argv 자체가 없음) - 위 문단이 예고했던
+  "crt0 진입 스텁" 작업은 이 용도로는 불필요해졌다(다른 이유로
+  argv를 실제 소비하는 프로그램이 생기면 그때 별도로 필요).
 

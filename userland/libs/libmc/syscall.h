@@ -38,6 +38,21 @@ constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpoint
 // 설계자 답변) 실제로 반환하지 않는다.
 [[noreturn]] void selfTerminate(int32_t exitCode);
 
+// [신규, 2026-09-19, PN-44C91D6E/PN-A0F72A3A, QU-FB7A0CFF 답변 - "fork
+// API가 추가되었으니 이걸 사용하도록 해"] POSIX fork()와 동일한 의미 -
+// 호출 시점의 이 프로세스 전체(메모리/지역·전역 변수 포함)를 커널이
+// COW로 복제해 새 자식 프로세스를 만든다. 부모/자식 둘 다 이 함수
+// 호출 지점에서 그대로 이어서 실행을 계속한다(같은 `int 0x80`을
+// 함께 "지나온" 것처럼) - 반환값으로만 구분한다: 부모는 자식의
+// `ProcessId`(항상 > 0)를, 자식은 정확히 `0`을 받는다. 실패하면
+// 부모 쪽에서만 음수(`-1`, `kInvalidProcessId`)가 돌아온다(커널
+// 쪽 처리는 kernel::kHandleForkSyscall 문서 주석 참고) - 이 경우
+// 자식은 애초에 생기지 않았으므로 이 값을 자식과 헷갈릴 일이 없다.
+// `submit()`/`wait()`와 달리 공용 verb 0/1/2 디스패치를 안 타는
+// 전용 verb(=3, `kernel::kSyscallVerbFork`, idt.cpp
+// `kHandleSyscallTrap`이 직접 가로챔)라 endpointId/args가 없다.
+int64_t fork();
+
 // [신규, PN-BD9AAE2F devmgr 착수 중 필요해짐 - RM-48E1E610 8번
 // EnumerateDevices 등 "제출/대기 분리" 패턴을 쓰는 모든 syscall의
 // 공용 진입점] SP-04EE2A18/QU-E7E51931/QU-CD6F68B7가 확정한 ABI

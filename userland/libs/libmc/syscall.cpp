@@ -27,6 +27,22 @@ void selfTerminate(int32_t exitCode) {
     }
 }
 
+int64_t fork() {
+    // kernel::kSyscallVerbFork(idt.cpp, =3)과 값을 맞춘다 - 이 값은
+    // submit()/wait()의 verb 0/1처럼 kDispatchSyscallVerb 공용
+    // 디스패치를 타지 않고 kHandleSyscallTrap이 RAX==3을 직접 보고
+    // 가로챈다(process.h kHandleForkSyscall 문서 주석 참고) - 그래서
+    // RDI/RSI는 커널이 아예 안 읽는다, 여기서도 안 채운다. 부모는
+    // 이 트랩에서 자식 pid(또는 실패 시 음수)를 받아 정상 반환하고,
+    // 자식은 커널이 이 트랩 지점(바로 이 `int $0x80` 직후)의 전체
+    // 레지스터 상태를 그대로 복제해 재개시키므로 - 함수 호출 하나
+    // 안에서 "두 번 반환하는" POSIX fork()와 동일한 모양이 그대로
+    // 재현된다(rax만 부모는 pid, 자식은 0으로 다름).
+    uint64_t verb = 3;  // fork
+    asm volatile("int $0x80" : "+a"(verb) : : "memory");
+    return static_cast<int64_t>(verb);
+}
+
 SyscallToken submit(SyscallEndpointId endpointId, void* args) {
     // [고침, PN-BD9AAE2F devmgr end-to-end 검증 중 발견] 원래 "r"
     // 제약 두 개를 각각 별도 mov로 rdi/rsi에 옮기는 방식이었는데,
