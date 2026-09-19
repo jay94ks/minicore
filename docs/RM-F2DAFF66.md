@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-19T18:56:22.278Z
+  updatedAt: 2026-09-19T19:01:18.926Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1505,6 +1505,17 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 결과를 이 절에서 §1(발견) 또는 §2(갭 없음)로 옮긴다:
 
 - [ ] (`SP-9A6D579F` 항목은 §2로 이동 - 2026-09-18 갱신 완료)
+
+- **[갱신, 2026-09-20] `SP-9DD4F3EA`(PnP 프레임워크) §3.2/§3.3/§6 -
+  AHCI 아키텍처 뒤집힘(QU-1FB6A7A4)이 반영 안 돼 있었음, 정정 완료**:
+  이 문서의 §3.2("devmgr이 probe() 성공 시 자식 프로세스로 스폰")/
+  §3.3("이 syscall의 실제 호출자는... 드라이버 자식 프로세스")/§6
+  5-6단계가 AHCI를 그 구조의 예시로 계속 인용하고 있었는데, `SP-C2670F69`
+  §3.1이 이미 뒤집어 둔 사실(AHCI는 이제 devmgr 경유 없이 fs가
+  직접 EnumerateDevices/RequestIoPermission을 부른다, `PN-F60E405A`
+  완료)이 이 상위(부모) 프레임워크 문서에는 교차 반영이 안 돼 있었다 -
+  정정 절 추가(원문 프레임워크 서술 자체는 향후 비-스토리지 PnP
+  드라이버를 위해 그대로 유효, AHCI 하나의 소유권만 옮겨진 것).
 
 - **[점검 완료, 2026-09-20] `SP-CC1CF30E`(authmgr) - 코드 자체가 아직
   없어 대조 불성립, 갭 없음**: `minicore/authmgr`/`minicore/libs/

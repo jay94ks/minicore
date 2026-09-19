@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-19T16:37:09.310Z
+  updatedAt: 2026-09-19T19:01:04.294Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -339,7 +339,28 @@ blacklist)을 devmgr 프로세스 하나의 실제 시작 시퀀스로 엮는다
    프로세스로 스폰(§3.2, `ProcessRole::KernelService` 상속 -
    SP-EAB162FC §2.2 개정).
 6. **자식 쪽**: `RequestIoPermission`(§3.3)으로 BAR/IRQ 확보 →
-   자체 데이터 Channel `openChannel()`. **[정정, 2026-09-16,
+   자체 데이터 Channel `openChannel()`. **[뒤집힘, 2026-09-20,
+   QU-1FB6A7A4 답변 - "블록 디바이스는 그냥 아예 fs한테 던져버려.
+   인식/인식 해제까지 전부."]** 이 5-6단계(devmgr이 probe() 성공
+   시 자식 프로세스로 스폰 → 그 자식이 RequestIoPermission 호출)는
+   **AHCI(그리고 향후 나올 블록 스토리지 장치 일반)에는 더 이상
+   적용되지 않는다** - devmgr의 PnP 매칭·fork() 경로 자체를 블록
+   스토리지 장치에 대해서는 타지 않고, `fs` 프로세스 자신이
+   `EnumerateDevices`/`RequestIoPermission`까지 전부 직접 호출한다
+   (`minicore/fs/main.cpp`의 `kProbeAndInitAhci()`, `SP-C2670F69`
+   §3.1 뒤집힘 절, `PN-F60E405A` 완료). 바로 아래 문단이 이미
+   "fs가 AHCI 등 블록 장치를 찾는 경로는... 기존 PnP 패턴을 그대로
+   쓴다"고 적어 뒀던 것이 결과적으로 실제 구현과 정확히 일치하게
+   됐다(당시엔 "fs가 devmgr 드라이버 자식과 Channel로 통신"이라는
+   의미로 쓰였을 가능성이 높지만, 문구 자체는 "fs가 그 syscall들을
+   직접 부른다"는 지금의 실제 아키텍처와도 문자 그대로 맞아떨어진다).
+   이 §6/§3.2/§3.3의 "devmgr → 자식 프로세스" 시퀀스 자체는 **향후
+   비-스토리지 PnP 드라이버**(devmgr의 매칭 테이블은 AHCI 제거로
+   현재 비어 있음)에는 여전히 유효한 일반 프레임워크로 남는다 -
+   AHCI 하나의 소유권만 옮겨졌을 뿐 이 프레임워크 자체가 폐기된
+   것은 아니다.
+
+   **[정정, 2026-09-16,
    SP-B071E628 §5-A/§5-B 재확인]** 한때(2026-09-15~16 사이) 이
    지점에서 `pubreg`에 `register`하는 것으로 갱신했었으나, 그 직후
    SP-B071E628 §5-A(설계자 지시 "커널 서비스들이 pubreg에 뭔가를
