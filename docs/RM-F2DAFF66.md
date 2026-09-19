@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-18T23:39:25.494Z
+  updatedAt: 2026-09-19T00:06:44.346Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -382,6 +382,25 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   전부 훑는 습관이 유효함을 재확인.
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-19] `SP-30FCC8AE`(사용자/권한 체계, review→
+  approved로 전환돼 새로 대상이 된 문서 - §3 절 자신이 다음 후보로
+  미리 지목해 뒀던 것)** - §1(uid/gid 필드, root=0, 상속 규칙)/§2
+  (`Permission` POSIX mode_t 9비트+S)/§3(`kCheckPermission()` 판정
+  순서)/§4(`Kill`의 `kCanSendSignal`)를 실제 소스(`libkenv/permission.h`,
+  `process.cpp`)와 전문 대조 - 전부 설계 그대로 정확히 구현돼 있음을
+  확인. §3이 "직계 부모만 vs 조상 전체(임의 depth)" 중 하나를 확정
+  안 하고 열어 둔 지점도, `PN-88E62419`(완료 기록)가 "DebugAttach의
+  `kFindDebuggableChild`와 일관성을 맞추기 위해 직계 부모만 채택"이라고
+  명시적으로 판단 근거까지 남겨 둔 것을 확인(CLAUDE.md 규칙4 예외에
+  해당하는 사소한 구현 세부 - 숨겨진 임의 결정 아님). §7(v1 제외
+  항목)의 서술도 실제 코드 상태와 일치(setuid 승격 경로 없음, 다중
+  그룹 없음 등 전부 코드에도 그대로 미구현 상태로 확인). §8(후속
+  계획)이 예고한 `PN-B6DB692C`(UserRecord+kSetuid, status=planned,
+  PN-24A2B6F5에 의존)/`PN-24A2B6F5`(authmgr+sudo/su) 둘 다 실제로
+  등록돼 있고 상태도 정확(아직 미착수 - authmgr 자체가 큰 신규
+  서브시스템이라 당연함). `RM-32D06563`에도 `Uid`/`Gid`/`Permission`/
+  `kCheckPermission` 이미 등록 완료(규칙12 준수 확인). **갭 없음.**
 
 - **[점검 완료, 2026-09-19] `SP-DE19BB1C`(커널 영역 TLB 샷다운, IPI
   기반)** - §2(핵심 메커니즘: Mailbox 구조체/`Lapic::sendFixedIpi`/
