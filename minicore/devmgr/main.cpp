@@ -2,6 +2,7 @@
 // 실코드(PN-BD9AAE2F 3번/4번 항목, PN-A0F72A3A가 §3.2 드라이버 매칭/
 // 자식 스폰까지 이어붙였다). v1 매칭 테이블은 AHCI(클래스 매칭) 항목
 // 하나뿐 - §3.4(핫플러그)는 아직 없다.
+#include "ahci.h"
 #include "libmc/channel.h"
 #include "libmc/pnp.h"
 #include "libmc/syscall.h"
@@ -52,16 +53,23 @@ mc::uint64_t kFirstMmioBase(const mc::DeviceDescriptor& dev) {
     return 0;
 }
 
-// [신규, PN-A0F72A3A 착수 순서 4번] `mc::fork()`로 분리된 드라이버
-// 자식 프로세스 안에서 실행 - SP-9DD4F3EA §3.2 "자식 쪽" 단계
-// (`RequestIoPermission`으로 BAR/IRQ 확보 -> 자체 Channel 개설)까지만
-// 다룬다. 실제 AHCI HBA 레지스터 초기화/커맨드 리스트/DMA는
-// `SP-C2670F69` §2-3 몫 - 이번 증분 범위 밖(PN-A0F72A3A 착수 순서
-// 7번으로 분리 예정). fork() 자식은 devmgr과 별개 프로세스라
-// essential이 기본 `false`(`Process::allocate()`의 zero-init 기본값,
-// `kHandleForkSyscall`이 `startFlags`를 전혀 안 건드림) - 크래시해도
-// devmgr/다른 드라이버를 끌고 내려가지 않는다(§3.2가 요구하는 장치
-// 격리를 그대로 만족).
+// [신규, PN-4E6EA13D] fork() 자식 프로세스 하나당 AHCI 컨트롤러
+// 인스턴스는 정확히 하나(그 컨트롤러 자신 - 이 자식 프로세스가 매칭된
+// 바로 그 장치) - 파일 스코프 전역인 이유는 kRunAhciDriverChild() 문서
+// 주석 참고(함수-지역 static 초기화 가드 부재).
+ahci::AhciController gAhciController;
+
+// [신규, PN-A0F72A3A 착수 순서 4번, 갱신 PN-4E6EA13D] `mc::fork()`로
+// 분리된 드라이버 자식 프로세스 안에서 실행 - SP-9DD4F3EA §3.2 "자식
+// 쪽" 단계(`RequestIoPermission`으로 BAR/IRQ 확보 -> 자체 Channel
+// 개설)에 이어, `SP-C2670F69` §2-3(AHCI HBA 초기화/포트 초기화/최소
+// 실제 I/O)까지 이어받는다(PN-4E6EA13D). `AhciBlockDevice`(§3.1 상위
+// API, fs 서비스 Channel 프로토콜 연동)는 여전히 범위 밖 - fs 서비스
+// 쪽 프로토콜이 먼저 정해져야 한다. fork() 자식은 devmgr과 별개
+// 프로세스라 essential이 기본 `false`(`Process::allocate()`의
+// zero-init 기본값, `kHandleForkSyscall`이 `startFlags`를 전혀 안
+// 건드림) - 크래시해도 devmgr/다른 드라이버를 끌고 내려가지 않는다
+// (§3.2가 요구하는 장치 격리를 그대로 만족).
 [[noreturn]] void kRunAhciDriverChild(const mc::DeviceDescriptor& dev) {
     mc::RequestIoPermissionArgs ioArgs;
     ioArgs.bus = dev.bus;
@@ -74,6 +82,23 @@ mc::uint64_t kFirstMmioBase(const mc::DeviceDescriptor& dev) {
     }
 
     if (ioArgs.error == mc::ChannelError::None) {
+        // [신규, PN-4E6EA13D] SP-C2670F69 §3.1 `AhciController::init` -
+        // BAR 확보에 성공한 경우에만 의미가 있다(mappedVirtualAddr가
+        // 유효한 ABAR 가상주소). 함수-지역 static 대신 파일 스코프
+        // 전역(gAhciController, 아래)을 쓴다 - 이 유저랜드 툴체인엔
+        // 함수-지역 static의 스레드 안전 1회 초기화 가드(__cxa_guard_*)
+        // 가 없다(freestanding, RM-23F4B687 §4류 - 이 파일이 이미
+        // 전역만 쓰는 gDevices/gDeviceCount와 동일한 관례).
+        if (gAhciController.init(ioArgs.mappedVirtualAddr)) {
+            // §3.1 "최소한의 실제 I/O" 검증 - 실제 장치가 붙어 있는 첫
+            // 포트에 IDENTIFY DEVICE를 발급해 본다. 결과 자체는 지금
+            // 당장 상위 소비자가 없어(AhciBlockDevice 범위 밖) 버려도
+            // 되지만, 실패/성공 여부와 무관하게 계속 살아있어야 하는
+            // 이 함수의 "살아있는 서비스" 계약은 그대로 유지한다.
+            ahci::PortProbeResult probeResult;
+            gAhciController.probeFirstDevice(&probeResult);
+        }
+
         // 이름 없이 개설(§6 6단계 정정 - SP-B071E628 §5-A/§5-B 확정대로
         // 커널 서비스/그 드라이버 자식은 pubreg를 아예 모른다).
         mc::OpenChannelArgs openArgs;
@@ -86,7 +111,6 @@ mc::uint64_t kFirstMmioBase(const mc::DeviceDescriptor& dev) {
     // BAR 확보/Channel 개설 성공 여부와 무관하게 계속 살아있는다(§3.2 -
     // 드라이버 프로세스도 devmgr과 동일하게 절대 스스로 종료하지 않는다
     // 는 "살아있는 서비스" 계약을 따른다, essential 여부와는 별개 축).
-    // 이후(HBA 초기화 등)는 SP-C2670F69 착수 세션이 이어받는다.
     for (;;) {
         asm volatile("pause");
     }

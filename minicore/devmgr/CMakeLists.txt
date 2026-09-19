@@ -5,7 +5,7 @@
 # userland/ 빌드 트리를 그대로 재사용한다(minicore/init/CMakeLists.txt
 # 와 동일한 out-of-tree 관례 - 이 파일도 그 빌드 트리 안에서만
 # 구성된다, 단독 configure 불가).
-add_executable(devmgr crt0.S main.cpp)
+add_executable(devmgr crt0.S main.cpp ahci.cpp)
 
 set_target_properties(devmgr PROPERTIES
     LINK_DEPENDS ${MINICORE_USERLAND_LINKER_SCRIPT}
@@ -13,4 +13,7 @@ set_target_properties(devmgr PROPERTIES
 )
 
 target_link_options(devmgr PRIVATE -T ${MINICORE_USERLAND_LINKER_SCRIPT})
-target_link_libraries(devmgr PRIVATE libmc)
+# libcenv(PN-4E6EA13D, ahci.cpp) - 커맨드 헤더/PRDT/FIS 구조체를 매번
+# 제로 초기화하는 memset 호출이 컴파일러 생성으로 필요해진다(pubreg의
+# 선례와 동일한 이유, userland/libs/libcenv 참고).
+target_link_libraries(devmgr PRIVATE libmc libcenv)
