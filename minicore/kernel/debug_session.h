@@ -53,14 +53,22 @@ constexpr SyscallEndpointId kSyscallEndpointDebugWriteMemory = kMakeSyscallEndpo
 // 그 스택을 건드리지 않음 - "인터럽트 자신이 다른 프로세스에게
 // 실행 기회를 준다"는 게 바로 이 매커니즘: EOI 이후 코어는 다음
 // Task로 넘어가고, 이 Task는 자기 스택에 그 프레임을 그대로 둔 채
-// 그냥 대기한다). `kSaveDebugRegistersSnapshot()`이 이 프레임의
-// 값을 `DebugSession::savedRegisters`에 복사해 두고(값 복사 -
-// 여러 syscall/다른 코어에서 안전하게 조회할 수 있도록), 동시에
-// 그 살아있는 프레임 자신의 주소도 `DebugSession::liveFramePtr`에
-// 남겨 둔다(내부 전용, 어떤 syscall args에도 노출 안 됨) -
-// `DebugSetRegisters`는 이 사본만 바꾸고, `DebugContinue`가 재개
-// 직전 이 사본 값을 `*liveFramePtr`에 다시 써넣어(write-back) 실제
-// iretq 프레임에 반영한다.
+// 그냥 대기한다). `kSaveDebugRegistersSnapshot()`이 그 살아있는
+// 프레임 자신의 주소를 `UserThread::debugLiveFramePtr`(syscall.h)에
+// 남겨 둔다(내부 전용, 어떤 syscall args에도 노출 안 됨). **[재정리,
+// 2026-09-19, QU-47A83CDF 답변("혼재된 것들을 리팩토링해야 할 것
+// 같네")]** 예전엔 이 값을 별도 사본(`DebugSession::savedRegisters`,
+// 나중엔 `UserThread::debugSavedRegisters`)에 또 복사해 두고
+// `DebugSetRegisters`는 그 사본만 바꾼 뒤 `DebugContinue`가 재개
+// 직전 사본→진짜 프레임으로 write-back하는 3단계 구조였다 - "이
+// 스레드가 정지 상태에서 갖는 레지스터 값"이라는 하나의 개념이
+// 캡처본/진짜 프레임 둘로 쪼개져 있어 어느 쪽이 최신 진실인지
+// 판단 지점이 늘어나는 문제가 있었다. 이제 별도 사본이 없다 -
+// `DebugGetRegisters`/`DebugSetRegisters`가 `*debugLiveFramePtr`를
+// (syscall ABI 경계에서만 `DebugRegisterSnapshot`으로 변환해) 직접
+// 읽고 쓴다. `DebugContinue`는 여전히 재개 직전 필요하지만(RFLAGS.TF/
+// RF 보정, 아래), 그건 "사본을 진짜 자리로 반영"이 아니라 "이미 유일한
+// 진짜 자리 그 자체를 재개 가능한 상태로 마지막 손질"일 뿐이다.
 constexpr SyscallEndpointId kSyscallEndpointDebugGetRegisters = kMakeSyscallEndpointId(7, 5);
 constexpr SyscallEndpointId kSyscallEndpointDebugSetRegisters = kMakeSyscallEndpointId(7, 6);
 
@@ -77,11 +85,15 @@ constexpr uint32_t kMaxDebugBreakpoints = 4;
 // 자체를 syscall ABI로 그대로 노출하지 않는다 - `vector`/`errorCode`는
 // ISR 자신의 장부일 뿐 "레지스터"가 아니다(디버거 입장에서 의미 없는
 // 필드를 읽고 쓰게 하지 않기 위한 최소 API 위생, RM-23F4B687 §4). 그
-// 외 필드는 `InterruptFrame`과 정확히 같은 이름/순서 - `kSaveDebugRegistersSnapshot()`
-// 이 필드별로 복사한다. [승격, 2026-09-19, PN-06A7C439] `DebugRegisterSnapshot`
-// 정의 자체는 `syscall.h`로 옮겼다(`UserThread::debugSavedRegisters`가
-// 값 타입으로 직접 담기 위함) - 이 파일은 그 include를 통해 그대로
-// 재사용한다.
+// 외 필드는 `InterruptFrame`과 정확히 같은 이름/순서 -
+// `kCopyFrameToSnapshot()`/`kCopySnapshotToFrame()`(debug_session.cpp)
+// 이 이 경계에서만 필요한 변환을 담당한다. [승격, 2026-09-19,
+// PN-06A7C439] `DebugRegisterSnapshot` 정의 자체는 `syscall.h`로
+// 옮겼다 - 이 파일은 그 include를 통해 그대로 재사용한다. **[재정리,
+// 2026-09-19, QU-47A83CDF 답변]** `UserThread`가 이 타입의 자기 소유
+// 사본을 갖던 시절(`debugSavedRegisters`)은 지났다 - 순수하게 syscall
+// 경계의 값 타입일 뿐이다(syscall.h `DebugRegisterSnapshot` 문서
+// 주석 참고).
 
 struct DebugBreakpoint {
     // [신규, 2026-09-17, SP-9A6D579F §3.4] DR7의 R/Wi 필드와 대응
@@ -246,10 +258,12 @@ struct DebugGetRegistersArgs {
 };
 
 // DebugGetRegistersArgs와 대칭(targetThread 포함) - `in`에서 읽어 대상
-// 스레드의 `UserThread::debugSavedRegisters`(syscall.h)에 반영한다.
-// 실제로 재개 시(DebugContinue) 그 스레드의 살아있는 프레임에
-// write-back된다 - 이 호출 자체는 재개하지 않는다(그룹 freeze 여부와
-// 무관하게 항상 사본만 갱신, 별도로 DebugContinue를 불러야 함).
+// 스레드의 살아있는 `*UserThread::debugLiveFramePtr`(syscall.h)에
+// 그 자리에서 바로 반영한다(값은 이미 진짜 자리에 있다 - 더 이상
+// 별도 사본→write-back 단계가 없다, QU-47A83CDF 답변 반영). 이 호출
+// 자체는 재개하지 않는다 - 그룹 freeze 여부와 무관하게 별도로
+// DebugContinue를 불러야 실제로 재개된다(DebugContinue는 RFLAGS.TF/RF
+// 보정만 마저 한다, `kWriteBackDebugFrame()` 참고).
 struct DebugSetRegistersArgs {
     int64_t targetProcessId = -1;
     ThreadId targetThread = kInvalidThreadId;

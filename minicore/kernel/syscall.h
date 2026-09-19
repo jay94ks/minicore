@@ -135,13 +135,19 @@ constexpr ThreadId kInvalidThreadId = 0xFFFFu;
 // 관찰자가 그 사이 컨테이너를 순회하다 이미 반납된 메모리를 살아있는
 // 스레드로 오인할 수 있다).
 // [승격, 2026-09-19, SP-9A6D579F §3.5, PN-06A7C439] 원래 debug_session.h
-// 전용이었으나, `UserThread::debugSavedRegisters`(아래)가 값 타입으로
-// 이 struct를 직접 담아야 해서 여기로 옮겼다(async_task.h의
-// `AsyncTaskWeakRef` 승격과 동일한 순환-include 회피 패턴 -
-// debug_session.h가 이미 이 헤더를 include하므로 그쪽은 그대로 이
-// 정의를 재사용한다). `InterruptFrame` 자체를 syscall ABI로 그대로
-// 노출하지 않는 이유(`vector`/`errorCode` 제외) 등 상세 문서는
-// debug_session.h 상단 주석 참고 - 필드 목록만 여기로 이동.
+// 전용이었으나 여기로 옮겼다(async_task.h의 `AsyncTaskWeakRef` 승격과
+// 동일한 순환-include 회피 패턴 - debug_session.h가 이미 이 헤더를
+// include하므로 그쪽은 그대로 이 정의를 재사용한다). `InterruptFrame`
+// 자체를 syscall ABI로 그대로 노출하지 않는 이유(`vector`/`errorCode`
+// 제외) 등 상세 문서는 debug_session.h 상단 주석 참고 - 필드 목록만
+// 여기로 이동. **[재정리, 2026-09-19, QU-47A83CDF 답변("혼재된 것들을
+// 리팩토링해야 할 것 같네")]** 이 타입은 이제 순수하게 syscall ABI의
+// 유저-커널 경계 값(디버거가 넘기는/받는 버퍼 모양)일 뿐이다 -
+// `UserThread`는 더 이상 이 타입으로 된 자기 소유 사본을 갖지 않는다
+// (아래 `debugLiveFramePtr`가 유일한 진짜 상태 - "잡아 둔 진짜
+// InterruptFrame"과 "그 값의 별도 복사본"이라는 두 갈래로 쪼개져 있던
+// 것을 하나로 합쳤다, debug_session.cpp의 `kCopyFrameToSnapshot()`/
+// `kCopySnapshotToFrame()`이 이 경계에서만 필요한 변환을 담당).
 struct DebugRegisterSnapshot {
     uint64_t rax = 0, rbx = 0, rcx = 0, rdx = 0, rsi = 0, rdi = 0, rbp = 0;
     uint64_t r8 = 0, r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
@@ -321,15 +327,26 @@ public:
     // (debug_session.cpp)이 이 스레드가 실제로 Blocked로 전환되는 그
     // 순간(onTick() 재스케줄 결정 지점, 또는 #DB ISR이 즉시 파킹하는
     // 경로)에 채운다.
-    DebugRegisterSnapshot debugSavedRegisters;
-    // nullptr이 아니면 "이 스레드가 지금 유효한 정지 스냅숏을 갖고
-    // 있다"는 뜻 - `DebugGetRegisters`/`DebugSetRegisters`(targetThread로
-    // 이 스레드를 골랐을 때)와 `DebugContinue`(정지된 스레드 전부를
-    // 순회할 때)가 이 조건으로 "이 스레드가 지금 대상이 될 수 있는지"를
-    // 판단한다. 그 살아있는 진짜 `InterruptFrame`(이 스레드 자신의 커널
-    // 스택 위, 아직 그 자리에 그대로 있음)의 주소 - `DebugContinue`가
-    // 재개 직전 `debugSavedRegisters`를 여기 다시 써넣은(write-back) 뒤
-    // 즉시 `nullptr`로 되돌린다(재사용/댕글링 방지).
+    // nullptr이 아니면 "이 스레드가 지금 유효한 정지 상태(디버거가
+    // 관찰/수정 가능)"라는 뜻 - `DebugGetRegisters`/`DebugSetRegisters`
+    // (targetThread로 이 스레드를 골랐을 때)와 `DebugContinue`(정지된
+    // 스레드 전부를 순회할 때)가 이 조건으로 "이 스레드가 지금 대상이
+    // 될 수 있는지"를 판단한다. **[재정리, 2026-09-19, QU-47A83CDF
+    // 답변]** 예전엔 이 포인터가 가리키는 살아있는 진짜 `InterruptFrame`
+    // 과 별도로 `debugSavedRegisters`(값 사본)가 있어, GetRegisters/
+    // SetRegisters는 그 사본만 건드리고 DebugContinue가 재개 직전
+    // 사본→진짜 프레임으로 write-back하는 3단계(캡처/수정/반영) 구조
+    // 였다 - "이 스레드의 정지된 레지스터 상태"라는 개념 하나가 두
+    // 곳에 나뉘어 있어 어느 한쪽만 보면 정확한 판단이 안 되는 문제가
+    // 있었다. 이제 그런 별도 사본이 없다 - `DebugGetRegisters`/
+    // `DebugSetRegisters`가 `*debugLiveFramePtr`를 직접 읽고 쓴다(경계
+    // 변환은 `kCopyFrameToSnapshot()`/`kCopySnapshotToFrame()`,
+    // debug_session.cpp). 이 포인터가 가리키는 메모리는 이 스레드
+    // 자신의 커널 스택 위, 아직 그 자리에 그대로 있다(다른 무엇도 그
+    // 스택을 건드리지 않는다는 게 이 매커니즘의 전제, debug_session.h
+    // 상단 주석 참고) - `DebugContinue`가 재개 직전 RFLAGS.TF/RF만
+    // 필요한 만큼 이 자리에서 직접 보정한 뒤 즉시 `nullptr`로 되돌린다
+    // (재사용/댕글링 방지, `kWriteBackDebugFrame()` 참고).
     InterruptFrame* debugLiveFramePtr = nullptr;
     // 이 스레드에 대해서만 적용되는 다음 DebugContinue의 싱글스텝 요청 -
     // "한 번 쓰이면 소비되는" 값(debug_session.h의 옛 `DebugSession::

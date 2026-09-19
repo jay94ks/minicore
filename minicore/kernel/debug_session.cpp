@@ -36,35 +36,70 @@ void kSaveDebugRegistersSnapshot(Task* task, InterruptFrame* frame) {
     if (!proc || !proc->debugSession.active) {
         return;
     }
-    // [갱신, 2026-09-19, PN-06A7C439] 스냅숏은 이제 `proc->debugSession`이
-    // 아니라 이 스레드 자신(`thread`)에 찍는다 - 여러 스레드가 각자 다른
-    // 순간에 정지해 들어올 수 있어(all-stop, `pausedByDebugger`는
-    // 여전히 process-wide) 스냅숏 자체는 스레드별로 독립이어야 한다.
-    DebugRegisterSnapshot& snap = thread->debugSavedRegisters;
-    snap.rax = frame->rax;
-    snap.rbx = frame->rbx;
-    snap.rcx = frame->rcx;
-    snap.rdx = frame->rdx;
-    snap.rsi = frame->rsi;
-    snap.rdi = frame->rdi;
-    snap.rbp = frame->rbp;
-    snap.r8 = frame->r8;
-    snap.r9 = frame->r9;
-    snap.r10 = frame->r10;
-    snap.r11 = frame->r11;
-    snap.r12 = frame->r12;
-    snap.r13 = frame->r13;
-    snap.r14 = frame->r14;
-    snap.r15 = frame->r15;
-    snap.rip = frame->rip;
-    snap.cs = frame->cs;
-    snap.rflags = frame->rflags;
-    snap.rsp = frame->rspOld;
-    snap.ss = frame->ssOld;
+    // [재정리, 2026-09-19, QU-47A83CDF 답변 - "혼재된 것들을 리팩토링"]
+    // 예전엔 여기서 `frame`의 값을 스레드 소유 사본(`debugSavedRegisters`)
+    // 으로 필드별 복사했다 - `*frame` 자신(이 스레드 자신의 커널 스택 위,
+    // 정지돼 있는 동안 아무도 안 건드림)이 이미 유일하게 필요한 진짜
+    // 자리이므로 그 복사는 항상 불필요한 중복이었다. 이제 그 주소만
+    // 기억해 둔다 - `DebugGetRegisters`/`DebugSetRegisters`가 이 포인터를
+    // 통해 그 자리를 직접 읽고 쓴다(syscall.h `debugLiveFramePtr` 문서
+    // 주석 참고).
     thread->debugLiveFramePtr = frame;
 }
 
 namespace {
+
+// [신규, 2026-09-19, QU-47A83CDF 답변 반영] `DebugGetRegisters`가
+// syscall ABI 경계(유저가 받는 `DebugRegisterSnapshot` 버퍼)로 나갈 때만
+// 쓰는 변환 - `vector`/`errorCode`를 제외한 필드 이름/순서 대응
+// (debug_session.h 상단 주석 참고).
+void kCopyFrameToSnapshot(const InterruptFrame& frame, DebugRegisterSnapshot* out) {
+    out->rax = frame.rax;
+    out->rbx = frame.rbx;
+    out->rcx = frame.rcx;
+    out->rdx = frame.rdx;
+    out->rsi = frame.rsi;
+    out->rdi = frame.rdi;
+    out->rbp = frame.rbp;
+    out->r8 = frame.r8;
+    out->r9 = frame.r9;
+    out->r10 = frame.r10;
+    out->r11 = frame.r11;
+    out->r12 = frame.r12;
+    out->r13 = frame.r13;
+    out->r14 = frame.r14;
+    out->r15 = frame.r15;
+    out->rip = frame.rip;
+    out->cs = frame.cs;
+    out->rflags = frame.rflags;
+    out->rsp = frame.rspOld;
+    out->ss = frame.ssOld;
+}
+
+// `kCopyFrameToSnapshot()`의 반대 방향 - `DebugSetRegisters`가 유저가
+// 준 버퍼를 살아있는 진짜 프레임에 그 자리에서 바로 반영할 때 쓴다.
+void kCopySnapshotToFrame(const DebugRegisterSnapshot& snap, InterruptFrame* frame) {
+    frame->rax = snap.rax;
+    frame->rbx = snap.rbx;
+    frame->rcx = snap.rcx;
+    frame->rdx = snap.rdx;
+    frame->rsi = snap.rsi;
+    frame->rdi = snap.rdi;
+    frame->rbp = snap.rbp;
+    frame->r8 = snap.r8;
+    frame->r9 = snap.r9;
+    frame->r10 = snap.r10;
+    frame->r11 = snap.r11;
+    frame->r12 = snap.r12;
+    frame->r13 = snap.r13;
+    frame->r14 = snap.r14;
+    frame->r15 = snap.r15;
+    frame->rip = snap.rip;
+    frame->cs = snap.cs;
+    frame->rflags = snap.rflags;
+    frame->rspOld = snap.rsp;
+    frame->ssOld = snap.ss;
+}
 
 // [SP-9A6D579F §3.2] 권한 모델 - **이번 증분은 "직계 부모" 경로만
 // 구현한다.** 원안은 (a) 호출자가 ProcessRole::KernelService면
@@ -124,45 +159,30 @@ UserThread* kFindThreadById(SharedPtr<Process>& proc, ThreadId id) {
     return found;
 }
 
-// [갱신, 2026-09-19, PN-06A7C439] `DebugContinueHandler`가 하던 write-back
-// 로직을 그대로 뽑아 옮긴 것뿐(동작 변화 없음) - 이제 `Process::
-// debugSession`의 process당 하나뿐인 liveFramePtr/savedRegisters/
-// singleStepPending이 아니라 이 `thread` 자신의 것을 쓴다는 점만 다르다
-// (여러 스레드가 각자 정지해 있을 수 있어 DebugContinueHandler가 이
-// 함수를 대상 프로세스의 정지된 스레드마다 반복 호출한다). 호출 전
-// `thread->debugLiveFramePtr != nullptr`를 반드시 확인해야 한다.
+// [재정리, 2026-09-19, QU-47A83CDF 답변 - "혼재된 것들을 리팩토링"]
+// 예전엔 이 함수가 스레드 소유 사본(`debugSavedRegisters`)의 값을
+// 진짜 프레임(`debugLiveFramePtr`)에 필드별로 되써 넣는(write-back)
+// 일을 했다 - 이제 `DebugGetRegisters`/`DebugSetRegisters`가 이미
+// 그 진짜 프레임을 직접 읽고 쓰므로(더 이상 별도 사본이 없음) 되써
+// 넣을 대상 자체가 없다. 이 함수에 남은 유일한 일은 RFLAGS.TF/RF
+// 보정뿐 - "재개 직전 마지막 손질"이지 "사본을 진짜 자리로 반영"이
+// 아니다. 호출 전 `thread->debugLiveFramePtr != nullptr`를 반드시
+// 확인해야 한다(DebugContinueHandler가 대상 프로세스의 정지된
+// 스레드마다 이 함수를 반복 호출).
 void kWriteBackDebugFrame(UserThread* thread) {
     InterruptFrame* frame = thread->debugLiveFramePtr;
-    const DebugRegisterSnapshot& snap = thread->debugSavedRegisters;
-    frame->rax = snap.rax;
-    frame->rbx = snap.rbx;
-    frame->rcx = snap.rcx;
-    frame->rdx = snap.rdx;
-    frame->rsi = snap.rsi;
-    frame->rdi = snap.rdi;
-    frame->rbp = snap.rbp;
-    frame->r8 = snap.r8;
-    frame->r9 = snap.r9;
-    frame->r10 = snap.r10;
-    frame->r11 = snap.r11;
-    frame->r12 = snap.r12;
-    frame->r13 = snap.r13;
-    frame->r14 = snap.r14;
-    frame->r15 = snap.r15;
-    frame->rip = snap.rip;
-    frame->cs = snap.cs;
     // [구현 완료, 2026-09-17, SP-9A6D579F §3.4] RFLAGS.TF(비트
-    // 8, 0x100)는 savedRegisters.rflags 사본을 그대로 되쓰지
+    // 8, 0x100)는 이미 `*frame`에 들어있는 값을 그대로 두지
     // 않고 singleStepPending에 따라 이 자리에서 명시적으로
     // 세우거나 지운다 - 정지 사유가 싱글스텝 트랩 자신이었을
-    // 경우 snap.rflags에 TF=1이 이미 들어있어(트랩 시점의
-    // 실제 EFLAGS를 그대로 스냅숏했으므로) 그걸 무비판적으로
-    // 되쓰면 다음 명령에서 또 트랩해 무한 싱글스텝에 빠진다 -
+    // 경우 frame->rflags에 TF=1이 이미 들어있어(트랩 시점의
+    // 실제 EFLAGS를 그대로 캡처했으므로) 그걸 무비판적으로
+    // 두면 다음 명령에서 또 트랩해 무한 싱글스텝에 빠진다 -
     // DebugSetSingleStep을 다시 호출하지 않는 한 정상 실행으로
     // 돌아가야 하므로 매번 명시적으로 판단한다(syscall.h
     // debugSingleStepPending 문서 주석과 대칭).
     constexpr uint64_t kRflagsTrapFlag = 0x100;
-    uint64_t rflags = snap.rflags & ~kRflagsTrapFlag;
+    uint64_t rflags = frame->rflags & ~kRflagsTrapFlag;
     if (thread->debugSingleStepPending) {
         rflags |= kRflagsTrapFlag;
         thread->debugSingleStepPending = false;  // 한 번 쓰이면 소비됨
@@ -184,8 +204,6 @@ void kWriteBackDebugFrame(UserThread* thread) {
     constexpr uint64_t kRflagsResumeFlag = 0x10000;
     rflags |= kRflagsResumeFlag;
     frame->rflags = rflags;
-    frame->rspOld = snap.rsp;
-    frame->ssOld = snap.ss;
     // 재사용/댕글링 방지 - 이 스레드가 다시 정지하기 전까지 무효.
     thread->debugLiveFramePtr = nullptr;
 }
@@ -515,9 +533,9 @@ public:
 
 DebugContinueHandler gDebugContinueHandler;
 
-// [갱신, 2026-09-19, PN-06A7C439] DebugGetRegisters - targetThread로
-// 지목한 그 스레드가 정지 상태여야 하고(그래야 그 스레드 자신의
-// debugSavedRegisters/debugLiveFramePtr가 유효), 그 외 권한 검증은
+// [갱신, 2026-09-19, PN-06A7C439, QU-47A83CDF 답변으로 재정리] DebugGetRegisters -
+// targetThread로 지목한 그 스레드가 정지 상태여야 하고(그래야 그
+// 스레드 자신의 `debugLiveFramePtr`가 유효), 그 외 권한 검증은
 // DebugSetBreakpoint와 동일한 패턴.
 class DebugGetRegistersHandler : public AsyncTaskHandler {
 public:
@@ -557,7 +575,7 @@ public:
             co_return;
         }
 
-        *args->out = thread->debugSavedRegisters;
+        kCopyFrameToSnapshot(*thread->debugLiveFramePtr, args->out);
         args->error = ChannelError::None;
         co_return;
     }
@@ -567,10 +585,11 @@ public:
 
 DebugGetRegistersHandler gDebugGetRegistersHandler;
 
-// [갱신, 2026-09-19, PN-06A7C439] DebugSetRegisters - DebugGetRegistersHandler
-// 와 대칭(방향만 반대, targetThread 포함). 이 호출 자체는 재개하지
-// 않는다 - 그 스레드의 사본(debugSavedRegisters)만 갱신, 실제 반영은
-// DebugContinue가 write-back할 때(syscall.h 상단 주석 참고).
+// [갱신, 2026-09-19, PN-06A7C439, QU-47A83CDF 답변으로 재정리] DebugSetRegisters -
+// DebugGetRegistersHandler와 대칭(방향만 반대, targetThread 포함). 이미
+// 살아있는 진짜 프레임(`debugLiveFramePtr`)에 그 자리에서 바로 반영한다
+// - 그래도 이 호출 자체는 재개하지 않는다(별도로 DebugContinue를
+// 불러야 실제로 재개, syscall.h 상단 주석 참고).
 class DebugSetRegistersHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
@@ -609,7 +628,7 @@ public:
             co_return;
         }
 
-        thread->debugSavedRegisters = *args->in;
+        kCopySnapshotToFrame(*args->in, thread->debugLiveFramePtr);
         args->error = ChannelError::None;
         co_return;
     }
@@ -898,8 +917,10 @@ bool kHandleUserBreakpointHit(InterruptFrame* frame, uint64_t dr6) {
     // 타이머 틱으로 지연 경로(onTick())를 타는 상호작용까지는 막지
     // 못한다** - 실제 dbgtarget 2-스레드 하네스(같은 프로세스, 공유
     // EXECUTE 브레이크포인트)로 재현: 그런 상호작용이 겹치면 이미 정지된
-    // 스레드의 `debugSavedRegisters`가 손상되고(rip가 세그먼트 셀렉터
-    // 값처럼 보이는 임의 값으로 바뀌거나 커널 주소로 튐) 재개 시 Invalid
+    // 스레드가 가리키던 `*debugLiveFramePtr`(당시엔 별도 사본
+    // `debugSavedRegisters`였음 - QU-47A83CDF 답변으로 이후 제거)이
+    // 손상되고(rip가 세그먼트 셀렉터 값처럼 보이는 임의 값으로 바뀌거나
+    // 커널 주소로 튐) 재개 시 Invalid
     // Opcode/Page Fault로 PANIC한다 - 근본 원인은 아직 확정하지 못했다
     // (IST4 자체의 재사용은 아닌 것으로 보임 - gIstStacks는 코어별로
     // 이미 분리돼 있음, PN-EA968DF0 참고). `Process::debugSession`/
