@@ -854,7 +854,7 @@ void kFinalizeProcessTermination(SharedPtr<Process>& process) {
     // 회수하지 않는 상태로 그냥 남는다 - `gInitProcess`/
     // `gServiceProcess[]` 전역이 계속 강하게 붙들고 있으므로
     // 이 지역 변수 `process`가 스코프를 벗어나도 파괴되지 않는다.
-    if (process->parent.lock()) {
+    if (SharedPtr<Process> parent = process->parent.lock()) {
         process->isZombie = true;
         // exitCode(§6) - 프로세스 트리 좀비의 exitCode는 여전히 0
         // 고정이다(§6이 다루는 건 Process::exitCode, UserThread::
@@ -864,6 +864,13 @@ void kFinalizeProcessTermination(SharedPtr<Process>& process) {
         // exitCode를 그대로 물려받는다"의 몫으로 후속 증분(Join 완료
         // 시점)에 배선한다).
         process->exitCode = 0;
+        // [신규, 2026-09-19, PN-485132FF, SP-68182FBD §4] 자식 종료를
+        // 부모에게 실제로 통지한다 - `kCheckSignalCheckpoint()`(idt.cpp)
+        // 가 이제 Kill/Terminate 전용 하드코딩이 아니라 dispositions[]를
+        // 실제로 참조하는 범용 체크포인트로 일반화돼(PN-59A60413) 이
+        // 신호가 비로소 관찰 가능한 효과를 낸다 - 부모가 Default(기본값)
+        // 면 종료, SignalAction으로 Ignore를 설정해 뒀으면 생존.
+        parent->raiseSignal(SignalNumber::Chld);
     }
 
     if (startFlags.essential) {

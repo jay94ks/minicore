@@ -578,16 +578,44 @@ extern "C" void kTaskOnFallingToEnd();
 extern "C" void kThreadOnFallingToEnd(kernel::int32_t exitCode);
 
 // [신규, 2026-09-17, PN-71E50394 항목3 나머지 - SP-0666DB3C §4.4
-// 체크포인트] 실행 중(비대기)인 UserThread도 다음 syscall 진입
-// 시점에 Kill/Terminate가 걸려 있으면 여기서 걸러낸다 - §9.5의
-// Waitable::cancel() 강제 웨이크업 경로(대기 중)와 쌍을 이루는 "실행
-// 중" 경로. 두 신호 모두 disposition을 실제로 소비하는 syscall API
-// (§4.5, 항목4)가 아직 없어 dispositions[]는 항상 기본값(Default=
-// 종료) 그대로다 - 그래서 v1은 Ignore/Handler 분기 없이 발견 즉시
-// 무조건 종료로 처리한다(이 둘의 기본 동작과 정확히 일치, POSIX상
-// Kill은 애초에 마스킹 불가). `kTerminateFaultingUserTask`/self-
-// terminate와 동일한 패턴(kTaskOnFallingToEnd + sti+hlt 루프)을
-// 재사용 - 호출부(int 0x80/`syscall` 양쪽)로 절대 반환하지 않는다.
+// 체크포인트, **2026-09-19 범용화, PN-59A60413, QU-4152C857
+// 설계자 답변("별도 계획으로 분리해서 구현해. 소비되지 않더라도
+// 확실하게 구현해둬야해")** - 실행 중(비대기)인 UserThread도 다음
+// syscall 진입 시점에 이 지점에서 자신의 pendingSignals를 확인한다
+// (§9.5의 Waitable::cancel() 강제 웨이크업 경로(대기 중)와 쌍을 이루는
+// "실행 중" 경로).
+//
+// 예전엔 Kill/Terminate 두 신호만 하드코딩으로 찾아 dispositions[]를
+// 전혀 참조하지 않고 무조건 종료시켰다 - PN-485132FF가 SIGCHLD를
+// 배선하려다 이 하드코딩 때문에 dispositions[]에 뭘 넣어도(Chld를
+// Ignore로 설정해도) 아무 효과가 없다는 진짜 설계 공백을 발견했다.
+// 이제는 **먼저 쌓인 신호부터 하나씩** dispositions[]를 실제로
+// 참조해 처리한다:
+//   - `Ignore`면 그 신호 하나만 조용히 소비(erase)하고 다음 신호를
+//     계속 찾는다(대기열 전체를 비울 때까지, 또는 처리해야 할 신호를
+//     만날 때까지).
+//   - 그 외(`Default`, 그리고 `Handler`도 - 아래 참고)면 발견 즉시
+//     종료로 처리한다.
+// `Kill`/`Stop`은 `SignalActionHandler`(process.cpp)가 애초에
+// `Ignore`로 바꾸는 걸 거부하므로(POSIX "마스킹 불가 원칙",
+// signal.h `SignalDisposition` 문서 주석) 이 dispositions[] 조회
+// 자체가 자연히 항상 `Default`를 돌려준다 - 예전처럼 Kill을
+// 특별히 하드코딩할 필요가 없다. 부수 효과로 `Terminate`(SIGTERM,
+// "핸들러로 가로챌 수 있음")도 이제 실제로 `Ignore` disposition을
+// 존중한다 - 예전엔 Kill과 똑같이 무조건 종료돼 이 신호 고유의
+// 마스킹 가능 성질이 지켜지지 않고 있었다(이것도 이번에 같이
+// 고쳐진 버그).
+//
+// `Handler`는 아직 실제 ring3 디스패치 인프라(핸들러 주소를 어디에
+// 저장할지, sigreturn 규약을 어떻게 둘지)가 설계되지 않아
+// `SignalActionHandler`가 애초에 `NotSupported`로 거부한다(signal.h
+// 참고) - 그래서 이 분기는 지금은 도달 불가능한 방어적 코드일
+// 뿐이다. 도달한다면 안전한 기본값(Default와 동일하게 종료)으로
+// 폴백한다 - "말없이 무시"보다 "일단 안전하게 종료"가 이 프로젝트의
+// 일관된 선택(SpawnProcess flags 검증 등과 같은 원칙).
+// `kTerminateFaultingUserTask`/self-terminate와 동일한 패턴
+// (kTaskOnFallingToEnd + sti+hlt 루프)을 재사용 - 호출부(int 0x80/
+// `syscall` 양쪽)로 절대 반환하지 않는다.
 bool kCheckSignalCheckpoint() {
     auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
     if (!thread) {
@@ -597,17 +625,28 @@ bool kCheckSignalCheckpoint() {
     if (!process) {
         return false;
     }
-    auto* slot = process->pendingSignals.find([](const kernel::PendingSignal& sig) {
-        return sig.number == kernel::SignalNumber::Kill || sig.number == kernel::SignalNumber::Terminate;
-    });
-    if (!slot) {
-        return false;
-    }
-    kernel::Logger::info("minicore: signal checkpoint - terminating UserThread (pending Kill/Terminate)");
-    kTaskOnFallingToEnd();
-    asm volatile("sti");
     for (;;) {
-        asm volatile("hlt");
+        auto* slot = process->pendingSignals.find([](const kernel::PendingSignal&) { return true; });
+        if (!slot) {
+            return false;  // 대기 중인 신호 없음(또는 전부 Ignore로 소비함)
+        }
+        const kernel::SignalNumber number = slot->value.number;
+        const kernel::uint32_t index = static_cast<kernel::uint32_t>(number);
+        const kernel::SignalDisposition disposition =
+            (index < kernel::kSignalCount) ? process->dispositions[index] : kernel::SignalDisposition::Default;
+        // find()가 준 슬롯 참조로 disposition을 다 읽은 뒤에 소비한다 -
+        // Ignore든 종료든 이 신호 하나는 "확인됨"이므로 항상 지운다.
+        process->pendingSignals.erase(slot);
+        if (disposition == kernel::SignalDisposition::Ignore) {
+            continue;  // 이 신호는 조용히 소비 - 다음 신호를 계속 찾는다.
+        }
+        // Default 또는 (아직 도달 불가능한) Handler 폴백 - 종료.
+        kernel::Logger::info("minicore: signal checkpoint - terminating UserThread (pending signal, non-Ignore disposition)");
+        kTaskOnFallingToEnd();
+        asm volatile("sti");
+        for (;;) {
+            asm volatile("hlt");
+        }
     }
 }
 
