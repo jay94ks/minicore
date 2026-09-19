@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-19T16:25:41.891Z
+  updatedAt: 2026-09-19T18:53:12.080Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -583,14 +583,19 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   구현이 `PAGE_CACHE_DISABLE`을 이미 올바르게 설정하고 있어 실재
   버그는 아님을 확인 - **`PN-5BCA7AB9`로 낮은 우선순위 문서화
   백로그 등록, 갭 없음(급한 위험 아님)**.
-- **`SP-39F18E30`(DMA 버퍼 관리자)**: `AllocDmaBuffer`/`FreeDmaBuffer`
-  syscall 자체가 아직 미구현 - `RM-48E1E610`("번호만 예약")과
-  `pnp.cpp` grep(구현 없음) 둘 다 일치, 표 형태 현황판이 이번엔
-  정확했다. §6이 스스로 열어 뒀던 3개 항목 중 2개는 이미 해소
-  기록, 나머지 하나(프로세스 종료 시 물리 프레임 반납 누수)도
-  `PN-FFC2F062`로 착수 조건(DMA 버퍼 관리자 자체 착수)까지 명시해
-  정확히 추적 중 - 실제 드라이버(AHCI/USB)가 아직 하나도 없어
-  당장 필요하지도 않다(PN-BD9AAE2F 항목5와 같은 이유). 갭 없음.
+- **[갱신, 2026-09-20] `SP-39F18E30`(DMA 버퍼 관리자) - 구현 완료,
+  갭 없음**: 이전 라운드에서 "`AllocDmaBuffer`/`FreeDmaBuffer` 미구현"
+  으로 기록됐던 것이 이 세션(`PN-29614AD7`)에서 실제 구현 완료됐다 -
+  §2/§3.1 할당 경로(4KiB 올림→order 계산→`physAddrLimit==32`면
+  §5-B `allocOrderBelow`/아니면 `allocOrder`→`ProcessAddressSpaceManager::
+  mapRegion(VmaBacking::FixedPhysical)`→`Process::dmaBuffers` 장부
+  기록) 전부 코드와 정확히 대조 확인. §3.3 캐시 속성(`PAGE_CACHE_DISABLE`)
+  도 실제 `mapRegion()` 호출에 반영됨 확인. §5-B `allocOrderBelow`도
+  §5-C(a) 선형 탐색/§5-D(NUMA 지역성 없이 전체 노드 순회) 그대로
+  구현. §6이 열어 뒀던 마지막 항목(프로세스 종료 시 물리 프레임
+  반납 누수, `PN-FFC2F062`)도 `Process::destroy()`에 실제 배선
+  완료(commit `0dc91c4`) - completed로 갱신 확인. **확정된 설계
+  전부 코드로 반영됨 - 갭 없음.**
 - **`SP-29D652AA`(진짜 컴파일러 thread_local)**: §7까지 전부 확정된
   approved 설계이지만 실제 구현은 `PN-22E5E9E7`(scheduled, 미착수)
   으로 이미 정확히 등록돼 있음을 `plan_get`으로 확인 - 디스패치
@@ -619,14 +624,21 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
   1-7, TLS 배선)는 이 블로커 해소로 이제 착수 가능하나 아직 미착수
   (계획 status 여전히 scheduled, 2026-09-17 기준) - 숨은 갭 아님,
   다음 착수 시 재대조 필요.
-- **`SP-C2670F69`(AHCI)**: §4 항목2("fs 서비스 설계가 아직 없음")가
-  낡은 교차 참조였음을 발견 - `SP-7CC5693A`(fs/VFS)가 그 사이
-  approved되며 §3.2 `FileSystemDriver::mount(BlockDevice*)`가 정확히
-  `AhciBlockDevice`를 연결점으로 지목해 뒀는데 이 문서는 갱신이 안
-  돼 있었다. 정정 각주 추가 - `BlockDevice` 인터페이스 세부(LBA
-  read/write/TRIM 등 정확한 시그니처)는 여전히 미정이지만 코드가
-  전혀 없는 순수 설계 단계 세부라 별도 PN 등록은 보류(AHCI 실착수
-  시 자연히 확정될 항목, RM-23F4B687 §4 취지) - 갭 없음(정정만).
+- **[갱신, 2026-09-20] `SP-C2670F69`(AHCI) - §3.1-3.4 구현 완료,
+  §3.5(NCQ, 확정) 미반영 발견 → `PN-A401DDF9` 등록**: HBA 초기화
+  (GHC.AE/CAP/PI), 포트 시작 절차(PxCLB/PxFB/FRE/ST 순서), IDENTIFY
+  DEVICE/READ·WRITE DMA EXT/FLUSH CACHE EXT까지 §3.1-§3.4가 코드로
+  실제 구현됨을 확인(`minicore/fs/ahci.h/.cpp`, PN-4E6EA13D/
+  PN-F60E405A, QEMU 실측 완료). §3.3(인터럽트)은 "제안"(확정 아님)
+  단계라 폴링으로 openly 대체 중 - 갭 아님. **그러나 §3.5(NCQ)는
+  "[확정, 2026-09-18, 설계자 지시]"로 명시된 확정 설계인데 실제
+  구현은 슬롯0 고정(비-NCQ)만 있다** - 코드 주석/계획 본문엔 이미
+  기록돼 있었지만(openly 알려짐) CLAUDE.md 규칙7이 요구하는 별도
+  PN 추적이 없었다 - `PN-A401DDF9`로 신규 등록(정확성엔 영향 없음,
+  §3.5 자신이 "미지원 시 슬롯1개로 자연 일치" 명시 - 순수 성능
+  후속 과제). 아키텍처 자체도 뒤집혔음(§3.1 - devmgr 자식 프로세스
+  대신 fs 프로세스 자신이 직접 구동, QU-1FB6A7A4 답변) - 문서
+  자체에 이미 정정 절 추가 완료.
 - **`SP-E35FD36C`(USB 스택)**: xHCI 위주 v1 설계 + 레거시(UHCI/OHCI/
   EHCI)/SuperSpeed 확장 초안까지 전부 명시적으로 유예 조건과 함께
   기록돼 있고, 코드가 전혀 없어(devmgr 자식 프로세스로 실행 예정,
@@ -1385,14 +1397,21 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   갭 없음 - 이 문서는 이미 여러 차례(2026-09-17/18) 자체 개정을 거쳐
   §목차-코드 대조가 실질적으로 상시 반영돼 있는 드문 사례.
 
-- **`SP-2BCE5D60`(fs 커널 서비스) - 점검 대상 아님(코드 자체가 아직
-  없음)**: §7 착수 조건이 스스로 명시하듯 `minicore/fs` 실코드
-  (`PN-452FF696`)가 존재하지 않아 "확정된 설계 vs 실제 코드" 대조가
-  성립하지 않는다 - 이 문서의 §1-§6은 전부 설계뿐이고 구현 착수 전.
-  RM-F2DAFF66의 대상은 "이미 부분 구현된 SP의 뒷부분 항목이 조용히
-  빠지는 패턴"이라 이런 순수 설계-only 문서는 실코드가 생긴 뒤
-  재방문 대상으로 보류(§3에도 다시 안 넣음 - PN-452FF696 완료 시
-  자연히 재검토됨).
+- **[갱신, 2026-09-20] `SP-2BCE5D60`(fs 커널 서비스) - 실코드가 생겨
+  재방문, §3.0만 대상(나머지는 이미 PN-452FF696이 정확히 추적 중) -
+  갭 없음**: `minicore/fs`(main.cpp/ahci.h·cpp/block_device.h)가
+  이제 실제로 존재한다(`PN-F60E405A`) - §3.0 `BlockDevice` 추상
+  인터페이스(`blockSize`/`blockCount`/`readBlocks`/`writeBlocks`/
+  `flush`/`trim`)를 `minicore/fs/block_device.h`와 한 줄씩 대조 -
+  시그니처 전부 정확히 일치(가상 소멸자만 의도적으로 생략 - 이유는
+  파일 자체 문서 주석에 기록, freestanding 툴체인 `operator delete`
+  부재). `AhciBlockDevice`가 그 구현체로 §3.0이 지목한 그대로 존재.
+  §3.1(`FileSystemDriver`)/§4(`SwapBackend`)/§5.1(`mtab`)은 여전히
+  코드가 없다 - 그런데 이건 "확정된 설계가 조용히 누락"된 게 아니라
+  `PN-452FF696`(fs 서비스 계획, 항목5)이 "libext4/libvfat 자체
+  부재"로 정확하고 최신 상태로 이미 추적 중인 항목과 정확히 일치 -
+  숨은 갭 아님. **§3.0만 놓고 보면 갭 없음, 나머지는 이미 openly
+  추적 중이라 이 문서에서 새로 할 일 없음.**
 
 - **`SP-B071E628`(pubreg) §6-6 최종 바이너리 와이어 포맷**:
   `PubregRegistration`(registryId/protocolCode[4]/implementationId[28]/
