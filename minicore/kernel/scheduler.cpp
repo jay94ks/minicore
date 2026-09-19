@@ -2300,8 +2300,25 @@ extern "C" void kSyncCr3OnTaskStart() {
 // 루프로 들어간다 - Kernel-Level 분기(retireCurrentTask())는 절대
 // 반환하지 않는다.
 extern "C" void kTaskOnFallingToEnd() {
+    // [신규, 2026-09-19, PN-05162577] entry()가 막 반환한 이 시점부터
+    // 아래에서 이 Task가 실제로 Zombie로 표시되거나(Kernel-Level) 자기
+    // 종료 syscall 제출을 마치기(User-Level) 전까지, gCurrentTask/
+    // 스케줄 큐 관점에서 이 Task는 여전히 "정상 실행 중"으로 보인다 -
+    // 이 좁은 창에 스케줄러 틱이 끼어들면 onTick()이 이 Task를 보통의
+    // 선점 대상으로 오인해 그대로 재삽입(enqueue)하고 다른 Task로
+    // 전환해 버릴 수 있다(퇴역 결정 자체를 아직 아무도 안 내렸으므로
+    // Zombie 분기도 안 타 정상 경로로 처리됨). 나중에 이 Task가 다시
+    // 뽑히면 이 지점(정확히는 onTick()의 kContextSwitch 호출부) 한
+    // 가운데서 재개되어 커널 스택이 두 실행 흐름에 동시에 걸치는
+    // 위험한 상태가 된다 - retireCurrentTask() 자신의 cli 문서 주석이
+    // 설명하는 것과 완전히 같은 위험을, 그 cli보다 한 단계 앞선
+    // 지점(entry 반환 직후)부터 이미 열어 두고 있었던 셈. 그 cli를
+    // 여기 앞당겨 창을 완전히 닫는다 - User-Level 분기는 아래 hlt
+    // 루프가 인터럽트로 깨어나야 하므로 반환 직전 sti로 다시 연다.
+    asm volatile("cli");
     kernel::Task* self = kernel::Scheduler::currentTask();
     if (!self) {
+        asm volatile("sti");
         return;  // 이론상 도달 불가 - 방어적으로 그냥 hlt 루프로
     }
     if (self->isUserLevel) {
@@ -2321,10 +2338,13 @@ extern "C" void kTaskOnFallingToEnd() {
         // 루프에서 계속 대기한다.
         self->state = kernel::TaskState::Zombie;
         kernel::Syscall::submitDetached(kernel::kSyscallEndpointSelfTerminate, self);
+        asm volatile("sti");  // 위 cli를 닫는다 - 아래 hlt 루프는 인터럽트로만 깨어난다.
         return;
     }
     // Kernel-Level Task가 계속 커널에 머물러 있는 경우(설계자 지시
     // 2번, 지금 이 프로젝트의 모든 Task가 해당) - 절대 돌아오지 않는다.
+    // retireCurrentTask() 자신도 cli를 실행하지만 위에서 이미 꺼 둔
+    // 상태라 그저 무해한 재확인이다.
     kernel::Scheduler::retireCurrentTask();
 }
 
