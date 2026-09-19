@@ -148,14 +148,32 @@ struct AsyncTaskWaitQueue {
 };
 
 // 코어당이 아니라 채널 전역 - connectChannel이 채워 넣고
-// acceptFromChannel이 꺼내 간다. Channel::lock으로 보호되는 단순
-// 침습적 단일 연결 리스트(FIFO)라 별도 락/원자 연산이 필요 없다.
+// acceptFromChannel이 꺼내 간다. `next`/리스트 연결 자체는
+// Channel::lock으로 보호되는 단순 침습적 단일 연결 리스트(FIFO)라
+// 별도 락/원자 연산이 필요 없다.
+//
+// [수정, 2026-09-19, PN-584DB994 잔존 크래시 조사] **`done`은 그
+// lock 보호 범위 밖에서 코어를 가로질러 읽고 쓰인다** - connectChannel
+// 쪽(channel.cpp의 `while (!req.done) { AsyncTask::yield(); }`)과
+// acceptFromChannel/destroyChannel 쪽(완료 시점에 `req->resultBridge`/
+// `req->rejected`를 채운 뒤 `req->done`을 세팅) 둘 다 lock을 놓은
+// 뒤에 접근한다 - 두 코어가 서로 다른 물리 CPU에서 이 필드를 plain
+// bool로 주고받는 것은 컴파일러/CPU 재정렬을 막을 방법이 없는 진짜
+// 데이터 레이스(UB)였다. `done`을 `Atomic<uint32_t>`로 승격해
+// "release 저장 후 acquire 스핀"으로 바꾼다 - 표준 발행(publish)
+// 패턴 그대로: 쓰는 쪽이 `resultBridge`/`rejected`를 먼저 채운
+// 뒤(plain 저장) `done.store(1)`(release)를 마지막에 실행하고, 읽는
+// 쪽은 `done.load()`(acquire)가 0이 아님을 확인한 "이후에만"
+// `resultBridge`/`rejected`를 읽는다 - release-acquire 페어링이
+// "그 이전의 모든 쓰기"까지 함께 가시성을 보장하므로 `resultBridge`/
+// `rejected` 자신은 원자화할 필요가 없다(둘 다 `done`의 release
+// 저장보다 항상 먼저 쓰이고, 항상 그 acquire 확인 이후에만 읽힘).
 struct PendingConnectRequest {
     AsyncTask* task = nullptr;         // 완료 시 AsyncReactor::submitCompletion으로 깨울 대상
     bool useHugePage = false;
-    bool done = false;                 // acceptFromChannel/destroyChannel이 세팅
-    bool rejected = false;             // true면 accept 실패/채널 소멸 - resultBridge 무효
-    BridgePipe* resultBridge = nullptr;  // 클라이언트 쪽 반쪽(성공 시)
+    Atomic<uint32_t> done{0};          // acceptFromChannel/destroyChannel이 세팅(release) - connectChannel이 폴링(acquire)
+    bool rejected = false;             // true면 accept 실패/채널 소멸 - resultBridge 무효(done의 release에 실려 함께 발행됨)
+    BridgePipe* resultBridge = nullptr;  // 클라이언트 쪽 반쪽(성공 시, done의 release에 실려 함께 발행됨)
     PendingConnectRequest* next = nullptr;
 };
 

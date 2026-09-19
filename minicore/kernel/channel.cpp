@@ -461,7 +461,7 @@ public:
             AsyncReactor::submitCompletion(accepter, channel->exclusivePreemptive);
         }
 
-        while (!req.done) {
+        while (req.done.load() == 0) {
             AsyncTask::yield();
         }
 
@@ -562,7 +562,7 @@ public:
             SharedPtr<BridgePipe> clientSide;
             if (!BridgePipe::createPair(req->useHugePage, &serverSide, &clientSide)) {
                 req->rejected = true;
-                req->done = true;
+                req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
                 co_return;
@@ -581,7 +581,7 @@ public:
             SharedPtr<Process> acceptorProcess = kProcessFromSubmitter(task);
             if (!clientProcess || !acceptorProcess) {
                 req->rejected = true;
-                req->done = true;
+                req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
                 co_return;
@@ -596,7 +596,7 @@ public:
                 // 프로세스의 openBridges에도 안 들어갔으므로 되돌릴 것도
                 // 없다).
                 req->rejected = true;
-                req->done = true;
+                req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
                 co_return;
@@ -608,14 +608,14 @@ public:
                 // 살아있는) 한 짐이 남는다.
                 clientProcess->openBridges.erase(clientSlot);
                 req->rejected = true;
-                req->done = true;
+                req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
                 co_return;
             }
 
             req->resultBridge = clientSide.get();
-            req->done = true;
+            req->done.store(1);
             AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
 
             args->bridge = reinterpret_cast<uint64_t>(serverSide.get());
@@ -906,7 +906,7 @@ public:
         for (PendingConnectRequest* req = rejectedHead; req;) {
             PendingConnectRequest* next = req->next;
             req->rejected = true;
-            req->done = true;
+            req->done.store(1);
             AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
             req = next;
         }
