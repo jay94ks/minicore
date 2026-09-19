@@ -101,6 +101,15 @@ public:
     static uint64_t allocOrderOnNode(uint32_t node, uint32_t order);
     static void freeOrder(uint64_t physAddr, uint32_t order);
 
+    // [SP-39F18E30 §5-B/§5-C/§5-D] physLimit 미만의 물리주소 범위에서만
+    // 2^order 페이지 블록을 찾는다(레거시 USB 컨트롤러의 32비트 DMA
+    // 제약용 - physLimit=0x1'0000'0000이면 "4GiB 미만"). §5-C가 채택한
+    // (a) 선형 탐색 그대로 - 해당 order의 free list만 뒤지고(더 큰
+    // 블록을 쪼개지 않음), §5-D에 따라 NUMA 지역성 없이 전체 노드를
+    // 순서대로 훑는다(드라이버 초기화 시점에만 일어나는 저빈도 연산이라
+    // O(n) 비용을 감수). 실패 시 0.
+    static uint64_t allocOrderBelow(uint64_t physLimit, uint32_t order);
+
     static uint64_t freePageCount();  // 전체 노드 합
     static uint32_t numaNodeCount();
     static uint64_t freePageCountOnNode(uint32_t node);

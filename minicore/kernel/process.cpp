@@ -354,6 +354,12 @@ bool Process::init() {
     // 이전 생애에 열려 있던 BridgePipe 강한 참조가 새 생애로 새어
     // 들어가면 안 된다.
     openBridges.clear();
+    // [신규, SP-39F18E30 §4] openBridges와 동일한 이유(Resurrect가 같은
+    // 정적 Process를 재사용할 수 있으므로) - 이전 생애의 DMA 버퍼
+    // 소유권 기록이 새 생애로 새어 들어가면 안 된다. 실제 물리 프레임
+    // 반납은 이 리셋이 아니라 destroy()가 이미 끝냈어야 한다(destroy()
+    // 문서 주석 참고) - 여기는 다음 생애를 위한 장부 초기화일 뿐이다.
+    dmaBuffers.clear();
     // 좀비 상태(§6, PN-543C0CE9 착수 5번째 증분(2/2)) - parent/children과
     // 동일한 이유(Resurrect가 같은 정적 Process를 재사용)로 매번 리셋.
     isZombie = false;
@@ -451,6 +457,23 @@ void Process::destroy() {
         group = nullptr;
     }
     memoryBytesUsed = 0;
+    // [신규, SP-39F18E30 §4/§6 항목3, PN-FFC2F062] addressSpace.unmapAll()
+    // 은 VmaBacking::FixedPhysical의 가상 매핑만 해제하고 물리 프레임은
+    // 의도적으로 반납하지 않는다(MMIO BAR 전제 - 소유권이 호출부).
+    // DMA 버퍼는 같은 백킹을 쓰지만 실제로는 PageFrameAllocator로 확보한
+    // 진짜 RAM 페이지라 이 정책을 그대로 물려받으면 프로세스가 죽어도
+    // 영원히 샌다 - 그래서 unmapAll() 이전에 이 목록을 따로 순회하며
+    // 물리 프레임만 명시적으로 반납한다(가상 매핑 해제 자체는 아래
+    // unmapAll()이 대신 처리하므로 여기서 unmapRegion()을 중복 호출할
+    // 필요는 없다).
+    dmaBuffers.forEach([](DmaBuffer& buf, ChunkedList<DmaBuffer, kDmaBufferChunkCapacity>::Slot*) {
+        uint32_t order = 0;
+        while ((1u << order) < buf.pageCount) {
+            ++order;
+        }
+        PageFrameAllocator::freeOrder(buf.physAddr, order);
+    });
+    dmaBuffers.clear();
     if (pml4Phys) {
         // PN-71C3D483 항목 3 - execImage()가 registerFixedRegion으로
         // 장부에 남겨 둔 코드/데이터/스택 VMA를 전부 찾아 실제 페이지를

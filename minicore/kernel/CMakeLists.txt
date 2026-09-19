@@ -29,6 +29,7 @@ add_library(minicore_kernel OBJECT
     channel.cpp
     interrupt_subscription.cpp
     pnp.cpp
+    dma_buffer.cpp
     livefs.cpp
     procfs.cpp
     mount_table.cpp

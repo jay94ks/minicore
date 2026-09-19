@@ -438,6 +438,28 @@ uint64_t PageFrameAllocator::allocOrderOnNode(uint32_t node, uint32_t order) {
     return addr;
 }
 
+uint64_t PageFrameAllocator::allocOrderBelow(uint64_t physLimit, uint32_t order) {
+    if (order > kMaxOrder) {
+        return 0;
+    }
+    const uint64_t blockSize = kPageSize << order;
+    for (uint32_t node = 0; node < gNodeCount; ++node) {
+        Node& n = gNodes[node];
+        SpinlockGuard guard(n.lock);
+        uint64_t cur = n.freeListHeads[order];
+        while (cur) {
+            const uint64_t next = kAsBlock(cur)->next;
+            if (cur + blockSize <= physLimit) {
+                kTryRemoveBlock(n, cur, order);  // 방금 이 리스트에서 찾은 값이라 항상 성공
+                n.freePageCount -= (1UL << order);
+                return cur;
+            }
+            cur = next;
+        }
+    }
+    return 0;
+}
+
 uint64_t PageFrameAllocator::allocOrder(uint32_t order) {
     const uint32_t preferredNode = kCurrentNumaNode();
     uint64_t addr = allocOrderOnNode(preferredNode, order);

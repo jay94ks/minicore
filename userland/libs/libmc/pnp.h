@@ -73,6 +73,30 @@ struct RequestIoPermissionArgs {
 
 constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = kMakeSyscallEndpointId(2, 1);
 
+// minicore/kernel/dma_buffer.h의 AllocDmaBufferArgs/FreeDmaBufferArgs와
+// 바이트 단위로 정확히 같은 레이아웃이어야 한다(위 문서 주석의 수동
+// 동기화 부담 그대로 적용, SP-39F18E30 §2). AHCI(SP-C2670F69)/
+// USB(SP-E35FD36C) 드라이버 자식이 컨트롤러 DMA 구조체(Command List/
+// FIS/PRDT 등)를 확보하는 데 쓴다.
+struct AllocDmaBufferArgs {
+    uint64_t sizeBytes = 0;
+    uint32_t physAddrLimit = 0;
+    // out
+    ChannelError error = ChannelError::None;
+    uint64_t virtualAddr = 0;
+    uint64_t physicalAddr = 0;
+    uint32_t handle = 0;
+};
+
+struct FreeDmaBufferArgs {
+    uint32_t handle = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+constexpr SyscallEndpointId kSyscallEndpointAllocDmaBuffer = kMakeSyscallEndpointId(2, 2);
+constexpr SyscallEndpointId kSyscallEndpointFreeDmaBuffer = kMakeSyscallEndpointId(2, 3);
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_PNP_H

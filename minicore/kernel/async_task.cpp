@@ -241,7 +241,15 @@ void kAsyncDrainIsr(kernel::InterruptFrame*) {
     }
 }
 
-constexpr kernel::uint32_t kMaxHandlers = 64;  // v1 상한 - 필요해지면 늘림
+// [갱신, SP-39F18E30 §2, AllocDmaBuffer/FreeDmaBuffer 추가] 64는 정확히
+// 그 시점까지 등록된 핸들러 총수와 같아 꽉 찬 상한이었다 - 그 사실을
+// 몰랐던 채로 새 syscall 2개를 등록하면(RM-48E1E610 그룹2 call 2/3)
+// registerHandler()가 상한 초과를 조용히 kMaxHandlers로만 반환하고,
+// 그 뒤에 등록되는 핸들러(당시 순서상 DebugSession 등)가 슬롯을 못 받아
+// 나중에 그 subjectCode로 조회하면 nullptr - 실측으로 "#DB unhandled"
+// 경고 뒤 페이지 폴트 패닉으로 발견했다. 128로 넉넉히 올려 둔다(v1
+// 상한 - 필요해지면 다시 늘림).
+constexpr kernel::uint32_t kMaxHandlers = 128;
 kernel::AsyncTaskHandler* gHandlers[kMaxHandlers] = {};
 kernel::uint32_t gNextSubjectCode = 0;
 kernel::Spinlock gRegistryLock;

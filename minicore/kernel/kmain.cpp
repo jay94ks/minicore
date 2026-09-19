@@ -5,6 +5,7 @@
 #include "channel.h"
 #include "debug_session.h"
 #include "delayed_exec.h"
+#include "dma_buffer.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
 #include "idt.h"
@@ -601,6 +602,14 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // syscall은 후속 증분).
     kernel::PnpService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: pnp EnumerateDevices syscall endpoint registered");
+
+    // SP-39F18E30 §2 - 위와 같은 이유(BSP에서 한 번만). devmgr(또는 그
+    // 드라이버 자식)이 AHCI(SP-C2670F69)/USB(SP-E35FD36C) 등 컨트롤러의
+    // DMA 구조체용 물리적으로 연속인 메모리를 확보하는 AllocDmaBuffer/
+    // FreeDmaBuffer - RM-48E1E610 그룹2(Device) call 2/3, 지금까지
+    // "번호만 예약" 상태였다.
+    kernel::DmaBufferService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: dma buffer alloc/free syscall endpoints registered");
 
     // SP-9A6D579F §3.2/§3.3 - 위와 같은 이유(BSP에서 한 번만). 이번
     // 증분은 DebugAttach/Detach + DebugSetBreakpoint(항목3/4) - 싱글

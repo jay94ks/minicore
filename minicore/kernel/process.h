@@ -377,6 +377,25 @@ public:
     // 실제 페이지를 찾아 반납한다. init()이 pml4Phys 확보 직후 초기화.
     ProcessAddressSpaceManager addressSpace;
 
+    // [신규, SP-39F18E30 §4, PN-4E6EA13D 착수 전 선행 구현] AllocDmaBuffer가
+    // 확보해 준 물리적으로 연속인 DMA 버퍼 하나 - `virtAddr`은
+    // `addressSpace`(VmaBacking::FixedPhysical)에도 등록돼 있지만, 그
+    // 백킹 종류는 물리 프레임을 반납하지 않는 정책(MMIO BAR 전제)이라
+    // (address_space.h의 VmaBacking::FixedPhysical 문서 주석 참고),
+    // 실제로 `PageFrameAllocator::allocOrder`로 확보한 진짜 RAM 페이지인
+    // DMA 버퍼는 이 목록으로 소유권을 별도 추적해야만 FreeDmaBuffer/
+    // destroy() 시점에 물리 프레임을 되돌려줄 수 있다(PN-FFC2F062가
+    // 발견한 누수 - 이 목록이 바로 그 해결책).
+    struct DmaBuffer {
+        uint64_t physAddr = 0;
+        uint64_t virtAddr = 0;
+        uint32_t pageCount = 0;  // freeOrder 호출 시 order 역산에 씀(항상 2의 거듭제곱)
+        uint32_t handle = 0;
+        bool used = false;
+    };
+    static constexpr uint32_t kDmaBufferChunkCapacity = 8;
+    ChunkedList<DmaBuffer, kDmaBufferChunkCapacity> dmaBuffers;
+
     // [신규, 2026-09-18, PN-22E5E9E7 항목5, SP-29D652AA §5.1/§5.2] 이
     // 프로세스의 ELF `PT_TLS` 세그먼트(있으면) 템플릿 - `execImage()`가
     // `elf::kSegmentTypeLoad` memsz 합산과 같은 세그먼트 스캔에서 함께
