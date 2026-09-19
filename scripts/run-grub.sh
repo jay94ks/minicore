@@ -19,6 +19,11 @@ SMP="${MINICORE_QEMU_SMP:-1}"  # SMP4 재현 시 MINICORE_QEMU_SMP=4(run-grub-gd
 # 그대로(initrd 없음, "modules=0") - 이 스크립트를 쓰던 기존 호출부
 # 전부 그대로 호환.
 INITRD="${MINICORE_QEMU_INITRD:-}"
+# [신규, PN-A0F72A3A 착수 순서 2번] opt-in AHCI 컨트롤러 - run-qemu.sh와
+# 동일한 관례(MINICORE_QEMU_AHCI=1). 미지정 시 기존 동작 그대로(AHCI
+# 없음) - 기존 시나리오 전부 그대로 호환.
+AHCI="${MINICORE_QEMU_AHCI:-0}"
+AHCI_DISK="${MINICORE_QEMU_AHCI_DISK:-${BUILD_DIR}/ahci-disk.img}"
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/cmake/toolchain-x86_64.cmake" \
@@ -45,7 +50,19 @@ cp "${BUILD_DIR}/minicore.elf" "${ISO_ROOT}/boot/minicore.elf"
 
 grub-mkrescue -o "${ISO_PATH}" "${ISO_ROOT}" >/dev/null 2>&1
 
-echo "--- QEMU(-cdrom GRUB ISO) 시리얼 출력 (최대 ${TIMEOUT_SECS}초, SMP=${SMP}) ---"
+QEMU_EXTRA_ARGS=()
+if [[ "${AHCI}" == "1" ]]; then
+    if [[ ! -f "${AHCI_DISK}" ]]; then
+        qemu-img create -f raw "${AHCI_DISK}" 16M >/dev/null
+    fi
+    QEMU_EXTRA_ARGS+=(
+        -drive "if=none,id=ahcidisk0,format=raw,file=${AHCI_DISK}"
+        -device ahci,id=ahci0
+        -device ide-hd,drive=ahcidisk0,bus=ahci0.0
+    )
+fi
+
+echo "--- QEMU(-cdrom GRUB ISO) 시리얼 출력 (최대 ${TIMEOUT_SECS}초, SMP=${SMP}, AHCI=${AHCI}) ---"
 set +e
 timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -cdrom "${ISO_PATH}" \
@@ -54,7 +71,8 @@ timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -no-reboot \
     -smp "${SMP}" \
     -d cpu_reset,guest_errors \
-    -D "${BUILD_DIR}/qemu-grub.log"
+    -D "${BUILD_DIR}/qemu-grub.log" \
+    "${QEMU_EXTRA_ARGS[@]+"${QEMU_EXTRA_ARGS[@]}"}"
 status=$?
 set -e
 
