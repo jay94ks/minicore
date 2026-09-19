@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-19T01:17:36.334Z
+  updatedAt: 2026-09-19T01:32:58.390Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1398,6 +1398,35 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   설계 vs 실제 코드) 대상이 아님 - 대조 불필요. `<type_traits>`
   베어메탈 부재로 인한 `kIsBaseOf` 자체 구현 대체도 문서 본문에 이미
   인라인 정정으로 기록돼 있어 별도 갭 아님.
+
+### 1-N. `SP-04EE2A18`(Syscall 디스패치) 본문이 자기 자신의 후속 Q&A
+결정을 반영 안 하고 낡은 채로 남아 있었음 (문서만 정정 - 코드 갭 아님,
+2026-09-19)
+
+- **출처**: RM-F2DAFF66 정기 점검 중 `SP-04EE2A18` 감사.
+- **발견**: 이 문서 자신의 "유저랜드 ABI" 절이 "`waitForMultipleSyscall`/
+  `waitAnyForMultipleSyscall`용... 아직 범위 밖 - 필요해지면 별도
+  질의"라고 서술하고 있었으나, 실제로는 **이 문서 자신에 대한
+  후속 질의(QU-31402585/QU-F475C6C2, 2026-09-14 설계자 답변)로 이미
+  결정되고 구현까지 끝난 상태**였다 - `UserThread::pendingSyscalls`
+  (syscall.h)가 단일 필드가 아니라 `ChunkedList<PendingSyscall, 10>`
+  로, 한 스레드가 동시에 여러 syscall을 제출/대기할 수 있게 구현돼
+  있음을 코드로 확인. "커널 진입 흐름"/"완료·응답 흐름" 절도 여전히
+  단수 `pendingSyscall`(단일 슬롯, `valid` 플래그)로 서술해 실제
+  복수형 리스트(+`ChunkedList::Slot::used`로 소유권 표현) 구현과
+  어긋나 있었다. 부수적으로 `SyscallRegistry`의 API 스케치도
+  `AsyncTaskHandler* resolve(id)`로 적혀 있으나 실제로는
+  `bool resolveSubjectCode(id, AsyncTaskSubjectCode*)`로 구현돼 있음을
+  확인(설계 의도 자체가 어긋난 것은 아니고, `AsyncTask::submit` 경유
+  디스패치 관례에 맞춘 자연스러운 시그니처 조정).
+- **성격**: 코드 갭이 아니라 **문서가 자기 자신의 승인된 후속 결정을
+  본문에 소급 반영하지 않은** 경우 - RM-23F4B687 §5의 "같은 설명이
+  다른 문서에도 복제돼 있는지 의심" 원칙이 여기서는 **같은 문서
+  안에서** 재현된 사례(앞부분 "확정된 설계" 서술과 뒷부분의 개정
+  각주가 서로 모순된 채 공존).
+- **조치**: `SP-04EE2A18` 본문에 두 군데 인라인 정정 각주 추가
+  완료(2026-09-19) - `document_patch`.
+- **현재 상태**: 완전 해소(문서 정정).
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
