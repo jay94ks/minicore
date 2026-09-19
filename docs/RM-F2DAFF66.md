@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-19T18:53:12.080Z
+  updatedAt: 2026-09-19T18:56:22.278Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1505,6 +1505,20 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 결과를 이 절에서 §1(발견) 또는 §2(갭 없음)로 옮긴다:
 
 - [ ] (`SP-9A6D579F` 항목은 §2로 이동 - 2026-09-18 갱신 완료)
+
+- **[점검 완료, 2026-09-20] `SP-CC1CF30E`(authmgr) - 코드 자체가 아직
+  없어 대조 불성립, 갭 없음**: `minicore/authmgr`/`minicore/libs/
+  libkvdb`/`minicore/libs/libkcrypto` 전부 디렉터리 자체가 없음(glob
+  확인). `PN-24A2B6F5`(계획)가 이 문서의 §1-B~§1-D 전 항목(sudo/su,
+  libkvdb 스키마, libkproto 추출 순서, 다중 그룹, 장애 정책)을 이미
+  정확하고 최신 상태로 추적 중 - SMP E2E를 막던 위험 요인
+  (`PN-9A5C0FC2`/`PN-907C5289`/`PN-3081704A`)도 전부 해소돼 "착수
+  가능" 상태로 정확히 갱신돼 있음까지 확인. `SP-2BCE5D60`(fs, 이
+  문서의 이전 갱신 항목)과 같은 패턴 - 순수 설계 단계라 코드 갭이
+  성립하지 않는다. 착수 자체는 새 커널 서비스+라이브러리 3개를
+  아우르는 대규모 작업(다수의 "착수 세션이 구체화" 표시가 있는
+  하위 결정 포함)이라 이 감사 틱의 범위 밖 - 실제 착수는 별도
+  세션에서 신중하게.
 
 (`SP-B1E258D8`(RCU) 항목은 approved 전환 + `PN-495C11B7` 구현
 완료까지 끝나 아래 §2로 이동했다.)
