@@ -6,10 +6,12 @@
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "logger.h"
+#include "nmi.h"
 #include "paging.h"
 #include "process.h"
 #include "resource_group.h"
 #include "scheduler.h"
+#include "smp.h"
 
 namespace kernel {
 
@@ -859,6 +861,29 @@ bool kHandleUserBreakpointHit(InterruptFrame* frame, uint64_t dr6) {
         return true;
     }
     gDebugParkedOnCore[coreIndex] = true;
+    // [신규, 2026-09-19, PN-EA968DF0 근본 원인 수정] 이 코어의 IST4가
+    // 이 스레드 전용으로 얼어붙기 직전, 이 프로세스의 다른 스레드가
+    // 실행 중일 수 있는 다른 온라인 코어 전부에게 즉시 DR7=0을
+    // 강제한다(NMI - 마스크 불가능, 대상 코어가 지금 무엇을 하고
+    // 있든 몇 명령어 안에 도착) - `Scheduler::kSyncDebugRegs()`의
+    // 디스패치 시점 게이트(`pausedByDebugger` 확인)만으로는 **이미
+    // DR7이 로드된 채 재디스패치 없이 계속 실행 중인 코어**를 막지
+    // 못한다는 게 실측으로 확인됐다(nmi.h `NmiReason::ClearDebugRegs`
+    // 문서 주석 참고) - 이 방송이 그 창을 닫는다. **알려진 v1 한계**:
+    // 대상 코어가 이 프로세스와 무관한 **다른** 디버그 세션의
+    // 브레이크포인트를 걸어 뒀다면 그것도 함께 잠깐 꺼진다(다음
+    // 디스패치에서 스스로 복구) - 지금은 디버그 세션이 흔치 않고
+    // 동시에 여러 개 활성인 시나리오가 실측된 적 없어 감수한다
+    // (RM-23F4B687 §4, 실제 필요해지면 프로세스별 타겟팅으로 좁힌다).
+    {
+        const uint32_t cpuCount = Acpi::cpuCount();
+        for (uint32_t i = 0; i < cpuCount; ++i) {
+            if (i == coreIndex || !Smp::isCoreOnline(i)) {
+                continue;
+            }
+            Nmi::send(i, NmiReason::ClearDebugRegs);
+        }
+    }
     // [신규, 2026-09-18, PN-49C2F890] 이 지점부터는 이 코어의 IST4가
     // 진짜로 이 스레드 전용으로 얼어붙으므로(gDebugParkedOnCore 가드가
     // 보장) `frame`을 안전하게 스냅숏 대상으로 쓸 수 있다 - 위 분기와

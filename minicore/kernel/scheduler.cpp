@@ -458,7 +458,37 @@ void kSyncDebugRegs(Task* task) {
     if (task->isUserLevel) {
         auto* thread = static_cast<UserThread*>(task);
         if (SharedPtr<Process> proc = thread->process.lock()) {
-            if (proc->debugSession.active) {
+            // [신규, 2026-09-19, PN-EA968DF0 근본 원인 수정] `pausedByDebugger`
+            // (all-stop, 이미 어떤 스레드 하나가 브레이크포인트에 걸려
+            // 정지했다는 process-wide 표시)가 세워진 동안은 이 프로세스의
+            // 어느 스레드가 디스패치되든 하드웨어 브레이크포인트를 전부
+            // 비활성으로 싣는다(dr7=0 그대로 유지, 아래 for 루프를 건너뜀).
+            // **근거**: 코어당 하나뿐인 #DB용 IST4 스택은 고정 최상단
+            // 주소로 매번 리셋되는 하드웨어 자원이라, 이미 한 스레드가
+            // `parkCurrent()`로 그 위에 얼어붙어 있는 동안(DebugContinue가
+            // 아직 write-back/재개하지 않은 동안) 같은 코어에서 형제
+            // 스레드가 같은(또는 다른) 브레이크포인트를 또 히트하면 그
+            // 얼어붙은 호출 체인의 스택 메모리(InterruptFrame 자체뿐
+            // 아니라 그보다 더 깊은 kSaveDebugRegistersSnapshot/
+            // parkCurrent/kContextSwitch의 저장된 콜리세이브 레지스터·
+            // 반환 주소까지)를 덮어써 버린다 - write-back은 InterruptFrame
+            // 필드만 복구할 뿐 그 아래 깊이의 손상은 복구하지 못한다(실측
+            // 확인: Logger로 TEMP dbg-hit/dbg-writeback 이벤트를 직접
+            // 관찰해 같은 코어의 같은 IST4 주소로 두 스레드가 동시에
+            // 몰리는 것과, 그 직후 그 주소 바로 아래 오프셋에서 Invalid
+            // Opcode가 나는 것을 확인했다 - PN-EA968DF0 본문 참고). 이미
+            // 한 스레드가 정지한 이상 다른 형제 스레드가 하드웨어
+            // 브레이크포인트에 또 걸릴 필요가 없다(all-stop 모델 자체가
+            // "하나가 멈추면 전부 곧 멈춰야 한다"는 의미이므로) - 대신
+            // `Scheduler::onTick()`의 기존 지연 경로(`kIsPausedByDebugger`,
+            // 그 스레드 자신의 평범한 커널 스택 위 프레임을 씀 - IST4와
+            // 무관해 이 경합이 성립하지 않음)가 곧 그 형제 스레드도 안전하게
+            // 정지시킨다. **DR7이 완전히 꺼지므로 이 창 동안은 진짜
+            // 브레이크포인트 조건에 도달해도 트랩되지 않지만**, 이미
+            // all-stop 상태라 유저 입장에서 "곧 멈출 스레드가 브레이크포인트를
+            // 한 번 더 정확히 찍었는지"는 관측 대상이 아니다(다음
+            // DebugContinue 이후 다시 정상 동작).
+            if (proc->debugSession.active && !proc->debugSession.pausedByDebugger) {
                 uint64_t* const slots[kMaxDebugBreakpoints] = {&dr0, &dr1, &dr2, &dr3};
                 for (uint32_t i = 0; i < kMaxDebugBreakpoints; ++i) {
                     const DebugBreakpoint& bp = proc->debugSession.breakpoints[i];
