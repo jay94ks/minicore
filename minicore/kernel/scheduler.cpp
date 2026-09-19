@@ -1536,21 +1536,23 @@ void Scheduler::onTick(InterruptFrame* frame) {
     }
 
     Task* next = pickNext(coreIndex);
-    // [신규, 2026-09-18, PN-44C91D6E 근본 원인 수정] `next`가 한 번도
-    // 디스패치된 적 없는 Task(`hasEverRun==false`)면 이 자리(onTick()의
-    // Task-to-Task 직접 전환, 원래 타이머 인터럽트 컨텍스트에 중첩된
-    // 채로 진행됨)에서 첫 디스패치를 시도하지 않는다 - 실측으로 확인된
-    // 근본 원인: `kContextSwitch`의 `popfq`가 `Task::init()`이 심어 둔
-    // `rflags=0x202`(IF=1)를 곧바로 CPU에 반영해, 아직 원래 타이머
-    // 인터럽트의 `iretq`를 거치지도 않았는데 인터럽트가 다시 켜지고
-    // (재중첩 가능), `kSyncCr3(next)`/`kSyncFpu(next)`가 아직 완전히
-    // 유효하지 않은 상태를 참조해 크래시할 수 있다(devmgr+dbgtarget
-    // SpawnProcess 연속 호출 하네스로 재현) - 이번 틱은 이 next를
-    // 큐에 도로 넣어 둔 채 "당장은 대신 돌릴 게 없다"로 취급한다.
-    if (next && !next->hasEverRun && current->state != TaskState::Zombie) {
-        enqueue(coreIndex, next);
-        next = nullptr;
-    }
+    // [신규, 2026-09-18, PN-44C91D6E - 정정, 2026-09-19, PN-414BF822,
+    // 설계자 답변(QU-CC3BB5AE)] 예전엔 `next`가 한 번도 디스패치된 적
+    // 없으면(`hasEverRun==false`) 이 자리(onTick()의 Task-to-Task 직접
+    // 전환, 원래 타이머 인터럽트 컨텍스트에 중첩된 채로 진행됨)에서
+    // 첫 디스패치 자체를 미뤘다(`kContextSwitch`의 `popfq`가 RFLAGS의
+    // IF=1을 인터럽트-복귀 이전에 CPU에 반영해 재중첩 위험이 있다는
+    // 이유, devmgr+dbgtarget SpawnProcess 연속 호출 하네스로 실측
+    // 확인됨) - 그런데 이 "미룸"이 "현재 실행 중인 Task가 절대
+    // 자발적으로 CPU를 내려놓지 않으면(예: `for(;;) { pause; }`), 이
+    // 코어가 다시는 idle로 안 돌아가 이 Task가 영원히 첫 디스패치를
+    // 못 받는" 라이브락을 낳았다(devmgr/fs/pubreg가 전혀 실행되지
+    // 않던 결함, PN-414BF822 실측 확인 - `kSpawnInitProcess()`가
+    // 스폰한 `init`이 무한 대기 루프에 들어간 뒤로는 다시는 idle로
+    // 안 돌아가 `kSpawnServiceProcesses()`가 스폰한 서비스들이 전부
+    // 대기만 함). 이제는 미루지 않는다 - 아래 전환 지점이
+    // `next->hasEverRun` 값으로 어느 메커니즘을 쓸지만 고른다(위
+    // `kContextSwitchToFreshTask` 문서 주석 참고).
 
     // Zombie면(PN-71C3D483 - kTaskOnFallingToEnd가 self-terminate 제출
     // 직전 스스로 표시해 둔 상태) 재삽입하지 않는다 - 곧 리액터의
@@ -1694,9 +1696,14 @@ void Scheduler::onTick(InterruptFrame* frame) {
         gCurrentTask[coreIndex] = next;
     }
     next->state = TaskState::Running;
-    // 이 지점에 도달하는 next는 이미 hasEverRun==true였거나(위 분기가
-    // never-run을 걸러냄), current가 Zombie라 예외적으로 그냥 진행한
-    // never-run next뿐이다 - 어느 쪽이든 여기서 true로 확정해 둔다.
+    // [정정, 2026-09-19, PN-414BF822] `next`가 이번이 첫 디스패치인지
+    // (`hasEverRun`을 아래에서 true로 확정하기 **전에**) 먼저 따로
+    // 기억해 둔다 - 이 값으로 바로 아래 전환 지점이 어느 메커니즘을
+    // 쓸지 고른다(예전엔 이 자리에 도달하는 next가 항상 hasEverRun
+    // ==true거나 Zombie 예외뿐이라는 전제가 있었으나, 이제 never-run
+    // next도 정상적으로 이 지점까지 온다 - 위 pickNext() 직후 문서
+    // 주석 참고).
+    const bool wasNeverRun = !next->hasEverRun;
     next->hasEverRun = true;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
@@ -1707,8 +1714,23 @@ void Scheduler::onTick(InterruptFrame* frame) {
     // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
     // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
     // isr_common_stub -> iretq로 이어진다(자기 자신의 InterruptFrame
-    // 그대로).
-    kContextSwitch(&current->savedRsp, next->savedRsp);
+    // 그대로) - kContextSwitch/kContextSwitchToFreshTask 둘 다 "현재
+    // 실행 흐름 저장" 절반은 동일해 이 점은 어느 쪽을 쓰든 변하지 않는다.
+    //
+    // [신규, 2026-09-19, PN-414BF822, 설계자 답변(QU-CC3BB5AE)] next가
+    // 이번이 첫 디스패치면(`wasNeverRun`) `kContextSwitchToFreshTask`로
+    // 진짜 iretq 기반 착지를 시킨다(task.h의 그 함수 문서 주석 참고) -
+    // 이미 한 번이라도 디스패치된 적 있으면 기존 `kContextSwitch`
+    // (협조적 전환 전제) 그대로.
+    static_assert(kGdtKernelCodeSelector == 0x08 && kGdtKernelDataSelector == 0x10,
+                  "gdt.h 값이 바뀌면 context_switch.S의 kContextSwitchToFreshTask 리터럴도 같이 바꿀 것");
+    if (wasNeverRun) {
+        kContextSwitchToFreshTask(&current->savedRsp, next->kernelStackTop,
+                                   reinterpret_cast<uint64_t>(next->entryFn),
+                                   reinterpret_cast<uint64_t>(next->entryArg));
+    } else {
+        kContextSwitch(&current->savedRsp, next->savedRsp);
+    }
     // [수정, 2026-09-18, PN-B5FD7B75, 설계자 승인(QU-29793535, 방향 A)]
     // 이 줄이 바로 그 "재개 지점"이다 - current가 나중에 이 Task-to-Task
     // 직접 전환으로 다시 선택되면(다른 코어의 onTick()이 next로 이
@@ -1808,18 +1830,27 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
         gCurrentTask[coreIndex] = next;
     }
     next->state = TaskState::Running;
-    // [신규, 2026-09-18, PN-44C91D6E] onTick()과 같은 이유로 여기서도
-    // 확정해 둔다 - 이 API는 수동/진단 전용이라 지금은 never-run
-    // Task를 실제로 여기서 처음 디스패치할 자동 경로가 없지만, 플래그
-    // 의미(이 Task가 한 번이라도 디스패치된 적 있는지)를 어긋나지
-    // 않게 유지한다.
+    // [신규, 2026-09-18, PN-44C91D6E - 정정, 2026-09-19, PN-414BF822]
+    // onTick()과 정확히 같은 이유로 wasNeverRun을 먼저 기억해 둔다 -
+    // 이 함수도 인터럽트 컨텍스트(IPI 핸들러)에서 pickNext()로 뽑은
+    // next를 그대로 쓰므로, "이 API는 수동/진단 전용이라 지금은
+    // never-run Task를 여기서 처음 디스패치할 자동 경로가 없다"는
+    // 예전 가정에 안전을 기대지 않는다(경로가 없다는 게 방어는
+    // 아니다) - onTick()과 동일하게 항상 안전한 쪽을 쓴다.
+    const bool wasNeverRun = !next->hasEverRun;
     next->hasEverRun = true;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
     kSyncDebugRegs(next);
     kSyncFsBase(next);
-    kContextSwitch(&current->savedRsp, next->savedRsp);
+    if (wasNeverRun) {
+        kContextSwitchToFreshTask(&current->savedRsp, next->kernelStackTop,
+                                   reinterpret_cast<uint64_t>(next->entryFn),
+                                   reinterpret_cast<uint64_t>(next->entryArg));
+    } else {
+        kContextSwitch(&current->savedRsp, next->savedRsp);
+    }
     // [수정, 2026-09-18, PN-B5FD7B75] onTick()의 동일 지점과 정확히
     // 같은 이유 - 이 Task-to-Task 직접 전환도 current의 재개 지점을
     // 여기(kContextSwitch 바로 다음)에 남기므로, onTick()과 똑같이
@@ -1976,11 +2007,14 @@ void Scheduler::runLoop() {
             gCurrentTask[coreIndex] = next;
         }
         next->state = TaskState::Running;
-        // [신규, 2026-09-18, PN-44C91D6E] 이 idle->Task 디스패치가
-        // never-run Task의 안전한 첫 디스패치 지점이다 - 여기서
-        // hasEverRun을 확정해 둬야 onTick()의 직접 전환 분기가 이후
-        // 이 Task를 다시 (불필요하게) never-run으로 오인해 계속
-        // 미루지 않는다.
+        // [신규, 2026-09-18, PN-44C91D6E - 정정, 2026-09-19, PN-414BF822]
+        // 이 idle->Task 디스패치는 협조적 컨텍스트(인터럽트에 중첩되지
+        // 않음)라 never-run Task도 원래부터 `kContextSwitch`로 안전하게
+        // 첫 디스패치할 수 있는 자리다 - `onTick()`(인터럽트 컨텍스트)
+        // 쪽만 별도로 `kContextSwitchToFreshTask`가 필요했을 뿐,
+        // 이 경로는 그대로 둔다. hasEverRun을 여기서 확정해 두면
+        // onTick()이 이 Task를 다시 볼 때 이미 true이므로 (여전히
+        // 유효한) 기존 kContextSwitch 분기를 탄다.
         next->hasEverRun = true;
         // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - PN-2008220B
         // 이후로는 "이 idle 컨텍스트의 스택이 안전하지 않을 수 있다"는

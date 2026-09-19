@@ -163,15 +163,40 @@ struct Task {
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
 
-    // [신규, 2026-09-18, PN-44C91D6E] 이 Task가 실제로 한 번이라도
-    // kContextSwitch의 대상으로 선택돼 그 스택으로 넘어간 적 있는지 -
-    // Task::init() 직후에는 항상 false, `runLoop()`의 idle->Task
-    // 디스패치/`onTick()`의 Task-to-Task 직접 전환 어느 쪽이든 실제
-    // 디스패치 직전에 true로 확정된다. `Scheduler::onTick()`이 이
-    // 플래그로 "한 번도 디스패치된 적 없는 Task를 원래 타이머
-    // 인터럽트에 중첩된 채로 첫 디스패치하면 안전하지 않다"(실측
-    // 확인된 근본 원인 - onTick() 정의부 주석 참고)는 판단을 내린다.
+    // [신규, 2026-09-18, PN-44C91D6E - 수정, 2026-09-19, PN-414BF822,
+    // 설계자 답변(QU-CC3BB5AE)] 이 Task가 실제로 한 번이라도 디스패치된
+    // 적 있는지 - Task::init() 직후에는 항상 false, `runLoop()`의
+    // idle->Task 디스패치/`onTick()`의 Task-to-Task 직접 전환 어느
+    // 쪽이든 실제 디스패치 직전에 true로 확정된다.
+    //
+    // **[정정, PN-414BF822]** 원래(PN-44C91D6E)는 이 플래그가
+    // "`onTick()`이 이 Task를 아예 미루고 큐에 도로 넣는다"는 회피용
+    // 판단에 쓰였다 - 그런데 그 회피가 "현재 실행 중인 Task가 절대
+    // 자발적으로 CPU를 내려놓지 않으면(예: `for(;;) { pause; }`),
+    // 이 코어가 다시는 idle로 안 돌아가 이 Task가 영원히 첫 디스패치를
+    // 못 받는" 라이브락을 낳았다(devmgr/fs/pubreg가 전혀 실행되지
+    // 않던 결함, PN-414BF822 실측 확인). 설계자 답변(QU-CC3BB5AE):
+    // "인터럽트에서 작업이 전환되는 것을 단일 메서드로 과도하게
+    // 일반화하지 말고, iretq로 인터럽트가 리턴되는 시점의 스택에
+    // push된 레지스터/cs/플래그로 전환되는 컨텍스트 스위칭 variation이
+    // 필요하다" - 이제 `Scheduler::onTick()`은 이 플래그로 **미루지
+    // 않고**, 어느 전환 메커니즘을 쓸지만 고른다: `true`면 기존
+    // `kContextSwitch`(콜리세이브+RFLAGS만 저장/복원, 협조적 전환용),
+    // `false`면 `kContextSwitchToFreshTask`(진짜 `iretq`로 착지시켜
+    // RFLAGS의 IF=1이 하드웨어가 보장하는 원자적 인터럽트-복귀
+    // 시점에만 반영되게 하는 전용 variation, 아래 `entryFn`/`entryArg`
+    // 참고)를 쓴다.
     bool hasEverRun = false;
+
+    // [신규, 2026-09-19, PN-414BF822] `hasEverRun==false`일 때
+    // `Scheduler::onTick()`이 `kContextSwitchToFreshTask()`(context_switch.S)
+    // 에 넘길 진입점/인자 - `Task::init()`이 채운다. 기존 kContextSwitch
+    // 기반 첫 디스패치(`runLoop()`의 idle->Task 경로)가 여전히 쓰는
+    // "가짜 콜리세이브 프레임"(savedRsp가 가리키는 스택 최상단, 그대로
+    // 유지됨)과는 별개의, 병행하는 표현이다 - 어느 경로로 첫 디스패치
+    // 되든 이 Task가 결국 도달해야 하는 지점(entry(arg) 호출)은 같다.
+    TaskEntry entryFn = nullptr;
+    void* entryArg = nullptr;
 
     // [신규, PN-A74871F2, DC-8EA1E7F6/PL-2D3184BC "Task 자료구조" 절이
     // 원래 요구했으나 구현에서 누락됐던 필드 - RM-F2DAFF66 §1-A 발견]
@@ -346,6 +371,23 @@ struct Task {
 // RFLAGS만 저장/복원한다(caller-saved 레지스터는 C++ 호출 규약상
 // 이미 호출부가 필요하면 자기 스택에 저장해 뒀을 것이므로 안 건드림).
 extern "C" void kContextSwitch(uint64_t* oldRspSlot, uint64_t newRsp);
+
+// [신규, 2026-09-19, PN-414BF822, 설계자 답변(QU-CC3BB5AE)] `kContextSwitch`
+// 의 "현재 실행 흐름 저장" 앞부분(pushfq+콜리세이브 push+*oldRspSlot=rsp)
+// 은 완전히 동일하게 재사용하지만, 복원 쪽은 `popfq`+`ret`(협조적 전환
+// 전제 - RFLAGS를 미리 CPU에 반영한 뒤에도 몇 명령어 더 진행해야
+// 목적지에 안전하게 도착함) 대신, `newStackTop`/`entryFn`/`entryArg`로
+// 완전한 `InterruptFrame`을 그 자리에서 합성해 `isr_common_epilogue`
+// (`isr.S`, `kResumeForkedRing3`가 이미 증명한 것과 같은 기법)로 점프해
+// **진짜 `iretq` 한 번**으로 착지시킨다 - RFLAGS(IF=1 포함)가 하드웨어의
+// 원자적 "인터럽트로부터 복귀" 시점에만 반영되므로, popfq 직후~목적지
+// 코드가 안정되기 전 사이에 인터럽트가 조기에 재중첩될 위험이 없다.
+// 한 번도 디스패치된 적 없는(`hasEverRun==false`) Task를 `onTick()`
+// (타이머 인터럽트 컨텍스트)에서 처음 디스패치할 때 전용으로 쓴다 -
+// `runLoop()`의 idle->Task 첫 디스패치(협조적 컨텍스트, 원래도 안전)는
+// 여전히 기존 `kContextSwitch`를 그대로 쓴다.
+extern "C" void kContextSwitchToFreshTask(uint64_t* oldRspSlot, uint64_t newStackTop, uint64_t entryFn,
+                                            uint64_t entryArg);
 
 }  // namespace kernel
 

@@ -193,6 +193,14 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     savedRsp = reinterpret_cast<uint64_t>(sp);
     state = TaskState::Ready;
     hasEverRun = false;  // PN-44C91D6E - task.h 문서 주석 참고
+    // [신규, 2026-09-19, PN-414BF822] kContextSwitchToFreshTask()가
+    // onTick()에서 이 Task를 직접(인터럽트 컨텍스트에서) 첫 디스패치할
+    // 때 쓸 값 - 위 가짜 콜리세이브 프레임에 이미 같은 값을 심어 뒀지만
+    // (rbx/r12 자리), 그건 kContextSwitch의 pop 규약 전용이라 별도
+    // 명명 필드로도 남겨 둔다(둘 다 같은 entry/arg를 가리키는 병행
+    // 표현일 뿐, 이 Task가 실제로 도달해야 하는 지점은 동일하다).
+    entryFn = entry;
+    entryArg = arg;
     // [신규, 2026-09-19, PN-8726CDBD] async_task.h의 AsyncTask::init()이
     // selfWaitable을 명시적으로 리셋해 두는 것과 같은 이유 - 이 Task가
     // (memset(0)을 새로 거치지 않고) 재사용되는 경로가 있다면 이전
