@@ -488,7 +488,7 @@ void kSyncDebugRegs(Task* task) {
             // all-stop 상태라 유저 입장에서 "곧 멈출 스레드가 브레이크포인트를
             // 한 번 더 정확히 찍었는지"는 관측 대상이 아니다(다음
             // DebugContinue 이후 다시 정상 동작).
-            if (proc->debugSession.active && !proc->debugSession.pausedByDebugger) {
+            if (proc->debugSession.active && proc->debugSession.pausedByDebugger.load() == 0) {
                 uint64_t* const slots[kMaxDebugBreakpoints] = {&dr0, &dr1, &dr2, &dr3};
                 for (uint32_t i = 0; i < kMaxDebugBreakpoints; ++i) {
                     const DebugBreakpoint& bp = proc->debugSession.breakpoints[i];

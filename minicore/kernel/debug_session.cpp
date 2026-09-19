@@ -24,7 +24,7 @@ bool kIsPausedByDebugger(Task* task) {
     if (!proc) {
         return false;
     }
-    return proc->debugSession.pausedByDebugger;
+    return proc->debugSession.pausedByDebugger.load() != 0;
 }
 
 void kSaveDebugRegistersSnapshot(Task* task, InterruptFrame* frame) {
@@ -465,7 +465,7 @@ public:
             args->error = ChannelError::PermissionDenied;
             co_return;
         }
-        if (!target->debugSession.pausedByDebugger) {
+        if (target->debugSession.pausedByDebugger.load() == 0) {
             // 정지된 적이 없거나 이미 재개됨 - InvalidState가 없는 이
             // 코드베이스 관례대로 NotFound로 대체(§6/DebugSetBreakpoint
             // 문서 주석과 동일한 이유).
@@ -493,7 +493,7 @@ public:
         // 결정했으므로), 그룹이 아직 frozen이면 실제로 깨우지 않는다 -
         // frozenByGroup이 이미 서 있어(kCheckAndMarkFrozen) 나중에
         // ResourceGroup::thaw()가 대신 깨운다.
-        target->debugSession.pausedByDebugger = false;
+        target->debugSession.pausedByDebugger.store(0);
         // [갱신, 2026-09-19, PN-06A7C439] `target->threads` 전체를
         // 무조건 재개한다 - `DebugContinueArgs` 문서 주석대로 의도적인
         // all-stop→continue-all 시맨틱(선택적으로 스레드 하나만 재개하는
@@ -836,7 +836,7 @@ bool kHandleUserBreakpointHit(InterruptFrame* frame, uint64_t dr6) {
         // 그냥 계속 실행.
         return false;
     }
-    proc->debugSession.pausedByDebugger = true;
+    proc->debugSession.pausedByDebugger.store(1);
 
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
     if (gDebugParkedOnCore[coreIndex]) {

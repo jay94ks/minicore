@@ -1208,7 +1208,7 @@ public:
             // resource_group.cpp 참고) 실질적 효과는 없지만, `pausedByDebugger`
             // 가 "이 Task가 지금 디버그 사유로 멈춰 있다"를 항상
             // 정확히 반영해야 한다는 불변조건을 처음부터 지킨다.
-            procShared->debugSession.pausedByDebugger = true;
+            procShared->debugSession.pausedByDebugger.store(1);
         } else {
             Scheduler::enqueue(Scheduler::currentCoreIndex(), started);
         }

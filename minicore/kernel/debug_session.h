@@ -127,7 +127,16 @@ struct DebugSession {
     // (`DebugContinue`가 그룹 freeze까지 실수로 풀어버리는 경우)은
     // `DebugContinue` 구현 시점에 `!proc->group->frozen`을 먼저
     // 확인해야 한다 - 이 주석이 그 요구사항을 미리 남겨 둔다.
-    bool pausedByDebugger = false;
+    //
+    // [갱신, 2026-09-19, PN-EA968DF0] plain bool에서 `Atomic<uint32_t>`로
+    // 승격 - `kHandleUserBreakpointHit()`(임의 코어의 #DB ISR)가 쓰고
+    // `Scheduler::kSyncDebugRegs()`/`onTick()`(다른 코어일 수 있음)가
+    // 읽는, 코어를 가로지르는 진짜 데이터 레이스였다(plain bool은
+    // 컴파일러/CPU 재정렬을 막을 방법이 없다) - `channel.h`의
+    // `PendingConnectRequest::done`과 동일한 release-store/acquire-load
+    // 패턴(release-acquire 페어링이 그 이전 쓰기까지 가시성을 보장하므로
+    // 이 필드 자신 외 다른 필드를 추가로 원자화할 필요는 없다).
+    Atomic<uint32_t> pausedByDebugger{0};
 
     // [갱신, 2026-09-19, PN-06A7C439] `singleStepPending`/`savedRegisters`/
     // `liveFramePtr`은 여기 process-wide로 두지 않는다 - `pausedByDebugger`
