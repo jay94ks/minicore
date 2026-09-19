@@ -191,15 +191,28 @@ bool AhciPort::init(mc::uint64_t hbaVirtAddr, mc::uint32_t portIndex, mc::uint32
     return true;
 }
 
-bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
-    *outResult = PortProbeResult{};
+namespace {
 
-    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
-    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent) {
-        return false;  // 장치 없음 - AhciController::probeFirstDevice가 다음 포트로 넘어간다
+void kFreeDma(mc::uint32_t handle) {
+    mc::FreeDmaBufferArgs args;
+    args.handle = handle;
+    mc::SyscallToken t = mc::submit(mc::kSyscallEndpointFreeDmaBuffer, &args);
+    if (t != 0) {
+        mc::wait(t);
     }
-    outResult->devicePresent = true;
+}
 
+}  // namespace
+
+// [SP-C2670F69 §3.1, PN-4E6EA13D/PN-F60E405A A 공유] Register H2D FIS +
+// PRDT 엔트리 1개 + 커맨드 헤더(슬롯 0)를 구성해 발급하고 완료까지
+// 폴링한다 - IDENTIFY DEVICE/READ DMA EXT/WRITE DMA EXT 전부 이
+// 골격 하나로 표현된다(ATA 사양 §7 각 커맨드가 공통으로 쓰는 Register
+// H2D FIS 포맷 덕분). lba/sectorCount가 무의미한 커맨드(IDENTIFY 등)는
+// 0으로 넘기면 된다 - LBA48 필드(lba0-5)/Count(16비트)를 그대로 채워도
+// 장치가 그 값을 무시하는 커맨드라 안전하다.
+bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32_t sectorCount, bool isWrite,
+                                mc::uint64_t dataPhysAddr, mc::uint32_t dataBytes) {
     // 커맨드 테이블(슬롯 0 전용, CFIS + PRDT 1개) - 페이지 하나면
     // CFIS(0x80 예약 영역) + PRDT 엔트리 1개(16바이트)를 넉넉히 담는다.
     DmaAlloc cmdTable;
@@ -208,41 +221,40 @@ bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
     }
     memset(reinterpret_cast<void*>(cmdTable.virtAddr), 0, kDmaPageSize);
 
-    // IDENTIFY DEVICE 응답 버퍼(512바이트, ATA 사양 고정 크기).
-    DmaAlloc identifyBuf;
-    if (!kAllocDma(512, _use32BitDma, &identifyBuf)) {
-        mc::FreeDmaBufferArgs freeArgs;
-        freeArgs.handle = cmdTable.handle;
-        mc::SyscallToken t = mc::submit(mc::kSyscallEndpointFreeDmaBuffer, &freeArgs);
-        if (t != 0) {
-            mc::wait(t);
-        }
-        return false;
-    }
-
-    // CFIS 영역(커맨드 테이블 오프셋 0) - Register H2D FIS로 IDENTIFY
-    // DEVICE(0xEC)를 채운다(ATA/ATAPI 사양 - LBA/Count는 IDENTIFY에
-    // 의미 없어 0으로 둔다).
+    // CFIS 영역(커맨드 테이블 오프셋 0) - Register H2D FIS(사양 §10.3.4).
+    // LBA48 모드 - device 레지스터는 드라이브/헤드 비트 없이 그대로
+    // 0(LBA 모드 자체는 커맨드 종류(EXT 접미) 자체가 암시).
     auto* fis = reinterpret_cast<RegH2dFis*>(cmdTable.virtAddr);
     *fis = RegH2dFis{};
     fis->fisType = kFisTypeRegH2d;
     fis->pmportAndC = 0x80;  // bit7=1(Command), PM port=0
-    fis->command = kAtaCommandIdentifyDevice;
+    fis->command = command;
     fis->device = 0;
+    fis->lba0 = static_cast<mc::uint8_t>(lba & 0xFF);
+    fis->lba1 = static_cast<mc::uint8_t>((lba >> 8) & 0xFF);
+    fis->lba2 = static_cast<mc::uint8_t>((lba >> 16) & 0xFF);
+    fis->lba3 = static_cast<mc::uint8_t>((lba >> 24) & 0xFF);
+    fis->lba4 = static_cast<mc::uint8_t>((lba >> 32) & 0xFF);
+    fis->lba5 = static_cast<mc::uint8_t>((lba >> 40) & 0xFF);
+    fis->countLow = static_cast<mc::uint8_t>(sectorCount & 0xFF);
+    fis->countHigh = static_cast<mc::uint8_t>((sectorCount >> 8) & 0xFF);
 
-    // PRDT 엔트리 1개(오프셋 0x80) - IDENTIFY 응답 버퍼(512바이트)를
-    // 가리킨다. dw3의 byte count 필드는 "실제 길이-1"(사양 §4.2.3.3).
+    // PRDT 엔트리 1개(오프셋 0x80) - dw3의 byte count 필드는 "실제
+    // 길이-1"(사양 §4.2.3.3).
     auto* prdt = reinterpret_cast<PrdtEntry*>(cmdTable.virtAddr + kCmdTablePrdtOffset);
     prdt[0] = PrdtEntry{};
-    prdt[0].dbaLow = static_cast<mc::uint32_t>(identifyBuf.physAddr & 0xFFFFFFFFu);
-    prdt[0].dbaHigh = static_cast<mc::uint32_t>(identifyBuf.physAddr >> 32);
-    prdt[0].dw3 = 511u;  // 512바이트 - 1, 인터럽트 비트(I)는 안 씀(폴링 방식)
+    prdt[0].dbaLow = static_cast<mc::uint32_t>(dataPhysAddr & 0xFFFFFFFFu);
+    prdt[0].dbaHigh = static_cast<mc::uint32_t>(dataPhysAddr >> 32);
+    prdt[0].dw3 = dataBytes - 1;  // 인터럽트 비트(I)는 안 씀(폴링 방식)
 
     // 커맨드 헤더(슬롯 0) - CFL은 DWORD 단위 FIS 길이(20바이트/4=5),
-    // PRDTL=1, W=0(읽기 방향 - IDENTIFY는 장치->호스트 데이터 전송).
+    // PRDTL=1, W는 전송 방향(호스트->장치면 1).
     auto* header = reinterpret_cast<CommandHeader*>(_clbVirtAddr);
     header[0] = CommandHeader{};
-    header[0].dw0 = 5u;   // CFL=5, W=0
+    header[0].dw0 = 5u;  // CFL=5
+    if (isWrite) {
+        header[0].dw0 |= (1u << 6);  // W
+    }
     header[0].dw0 |= (1u << 16);  // PRDTL=1
     header[0].ctbaLow = static_cast<mc::uint32_t>(cmdTable.physAddr & 0xFFFFFFFFu);
     header[0].ctbaHigh = static_cast<mc::uint32_t>(cmdTable.physAddr >> 32);
@@ -272,7 +284,28 @@ bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
         }
     }
 
-    if (completed && !ioError) {
+    kFreeDma(cmdTable.handle);
+    return completed && !ioError;
+}
+
+bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
+    *outResult = PortProbeResult{};
+
+    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent) {
+        return false;  // 장치 없음 - AhciController::probeFirstDevice가 다음 포트로 넘어간다
+    }
+    outResult->devicePresent = true;
+
+    // IDENTIFY DEVICE 응답 버퍼(512바이트, ATA 사양 고정 크기) - LBA/
+    // Count는 IDENTIFY에 의미 없어 0으로 넘긴다.
+    DmaAlloc identifyBuf;
+    if (!kAllocDma(512, _use32BitDma, &identifyBuf)) {
+        return false;
+    }
+
+    const bool ok = issueAtaCommand(kAtaCommandIdentifyDevice, 0, 0, false, identifyBuf.physAddr, 512);
+    if (ok) {
         auto* words = reinterpret_cast<mc::uint16_t*>(identifyBuf.virtAddr);
         for (mc::uint32_t i = 0; i < 256; ++i) {
             outResult->identifyData[i] = words[i];
@@ -280,20 +313,50 @@ bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
         outResult->identifySucceeded = true;
     }
 
-    mc::FreeDmaBufferArgs freeIdentify;
-    freeIdentify.handle = identifyBuf.handle;
-    mc::SyscallToken t1 = mc::submit(mc::kSyscallEndpointFreeDmaBuffer, &freeIdentify);
-    if (t1 != 0) {
-        mc::wait(t1);
-    }
-    mc::FreeDmaBufferArgs freeCmdTable;
-    freeCmdTable.handle = cmdTable.handle;
-    mc::SyscallToken t2 = mc::submit(mc::kSyscallEndpointFreeDmaBuffer, &freeCmdTable);
-    if (t2 != 0) {
-        mc::wait(t2);
+    kFreeDma(identifyBuf.handle);
+    return outResult->identifySucceeded;
+}
+
+bool AhciPort::readSectors(mc::uint64_t lba, mc::uint32_t count, void* outBuf) {
+    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent || count == 0) {
+        return false;
     }
 
-    return outResult->identifySucceeded;
+    const mc::uint64_t bytes = static_cast<mc::uint64_t>(count) * 512u;
+    DmaAlloc dataBuf;
+    if (!kAllocDma(bytes, _use32BitDma, &dataBuf)) {
+        return false;
+    }
+
+    // READ DMA EXT(0x25, LBA48) - 장치->호스트 전송이라 W=0.
+    const bool ok = issueAtaCommand(0x25, lba, count, false, dataBuf.physAddr, static_cast<mc::uint32_t>(bytes));
+    if (ok) {
+        memcpy(outBuf, reinterpret_cast<const void*>(dataBuf.virtAddr), bytes);
+    }
+
+    kFreeDma(dataBuf.handle);
+    return ok;
+}
+
+bool AhciPort::writeSectors(mc::uint64_t lba, mc::uint32_t count, const void* buf) {
+    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent || count == 0) {
+        return false;
+    }
+
+    const mc::uint64_t bytes = static_cast<mc::uint64_t>(count) * 512u;
+    DmaAlloc dataBuf;
+    if (!kAllocDma(bytes, _use32BitDma, &dataBuf)) {
+        return false;
+    }
+    memcpy(reinterpret_cast<void*>(dataBuf.virtAddr), buf, bytes);
+
+    // WRITE DMA EXT(0x35, LBA48) - 호스트->장치 전송이라 W=1.
+    const bool ok = issueAtaCommand(0x35, lba, count, true, dataBuf.physAddr, static_cast<mc::uint32_t>(bytes));
+
+    kFreeDma(dataBuf.handle);
+    return ok;
 }
 
 bool AhciController::init(mc::uint64_t mmioVirtAddr) {

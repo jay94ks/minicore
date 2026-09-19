@@ -5,11 +5,12 @@
 
 // SP-C2670F69 §3.1-§3.5 - AHCI(SATA 스토리지 컨트롤러) 드라이버, devmgr이
 // fork()로 스폰한 드라이버 자식(minicore/devmgr/main.cpp의
-// kRunAhciDriverChild) 내부에서만 쓰인다. PN-4E6EA13D 착수분 - HBA
-// 초기화/포트 초기화/최소 실제 I/O(IDENTIFY DEVICE)까지만 다룬다.
-// `AhciBlockDevice`(§3.1의 fs 서비스 대상 상위 API)는 이 계획 본문이
-// 명시한 대로 범위 밖 - fs 서비스 쪽 Channel 프로토콜이 먼저 정해져야
-// 착수할 수 있다.
+// kRunAhciDriverChild) 내부에서만 쓰인다. PN-4E6EA13D - HBA 초기화/
+// 포트 초기화/IDENTIFY DEVICE. PN-F60E405A(A 부분) - READ/WRITE DMA
+// EXT(LBA48) 섹터 읽기/쓰기 추가. `AhciBlockDevice`(§3.1의 fs 서비스
+// 대상 상위 API, `BlockDevice` 가상 인터페이스 구현)는 여전히 범위
+// 밖 - devmgr 자식이 개설한 이름 없는 Channel을 fs가 어떻게 찾는지
+// (QU-1FB6A7A4, 답변 대기)가 먼저 정해져야 그 위에 씌울 수 있다.
 
 namespace ahci {
 
@@ -48,7 +49,27 @@ public:
     // §3.3은 후속). 장치가 없거나(DET!=3) 발급/완료에 실패하면 false.
     bool probeWithIdentify(PortProbeResult* outResult);
 
+    // [신규, PN-F60E405A A] LBA48 READ DMA EXT(0x25)/WRITE DMA EXT(0x35)
+    // - probeWithIdentify()와 동일한 슬롯0/폴링 골격을 공유한다(내부
+    // issueAtaCommand()). count는 섹터 수(512바이트 단위), outBuf/buf는
+    // 이 프로세스 자신의 힙/스택 등 아무 버퍼나 가능(내부에서 DMA
+    // 가능 버퍼로 왕복 복사) - 최대 전송량은 PRDT 엔트리 1개의 상한
+    // (버디 할당자 kMaxOrder=10과 일치하는 4MiB-1)을 넘지 않아야 한다.
+    // 장치가 없거나(probeWithIdentify를 먼저 호출해 두지 않았어도
+    // 이 함수 자신이 PxSSTS.DET를 다시 확인한다) 발급/완료에 실패하면
+    // false.
+    bool readSectors(mc::uint64_t lba, mc::uint32_t count, void* outBuf);
+    bool writeSectors(mc::uint64_t lba, mc::uint32_t count, const void* buf);
+
 private:
+    // probeWithIdentify/readSectors/writeSectors가 공유하는 실제 발급+
+    // 폴링 로직 - command/lba/sectorCount로 Register H2D FIS를 채우고
+    // (IDENTIFY처럼 lba/count가 무의미한 커맨드는 0으로 넘기면 됨),
+    // dataPhysAddr/dataBytes를 가리키는 PRDT 엔트리 1개를 구성해
+    // 슬롯 0으로 발급한다. isWrite는 커맨드 헤더 W 비트(전송 방향)에만
+    // 반영 - 실제 데이터를 그 방향으로 복사하는 책임은 호출부에 있다.
+    bool issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32_t sectorCount, bool isWrite,
+                          mc::uint64_t dataPhysAddr, mc::uint32_t dataBytes);
     mc::uint64_t _portRegBase = 0;   // 이 포트의 레지스터 블록 시작 가상주소
     mc::uint64_t _clbVirtAddr = 0;   // 커맨드 리스트 가상주소(1페이지)
     mc::uint64_t _fbVirtAddr = 0;    // FIS 수신 버퍼 가상주소(1페이지)
