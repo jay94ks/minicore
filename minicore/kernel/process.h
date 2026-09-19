@@ -422,6 +422,13 @@ public:
     // 이 값을 바꾸는 syscall은 아직 없다(kSetuid와 마찬가지로 후속).
     Permission signalPermission = kPermOwnerWrite;
 
+    // [신규, 2026-09-19, SP-30FCC8AE §4류, PN-85FA4992] "누가 이
+    // 프로세스의 procfs status를 볼 수 있는가" - `signalPermission`과
+    // 완전히 같은 패턴(기본값만 다름 - 조회는 대개 더 관대하게 허용해도
+    // 안전하므로 owner-read 하나만 세운 값으로 시작). 이 값을 바꾸는
+    // syscall도 아직 없다.
+    Permission statusPermission = kPermOwnerRead;
+
     // 프로세스 디버깅(SP-9A6D579F §3.1, PN-87D6B615) - 이 프로세스가
     // "디버기"일 때만 의미가 있다(`active==true`) - 디버기 자신이
     // 소유하는 세션이라 debug_session.h의 문서 주석 참고대로 원
@@ -462,6 +469,15 @@ public:
     // 전제(순서를 안 지키면 자원 누수 - destroy()가 안전을 강제하지
     // 않는다, Vma의 free() 관례와 동일).
     static void release(Process* proc);
+
+    // [신규, 2026-09-19, SP-9CB55C5B §2/§3, PN-85FA4992] `kResolveProcessId()`
+    // (process.cpp 내부, 세대 태그 슬롯 테이블)의 공개 래퍼 - 그 함수
+    // 자신은 여전히 파일 스코프에 남겨 두고(`KillHandler` 등 기존
+    // 소비자와 동일한 접근 방식 유지), 외부 파일(`procfs.cpp` 등)이
+    // 유저가 넘긴 `ProcessId`를 안전하게(인덱스 범위+generation 일치
+    // 확인, `reinterpret_cast` 없이) 해석해야 할 때는 이 메서드를 쓴다.
+    // 실패(잘못된 pid/이미 죽은 프로세스) 시 빈 `SharedPtr`.
+    static SharedPtr<Process> resolveById(ProcessId pid);
 
     // pml4Phys를 새로 확보하고 커널 상위 절반(higher-half)을 공유하는
     // 상태로 초기화한다(Paging::createAddressSpace 참고 - 하위 절반은
@@ -583,7 +599,16 @@ private:
 // process.cpp의 익명 네임스페이스 안에 있다(channel.cpp의
 // `kAllocateChannelId`/`kResolveChannelId`/`kFreeChannelId`와 동일한
 // 관례 - `SpawnProcessHandler`/`WaitHandler`/`KillHandler` 전부 같은
-// process.cpp 파일 안에 있어 헤더에 노출할 이유가 없다).
+// process.cpp 파일 안에 있어 헤더에 노출할 이유가 없다). 외부 소비자는
+// 위 `Process::resolveById()` 공개 래퍼를 쓴다.
+
+// [신규, 2026-09-19, SP-30FCC8AE §3/§4류, PN-85FA4992] "누가 이
+// 프로세스의 procfs status를 볼 수 있는가" - `kCanSendSignal()`
+// (process.cpp, 파일 스코프)과 정확히 같은 판정 순서(커널/KernelService
+// 예외 → 직계 부모 예외 → uid/gid RWX)를 쓰되 대상 필드만
+// `statusPermission`+`kPermOwnerRead`로 바꾼 자매 함수 - `procfs.cpp`가
+// 헤더 너머에서 호출해야 해 `kCanSendSignal`과 달리 공개 선언한다.
+bool kCanViewProcessStatus(const Process& caller, const Process& target);
 
 // [갱신, 2026-09-17, SP-E9B44929] Process 그룹(0) - SpawnProcess.
 constexpr SyscallEndpointId kSyscallEndpointSpawnProcess = kMakeSyscallEndpointId(0, 4);

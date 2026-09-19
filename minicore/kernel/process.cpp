@@ -397,6 +397,11 @@ bool Process::init() {
     uid = kRootUid;
     gid = kRootGid;
     signalPermission = kPermOwnerWrite;
+    // [신규, 2026-09-19, PN-85FA4992] signalPermission과 동일한 이유로
+    // 매번 리셋(Resurrect §6.2 재사용 대비) - 상속하지 않는다(이
+    // 필드를 바꾸는 syscall이 아직 없어 signalPermission과 동일하게
+    // 항상 이 기본값 그대로).
+    statusPermission = kPermOwnerRead;
     // 프로세스 디버깅(SP-9A6D579F §3.1, PN-87D6B615) - pendingSignals와
     // 동일한 이유로 매번 리셋(Resurrect §6.2가 같은 정적 Process를
     // 재사용할 수 있으므로 이전 생애의 디버그 세션이 새 생애로 새어
@@ -1786,6 +1791,29 @@ public:
 SignalActionHandler gSignalActionHandler;
 
 }  // namespace
+
+// [신규, 2026-09-19, PN-85FA4992] process.h `Process::resolveById()`
+// 선언 문서 주석 참고 - 위 익명 네임스페이스 안의 `kResolveProcessId()`
+// 를 그대로 위임 호출한다. 이 함수 자신은 익명 네임스페이스 밖(외부
+// 링크)이라 `procfs.cpp` 등 다른 TU에서 호출 가능하다.
+SharedPtr<Process> Process::resolveById(ProcessId pid) { return kResolveProcessId(pid); }
+
+// [신규, 2026-09-19, SP-30FCC8AE §3/§4류, PN-85FA4992] process.h
+// 선언 문서 주석 참고 - `kCanSendSignal()`(위 익명 네임스페이스 안)과
+// 완전히 같은 판정 순서, 대상 필드만 statusPermission/kPermOwnerRead로
+// 바꿨다. 이 함수도 외부 TU가 불러야 해 익명 네임스페이스 밖에 둔다.
+bool kCanViewProcessStatus(const Process& caller, const Process& target) {
+    if (caller.role == ProcessRole::KernelService) {
+        return true;
+    }
+    if (SharedPtr<Process> parent = target.parent.lock()) {
+        if (parent.get() == &caller) {
+            return true;
+        }
+    }
+    return kCheckPermission(caller.uid, caller.gid, target.uid, target.gid, target.statusPermission,
+                             kPermOwnerRead);
+}
 
 // [신규, 2026-09-18, PN-44C91D6E] `fork()` 본체 - idt.cpp의
 // `kHandleSyscallTrap`이 `kSyscallVerbFork`를 직접 가로채 전체

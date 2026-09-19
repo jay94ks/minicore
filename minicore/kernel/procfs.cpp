@@ -47,8 +47,58 @@ void kAppendI64(char* buf, kernel::uint32_t bufSize, kernel::uint32_t& pos, kern
     }
 }
 
-constexpr char kSelfStatusPath[] = "self/status";
+constexpr char kSelfSelector[] = "self";
+constexpr char kStatusSuffix[] = "status";
 constexpr kernel::uint32_t kMaxStatusLen = 256;  // §3의 5줄 정도는 넉넉히 담는 v1 상한
+
+// [신규, 2026-09-19, PN-85FA4992] "<selector>/status" 경로를 selector
+// 부분만 잘라낸다("self" 또는 10진수 pid) - 첫 '/' 앞부분을 selector로,
+// 그 뒤가 정확히 "status"인지 확인한다. 여러 단계 하위 경로(예:
+// "self/status/extra")는 지원하지 않는다(v1 스코프, SP-5D965B74 §2).
+bool kSplitSelectorStatusPath(const char* relPath, kernel::uint32_t relPathLen, const char** outSelector,
+                               kernel::uint32_t* outSelectorLen) {
+    kernel::uint32_t slash = 0;
+    bool found = false;
+    for (kernel::uint32_t i = 0; i < relPathLen; ++i) {
+        if (relPath[i] == '/') {
+            slash = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found || slash == 0) {
+        return false;
+    }
+    const char* rest = relPath + slash + 1;
+    const kernel::uint32_t restLen = relPathLen - slash - 1;
+    if (!kEqualsExact(rest, restLen, kStatusSuffix, sizeof(kStatusSuffix) - 1)) {
+        return false;
+    }
+    *outSelector = relPath;
+    *outSelectorLen = slash;
+    return true;
+}
+
+// [신규, 2026-09-19, PN-85FA4992] selector가 10진수 pid 표기면
+// `ProcessId`로 파싱한다("self"는 호출측에서 먼저 걸러냄) - 부호/공백/
+// 선행 0 등은 허용하지 않는 가장 단순한 형태(`kFormatStatus()`가
+// `kAppendI64()`로 찍는 형식과 대칭). 길이 상한(18자리)은 오버플로
+// 방지용 - `ProcessId`(세대<<32|인덱스) 실제 값은 훨씬 작다.
+bool kParsePidSelector(const char* s, kernel::uint32_t len, kernel::ProcessId* outPid) {
+    if (len == 0 || len > 18) {
+        return false;
+    }
+    kernel::uint64_t value = 0;
+    for (kernel::uint32_t i = 0; i < len; ++i) {
+        const char c = s[i];
+        if (c < '0' || c > '9') {
+            return false;
+        }
+        value = value * 10 + static_cast<kernel::uint64_t>(c - '0');
+    }
+    *outPid = static_cast<kernel::ProcessId>(value);
+    return true;
+}
 
 // [추가, 2026-09-17, PN-0C282BB7] meminfo/uptime - self/status와 달리
 // Process*가 없는 전역 핸들이라 procfs.h의 kProcFsGlobalHandleBit로
@@ -134,13 +184,17 @@ kernel::uint32_t kFormatUptime(char* buf, kernel::uint32_t bufCap) {
 kernel::uint32_t kFormatStatus(kernel::Process* proc, char* buf, kernel::uint32_t bufCap) {
     kernel::uint32_t pos = 0;
 
+    // [수정, 2026-09-19, PN-85FA4992] 원시 포인터 값 대신 재사용 가능한
+    // `ProcessId`를 찍는다 - 호출자가 이 `ParentPid` 값을 그대로 다음
+    // `<selector>/status` 요청에 넣어 프로세스 트리를 거슬러 올라갈 수
+    // 있어야 하므로(원시 포인터는 그 자체로 유효한 selector가 아님).
     kAppendStr(buf, bufCap, pos, "Pid:\t");
-    kAppendI64(buf, bufCap, pos, reinterpret_cast<kernel::int64_t>(proc));
+    kAppendI64(buf, bufCap, pos, proc->processId);
     kAppendStr(buf, bufCap, pos, "\n");
 
     kAppendStr(buf, bufCap, pos, "ParentPid:\t");
     kernel::SharedPtr<kernel::Process> parent = proc->parent.lock();
-    kAppendI64(buf, bufCap, pos, parent ? reinterpret_cast<kernel::int64_t>(parent.get()) : -1);
+    kAppendI64(buf, bufCap, pos, parent ? parent->processId : kernel::kInvalidProcessId);
     kAppendStr(buf, bufCap, pos, "\n");
 
     kAppendStr(buf, bufCap, pos, "Role:\t");
@@ -204,6 +258,37 @@ bool kResolveCallerProcess(kernel::AsyncTask* task, kernel::SharedPtr<kernel::Pr
     return true;
 }
 
+// [신규, 2026-09-19, PN-85FA4992] `open()`/`stat()`이 공유하는 selector
+// 해석 - "self"면 제출자 자신, 그 외엔 10진수 pid를 `Process::resolveById()`
+// 로 재해석한 뒤 `kCanViewProcessStatus()`로 열람 권한을 확인한다(부모/
+// 자신/KernelService만 허용, process.h 문서 주석 참고). `NotFound`는
+// selector 문법 오류 또는 대상 pid가 이미 죽었을 때, `PermissionDenied`는
+// 제출자를 못 찾았거나 권한이 없을 때.
+kernel::VfsError kResolveStatusTarget(kernel::AsyncTask* task, const char* selector, kernel::uint32_t selectorLen,
+                                       kernel::SharedPtr<kernel::Process>* outProc) {
+    kernel::SharedPtr<kernel::Process> caller;
+    if (!kResolveCallerProcess(task, &caller)) {
+        return kernel::VfsError::PermissionDenied;
+    }
+    if (kEqualsExact(selector, selectorLen, kSelfSelector, sizeof(kSelfSelector) - 1)) {
+        *outProc = caller;
+        return kernel::VfsError::None;
+    }
+    kernel::ProcessId pid;
+    if (!kParsePidSelector(selector, selectorLen, &pid)) {
+        return kernel::VfsError::NotFound;
+    }
+    kernel::SharedPtr<kernel::Process> target = kernel::Process::resolveById(pid);
+    if (!target) {
+        return kernel::VfsError::NotFound;
+    }
+    if (!kernel::kCanViewProcessStatus(*caller, *target)) {
+        return kernel::VfsError::PermissionDenied;
+    }
+    *outProc = target;
+    return kernel::VfsError::None;
+}
+
 }  // namespace
 
 namespace kernel {
@@ -224,14 +309,30 @@ OpenResult ProcFs::open(AsyncTask* task, const char* relPath, uint32_t relPathLe
         return OpenResult{FileHandle{kProcFsUptimeHandle}, false, VfsError::None};
     }
 
-    if (!kEqualsExact(relPath, relPathLen, kSelfStatusPath, sizeof(kSelfStatusPath) - 1)) {
+    const char* selector = nullptr;
+    uint32_t selectorLen = 0;
+    if (!kSplitSelectorStatusPath(relPath, relPathLen, &selector, &selectorLen)) {
         return OpenResult{FileHandle{}, false, VfsError::NotFound};
     }
-    SharedPtr<Process> proc;
-    if (!kResolveCallerProcess(task, &proc)) {
-        return OpenResult{FileHandle{}, false, VfsError::PermissionDenied};
+    SharedPtr<Process> target;
+    const VfsError err = kResolveStatusTarget(task, selector, selectorLen, &target);
+    if (err != VfsError::None) {
+        return OpenResult{FileHandle{}, false, err};
     }
-    return OpenResult{FileHandle{reinterpret_cast<uint64_t>(proc.get()) | kProcFsHandleTagBit}, false, VfsError::None};
+    if (target->processId != kInvalidProcessId) {
+        const uint64_t handleValue =
+            (static_cast<uint64_t>(target->processId) << 4) | kProcFsHandleTagBit | kProcFsPidHandleBit;
+        return OpenResult{FileHandle{handleValue}, false, VfsError::None};
+    }
+    // [레거시 v1 경로 유지, 2026-09-19, PN-85FA4992] `processId`가 없는
+    // 커널 서비스 프로세스가 self를 여는 경우로만 도달한다 - self가
+    // 아닌 pid는 `kResolveStatusTarget()`이 `Process::resolveById()`로
+    // 성공 해석한 대상만 여기까지 오므로 항상 유효한 `processId`를
+    // 갖는다(테이블에 등록된 것만 해석 성공, SP-9CB55C5B §2). 기존 v1과
+    // 동일하게 원시 포인터 핸들로 폴백한다(procfs.h read() 문서 주석의
+    // 댕글링 한계도 이 경로에서만 그대로 유지 - 새 회귀 아님).
+    return OpenResult{FileHandle{reinterpret_cast<uint64_t>(target.get()) | kProcFsHandleTagBit}, false,
+                       VfsError::None};
 }
 
 ReadResult ProcFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) {
@@ -258,7 +359,20 @@ ReadResult ProcFs::read(FileHandle handle, uint64_t offset, void* buf, uint32_t 
         return ReadResult{toCopy, VfsError::None};
     }
 
-    auto* proc = reinterpret_cast<Process*>(handle.value & ~kProcFsHandleTagBit);
+    Process* proc = nullptr;
+    SharedPtr<Process> resolved;  // pid 경로에서만 채워짐 - kFormatStatus() 동안 수명 유지
+    if (handle.value & kProcFsPidHandleBit) {
+        const ProcessId pid = static_cast<ProcessId>(handle.value >> 4);
+        resolved = Process::resolveById(pid);
+        if (!resolved) {
+            // [PN-85FA4992] 대상이 Open~Read 사이에 죽었다(세대 불일치) -
+            // 댕글링 역참조 대신 정상적인 "이제 없음" 경로로 처리한다.
+            return ReadResult{0, VfsError::NotFound};
+        }
+        proc = resolved.get();
+    } else {
+        proc = reinterpret_cast<Process*>(handle.value & ~kProcFsHandleTagBit);
+    }
 
     char status[kMaxStatusLen];
     const uint32_t statusLen = kFormatStatus(proc, status, kMaxStatusLen);
@@ -295,17 +409,20 @@ void ProcFs::stat(AsyncTask* task, KernelFsStatArgs* args) {
         return;
     }
 
-    if (!kEqualsExact(args->relPath, args->relPathLen, kSelfStatusPath, sizeof(kSelfStatusPath) - 1)) {
+    const char* selector = nullptr;
+    uint32_t selectorLen = 0;
+    if (!kSplitSelectorStatusPath(args->relPath, args->relPathLen, &selector, &selectorLen)) {
         args->error = VfsError::NotFound;
         return;
     }
-    SharedPtr<Process> proc;
-    if (!kResolveCallerProcess(task, &proc)) {
-        args->error = VfsError::PermissionDenied;
+    SharedPtr<Process> target;
+    const VfsError err = kResolveStatusTarget(task, selector, selectorLen, &target);
+    if (err != VfsError::None) {
+        args->error = err;
         return;
     }
     char status[kMaxStatusLen];
-    args->size = kFormatStatus(proc.get(), status, kMaxStatusLen);
+    args->size = kFormatStatus(target.get(), status, kMaxStatusLen);
     args->isDirectory = false;
     args->error = VfsError::None;
 }
@@ -314,8 +431,10 @@ void ProcFs::readdir(KernelFsReaddirArgs* args) {
     if (args->dirHandle.value != kProcFsRootHandle) {
         // [v1 축소 범위] `self`(디렉터리로 표시되지만 내부는 `status`
         // 파일 하나뿐 - 그 자체를 다시 나열하는 것은 이번 범위 밖)나
-        // 임의 pid 디렉터리(위 클래스 문서 주석 - QU-764C5624 답변
-        // 대기) - 아직 지원하지 않는다.
+        // 임의 pid 디렉터리(open/read/stat은 PN-85FA4992로 지원하지만,
+        // 그 pid 아래를 `readdir()`로 나열하는 것은 여전히 스코프 밖 -
+        // `self`도 마찬가지로 그 내부를 나열하지 않으므로 일관된 축소) -
+        // 아직 지원하지 않는다.
         args->hasMore = false;
         args->error = VfsError::InvalidHandle;
         return;
