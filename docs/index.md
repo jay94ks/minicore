@@ -50,7 +50,7 @@
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-18T19:00:35.209Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-19T15:57:25.766Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-19T19:01:18.926Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-20T03:56:18.450Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-16T15:14:07.955Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-19T01:32:40.139Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-19T02:22:21.248Z |
@@ -67,7 +67,7 @@
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
 | [SP-4DCD0E6A](./SP-4DCD0E6A.md) | Minicore Lock-free/Concurrent 컨테이너 템플릿(LockFreeList/LockFreeVector/LockFreeQueue/ConcurrentMap/ConcurrentRbtree) — 설계 제안 | approved | 2026-09-17T17:24:15.924Z |
 | [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved | 2026-09-16T00:21:27.201Z |
-| [SP-5D965B74](./SP-5D965B74.md) | procfs — 커널 상태 노출 파일시스템 스키마 설계 제안 | approved | 2026-09-18T06:54:56.048Z |
+| [SP-5D965B74](./SP-5D965B74.md) | procfs — 커널 상태 노출 파일시스템 스키마 설계 제안 | approved | 2026-09-20T03:55:08.695Z |
 | [SP-5EE7384A](./SP-5EE7384A.md) | ResourceGroup — cgroup 유사 자원 그룹 체계 설계 제안 | deprecated | 2026-09-17T03:04:11.492Z |
 | [SP-677210E6](./SP-677210E6.md) | TSS/IST 예외 스택 서브시스템 — 설계 제안 | approved | 2026-09-16T11:21:53.003Z |
 | [SP-68182FBD](./SP-68182FBD.md) | 프로세스 모델(Process/AddressSpace) — 설계 제안 및 1차 구현 | approved | 2026-09-18T10:28:09.946Z |
