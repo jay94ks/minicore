@@ -322,6 +322,60 @@ Task* gFpuOwner[kMaxCores] = {};
 // 건드리므로 원자 연산이 필요 없다).
 uint32_t gPreemptDisableCount[kMaxCores] = {};
 
+// [신규, 2026-09-20, PN-584DB994/DC-06FC78E8, 설계자 답변(QU-D14FF560)
+// "전용 재진입 플래그 신설"] `onTick()`/`onForcedMigration()`은 EOI를
+// 보낸 직후(=이 코어가 다시 인터럽트를 받을 수 있는 상태)부터
+// `kContextSwitchFromISR()`로 실제 전환하기 전까지 `gCurrentTask[
+// coreIndex]` 등 전역 디스패치 상태를 만진다 - 바로 위 주석의 "인터럽트
+// 게이트라 재진입 없음"이라는 전제가 이 좁은 창에는 적용되지 않는다
+// (그 전제는 EOI를 늦게 보내 인터럽트 자체가 아예 안 오는 일반적인
+// ISR에 대한 것). `gPreemptDisableCount`는 "남이 이 코어의 선점을
+// 잠깐 막아 달라"는 요청용이라 재사용할 수 없다(`kContextSwitchFromISR`
+// 가 이 Task가 나중에 다시 뽑힐 때에야 "반환"해, enablePreemption()을
+// 그 뒤에 두면 이 코어의 스케줄러 틱 자체가 임의로 길게 막힌다 -
+// DC-06FC78E8 본문 참고) - 그래서 별도 전용 플래그를 둔다. 아래
+// `DispatchWindowGuard`가 이 플래그를 관리한다: 이미 서 있으면(=같은
+// 코어에서 이 창이 중첩됨) 이번 인터럽트의 스케줄링 결정 자체를
+// 포기하고(EOI는 이미 보냈으니 인터럽트 자체는 정상 처리된 것으로
+// 취급) 그냥 반환 - 이 좁은 창에서는 안전하게 재진입을 처리할 방법이
+// 없으므로 이번 틱/IPI을 버리는 게 유일한 선택이다.
+bool gInDispatchWindow[kMaxCores] = {};
+
+// EOI 직후~`kContextSwitchFromISR()` 호출 직전까지의 재진입 보호
+// 구간을 RAII로 관리한다 - `onTick()`/`onForcedMigration()` 양쪽에서
+// 동일하게 쓴다. 생성자가 이미 서 있는 플래그를 발견하면 아무 것도
+// 세우지 않고 `acquired()==false`를 남긴다(호출부가 이 경우 즉시
+// 반환해야 함) - 소멸자는 "이 인스턴스가 실제로 세운 경우에만" 내려
+// 이중 해제를 막는다. `release()`를 `kContextSwitchFromISR()` 호출
+// **직전**에 명시적으로 불러 그 시점부터는(=실제로 다른 스택/Task로
+// 넘어간 뒤부터는) 재진입을 다시 허용한다 - 그 전에 함수가 그냥
+// return하는 경로(예: "current 멀쩡함, next 없음")는 소멸자가 대신
+// 내려 준다.
+class DispatchWindowGuard {
+public:
+    explicit DispatchWindowGuard(uint32_t coreIndex) : coreIndex_(coreIndex) {
+        if (!gInDispatchWindow[coreIndex_]) {
+            gInDispatchWindow[coreIndex_] = true;
+            acquired_ = true;
+        }
+    }
+    ~DispatchWindowGuard() { release(); }
+    DispatchWindowGuard(const DispatchWindowGuard&) = delete;
+    DispatchWindowGuard& operator=(const DispatchWindowGuard&) = delete;
+
+    bool acquired() const { return acquired_; }
+    void release() {
+        if (acquired_) {
+            gInDispatchWindow[coreIndex_] = false;
+            acquired_ = false;
+        }
+    }
+
+private:
+    uint32_t coreIndex_;
+    bool acquired_ = false;
+};
+
 // 이 코어에서 next로 실제로 전환하기(kContextSwitch) 직전마다 부른다
 // (PN-AEA74E1B). next가 ring3 코드를 실행할 수 있는 UserThread면(v1은
 // isUserLevel==true가 정확히 이 뜻) 이 코어의 TSS.RSP0을 그 Task 자신의
@@ -1537,6 +1591,20 @@ void Scheduler::onTick(InterruptFrame* frame) {
         return;  // 선점 금지 구간 - 인터럽트 자체는 처리됐으니 그냥 계속 실행
     }
 
+    // [신규, 2026-09-20, PN-584DB994/DC-06FC78E8] 이 지점부터 아래
+    // `kContextSwitchFromISR()` 호출 직전까지 `gCurrentTask[coreIndex]`
+    // 등 전역 디스패치 상태를 만진다 - 이 창에서 같은 코어에 또 다른
+    // 인터럽트가 도착해 `onTick()`/`onForcedMigration()`이 재진입되면
+    // 그 상태가 서로 덮어써진다(실측으로 확인된 근본 원인, 위
+    // `gInDispatchWindow` 선언부 문서 주석 참고). 이미 누군가(중첩된
+    // 바깥쪽 호출) 이 창 안에 있으면 이번 인터럽트의 스케줄링 결정은
+    // 포기한다 - EOI는 이미 보냈으니 인터럽트 자체는 정상 처리된
+    // 것으로 취급.
+    DispatchWindowGuard dispatchGuard(coreIndex);
+    if (!dispatchGuard.acquired()) {
+        return;
+    }
+
     Task* current;
     {
         RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
@@ -1749,6 +1817,11 @@ void Scheduler::onTick(InterruptFrame* frame) {
     // 없으니 current->tcb는 여전히 이전 상태 그대로였고, 그 다음
     // 인터럽트가 그 어긋난 CR3 위에서 또 전환을 시도하며 실제로
     // null에 가까운 tcb를 통해 쓰기가 일어난 것으로 보인다).
+    // [신규, 2026-09-20, PN-584DB994/DC-06FC78E8] 실제 전환은 바로 다음
+    // 줄에서 일어난다 - 그 순간부터 이 코어는 진짜로 다른 Task/스택
+    // 위에서 실행되므로, 재진입 보호를 여기서 명시적으로 내려 다음
+    // 인터럽트(다른 Task를 위한 정상적인 onTick())가 막히지 않게 한다.
+    dispatchGuard.release();
     kContextSwitchFromISR(&current->tcb, next->tcb, frame);
     // [제거, 2026-09-20, PN-81E49523 2단계] 예전엔 여기 `kSyncCr3(current)`
     // 호출이 있었다(PN-B5FD7B75가 발견한 "네 번째 CR3 재동기화 지점"
@@ -1793,6 +1866,21 @@ void Scheduler::onForcedMigration(InterruptFrame* frame) {
     Lapic::sendEoi();
 
     const uint32_t coreIndex = currentCoreIndex();
+
+    // [신규, 2026-09-20, PN-584DB994/DC-06FC78E8] onTick()과 동일한
+    // 재진입 보호 - 아래 `gCurrentTask[coreIndex]` 갱신부터
+    // `kContextSwitchFromISR()` 호출 직전까지 이 코어에 다른 인터럽트가
+    // 겹치면(예: onTick()이 동시에 재진입) 전역 디스패치 상태가
+    // 덮어써진다(위 `gInDispatchWindow` 선언부 문서 주석 참고). 이미
+    // 다른 호출(onTick() 자신 포함)이 이 창 안에 있으면 이번 IPI의
+    // 이관 시도는 포기한다 - `requestForcedMigration()`이 이미 "가능
+    // 하면 지금 옮긴다"는 근사적 요청으로 설계돼 있어(위 문서 주석),
+    // 포기해도 안전하다.
+    DispatchWindowGuard dispatchGuard(coreIndex);
+    if (!dispatchGuard.acquired()) {
+        return;
+    }
+
     Task* current;
     {
         RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
@@ -1858,6 +1946,9 @@ void Scheduler::onForcedMigration(InterruptFrame* frame) {
     // 정확히 같은 이유로 `kContextSwitchFromISR`로 통일 - `frame`(이
     // IPI 핸들러 자신의 InterruptFrame)을 그대로 current의 TaskTcb로
     // 캡처한다. onTick() 위쪽의 상세 주석 참고.
+    // [신규, 2026-09-20, PN-584DB994/DC-06FC78E8] onTick()과 동일한
+    // 이유로 실제 전환 직전에 재진입 보호를 내린다.
+    dispatchGuard.release();
     kContextSwitchFromISR(&current->tcb, next->tcb, frame);
     // [제거, 2026-09-20, PN-81E49523 2단계] onTick()과 정확히 같은
     // 이유로 여기 있던 `kSyncCr3(current)`를 제거했다 - 그 함수의
