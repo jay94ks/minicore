@@ -206,6 +206,29 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     // (이 Task의 커널 스택을 통째로 물려준다 - TaskTcb 블록 자체는
     // 커널 스택과 무관한 별도 메모리이므로 "이 프레임이 차지한 자리를
     // 되돌려준다"는 옛 관례가 아니라 그냥 이 Task의 진짜 스택 top).
+    // [신규, 2026-09-20, PN-584DB994 조사 중 발견] 아래 free+alloc+
+    // 필드별 채움 전체를 cli/sti로 감싼다 - 이 블록은 이 Task 자신의
+    // `tcb` 포인터를 옛 블록에서 새 블록으로 교체하며 여러 필드를
+    // 하나씩 순서대로 쓴다(원자적이지 않음). execImage()/CreateThread/
+    // fork 재개 경로는 전부 `self`(=이 Task 자신, 지금 실행 중인
+    // 바로 그 코어의 currentTask())를 대상으로 이 함수를 부른다
+    // (`thread->init(kEnterRing3, ...)` 등, process.cpp) - 즉 이
+    // 블록이 실행되는 동안 `self->tcb`는 "지금 이 순간 실제로 실행
+    // 중인 Task"의 백업 슬롯이기도 하다. 이 사이에 타이머 틱이
+    // 끼어들면 `Scheduler::onTick()`의 `kContextSwitchFromISR`이
+    // 바로 이 `tcb`(옛 포인터, 또는 아직 필드가 다 안 채워진 새
+    // 포인터)에 "진짜" 인터럽트 프레임을 통째로 덮어쓴다 - 그 뒤
+    // 이 함수가 재개되어 나머지 필드를 마저 쓰면, ISR이 방금 쓴 값
+    // 위에 rip/cs/rflags/rspOld/ssOld 등이 일부만 다시 덮어써져
+    // "일부 필드는 진짜 인터럽트 상태, 일부는 kTaskStartTrampoline
+    // 최초 진입 상태"가 뒤섞인 tcb가 만들어진다(PN-584DB994가 추적
+    // 해 온 SMP1에서도 재현되는 간헐적 rip=물리맵 주소 wild jump/
+    // #GP 크래시와 정확히 일치 - rip=0xffff800007fd8f40류 물리맵
+    // 주소, 실제 커널 코드 위치가 아님). 이 free/alloc까지 포함해
+    // 감싸는 이유는, 옛 tcb가 이미 free된 뒤 새 tcb가 아직 배정되기
+    // 전 그 짧은 틈에 틱이 끼어들면 ISR이 이미 반납된 메모리에
+    // 인터럽트 프레임을 쓰게 되는 use-after-free이기도 하기 때문.
+    asm volatile("cli" ::: "memory");
     if (tcb) {
         // [신규, 2026-09-20, PN-81E49523 2단계] fpuContext.reset()과
         // 동일한 이유 - memset(0) 없이 재사용되는 경로에서 이전 수명의
@@ -230,6 +253,7 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     // 명시적으로 반납한다(fresh memset 직후 호출되는 정상 경로에서는
     // 이미 nullptr이라 무해한 재확인).
     fpuContext.reset();
+    asm volatile("sti" ::: "memory");
 }
 
 }  // namespace kernel
