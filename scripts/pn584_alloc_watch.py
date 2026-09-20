@@ -308,17 +308,25 @@ class KPanicWatch(gdb.Breakpoint):
 
 
 class SyncCr3Watch(gdb.Breakpoint):
-    # [신규, 갱신27] PN-584DB994 갱신26이 새로 잡은 더블폴트(vector=8,
-    # rip=kSyncCr3+82, rspOld가 스택 범위 밖의 낮은 값)의 근본 원인을
-    # 좁히기 위해 - kSyncCr3(Task* task) 호출마다 task->tcb->rspOld
-    # (InterruptFrame::rspOld, TaskTcb=InterruptFrame이라 tcb 오프셋
-    # +160)를 직접 읽어 "이미 이 함수에 들어오는 시점부터 비정상적인
-    # 낮은 값인지"를 확인한다. 정상이면 조용히 넘어가고(매 컨텍스트
-    # 전환마다 불려 매우 잦음 - 로그 폭주 방지), 비정상이면(하이
-    # 캐노니컬 커널 범위 밖) 그 자리에서 즉시 멈춰 어느 Task/어떤
-    # 값이었는지 남긴다 - 이게 걸리면 손상이 kSyncCr3 진입 "이전"에
-    # 이미 일어났다는 결정적 증거, 안 걸리는데도 더블폴트가 재현되면
-    # kSyncCr3 실행 "도중"에 손상된다는 뜻으로 조사 방향이 갈린다.
+    # [신규, 갱신27, 수정 갱신28 - 실측으로 첫 버전의 오탐 발견]
+    # PN-584DB994 갱신26이 새로 잡은 더블폴트(vector=8, rip=kSyncCr3+82,
+    # rspOld가 스택 범위 밖의 낮은 값)의 근본 원인을 좁히기 위해 -
+    # kSyncCr3(Task* task) 호출마다 task->tcb->rspOld(InterruptFrame::
+    # rspOld, +160)와 cs(InterruptFrame::cs, +144)를 읽어 "이미 이
+    # 함수에 들어오는 시점부터 비정상적인 값인지"를 확인한다.
+    #
+    # [갱신28, 실측으로 발견한 첫 버전의 결함] 첫 버전은 "rspOld가
+    # 하이 캐노니컬 커널 범위가 아니면 무조건 손상"으로 판정했는데,
+    # 실제로 잡힌 첫 사례(task=&gServiceThread[2]=pubreg)는 진짜
+    # 손상이 아니라 **ring3(유저 모드)에서 캡처된 정상적인 InterruptFrame
+    # 이 정상적으로 유저 스택 주소(rspOld=0x7fffffffebf8류, 표준
+    # top-of-user-stack 모양)를 담고 있었을 뿐**이었다(cs=0x1b류,
+    # ring3) - UserThread가 ring3에서 실행 중일 때 캡처되면 rspOld가
+    # 유저 주소인 게 정상이다. 이제 `cs`(InterruptFrame::cs, +144)의
+    # 링 비트(cs&3)를 먼저 확인해 **ring0(커널 모드)로 캡처된 tcb인데
+    # rspOld가 하이 캐노니컬 커널 범위 밖인 경우만** 진짜 이상으로
+    # 판정한다 - ring3 캡처는 rspOld가 무엇이든(유저 주소공간 전체가
+    # 유효 범위) 정상으로 취급.
     def stop(self):
         frame = gdb.selected_frame()
         task_ptr = int(frame.read_register("rdi")) & 0xFFFFFFFFFFFFFFFF
@@ -329,16 +337,17 @@ class SyncCr3Watch(gdb.Breakpoint):
             if tcb_ptr == 0:
                 return False
             rsp_old = int(gdb.parse_and_eval(f"*(unsigned long*)0x{tcb_ptr + 160:x}")) & 0xFFFFFFFFFFFFFFFF
+            cs = int(gdb.parse_and_eval(f"*(unsigned long*)0x{tcb_ptr + 144:x}")) & 0xFFFFFFFFFFFFFFFF
         except gdb.error:
             return False
-        # 정상 범위: 이 커널의 모든 실제 커널 스택은 direct map/전용
-        # 매핑 상 하이 캐노니컬(0xffff8000...) 영역에 있다 - 그보다
-        # 낮으면(유저 영역대인 0x400000류거나 이번처럼 ~1MB류 낮은
-        # 값이면) 이미 손상된 것으로 본다.
-        if rsp_old < 0xFFFF000000000000:
-            log(f"*** kSyncCr3 진입 시점부터 손상된 tcb->rspOld 발견 *** "
-                f"task=0x{task_ptr:x} tcb=0x{tcb_ptr:x} rspOld=0x{rsp_old:x} - "
-                f"kSyncCr3 호출 이전에 이미 비정상(정상이면 0xffff8000... 대여야 함)")
+        is_ring0 = (cs & 3) == 0
+        # ring0(커널 모드)로 캡처된 tcb는 rspOld가 반드시 하이 캐노니컬
+        # 커널 범위(direct map/전용 스택 매핑, 0xffff8000... 이상)여야
+        # 한다 - ring3는 유저 주소공간 전체가 유효 범위라 검사하지 않는다.
+        if is_ring0 and rsp_old < 0xFFFF000000000000:
+            log(f"*** kSyncCr3 진입 시점부터 손상된 tcb->rspOld 발견(ring0인데 커널 범위 밖) *** "
+                f"task=0x{task_ptr:x} tcb=0x{tcb_ptr:x} cs=0x{cs:x} rspOld=0x{rsp_old:x} - "
+                f"kSyncCr3 호출 이전에 이미 비정상")
             gdb.execute("bt")
             return True
         return False
