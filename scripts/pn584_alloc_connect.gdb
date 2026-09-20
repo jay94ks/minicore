@@ -6,8 +6,6 @@ set confirm off
 
 source scripts/pn584_alloc_watch.py
 
-break kPanic
-
 continue
 
 echo \n=== STOPPED (either kPanic or a DOUBLE ALLOC/FREE hit) ===\n

@@ -28,6 +28,32 @@ def log(msg):
     gdb.flush()
 
 
+# [신규] PN-584DB994 - "타이머 인터럽트가 kObtainBlock() 임계구역
+# 도중 끼어드는가"를 직접 확인한다. 커널 자신의 gInterruptDepth는
+# kernel:: 안의 익명 네임스페이스에 있어 gdb가 이름으로 못 찾는다
+# (실측으로 확인 - kernel::gInterruptDepth/'deferred_destruction.cpp'::
+# gInterruptDepth 둘 다 실패) - 대신 그 카운터를 직접 증감시키는
+# extern "C" 함수(맹글링 없음, 이름으로 확실히 찾음) 진입/이탈을
+# 우리가 직접 세어 같은 값을 얻는다.
+interrupt_depth = {"n": 0}
+
+
+class EnterDepthWatch(gdb.Breakpoint):
+    def stop(self):
+        interrupt_depth["n"] += 1
+        return False
+
+
+class LeaveDepthWatch(gdb.Breakpoint):
+    def stop(self):
+        interrupt_depth["n"] -= 1
+        return False
+
+
+def current_interrupt_depth():
+    return interrupt_depth["n"]
+
+
 def dump_freelist_state(order, focus_addr):
     # [신규] 이중할당이 잡힌 그 순간, node 0의 해당 order free list를
     # 직접 걸어 self-loop(같은 주소가 자기 자신을 next로 가리켜 pop이
@@ -77,16 +103,20 @@ class AllocFinish(gdb.FinishBreakpoint):
             return False  # 할당 실패(OOM) - 추적 대상 아님
         call_index["n"] += 1
         idx = call_index["n"]
+        depth = current_interrupt_depth()
         if addr in outstanding:
-            prev_order, prev_idx = outstanding[addr]
+            prev_order, prev_idx, prev_depth = outstanding[addr]
             hits["double_alloc"] += 1
             log(f"*** DOUBLE ALLOC *** phys=0x{addr:x} order={self.order} "
-                f"call#{idx} - 이미 call#{prev_idx}(order={prev_order})에서 할당된 채로 "
-                f"freeOrder() 없이 다시 할당됨")
+                f"call#{idx}(interrupt_depth={depth}) - 이미 "
+                f"call#{prev_idx}(order={prev_order}, interrupt_depth={prev_depth})에서 "
+                f"할당된 채로 freeOrder() 없이 다시 할당됨 - "
+                f"{'이번 호출은 인터럽트 컨텍스트 안!' if depth > 0 else '이번 호출은 인터럽트 컨텍스트 아님'}, "
+                f"{'첫 호출도 인터럽트 컨텍스트 안!' if prev_depth > 0 else '첫 호출도 인터럽트 컨텍스트 아님'}")
             gdb.execute("bt")
             dump_freelist_state(self.order, addr)
             return True  # 여기서 실제로 멈춘다 - 결정적 증거
-        outstanding[addr] = (self.order, idx)
+        outstanding[addr] = (self.order, idx, depth)
         return False
 
 
@@ -119,7 +149,7 @@ class FreeEntry(gdb.Breakpoint):
                 f"call#{idx} - 현재 outstanding 목록에 없는 주소를 반납")
             gdb.execute("bt")
             return True  # 여기서도 결정적 증거로 멈춘다
-        prev_order, prev_idx = outstanding.pop(addr)
+        prev_order, prev_idx, _prev_depth = outstanding.pop(addr)
         if prev_order != order:
             log(f"NOTE: order 불일치 phys=0x{addr:x} alloc_order={prev_order}(call#{prev_idx}) "
                 f"free_order={order}(call#{idx}) - buddy 정책상 있을 수 있는 정상 케이스인지 "
@@ -139,7 +169,39 @@ class FreeEntry(gdb.Breakpoint):
 # 잡힌다. allocOrderBelow는 allocOrder를 거치지 않는 완전히 독립된
 # 구현(같은 파일 안에서 직접 free-list를 조작)이라 이중 계산 위험이
 # 없다 - 계속 감시.
+class KPanicWatch(gdb.Breakpoint):
+    # [신규] PN-584DB994의 기존(잘 알려진) #GP 크래시 자체도 이
+    # 계측 세션 안에서 자주 잡힌다(이중할당보다도 먼저 걸리는 경우가
+    # 대부분 - 계측 부하가 두 증상 모두를 더 자주 만들어낸다는 정황).
+    # kIsrHandler가 vector 13(#GP)을 명시적으로 처리하지 않고
+    # catch-all(kPanic)로 떨어뜨리는 게 원래부터 의도된 동작이라(새
+    # 버그 아님), 이 지점에서 실제로 궁금한 건 단 하나 -
+    # "이 순간에도 인터럽트 컨텍스트 안인가"(중첩 인터럽트/재진입
+    # 가능성). InterruptFrame(interrupt_frame.h)의 vector 필드는
+    # rax~r15(15개, 각 8바이트) 다음 오프셋 120에 있다.
+    def stop(self):
+        frame = gdb.selected_frame()
+        frame_ptr = int(frame.read_register("rdi")) & 0xFFFFFFFFFFFFFFFF
+        depth = current_interrupt_depth()
+        if frame_ptr == 0:
+            log(f"kPanic 도달 - frame=NULL(읽기 실패), interrupt_depth={depth}")
+            return True
+        try:
+            vector = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 120:x}"))
+            error_code = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 128:x}"))
+            log(f"kPanic 도달 - vector=0x{vector:x} error_code=0x{error_code:x} "
+                f"interrupt_depth={depth} "
+                f"({'인터럽트 컨텍스트 안(중첩)!' if depth > 1 else '정상 깊이'})")
+        except gdb.error as e:
+            log(f"kPanic 도달 - frame=0x{frame_ptr:x} 필드 읽기 실패({e}), interrupt_depth={depth}")
+        return True
+
+
 AllocEntry("kernel::PageFrameAllocator::allocOrder", "rdi")
 AllocEntry("kernel::PageFrameAllocator::allocOrderBelow", "rsi")
 FreeEntry("kernel::PageFrameAllocator::freeOrder", internal=False)
-log("armed - watching kernel::PageFrameAllocator alloc*/freeOrder for double-alloc/double-free")
+EnterDepthWatch("kEnterInterruptDepth", internal=False)
+LeaveDepthWatch("kLeaveInterruptDepth", internal=False)
+KPanicWatch("kPanic", internal=False)
+log("armed - watching kernel::PageFrameAllocator alloc*/freeOrder for double-alloc/double-free "
+    "+ kEnter/LeaveInterruptDepth for interrupt-context detection + kPanic for depth-at-crash")
