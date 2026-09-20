@@ -25,6 +25,20 @@ bool kValidateVfsBuffer(AsyncTask* task, const void* ptr, uint64_t length) {
     if (!submitter) {
         return false;
     }
+    // [수정, 2026-09-21, PN-A8BE8BED 항목4/SP-43331889 §3-1] 예전엔
+    // `submitter`를 무조건 `static_cast<UserThread*>`했다 - Process
+    // 없는 KernelThread 제출자(devmgr/fs, §1 확정)에겐 잠재적 UB였다
+    // (pnp.cpp의 옛 `kProcessFromSubmitterForPnp`와 정확히 같은 결함,
+    // 그쪽은 이미 `kOwnerProcessOf(Task*)`로 고쳐짐 - 위 주석 참고).
+    // KernelThread는 별도 유저 주소공간이 없어 이 검증 자체가 성립하지
+    // 않으므로 `kOwnerProcessOf`와 동일한 관례로 거절한다. 오늘은 이
+    // 경로에 실제로 도달하는 호출자가 없다(fs는 `MountTable::mount()`를
+    // 직접 호출해 이 트랩 경로 자체를 우회한다) - 실제 KernelThread가
+    // 이 syscall을 트랩으로 부르게 되면 그때 진짜 검증 방식을 설계한다
+    // (CLAUDE.md 규칙4 - 지금은 추측으로 채우지 않고 안전하게 거절만).
+    if (!submitter->isUserLevel) {
+        return false;
+    }
     auto* thread = static_cast<UserThread*>(submitter.get());
     return Paging::isUserRangeValid(reinterpret_cast<uint64_t>(ptr), length, thread->userPml4Phys);
 }
