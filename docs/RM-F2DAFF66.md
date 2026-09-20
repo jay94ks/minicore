@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-20T03:56:18.450Z
+  updatedAt: 2026-09-20T05:39:21.165Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1553,6 +1553,26 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   하위 결정 포함)이라 이 감사 틱의 범위 밖 - 실제 착수는 별도
   세션에서 신중하게.
 
+### 1-P. `SP-ECC59BAE`(Running Task 강제 이관) - `onForcedMigration()`이 `onTick()`과 달리 freeze/디버그 정지 검사 없음 (코드 갭, `PN-6CE4DD35`로 등록, 시급성 낮음)
+
+- **출처**: RM-F2DAFF66 정기 점검 중 `SP-ECC59BAE`를 처음 대입.
+  메커니즘(§2-4)은 오늘(2026-09-20) `PN-81E49523` 2단계의
+  `kContextSwitchFromISR` 통일까지 정확히 함께 반영되어 있음을
+  확인(`Scheduler::onForcedMigration()`, scheduler.cpp:1787~) - 그
+  자체는 갭 없음.
+- **발견**: `onForcedMigration()`의 재삽입 분기가 `onTick()`과 달리
+  `kCheckAndMarkFrozen()`(ResourceGroup freeze)/`kIsPausedByDebugger()`
+  (디버그 정지) 검사를 안 한다 - 코드 자신이 "[알려진 갭,
+  2026-09-17]" 주석으로 이미 정직하게 남겨 둔 항목이었으나 PN으로
+  승격된 적은 없었다(CLAUDE.md 규칙 7 위반 상태로 방치돼 있었음).
+- **위험도**: 낮음 - `Scheduler::requestForcedMigration()`은 현재
+  호출부가 전혀 없다(`SP-ECC59BAE` §5가 (C)안 채택 - 자동 트리거
+  없음, 수동/진단 API만). 실제 소비자가 생기기 전까지 위험이 발현될
+  경로 자체가 없다.
+- **조치**: `PN-6CE4DD35`로 등록(우선순위 낮음, `requestForcedMigration()`에
+  실제 호출부가 생기는 시점과 함께 처리 권장).
+- **현재 상태**: 갭 등록 완료, 미해소(추적은 `PN-6CE4DD35`로 이관).
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
@@ -1561,6 +1581,7 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 
 - [ ] (`SP-9A6D579F` 항목은 §2로 이동 - 2026-09-18 갱신 완료)
 - [ ] (`SP-9DD4F3EA`/`SP-CC1CF30E` 항목은 각각 §1/§2로 이동 - 2026-09-20 갱신 완료)
+- [ ] (`SP-ECC59BAE` 항목은 §1로 이동 - 2026-09-20 갱신 완료, PN-6CE4DD35 등록)
 
 (`SP-B1E258D8`(RCU) 항목은 approved 전환 + `PN-495C11B7` 구현
 완료까지 끝나 아래 §2로 이동했다.)
