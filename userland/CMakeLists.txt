@@ -30,9 +30,11 @@ add_subdirectory(tests/userlandtest)
 # 바이너리 디렉터리를 명시해 소스 트리 밖에서도 안전).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BINARY_DIR}/minicore-init)
 
-# devmgr(SP-9DD4F3EA §6, PN-BD9AAE2F) - init과 동일한 이유의 out-of-tree
-# add_subdirectory.
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/devmgr ${CMAKE_CURRENT_BINARY_DIR}/minicore-devmgr)
+# devmgr(SP-9DD4F3EA §6, PN-BD9AAE2F) - **[제외, 2026-09-20,
+# SP-43331889/QU-23B339AB/QU-ECEE5990] 더 이상 유저랜드 ELF가 아니다**,
+# Process 없는 순수 커널 KernelThread로 완전 흡수돼 이 유저랜드 빌드
+# 트리에서 뺐다(minicore/devmgr/CMakeLists.txt는 이제 top-level
+# CMakeLists.txt가 커널 빌드 트리에서 직접 add_subdirectory한다).
 
 # pubreg(SP-B071E628, PN-185406F6) - init/devmgr과 동일한 이유의
 # out-of-tree add_subdirectory.

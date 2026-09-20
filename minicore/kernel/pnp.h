@@ -83,6 +83,14 @@ struct RequestIoPermissionArgs {
 
 constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = kMakeSyscallEndpointId(2, 1);
 
+// [신규, 2026-09-20, SP-43331889 §3] `EnumerateDevicesHandler::onExec()`
+// 본문(pnp.cpp) - 유저 포인터 검증(트랩 경계를 넘는 syscall에서만
+// 의미 있음)은 그 핸들러가 이미 끝내고 여기로 넘어온다는 전제. devmgr
+// 이 커널 모드로 흡수된 뒤(§7) 직접 호출하는 진입점이자, 기존 syscall
+// 트랩 어댑터도 이 함수 하나로 통일해 쓴다.
+void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescriptor* outDevices,
+                           uint32_t* outTotalCount);
+
 class PnpService {
 public:
     // 부팅 시 한 번 호출 - EnumerateDevices/RequestIoPermission

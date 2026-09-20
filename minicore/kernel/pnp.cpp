@@ -253,28 +253,6 @@ bool kValidateEnumerateBuffer(AsyncTask* task, const void* ptr, uint64_t length)
     return Paging::isUserRangeValid(reinterpret_cast<uint64_t>(ptr), length, thread->userPml4Phys);
 }
 
-// [신규, 2026-09-20, SP-43331889 §3] EnumerateDevicesHandler::onExec()
-// 본문 - 유저 포인터 검증(트랩 경계를 넘는 syscall에서만 의미 있음)은
-// 호출부 책임으로 남기고, 캐시 조회/페이지네이션 로직만 이 함수에
-// 담는다. 커널 모드 직접 호출부(devmgr, §3 착수 시 이 함수를 그대로
-// 재사용)와 기존 syscall 트랩 어댑터(아래 핸들러) 둘 다 여기로 온다.
-void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescriptor* outDevices,
-                           uint32_t* outTotalCount) {
-    kEnsureDeviceCache();
-    uint32_t total = gDeviceCacheCount;
-    uint32_t start = startIndex;
-    uint32_t filled = 0;
-    if (start < total) {
-        uint32_t available = total - start;
-        filled = available < *capacity ? available : *capacity;
-        for (uint32_t i = 0; i < filled; ++i) {
-            outDevices[i] = gDeviceCache[start + i];
-        }
-    }
-    *outTotalCount = total;
-    *capacity = filled;
-}
-
 class EnumerateDevicesHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
@@ -371,6 +349,28 @@ public:
 RequestIoPermissionHandler gRequestIoPermissionHandler;
 
 }  // namespace
+
+// [신규, 2026-09-20, SP-43331889 §3] pnp.h 선언 참고 - 외부(devmgr의
+// 커널 모드 직접 호출부, §7 착수 시)에서 부를 수 있도록 익명
+// 네임스페이스 밖으로 뺐다. 캐시(`gDeviceCache` 등)는 여전히 이 파일
+// 안(익명 네임스페이스)에만 있고, `kEnsureDeviceCache()` 같은 내부
+// 헬퍼도 같은 번역 단위 안에서는 그대로 이름 조회가 되므로 문제없다.
+void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescriptor* outDevices,
+                           uint32_t* outTotalCount) {
+    kEnsureDeviceCache();
+    uint32_t total = gDeviceCacheCount;
+    uint32_t start = startIndex;
+    uint32_t filled = 0;
+    if (start < total) {
+        uint32_t available = total - start;
+        filled = available < *capacity ? available : *capacity;
+        for (uint32_t i = 0; i < filled; ++i) {
+            outDevices[i] = gDeviceCache[start + i];
+        }
+    }
+    *outTotalCount = total;
+    *capacity = filled;
+}
 
 void PnpService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointEnumerateDevices, &gEnumerateDevicesHandler);

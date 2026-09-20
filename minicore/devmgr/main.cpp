@@ -12,69 +12,64 @@
 // 실제로 fork() 스폰할 후속 드라이버(예: 비-스토리지 PnP 장치)가
 // 생기면 그때 다시 채운다. `EnumerateDevices` 호출 자체는 devmgr의
 // 일반 PnP 열거 책임(SP-9DD4F3EA §3.1)이라 그대로 남겨 둔다.
-#include "libmc/channel.h"
-#include "libmc/pnp.h"
-#include "libmc/syscall.h"
+//
+// **[전환, 2026-09-20, SP-43331889/QU-23B339AB/QU-ECEE5990 - devmgr을
+// 유저랜드 프로세스에서 Process 없는 순수 커널 Task로 완전 흡수]**
+// 이 파일은 더 이상 유저랜드 ELF(`crt0.S`가 SysV 진입 스택을 받아
+// 넘겨주던 `kDevmgrMain(argc,argv,envp)`)가 아니다 - `kmain.cpp`가
+// `kSpawnKernelThread(kDevmgrKernelMain, nullptr)`로 직접 띄우는
+// ring0 `KernelThread`의 entry 함수다. `libmc`(트랩 기반 syscall
+// 왕복)는 더 이상 쓰지 않고 `kernel::pnp.h`가 노출하는 동기 함수를
+// 그대로 호출한다(같은 주소공간, 트랩 자체가 무의미 - SP-43331889 §3
+// "설계자 의견 - 커널 내부에선 syscall을 사용하지 말고 직접
+// 호출하도록해"). argc/argv/envp 개념 자체가 없다(ELF 로드가 아니므로) -
+// `crt0.S`도 이제 이 서비스에서는 안 쓴다(devmgr/CMakeLists.txt 참고).
+#include "devmgr_service.h"
+#include "pnp.h"
+
+namespace kernel {
 
 namespace {
 
 // v1 상한 - 실측 후 조정(RM-23F4B687 §4, kernel/pnp.cpp의
 // kMaxCachedPciDevices=256과는 별개로 devmgr 자신의 로컬 캐시 크기).
-constexpr mc::uint32_t kMaxDevices = 64;
-mc::DeviceDescriptor gDevices[kMaxDevices];
-mc::uint32_t gDeviceCount = 0;
-
-// [신규, PN-A0F72A3A 착수 순서 3번] crt0.S가 실제 SysV 진입 스택에서
-// 꺼내 넘겨준 값 - 최초 부팅 시 스폰(kSpawnServiceProcesses)은 항상
-// argc=0/argv=[NULL]이다. **[정정, 2026-09-19, QU-FB7A0CFF 답변]**
-// "드라이버 모드 재진입"을 이 값으로 구분하는 원안(자기 자신을
-// argv={"devmgr","--driver=..."}로 재스폰)은 폐기됐다 - `mc::fork()`가
-// 그 역할을 대신한다(현재는 실제 fork() 소비자가 없다 - 위 문서
-// 주석 참고). 이 전역은 여전히 SysV 진입 규약 자체를 보관하는
-// 용도로 남겨 둔다.
-mc::int32_t gArgc = 0;
-char** gArgv = nullptr;
-char** gEnvp = nullptr;
+constexpr uint32_t kMaxDevices = 64;
+DeviceDescriptor gDevices[kMaxDevices];
+uint32_t gDeviceCount = 0;
 
 }  // namespace
 
-// [교체, PN-A0F72A3A 착수 순서 3번] `_start()` 자신은 이제 crt0.S가
-// 맡는다(SysV 스택 -> 호출 규약 레지스터 변환) - 이 함수가 그 변환된
-// argc/argv/envp를 실제로 받는 진짜 진입점이다.
-extern "C" void kDevmgrMain(mc::int32_t argc, char** argv, char** envp) {
-    gArgc = argc;
-    gArgv = argv;
-    gEnvp = envp;
-
-    mc::EnumerateDevicesArgs args;
-    args.startIndex = 0;
-    args.capacity = kMaxDevices;
-    args.outDevices = gDevices;
-
-    mc::SyscallToken token = mc::submit(mc::kSyscallEndpointEnumerateDevices, &args);
-    if (token != 0 && mc::wait(token) && args.error == mc::ChannelError::None) {
-        gDeviceCount = args.capacity;  // capacity는 EnumerateDevices onExec()이 "실제로 채운 개수"로 덮어쓴다
-    }
+// [교체, 2026-09-20, SP-43331889 §7] `kSpawnKernelThread()`가 새
+// `KernelThread`의 TaskTcb에 이 함수 포인터를 직접 실어 최초 진입
+// 시 호출한다(Task::init() 재사용 - SP-43331889 §2 참고) - `arg`는
+// 현재 안 씀(항상 nullptr로 스폰).
+void kDevmgrKernelMain(void* /*arg*/) {
+    uint32_t capacity = kMaxDevices;
+    kEnumerateDevicesSync(0, &capacity, gDevices, &gDeviceCount);
+    // capacity는 kEnumerateDevicesSync()이 "실제로 채운 개수"로
+    // 덮어쓴다(gDeviceCount에 이미 그 값이 들어간다 - 트랩 시절의
+    // "capacity를 in/out으로 겸용"하던 args 구조체가 없어져 두 값이
+    // 이제 분리됐다).
 
     // [뒤집힘, 2026-09-20, QU-1FB6A7A4] 예전엔 여기서 AHCI(§3.2 클래스
     // 매칭)를 찾아 fork()로 드라이버 자식을 스폰했다 - 이제 블록
     // 스토리지 장치는 fs가 직접 인식/구동한다(위 파일 문서 주석
     // 참고). devmgr의 매칭 테이블은 현재 비어 있다 - 다음 비-스토리지
     // PnP 드라이버가 필요해지면 여기(gDevices/gDeviceCount 순회)에
-    // 그 매칭 루프를 다시 채운다.
+    // 그 매칭 루프를 다시 채운다(§5의 `kSpawnUserModeDriver()`로).
 
-    // [수정, 2026-09-18, PN-11B3D2BB] devmgr는 `kSpawnServiceProcesses()`
-    // 가 `ProcessStartFlags::essential = true`로 스폰하는 KernelService다
-    // (kmain.cpp) - `essential==true`인 프로세스가 실행을 마치면(크래시든
-    // 정상 종료든 무관하게) 커널이 "죽었다"고 보고 즉시 패닉한다
-    // (process.h의 `ProcessStartFlags::essential` 문서 주석, scheduler.cpp
-    // "PANIC - essential service died" 분기). `fs`(minicore/fs/main.cpp)
-    // 가 이미 하고 있는 것과 같은 관례로, 실제 서비스 루프(§7 핫플러그
-    // 대기)가 아직 없는 지금은 그 자리를 대신할 최소한의 무한 대기로
-    // 막아 둔다 - 절대 종료하지 않는다는 essential 계약만 만족시키는
-    // TEMP 자리표시자, §7이 실제 핫플러그 이벤트 대기(syscall 기반
-    // 블로킹)로 대체할 것.
+    // [수정, 2026-09-20, SP-43331889 §7-1] devmgr은 이제 Process가
+    // 없는 순수 KernelThread다 - 예전 essential=true Process가 죽으면
+    // 커널이 자동으로 패닉하던 안전망(process.h의 `ProcessStartFlags::
+    // essential` 문서 주석) 자체가 없어졌다. `kTaskOnFallingToEnd()`의
+    // Kernel-Level 분기(scheduler.cpp)는 entry가 반환하면 정리 없이
+    // 그냥 조용히 퇴역시킬 뿐이다 - 그러니 이 무한 대기가 예전보다
+    // 오히려 더 중요해졌다(유일한 안전장치). §7 핫플러그 이벤트 대기
+    // (syscall 기반 블로킹)가 아직 없는 지금은 그 자리를 대신하는
+    // TEMP 자리표시자.
     for (;;) {
         asm volatile("pause");
     }
 }
+
+}  // namespace kernel
