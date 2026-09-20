@@ -132,9 +132,10 @@ public:
     // 이 그룹에 속한 프로세스들 - `WeakPtr<Process>`(관찰만, 그룹이
     // 프로세스를 소유하지 않는다 - SP-245D130B §1). `Process`는
     // `memset(0)`으로 할당되므로(process.cpp `Process::allocate()`)
-    // `WeakPtr`을 안전하게 담을 수 있다(`Channel::ownerProcess`가
-    // 겪은 placement-new 문제와 달리 - PN-18FDBFF3/SP-CA3C3E57 §6.1
-    // 참고, Channel은 memset을 안 거쳐 이 방식을 못 썼다).
+    // `WeakPtr`을 안전하게 담을 수 있다(`Channel::owner`, 2026-09-20
+    // 이전 이름 `ownerProcess`가 겪은 placement-new 문제와 달리 -
+    // PN-18FDBFF3/SP-CA3C3E57 §6.1 참고, Channel은 memset을 안 거쳐
+    // 이 방식을 못 썼다).
     static constexpr uint32_t kMaxMemberChunkCapacity = 8;
     ChunkedList<WeakPtr<Process>, kMaxMemberChunkCapacity> memberProcesses;
 

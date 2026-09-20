@@ -298,22 +298,44 @@ bool kIsBridgeBroken(BridgePipe* bridge) {
     return !peer || peer->closedLocal;
 }
 
-// [신규, 2026-09-17, PN-9CC66142] "이 AsyncTask를 제출한 UserThread가
-// 속한 Process"를 얻는 공용 체이닝 - AcceptFromChannelHandler가 accept
-// 완료 시 양쪽(client/acceptor) Process에 BridgePipe 강한 참조를
-// 나눠 주는 데 쓴다. `submitterTask`는 `Syscall::submit()`만 채우고
-// (syscall.cpp) 그 계약 자체가 "반드시 UserThread 실행 흐름에서만
-// 호출"이므로(syscall.h), `static_cast<UserThread*>`는 그 기존 계약을
-// 그대로 재사용하는 것뿐이다(Syscall::submit 자신도 동일한 캐스트를
-// 이미 쓴다). 제출자가 이미 죽었거나(WeakPtr 만료) Process가 이미
-// 종료됐으면 빈 SharedPtr.
-SharedPtr<Process> kProcessFromSubmitter(AsyncTask* task) {
-    SharedPtr<Task> submitter = task->submitterTask.lock();
-    if (!submitter) {
-        return SharedPtr<Process>();
+// [제거, 2026-09-20, SP-43331889 §3-1] 예전엔 여기 "이 AsyncTask를
+// 제출한 UserThread가 속한 Process"를 얻는 `kProcessFromSubmitter(AsyncTask*)`
+// 가 있었다(PN-9CC66142) - `submitter`를 무조건 `static_cast<UserThread*>`
+// 해 Process 없는 KernelThread 제출자(devmgr/fs, §1 확정)가 생기면
+// 잘못된 캐스팅이 되는 문제가 있었고, 이 파일의 모든 호출부가 이제
+// `task->submitterTask.lock()` + 아래 `kOwnerOpenBridgesOf`(BridgePipe
+// 소유권)/`channel.h`의 `owner` 필드(채널 소유권)로 옮겨가 완전히
+// 대체됐다 - 제거.
+
+// [신규, 2026-09-20, SP-43331889 §3-1] "이 Task가 자신이 연 BridgePipe를
+// 걸어 두는 핸들 테이블"을 통일해서 얻는다 - `kOwnerProcessOf(Task*)`
+// (process.h §4)와 정확히 같은 이유/패턴: `Process` 소속 UserThread는
+// `Process::openBridges`를, Process 없는 KernelThread(devmgr/fs, §1)는
+// 자기 자신의 `KernelThread::openBridges`를 직접 쓴다. 두 컨테이너의
+// 청크 용량이 어긋나면 아래 타입이 안전하지 않으므로 컴파일 타임에
+// 강제한다.
+using OpenBridgeList = ChunkedList<SharedPtr<BridgePipe>, Process::kMaxOpenBridgesChunkCapacity>;
+static_assert(Process::kMaxOpenBridgesChunkCapacity == KernelThread::kMaxOpenBridgesChunkCapacity,
+              "Process::openBridges와 KernelThread::openBridges의 청크 용량이 일치해야 한다");
+
+OpenBridgeList* kOwnerOpenBridgesOf(Task* task) {
+    if (!task) {
+        return nullptr;
     }
-    auto* thread = static_cast<UserThread*>(submitter.get());
-    return thread->process.lock();
+    if (task->isUserLevel) {
+        SharedPtr<Process> process = static_cast<UserThread*>(task)->process.lock();
+        if (!process) {
+            return nullptr;
+        }
+        process->openBridges.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+        return &process->openBridges;
+    }
+    if (task->isKernelMode) {
+        auto* kernelThread = static_cast<KernelThread*>(task);
+        kernelThread->openBridges.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+        return &kernelThread->openBridges;
+    }
+    return nullptr;  // 순수 커널 전용 Task(idle/리액터 등) - 자원 소유 없음
 }
 
 // [신규, 2026-09-17, PN-9CC66142] `BridgeHandle`(유저가 syscall마다
@@ -324,13 +346,17 @@ SharedPtr<Process> kProcessFromSubmitter(AsyncTask* task) {
 // 살아있음을 보장)를, 못 찾으면(위조된 핸들, 남의 핸들, 이미 닫혀
 // 목록에서 빠진 핸들) 빈 값을 반환한다.
 SharedPtr<BridgePipe> kResolveOwnedBridge(AsyncTask* task, BridgeHandle handle) {
-    SharedPtr<Process> process = kProcessFromSubmitter(task);
-    if (!process) {
+    // [갱신, 2026-09-20, SP-43331889 §3-1] Process 전용
+    // kProcessFromSubmitter 대신 kOwnerOpenBridgesOf로 - 제출자가
+    // Process 없는 KernelThread(devmgr/fs)여도 자기 몫의 openBridges를
+    // 그대로 찾는다.
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    OpenBridgeList* bridges = kOwnerOpenBridgesOf(submitter.get());
+    if (!bridges) {
         return SharedPtr<BridgePipe>();
     }
     auto* rawTarget = reinterpret_cast<BridgePipe*>(handle);
-    auto* slot = process->openBridges.find(
-        [rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
+    auto* slot = bridges->find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
     if (!slot) {
         return SharedPtr<BridgePipe>();
     }
@@ -388,7 +414,11 @@ public:
         // [수정, PN-CE6A04AB] 더 이상 raw 포인터가 아니다 - channel->
         // channelId는 kCreateNamedChannel()이 이미 안전하게 발급해 둔
         // 값이다(channel.h §ChannelId 주석 참고).
-        channel->ownerProcess = DontDeref<Process>(kProcessFromSubmitter(task).get());
+        // [갱신, 2026-09-20, SP-43331889 §3-1] Process가 아니라 제출자
+        // Task 자신의 신원을 직접 기록한다(channel.h의 `owner` 문서
+        // 주석 참고) - devmgr/fs(KernelThread, Process 없음)가 연
+        // 채널도 진짜 소유자로 식별되게 하기 위함.
+        channel->owner = DontDeref<Task>(task->submitterTask.lock().get());
         args->channelId = channel->channelId;
         args->channelHandle = args->channelId;
         co_return;
@@ -528,12 +558,15 @@ public:
             co_return;
         }
         // [신규, PN-CE6A04AB/SP-CA3C3E57 §6] 소유자만 accept할 수 있다 -
-        // ownerProcess==nullptr(커널이 만든 예약 채널, livefs.cpp)는
-        // 예외적으로 무제한 허용(SP-9A6D579F §3.2의 "커널 자신은 예외"
-        // 와 같은 패턴, 실사용처 없음 - RM-C65F7760 참고).
-        if (channel->ownerProcess) {
-            SharedPtr<Process> caller = kProcessFromSubmitter(task);
-            if (!caller || DontDeref<Process>(caller.get()) != channel->ownerProcess) {
+        // owner==nullptr(커널이 만든 예약 채널, livefs.cpp)는 예외적으로
+        // 무제한 허용(SP-9A6D579F §3.2의 "커널 자신은 예외"와 같은
+        // 패턴, 실사용처 없음 - RM-C65F7760 참고). [갱신, 2026-09-20,
+        // SP-43331889 §3-1] Process 동일성 대신 제출자 Task 동일성으로
+        // 비교(channel.h의 `owner` 문서 주석 참고) - devmgr/fs(KernelThread)
+        // 가 연 채널도 자기 자신 말고는 accept 못 하게 정확히 지켜진다.
+        if (channel->owner) {
+            SharedPtr<Task> caller = task->submitterTask.lock();
+            if (!caller || DontDeref<Task>(caller.get()) != channel->owner) {
                 args->error = ChannelError::PermissionDenied;
                 co_return;
             }
@@ -572,14 +605,21 @@ public:
             // 매달려야 한다"는 설계자 답변 그대로 - client 쪽은
             // `req->task`(ConnectChannel을 제출한 AsyncTask, submitterTask
             // 를 이미 들고 있음)로, acceptor 쪽은 이 accept 핸들러 자신의
-            // `task`로 각각 제출자 Process를 얻는다. 어느 한쪽이라도
-            // 못 얻으면(제출자가 이미 죽었거나 커널 서비스처럼 Process가
-            // 없는 호출자 - §6, 아직 실사용처 없음) 거절한다 -
-            // serverSide/clientSide는 지역 SharedPtr이라 그냥 스코프를
-            // 벗어나면서 스스로 정리된다(별도 롤백 코드 불필요).
-            SharedPtr<Process> clientProcess = kProcessFromSubmitter(req->task);
-            SharedPtr<Process> acceptorProcess = kProcessFromSubmitter(task);
-            if (!clientProcess || !acceptorProcess) {
+            // `task`로 각각 제출자를 얻는다. [갱신, 2026-09-20,
+            // SP-43331889 §3-1] Process 전용 kProcessFromSubmitter 대신
+            // kOwnerOpenBridgesOf로 - devmgr/fs(KernelThread, Process
+            // 없음)가 acceptor여도 자기 몫의 openBridges를 정상적으로
+            // 얻는다(이 경로가 그 첫 실사용처가 됐다 - 예전 주석의
+            // "아직 실사용처 없음"은 이제 사실이 아니다). 어느 한쪽이라도
+            // 못 얻으면(제출자가 이미 죽었거나, 순수 커널 전용 Task처럼
+            // 애초에 자원을 못 갖는 호출자) 거절한다 - serverSide/
+            // clientSide는 지역 SharedPtr이라 그냥 스코프를 벗어나면서
+            // 스스로 정리된다(별도 롤백 코드 불필요).
+            SharedPtr<Task> clientTask = req->task->submitterTask.lock();
+            SharedPtr<Task> acceptorTask = task->submitterTask.lock();
+            OpenBridgeList* clientBridges = kOwnerOpenBridgesOf(clientTask.get());
+            OpenBridgeList* acceptorBridges = kOwnerOpenBridgesOf(acceptorTask.get());
+            if (!clientBridges || !acceptorBridges) {
                 req->rejected = true;
                 req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
@@ -587,26 +627,23 @@ public:
                 co_return;
             }
 
-            clientProcess->openBridges.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
-            acceptorProcess->openBridges.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
-            auto* clientSlot = clientProcess->openBridges.insert(clientSide);
+            auto* clientSlot = clientBridges->insert(clientSide);
             if (!clientSlot) {
                 // 극히 드문 목록 슬랩 고갈 - serverSide/clientSide 지역
                 // SharedPtr이 스코프 종료 시 스스로 정리된다(아직 어느
-                // 프로세스의 openBridges에도 안 들어갔으므로 되돌릴 것도
-                // 없다).
+                // 쪽 openBridges에도 안 들어갔으므로 되돌릴 것도 없다).
                 req->rejected = true;
                 req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
                 args->error = ChannelError::ResourceExhausted;
                 co_return;
             }
-            if (!acceptorProcess->openBridges.insert(serverSide)) {
+            if (!acceptorBridges->insert(serverSide)) {
                 // client 쪽엔 이미 넣었으니 반드시 되돌린다 - 안 그러면
-                // 이 실패한 accept로 client 프로세스에만 "고아
-                // BridgePipe"(아무도 handle을 모르는 채로 강한 참조만
-                // 살아있는) 한 짐이 남는다.
-                clientProcess->openBridges.erase(clientSlot);
+                // 이 실패한 accept로 client 쪽에만 "고아 BridgePipe"
+                // (아무도 handle을 모르는 채로 강한 참조만 살아있는)
+                // 한 짐이 남는다.
+                clientBridges->erase(clientSlot);
                 req->rejected = true;
                 req->done.store(1);
                 AsyncReactor::submitCompletion(req->task, channel->exclusivePreemptive);
@@ -837,13 +874,15 @@ public:
         // BridgePipe 객체는 안전하게 살아있다(peer.lock() 계속 유효) -
         // 상대도 이미 닫아 자기 몫을 내려놨다면 두 객체 다 자연히
         // destroy()까지 끝난다. 별도 destroyPair() 호출이 필요 없다.
-        SharedPtr<Process> process = kProcessFromSubmitter(task);
-        if (process) {
+        // [갱신, 2026-09-20, SP-43331889 §3-1] Process 전용
+        // kProcessFromSubmitter 대신 kOwnerOpenBridgesOf로 일반화.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        OpenBridgeList* bridges = kOwnerOpenBridgesOf(submitter.get());
+        if (bridges) {
             auto* rawTarget = bridge.get();
-            auto* slot =
-                process->openBridges.find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
+            auto* slot = bridges->find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
             if (slot) {
-                process->openBridges.erase(slot);
+                bridges->erase(slot);
             }
         }
         args->error = ChannelError::None;
@@ -868,11 +907,12 @@ public:
             co_return;
         }
         // [신규, PN-CE6A04AB/SP-CA3C3E57 §6] 소유자만 destroy할 수
-        // 있다 - AcceptFromChannelHandler와 동일한 예외(ownerProcess==
-        // nullptr는 커널 예약 채널).
-        if (channel->ownerProcess) {
-            SharedPtr<Process> caller = kProcessFromSubmitter(task);
-            if (!caller || DontDeref<Process>(caller.get()) != channel->ownerProcess) {
+        // 있다 - AcceptFromChannelHandler와 동일한 예외(owner==nullptr는
+        // 커널 예약 채널). [갱신, 2026-09-20, SP-43331889 §3-1] 위
+        // AcceptFromChannelHandler와 동일하게 Task 동일성으로 비교.
+        if (channel->owner) {
+            SharedPtr<Task> caller = task->submitterTask.lock();
+            if (!caller || DontDeref<Task>(caller.get()) != channel->owner) {
                 args->error = ChannelError::PermissionDenied;
                 co_return;
             }

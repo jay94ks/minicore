@@ -307,11 +307,17 @@ public:
     ChannelId channelId = 0;
 
     // [신규, PN-CE6A04AB/SP-CA3C3E57 §6.1, 타입 승격 PN-18FDBFF3/§6-A]
-    // 이 채널을 만든 프로세스 - `DontDeref<Process>`라 애초에
-    // 역참조할 방법이 없다(operator*/->/T* 변환 없음, shared_ptr.h
-    // 참고). AcceptFromChannel/DestroyChannel의 호출자가 이 값과
-    // 동일성만 비교하는 용도.
-    DontDeref<Process> ownerProcess;
+    // 이 채널을 만든 제출자 - `DontDeref<Task>`라 애초에 역참조할
+    // 방법이 없다(operator*/->/T* 변환 없음, shared_ptr.h 참고).
+    // AcceptFromChannel/DestroyChannel의 호출자가 이 값과 동일성만
+    // 비교하는 용도. [갱신, 2026-09-20, SP-43331889 §3-1] 원래
+    // `DontDeref<Process>` - Process 없는 KernelThread(devmgr/fs, §1)가
+    // 채널을 만들면 항상 빈 값이 돼 "커널 예약 채널"(원래 이 nullptr
+    // 예외가 상정한 대상, livefs.cpp)과 구분이 안 되고 accept/destroy
+    // 권한 검사가 통째로 무력화되는 문제를 발견 - `Task` 단위로
+    // 넓혀 devmgr/fs의 KernelThread 자신도 진짜 소유자로 식별되게
+    // 했다(kClaimBar의 WeakPtr<Task> 일반화와 동일한 이유/패턴).
+    DontDeref<Task> owner;
 
     // Tier B(SP-00CA7175 §2.2, "ExclusivePreemptiveChannel") - true면
     // 이 Channel의 accept/read/write에서 파생된 AsyncTask가 그 코어의
@@ -342,7 +348,7 @@ public:
         hasName = false;
         nameLength = 0;
         channelId = 0;
-        ownerProcess = DontDeref<Process>();
+        owner = DontDeref<Task>();
         exclusivePreemptive = false;
         pendingHead = nullptr;
         pendingTail = nullptr;
