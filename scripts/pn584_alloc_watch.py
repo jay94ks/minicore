@@ -200,11 +200,26 @@ class KPanicWatch(gdb.Breakpoint):
         try:
             vector = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 120:x}"))
             error_code = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 128:x}"))
+            # [신규, 갱신21] 실제 폴트가 난 원본 컨텍스트의 rip/cs -
+            # InterruptFrame(interrupt_frame.h) 레이아웃 그대로
+            # (rip=+136, cs=+144) - kPanic() 자신의 현재 gdb 프레임이
+            # 아니라 "무엇을 실행하다가" 이 인터럽트가 걸렸는지 직접
+            # 알아낸다(cr2만으로는 코드 페치 폴트인지 데이터 접근
+            # 폴트인지 구분 못 함 - rip==cr2면 코드 페치, 아니면 데이터).
+            fault_rip = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 136:x}"))
+            fault_cs = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 144:x}"))
+            rip_sym = ""
+            try:
+                rip_sym = " [" + gdb.execute(f"info symbol 0x{fault_rip:x}", to_string=True).strip() + "]"
+            except gdb.error:
+                pass
             cr2_note = ""
             if vector == 0xE:
                 try:
                     cr2 = int(frame.read_register("cr2")) & 0xFFFFFFFFFFFFFFFF
                     cr2_note = f" cr2=0x{cr2:x}"
+                    if cr2 == fault_rip:
+                        cr2_note += " (rip와 정확히 일치 - 코드 페치 폴트, 이 주소로 점프/리턴 시도)"
                     if cr2 >= K_DIRECT_MAP_BASE:
                         physAddr = cr2 - K_DIRECT_MAP_BASE
                         pageAddr = physAddr & ~0xFFF
@@ -217,10 +232,26 @@ class KPanicWatch(gdb.Breakpoint):
                             cr2_note += (f" -> direct-map phys=0x{pageAddr:x}가 outstanding 장부에 없음 "
                                          f"(해제됐거나 애초에 이 계측 이후 할당된 적 없는 페이지)")
                     else:
-                        cr2_note += " -> direct map 범위 밖(유저 영역 또는 커널 코드/데이터 가상주소)"
+                        # [신규, 갱신21] direct map 범위 밖이어도 상위
+                        # 32비트가 0xffffffff인 정상 커널 가상주소를
+                        # 잘라낸 것처럼 보이는 값인지 확인 - 64->32비트
+                        # 절단 버그의 증거가 될 수 있다(위 kPanic 도달
+                        # 로그의 rip_sym과 대조).
+                        truncated_as_kernel = 0xFFFFFFFF00000000 | cr2
+                        try:
+                            sym = gdb.execute(f"info symbol 0x{truncated_as_kernel:x}", to_string=True).strip()
+                            if sym and not sym.startswith("No symbol"):
+                                cr2_note += (f" -> direct map 범위 밖이지만 0xffffffff{cr2:08x}로 "
+                                             f"복원하면 [{sym}] - 64비트 커널 포인터가 상위 32비트를 "
+                                             f"잃은 것처럼 보임(절단 버그 의심)")
+                            else:
+                                cr2_note += " -> direct map 범위 밖(유저 영역 또는 무관한 낮은 주소)"
+                        except gdb.error:
+                            cr2_note += " -> direct map 범위 밖(유저 영역 또는 무관한 낮은 주소)"
                 except gdb.error as e:
                     cr2_note = f" cr2 읽기 실패({e})"
             log(f"kPanic 도달 - vector=0x{vector:x} error_code=0x{error_code:x} "
+                f"fault_rip=0x{fault_rip:x}{rip_sym} fault_cs=0x{fault_cs:x} "
                 f"interrupt_depth={depth}{cr2_note} "
                 f"({'인터럽트 컨텍스트 안(중첩)!' if depth > 1 else '정상 깊이'})")
         except gdb.error as e:
