@@ -12,6 +12,7 @@
 namespace kernel {
 
 class Waitable;  // WeakPtr<Waitable>로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
+class Process;  // WeakPtr<Process>로만 참조(KernelThread::process) - 전체 정의는 process.h(UserThread::process와 동일한 순환 include 회피 관례)
 
 // [신규, 2026-09-19, PN-0AC554C2 1단계] Task::blockedOn(아래)의
 // ChunkedList 청크 용량 - signal.h의 kPendingSignalChunkCapacity와
@@ -275,6 +276,19 @@ struct Task {
     // 스케줄러에서 완전히 떼어낸다.
     bool isUserLevel = false;
 
+    // [신규, 2026-09-20, SP-43331889 §1, DC-91ABD922/QU-23B339AB] 이
+    // Task가 `KernelThread`(devmgr/fs 등 "커널 모드 프로세스"의 실행
+    // 단위 - ring0, 커널 자신의 주소공간 공유, ELF 로드 없이 C++ 함수
+    // 포인터를 직접 entry로 씀)면 true. `isUserLevel`과 정확히 같은
+    // 관례(평범한 bool 플래그 + `static_cast`, `Task`에 가상 함수를
+    // 추가하지 않는다 - `tcb`가 항상 오프셋 0이어야 하는 불변조건이
+    // vtable 포인터 삽입으로 깨지기 때문, SP-43331889 §4 정정 참고)
+    // - `kOwnerProcessOf(Task*)`(process.h)가 `isUserLevel`/
+    // `isKernelMode` 둘 다 확인해 `UserThread`/`KernelThread` 중
+    // 알맞은 쪽으로 `static_cast`한다. 순수 커널 전용 Task(idle/
+    // 리액터 등, Process 소속 없음)는 이 필드도 계속 기본값 false.
+    bool isKernelMode = false;
+
     // 이 Task가 지금 스케줄러의 세 큐(즉시/RT/일반) 중 어딘가에
     // 실제로 들어있는지 - **실측으로 발견한 이중 스케줄링 경쟁의
     // 구조적 방지책**(2026-09-14, Channel IPC 스트레스 테스트,
@@ -414,6 +428,34 @@ struct Task {
     // 넣는 것은 호출부 책임(아직 스케줄러 자체가 없어 별도 API 없음).
     // Paging::init() 이후에만 호출 가능(direct map 필요).
     void init(TaskEntry entry, void* arg, uint64_t stackSize = kTaskDefaultKernelStackSize);
+};
+
+// [신규, 2026-09-20, SP-43331889 §1, DC-91ABD922/QU-23B339AB 확정
+// 반영] "커널 모드 프로세스"(devmgr/fs 등을 커널에 완전 통합하되
+// `Process` 추상화 자체(자원그룹 소속/fd 테이블/essential+respawn/
+// 프로세스 트리 가시성)는 그대로 유지하기 위한 실행 단위 - `UserThread`
+// (syscall.h)와 정확히 같은 상속 패턴(`EnableSharedFromThis`까지
+// 포함, `weakAsTask()` 공개 래퍼도 동일한 이유로 필요 - `process.cpp`의
+// 외부 헬퍼가 `sharedFromThis()`(protected)에 접근 못 함)이나, ELF
+// 로드/유저 스택/별도 `pml4Phys` 없이 순수 C++ 함수 포인터를 entry로
+// 쓴다는 점이 다르다. `isUserLevel`은 항상 false(ring0이므로 CR3
+// 재동기화/ring3 진입 로직을 전부 건너뜀), `isKernelMode`는 항상
+// true(위 필드 참고) - `Task::init()`이 아니라 이 클래스 전용 초기화
+// 경로(`Process::execKernelEntry()`, SP-43331889 §2, 아직 미구현)가
+// 채운다. v1은 커널 모드 프로세스당 이 스레드 하나만 허용(devmgr/fs
+// 둘 다 현재 단일 스레드) - `Process::kernelThread` 별도 필드로 담아
+// 기존 `Process::threads`(UserThread 전용)를 건드리지 않는다.
+class KernelThread : public Task, public EnableSharedFromThis<KernelThread> {
+public:
+    WeakPtr<Task> weakAsTask() { return WeakPtr<Task>(sharedFromThis(), static_cast<Task*>(this)); }
+
+    // UserThread::process와 동일한 역할/동일한 순환 include 회피 관례.
+    WeakPtr<Process> process;
+
+    // ring0 최초 진입 시 부를 함수 포인터/인자 - `Process::
+    // execKernelEntry()`가 채운다(SP-43331889 §2).
+    void (*entry)(void*) = nullptr;
+    void* entryArg = nullptr;
 };
 
 // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 답변(QU-2FC61718)+후속

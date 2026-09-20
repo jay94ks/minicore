@@ -629,6 +629,18 @@ private:
 // 헤더 너머에서 호출해야 해 `kCanSendSignal`과 달리 공개 선언한다.
 bool kCanViewProcessStatus(const Process& caller, const Process& target);
 
+// [신규, 2026-09-20, SP-43331889 §4, DC-91ABD922/QU-23B339AB] "이
+// Task를 소유한 Process는 무엇인가"를 `UserThread`/`KernelThread`
+// 구분 없이 통일해서 묻는 헬퍼 - `vfs_syscall.cpp`/`pnp.cpp` 등
+// 여러 곳에 중복돼 있는 `static_cast<UserThread*>(submitter.get())
+// ->process.lock()` 패턴이 devmgr/fs가 `KernelThread`로 바뀐 뒤에도
+// 그대로 동작하려면 이 자유 함수를 거쳐야 한다(§4가 정정한 대로
+// `Task`에 가상 함수를 추가하지 않는다 - `isUserLevel`/`isKernelMode`
+// 평범한 bool 플래그로 분기). 기존 호출부의 실제 교체는 아직 하지
+// 않았다(이 함수 자체는 순수 추가 - 이번 커밋의 범위는 §7 착수
+// 순서의 1번뿐, 호출부 마이그레이션은 5번 이후).
+SharedPtr<Process> kOwnerProcessOf(Task* task);
+
 // [갱신, 2026-09-17, SP-E9B44929] Process 그룹(0) - SpawnProcess.
 constexpr SyscallEndpointId kSyscallEndpointSpawnProcess = kMakeSyscallEndpointId(0, 4);
 

@@ -1891,6 +1891,22 @@ bool kCanViewProcessStatus(const Process& caller, const Process& target) {
                              kPermOwnerRead);
 }
 
+// [신규, 2026-09-20, SP-43331889 §4] process.h 문서 주석 참고 -
+// `Task`에 가상 함수를 두지 않고(오프셋 0 `tcb` 불변조건) 평범한
+// bool 플래그로 `UserThread`/`KernelThread`를 구분해 분기한다.
+SharedPtr<Process> kOwnerProcessOf(Task* task) {
+    if (!task) {
+        return SharedPtr<Process>();
+    }
+    if (task->isUserLevel) {
+        return static_cast<UserThread*>(task)->process.lock();
+    }
+    if (task->isKernelMode) {
+        return static_cast<KernelThread*>(task)->process.lock();
+    }
+    return SharedPtr<Process>();
+}
+
 // [신규, 2026-09-18, PN-44C91D6E] `fork()` 본체 - idt.cpp의
 // `kHandleSyscallTrap`이 `kSyscallVerbFork`를 직접 가로채 전체
 // `InterruptFrame*`을 그대로 넘긴다(process.h의 `kHandleForkSyscall`
