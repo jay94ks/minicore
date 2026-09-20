@@ -208,11 +208,41 @@ class KPanicWatch(gdb.Breakpoint):
             # 폴트인지 구분 못 함 - rip==cr2면 코드 페치, 아니면 데이터).
             fault_rip = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 136:x}"))
             fault_cs = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 144:x}"))
+            fault_rsp = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 160:x}"))
             rip_sym = ""
             try:
                 rip_sym = " [" + gdb.execute(f"info symbol 0x{fault_rip:x}", to_string=True).strip() + "]"
             except gdb.error:
                 pass
+            # [신규, 갱신22] PN-584DB994 갱신22의 "최우선 검증" -
+            # onTick()/onForcedMigration()이 kContextSwitchFromISR() 전에
+            # EOI를 먼저 보내 이 코어에 인터럽트를 재허용하므로, 아직
+            # 전환 전인 현재 Task의 8KiB 고정 커널 스택 위에 중첩
+            # 인터럽트 프레임이 계속 쌓일 수 있다는 가설을 직접 수치로
+            # 검증한다 - fault_rsp(폴트 시점 실제 스택 포인터)를 그
+            # Task의 커널 스택 바닥(kernelStackTop-kernelStackSize)과
+            # 비교해 여유/오버플로 여부를 계산한다. gCurrentTask는
+            # `namespace kernel { namespace {} }`(이름 있는 네임스페이스
+            # 안에 중첩된 무명 네임스페이스)라 gdb가 이름으로 못 찾는
+            # 기존 한계(갱신20 문서 참고)와 똑같아, 맹글링된 심볼
+            # 이름을 직접 식별자로 참조하는 우회를 쓴다(nm으로 확인한
+            # `_ZN6kernel12_GLOBAL__N_112gCurrentTaskE`) - 이 프로젝트의
+            # 헌트가 전부 SMP1(코어 0)이므로 인덱스 0 고정.
+            stack_note = ""
+            try:
+                task_ptr = int(gdb.parse_and_eval("_ZN6kernel12_GLOBAL__N_112gCurrentTaskE[0]"))
+                if task_ptr == 0:
+                    stack_note = " task=NULL(idle?)"
+                else:
+                    stack_top = int(gdb.parse_and_eval(f"*(unsigned long*)0x{task_ptr + 24:x}"))
+                    stack_size = int(gdb.parse_and_eval(f"*(unsigned long*)0x{task_ptr + 16:x}"))
+                    stack_bottom = stack_top - stack_size
+                    headroom = fault_rsp - stack_bottom
+                    stack_note = (f" task=0x{task_ptr:x} kernelStack=[0x{stack_bottom:x}, 0x{stack_top:x}) "
+                                  f"fault_rsp=0x{fault_rsp:x} headroom={headroom} bytes"
+                                  f"{' *** 스택 바닥 이미 넘음(오버플로) ***' if headroom < 0 else ''}")
+            except gdb.error as e:
+                stack_note = f" 스택 여유 계산 실패({e})"
             cr2_note = ""
             if vector == 0xE:
                 try:
@@ -252,7 +282,7 @@ class KPanicWatch(gdb.Breakpoint):
                     cr2_note = f" cr2 읽기 실패({e})"
             log(f"kPanic 도달 - vector=0x{vector:x} error_code=0x{error_code:x} "
                 f"fault_rip=0x{fault_rip:x}{rip_sym} fault_cs=0x{fault_cs:x} "
-                f"interrupt_depth={depth}{cr2_note} "
+                f"interrupt_depth={depth}{cr2_note}{stack_note} "
                 f"({'인터럽트 컨텍스트 안(중첩)!' if depth > 1 else '정상 깊이'})")
         except gdb.error as e:
             log(f"kPanic 도달 - frame=0x{frame_ptr:x} 필드 읽기 실패({e}), interrupt_depth={depth}")
