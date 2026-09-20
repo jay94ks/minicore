@@ -281,6 +281,16 @@ constexpr uint64_t kResourceGroupHandleTagBit = 1ULL << 3;
 constexpr uint64_t kResourceGroupRootHandleBit = 1ULL << 4;
 constexpr uint64_t kResourceGroupRootCpuStatHandle = kResourceGroupHandleTagBit | kResourceGroupRootHandleBit;
 
+// [신규, 2026-09-20, PN-A40787C8] `<name>/memory.stat` 구분 비트 -
+// 동적 그룹 슬랩 포인터는 비트0~4가 전부 0이라(위 kResourceGroupHandleTagBit
+// 문서 주석 참고) 비트2도 안전하게 태그로 예약할 수 있다(비트3=태그,
+// 비트4=루트, 비트5=디렉터리와 겹치지 않음). 이 비트가 서 있으면
+// memory.stat, 없으면(기존 그대로) cpu.stat - `ResourceGroupFs::open()`이
+// `kResourceGroup{,Root}CpuStatHandle`류 기존 핸들 값에 OR로 얹고,
+// `read()`/`stat()`가 다시 이 비트만 확인해 어느 kFormat*Stat()을
+// 쓸지 고른다(루트/동적 그룹 두 경로 모두 별도 상수 없이 동일하게).
+constexpr uint64_t kResourceGroupMemoryStatFileBit = 1ULL << 2;
+
 // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신(디렉터리
 // 나열 대상) - 위 두 핸들(동적 그룹 포인터|비트3, 루트 cpu.stat)과
 // 겹치지 않도록 비트5를 함께 세운다(LiveFs의 `kLiveFsRootDirHandleValue`
