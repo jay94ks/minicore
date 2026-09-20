@@ -1,5 +1,5 @@
-#ifndef MINICORE_DEVMGR_DEVMGR_SERVICE_H
-#define MINICORE_DEVMGR_DEVMGR_SERVICE_H
+#ifndef MINICORE_KERNEL_DEVMGR_SERVICE_H
+#define MINICORE_KERNEL_DEVMGR_SERVICE_H
 
 namespace kernel {
 
@@ -11,4 +11,4 @@ void kDevmgrKernelMain(void* arg);
 
 }  // namespace kernel
 
-#endif  // MINICORE_DEVMGR_DEVMGR_SERVICE_H
+#endif  // MINICORE_KERNEL_DEVMGR_SERVICE_H

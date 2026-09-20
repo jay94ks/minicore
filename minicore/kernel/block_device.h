@@ -1,5 +1,5 @@
-#ifndef MINICORE_FS_BLOCK_DEVICE_H
-#define MINICORE_FS_BLOCK_DEVICE_H
+#ifndef MINICORE_KERNEL_BLOCK_DEVICE_H
+#define MINICORE_KERNEL_BLOCK_DEVICE_H
 
 #include "libkenv/types.h"
 
@@ -45,4 +45,4 @@ public:
 
 }  // namespace fs
 
-#endif  // MINICORE_FS_BLOCK_DEVICE_H
+#endif  // MINICORE_KERNEL_BLOCK_DEVICE_H

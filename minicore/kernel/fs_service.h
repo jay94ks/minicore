@@ -1,5 +1,5 @@
-#ifndef MINICORE_FS_FS_SERVICE_H
-#define MINICORE_FS_FS_SERVICE_H
+#ifndef MINICORE_KERNEL_FS_SERVICE_H
+#define MINICORE_KERNEL_FS_SERVICE_H
 
 namespace kernel {
 
@@ -11,4 +11,4 @@ void kFsKernelMain(void* arg);
 
 }  // namespace kernel
 
-#endif  // MINICORE_FS_FS_SERVICE_H
+#endif  // MINICORE_KERNEL_FS_SERVICE_H

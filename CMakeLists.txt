@@ -22,9 +22,14 @@ set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/arch/x86_64/linker.ld)
 option(MINICORE_TASK_STACK_GUARD_PAGE "Task 커널 스택 가드 페이지 활성화(디버그 전용)" OFF)
 
 # 모듈별 CMakeLists.txt (SP-8B6B8D25 §3 디렉터리 배치와 1:1 대응) -
-# 새 모듈(devmgr/fs/net/tty 등, 전부 유저랜드)이 생기면 여기 목록에
-# 추가한다. 전부 OBJECT 라이브러리라 실제 아카이빙/심볼가지치기 없이
-# 오브젝트가 그대로 최종 실행 파일에 들어간다.
+# 새 유저랜드 서비스 모듈(net/tty 등)이 생기면 여기 목록에 추가한다.
+# 전부 OBJECT 라이브러리라 실제 아카이빙/심볼가지치기 없이 오브젝트가
+# 그대로 최종 실행 파일에 들어간다. **[정리, 2026-09-21, 설계자 지시,
+# PN-D6A05E78]** devmgr/fs는 더 이상 여기 해당 안 됨 - Process 없는
+# 순수 커널 KernelThread로 완전 흡수돼(SP-43331889 §7)
+# minicore/kernel/CMakeLists.txt의 minicore_kernel 소스 목록에
+# devmgr.cpp/fs.cpp/ahci.cpp로 직접 들어갔다(minicore/devmgr,
+# minicore/fs 디렉터리 자체를 제거).
 add_subdirectory(minicore/libs/libkenv)
 add_subdirectory(minicore/libs/libcpio)
 add_subdirectory(minicore/libs/libkmm)
@@ -36,21 +41,10 @@ add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
 
-# [신규, 2026-09-20, SP-43331889 §7, QU-23B339AB/QU-ECEE5990] devmgr/
-# fs - 커널에 완전 흡수돼(Process 없는 순수 커널 Task) 더 이상 별도
-# 유저랜드 ELF가 아니다 - minicore/devmgr(/fs)/CMakeLists.txt 문서
-# 주석 참고. fs의 AllocDmaBuffer 커널 모드 매핑 설계는 여전히 미정
-# (dma_buffer.h 문서 주석) - 설계자 지시(QU-5FC58B06)로 그 설계
-# 결정과 무관하게 구조 전체를 먼저 옮겼다.
-add_subdirectory(minicore/devmgr)
-add_subdirectory(minicore/fs)
-
 add_executable(minicore.elf)
 target_link_libraries(minicore.elf PRIVATE
     minicore_arch_x86_64
     minicore_kernel
-    minicore_devmgr
-    minicore_fs
     libkenv
     libcpio
     libkmm

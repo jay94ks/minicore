@@ -33,8 +33,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BI
 # devmgr(SP-9DD4F3EA §6, PN-BD9AAE2F) - **[제외, 2026-09-20,
 # SP-43331889/QU-23B339AB/QU-ECEE5990] 더 이상 유저랜드 ELF가 아니다**,
 # Process 없는 순수 커널 KernelThread로 완전 흡수돼 이 유저랜드 빌드
-# 트리에서 뺐다(minicore/devmgr/CMakeLists.txt는 이제 top-level
-# CMakeLists.txt가 커널 빌드 트리에서 직접 add_subdirectory한다).
+# 트리에서 뺐다. **[정리, 2026-09-21, 설계자 지시, PN-D6A05E78]**
+# minicore/devmgr 디렉터리 자체가 사라졌다 - 소스는
+# minicore/kernel/devmgr.cpp로 옮겨 top-level CMakeLists.txt가 커널
+# 빌드 트리(minicore_kernel 소스 목록)에 직접 넣는다.
 
 # pubreg(SP-B071E628, PN-185406F6) - init/devmgr과 동일한 이유의
 # out-of-tree add_subdirectory.
@@ -48,9 +50,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/authmgr ${CMAKE_CURRENT
 # fs(SP-8B6B8D25 §4-A, PN-452FF696) - **[제외, 2026-09-20,
 # SP-43331889/QU-5FC58B06] 더 이상 유저랜드 ELF가 아니다**, devmgr과
 # 동일한 이유로 Process 없는 순수 커널 KernelThread로 완전 흡수돼
-# 이 유저랜드 빌드 트리에서 뺐다(minicore/fs/CMakeLists.txt는 이제
-# top-level CMakeLists.txt가 커널 빌드 트리에서 직접
-# add_subdirectory한다).
+# 이 유저랜드 빌드 트리에서 뺐다. **[정리, 2026-09-21, 설계자 지시,
+# PN-D6A05E78]** minicore/fs 디렉터리 자체가 사라졌다 - 소스(main.cpp,
+# ahci.h/.cpp, block_device.h)는 전부 minicore/kernel/로 옮겨
+# top-level CMakeLists.txt가 커널 빌드 트리에 직접 넣는다.
 
 # dbgtarget(PN-87D6B615 "남은 범위" 2번, 디버그 세션 E2E 전용 디버기) -
 # init/devmgr/pubreg/fs와 동일한 이유의 out-of-tree add_subdirectory.

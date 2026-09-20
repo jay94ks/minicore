@@ -1,5 +1,5 @@
-#ifndef MINICORE_FS_AHCI_H
-#define MINICORE_FS_AHCI_H
+#ifndef MINICORE_KERNEL_AHCI_H
+#define MINICORE_KERNEL_AHCI_H
 
 #include "block_device.h"
 #include "libkenv/types.h"
@@ -142,4 +142,4 @@ private:
 
 }  // namespace ahci
 
-#endif  // MINICORE_FS_AHCI_H
+#endif  // MINICORE_KERNEL_AHCI_H

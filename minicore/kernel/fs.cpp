@@ -1,4 +1,4 @@
-// minicore/fs: VFS 마운트 지점의 실질 처리를 담당하는 커널 서비스
+// fs 커널 서비스: VFS 마운트 지점의 실질 처리를 담당하는 커널 서비스
 // (SP-8B6B8D25 §4-A, PN-452FF696 항목3) - devmgr/pubreg/init과 같은
 // 이유("libmc를 통해서만 커널에 요청한다"는 모양부터 갖춘다)로 신설.
 //
@@ -31,7 +31,7 @@
 // 이름 없는 Channel을 이 프로세스가 나중에 찾아야 하는 문제
 // (SP-C2670F69 §3.1이 남겨 둔 설계 공백) 자체가 이 결정으로 사라진다
 // (같은 프로세스 안이므로 핸드오프가 필요 없음). AHCI 실제 하드웨어
-// 코드는 ahci.h/ahci.cpp(PN-4E6EA13D/PN-F60E405A, devmgr에서 이관) -
+// 코드는 ahci.h/ahci.cpp(PN-4E6EA13D/PN-F60E405A, devmgr.cpp에서 이관) -
 // `AhciBlockDevice`(block_device.h `fs::BlockDevice` 구현)까지 이
 // 증분에서 구성하지만, 그걸 실제 `FileSystemDriver::mount()`(§3.1a,
 // libext4/libvfat 자체가 아직 미구현)에 넘기는 건 여전히 범위 밖 -
@@ -46,15 +46,20 @@
 // (dma_buffer.h 문서 주석 참고) - 그 결과 AHCI 실제 I/O(ahci.cpp가
 // 요구하는 모든 DMA 버퍼 alloc)는 그 설계가 결정되기 전까지 전부
 // 우아하게 실패한다(VFS 마운트 지점 라우팅 자체엔 영향 없음). 이
-// 파일은 더 이상 유저랜드 ELF(`crt0.S`가 넘겨주던 `_start()`)가
-// 아니다 - `kmain.cpp`가 `kSpawnKernelThread(kFsKernelMain, nullptr)`
-// 로 직접 띄우는 ring0 `KernelThread`의 entry 함수다. `libmc`(트랩
-// 기반 syscall 왕복)는 더 이상 쓰지 않고 커널 내부 동기 함수를 직접
-// 호출한다(devmgr과 동일한 이유 - 같은 주소공간, 트랩 자체가
-// 무의미). 6개 syscall 중 유일하게 블로킹하는 `AcceptFromChannel`
-// 만은 `AsyncTask::submit()` 직접 호출 + `submitterTask` 수동 캡처 +
-// `AsyncTaskWaitGroup::waitAll()` 패턴을 쓴다(SP-43331889 §3-3 설계,
-// 이 전환이 그 첫 실제 실행이다).
+// 파일은 더 이상 유저랜드 ELF(예전엔 `crt0.S`가 넘겨주던 `_start()`
+// 였다)가 아니다 - `kmain.cpp`가 `kSpawnKernelThread(kFsKernelMain,
+// nullptr)`로 직접 띄우는 ring0 `KernelThread`의 entry 함수다.
+// `libmc`(트랩 기반 syscall 왕복)는 더 이상 쓰지 않고 커널 내부 동기
+// 함수를 직접 호출한다(devmgr과 동일한 이유 - 같은 주소공간, 트랩
+// 자체가 무의미). 6개 syscall 중 유일하게 블로킹하는
+// `AcceptFromChannel`만은 `AsyncTask::submit()` 직접 호출 +
+// `submitterTask` 수동 캡처 + `AsyncTaskWaitGroup::waitAll()` 패턴을
+// 쓴다(SP-43331889 §3-3 설계, 이 전환이 그 첫 실제 실행이다).
+// **[정리, 2026-09-21, 설계자 지시, PN-D6A05E78]** 예전 유저랜드
+// 진입점 `crt0.S`(devmgr과 공유하던 파일)와 이 디렉터리 자체
+// (`minicore/fs`)를 완전히 제거하고 이 파일을 `minicore/kernel/fs.cpp`
+// 로, ahci.h/ahci.cpp/block_device.h도 같은 디렉터리로 옮겼다 -
+// `minicore_kernel` 소스 목록(CMakeLists.txt)에 직접 들어간다.
 #include "ahci.h"
 #include "async_task.h"
 #include "channel.h"

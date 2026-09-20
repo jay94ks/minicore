@@ -5,8 +5,8 @@
 #include "channel.h"
 #include "debug_session.h"
 #include "delayed_exec.h"
-#include "../devmgr/devmgr_service.h"
-#include "../fs/fs_service.h"
+#include "devmgr_service.h"
+#include "fs_service.h"
 #include "dma_buffer.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
@@ -415,8 +415,8 @@ void kSpawnServiceProcesses() {
 // [신규, 2026-09-20, SP-43331889 §7] devmgr을 Process 없는 순수 커널
 // `KernelThread`로 직접 스폰한다 - 위 kSpawnServiceProcesses()의 ELF
 // 매니페스트 경로(net/tty/pubreg)와 달리 initrd/ELF 로드가 전혀
-// 없다(kernel::kDevmgrKernelMain은 그냥 함수 포인터, minicore/devmgr/
-// main.cpp 문서 주석 참고). ProcessRole/essential 같은 Process
+// 없다(kernel::kDevmgrKernelMain은 그냥 함수 포인터, devmgr.cpp 문서
+// 주석 참고). ProcessRole/essential 같은 Process
 // 전용 개념도 없다 - §7-1의 무한 대기 루프가 유일한 안전장치.
 void kSpawnDevmgrKernelThread() {
     kernel::KernelThread* thread = kernel::kSpawnKernelThread(kernel::kDevmgrKernelMain, nullptr);
@@ -430,7 +430,7 @@ void kSpawnDevmgrKernelThread() {
 
 // [신규, 2026-09-20, SP-43331889 §7, QU-5FC58B06] fs도 devmgr과
 // 완전히 동일한 방식으로 Process 없는 순수 커널 `KernelThread`로
-// 직접 스폰한다 - minicore/fs/main.cpp 문서 주석 참고.
+// 직접 스폰한다 - fs.cpp 문서 주석 참고.
 void kSpawnFsKernelThread() {
     kernel::KernelThread* thread = kernel::kSpawnKernelThread(kernel::kFsKernelMain, nullptr);
     if (!thread) {

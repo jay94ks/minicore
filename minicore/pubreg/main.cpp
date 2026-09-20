@@ -1,7 +1,7 @@
 // minicore/pubreg: "프로세스간 공개 인터페이스" Registry 서비스(5번째
 // 커널 서비스, SP-B071E628 §1~§4/§6-6, PN-185406F6) - devmgr/init과
 // 같은 이유로 "libmc를 통해서만 커널에 요청한다"는 모양부터 갖춰 둔다
-// (minicore/devmgr/main.cpp/minicore/init/main.cpp와 동일한 관례).
+// (minicore/kernel/devmgr.cpp/minicore/init/main.cpp와 동일한 관례).
 //
 // **[완료, 2026-09-18, PN-185406F6 항목4]** register/query 메시지
 // 처리(SP-B071E628 §6-6 완전 바이너리 와이어 포맷) - "새 연결 accept"

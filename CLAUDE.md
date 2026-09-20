@@ -152,7 +152,9 @@ MCP 도구(`cnw`)로만 읽고 쓴다. 파일을 직접 만들거나 수정해�
 - 디렉터리: `minicore/arch/<arch>`는 순수 부팅 stub만, 부팅 이후에도
   쓰는 아키텍처 종속 코드는 `minicore/libs/<arch_name>`, 아키텍처
   무관 early 런타임(memcpy 등)은 `minicore/libs/libkenv`, 커널은
-  `minicore/kernel`, 서비스는 `minicore/devmgr`/`fs`/`net`/`tty`.
+  `minicore/kernel`, 유저랜드 서비스는 `minicore/net`/`tty`(devmgr/fs는
+  2026-09-21부로 Process 없는 순수 커널 KernelThread로 완전 흡수돼
+  `minicore/kernel` 안으로 옮겨졌다 - PN-D6A05E78).
 - 빌드: CMake + WSL의 clang. 첫 구현 부팅 경로는 multiboot2, 부트로더는
   기존 것을 체인로더로 활용. 라이선스: MIT.
 
