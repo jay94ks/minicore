@@ -25,7 +25,7 @@ bool kValidateVfsBuffer(AsyncTask* task, const void* ptr, uint64_t length) {
     if (!submitter) {
         return false;
     }
-    // [수정, 2026-09-21, PN-A8BE8BED 항목4/SP-43331889 §3-1] 예전엔
+    // [수정, 2026-09-21, PN-A8BE8BED 항목4/SP-43331889 §7-1-b] 예전엔
     // `submitter`를 무조건 `static_cast<UserThread*>`했다 - Process
     // 없는 KernelThread 제출자(devmgr/fs, §1 확정)에겐 잠재적 UB였다
     // (pnp.cpp의 옛 `kProcessFromSubmitterForPnp`와 정확히 같은 결함,
