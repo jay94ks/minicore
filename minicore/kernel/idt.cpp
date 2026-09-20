@@ -822,15 +822,34 @@ void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
 // 정지시키는 대신 그 프로세스 하나만 죽인다. 폴트난 그 ring3
 // 명령어를 안전하게 재개할 방법이 없어 §4.4의 체크포인트 방식(다음
 // syscall 진입/ring3 재진입 시점에 pendingSignals 확인)이 적용될 수
-// 없다 - 그래서 self-terminate syscall(위 kDispatchSyscallVerb의
-// kSyscallEndpointSelfTerminate 분기)이 이미 쓰는 것과 동일한 패턴을
-// 그대로 재사용한다: kTaskOnFallingToEnd()(Zombie 표시 +
-// Syscall::submitDetached로 리액터에 정리 위임)를 부른 뒤 이 함수에서
-// 반환하지 않고 sti+hlt 루프로 들어간다 - 다음 스케줄러 틱이 다른
-// Task로 kContextSwitch할 때까지 이 코어를 안전하게 대기시키므로
-// 절대 iretq로 ring3에 돌아가지 않는다(설계자 확인 완료, "그래 이렇게
-// 해", 2026-09-16).
-void kTerminateFaultingUserTask(kernel::SignalNumber signal) {
+// 없다 - kTaskOnFallingToEnd()(Zombie 표시 + Syscall::submitDetached로
+// 리액터에 정리 위임)를 부른 뒤 이 함수에서 반환하지 않는다는 큰
+// 그림은 설계자 확인(2026-09-16, "그래 이렇게 해")에서 확정된 그대로다.
+//
+// [수정, 2026-09-21, PN-1DFCB337] 다만 "반환하지 않는" 구체적인
+// 방법은 그 확인 이후(2026-09-20) 이 프로젝트가 더 나은 패턴을 이미
+// 확립했다 - `Scheduler::parkFromISR()`(#DB ISR의 `kHandleUserBreakpointHit`,
+// debug_session.cpp 참고). 원래 이 함수는 `sti` + `for(;;) hlt`로
+// "다음 스케줄러 틱이 다른 Task로 전환할 때까지 대기"했는데, 이
+// 방식은 `isr_common_stub`이 이 #PF/#UD 진입 때 이미 늘려 둔
+// `gInterruptDepth` 카운터의 짝(`kLeaveInterruptDepth`, isr.S/
+// context_switch.S 어느 쪽도)을 **영원히** 못 맞춘다 - 이 hlt 루프의
+// C 콜스택(`kIsrHandler`←`isr_common_stub`) 자체가, 나중에 다른
+// 인터럽트가 이 코어를 다른 Task로 전환하는 순간 통째로 버려지기
+// 때문이다(그 전환은 그 "다른 인터럽트" 자신의 진입/이탈만 짝을
+// 맞출 뿐, 이 hlt 루프에 갇혀 있던 원래 #PF/#UD 진입의 이탈은 코드상
+// 존재해도 실행될 기회를 영원히 잃는다). PN-D7B66FE4(코어별 전용
+// 인터럽트 디스패치 스택)가 바로 이 카운터의 정확성에 의존하는데,
+// gdb 실측으로 이 함수가 그 카운터를 실제로 크게 어긋나게 만들고
+// 있음을 확인했다(자세한 근거는 PN-1DFCB337). `parkFromISR()`은 이
+// hlt 루프 대신 `kContextSwitchFromISR()`로 **곧장** idle로 전환해
+// 그 호출 하나로 이 진입의 카운터 감소까지 함께 마친다 - "절대
+// ring3로 안 돌아간다"는 원래 확정된 요구사항은 그대로 지키면서(idle
+// 전환도 iretq로 ring3가 아니라 idle의 재개 지점으로 감), 카운터
+// 정확성 문제만 없앤다. 게다가 idle이 곧 `AsyncReactor::drainOnce()`를
+// 도는 자리라, 방금 제출한 self-terminate 비동기 작업도 다음
+// 스케줄러 틱을 기다리지 않고 더 빨리 처리된다.
+void kTerminateFaultingUserTask(kernel::SignalNumber signal, kernel::InterruptFrame* frame) {
     auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
     // [수정, 2026-09-17, PN-E2A114C1] `thread->process`가 이제
     // `WeakPtr<Process>`라 `.lock()`으로 유효성을 확인해야 한다.
@@ -840,6 +859,14 @@ void kTerminateFaultingUserTask(kernel::SignalNumber signal) {
         }
     }
     kTaskOnFallingToEnd();
+    if (thread) {
+        kernel::Scheduler::parkFromISR(thread, frame);  // 반환하지 않음
+    }
+    // 이론상 도달 불가 - 호출부(kIsrHandler)가 이미
+    // `frame->cs == kGdtUserCodeSelector`(ring3)를 확인한 뒤에만 이
+    // 함수를 부르므로 `Scheduler::currentTask()`가 null일 수 없다.
+    // 그래도 방어적으로 예전 방식(다음 스케줄러 틱까지 안전 대기)을
+    // 최후의 안전망으로 남겨 둔다.
     asm volatile("sti");
     for (;;) {
         asm volatile("hlt");
@@ -909,13 +936,13 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
         // 폴트는 진짜 커널 버그이므로 그대로 아래 kPanic(frame)으로
         // 떨어진다(동작 변경 없음).
         if (frame->cs == kernel::kGdtUserCodeSelector) {
-            kTerminateFaultingUserTask(kernel::SignalNumber::Segv);
+            kTerminateFaultingUserTask(kernel::SignalNumber::Segv, frame);
             // kTerminateFaultingUserTask는 절대 반환하지 않는다(위 주석).
         }
     }
     if (frame->vector == 6) {  // #UD(Invalid Opcode) - [QU-04C420BF, PN-71E50394 항목3]
         if (frame->cs == kernel::kGdtUserCodeSelector) {
-            kTerminateFaultingUserTask(kernel::SignalNumber::IllegalInstruction);
+            kTerminateFaultingUserTask(kernel::SignalNumber::IllegalInstruction, frame);
             // 반환하지 않음 - ring0의 #UD(진짜 커널 버그)는 이 분기에
             // 안 걸리고 그대로 아래 kPanic(frame)으로 떨어진다.
         }
