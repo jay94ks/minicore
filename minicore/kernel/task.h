@@ -12,7 +12,7 @@
 namespace kernel {
 
 class Waitable;  // WeakPtr<Waitable>로만 참조(Task::blockedOn) - 전체 정의는 waitable.h(SP-0666DB3C §9.2, WaitCancelReason도 여기)
-class Process;  // WeakPtr<Process>로만 참조(KernelThread::process) - 전체 정의는 process.h(UserThread::process와 동일한 순환 include 회피 관례)
+struct BridgePipe;  // 포인터로만 참조(KernelThread::openBridges) - 전체 정의는 channel.h(process.h의 Process::openBridges와 동일한 순환 include 회피 관례)
 
 // [신규, 2026-09-19, PN-0AC554C2 1단계] Task::blockedOn(아래)의
 // ChunkedList 청크 용량 - signal.h의 kPendingSignalChunkCapacity와
@@ -471,6 +471,14 @@ public:
     // rbx/r12에 직접 싣는다, 위 클래스 문서 참고).
     void (*entry)(void*) = nullptr;
     void* entryArg = nullptr;
+
+    // [신규, 2026-09-20, SP-43331889 §3-1] Process::openBridges와
+    // 동일한 역할/동일한 용량(channel.h - Process 없는 KernelThread가
+    // 자신이 accept한 BridgePipe를 걸어 둘 곳이 필요해졌다. `Process`
+    // 소속 UserThread는 여전히 `Process::openBridges`를 쓴다 - 이
+    // 필드는 KernelThread 전용.
+    static constexpr uint32_t kMaxOpenBridgesChunkCapacity = 8;
+    ChunkedList<SharedPtr<BridgePipe>, kMaxOpenBridgesChunkCapacity> openBridges;
 
     // UserThread::allocate()/release()/ensureSelfRef()와 완전히 동일한
     // 계약(task.cpp에 구현) - 정적/동적 생성 양쪽 다 `submitterTask`
