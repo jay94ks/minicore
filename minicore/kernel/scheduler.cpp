@@ -276,6 +276,23 @@ Task gIdleTask[kMaxCores];
 // 것뿐(실측 후 조정 가능, RM-23F4B687 §4).
 alignas(16) uint8_t gIdleStack[kMaxCores][kTaskDefaultKernelStackSize];
 
+// [신규, 2026-09-20, PN-81E49523 2단계] `gIdleTask[coreIndex].tcb`
+// 전용 고정 블록 - 일반 Task/AsyncTask는 이제 이 블록을 Slab에서
+// 할당하지만(설계자 지시 - 커널 스택과 완전히 분리), `enterIdleLoop()`
+// 은 위 `gIdleStack`과 똑같은 이유(부팅 극초반, Slab 할당자가 아직
+// 준비되지 않았을 수 있는 시점)로 Slab을 쓸 수 없다 - 그래서 이
+// TaskTcb만은 예외적으로 `gIdleStack`과 같은 정적 배열(BSS)로 둔다.
+TaskTcb gIdleTaskTcb[kMaxCores];
+
+// [신규, 2026-09-20, PN-81E49523 2단계] `enterIdleLoop()`이 부팅 스택을
+// 영원히 버리며 `kContextSwitch`를 호출할 때 "저장은 되지만 다시는
+// 안 읽힐" `*oldTcbSlot` 쓰기 대상 - `kContextSwitch`의 저장 절반이
+// 이제 `*oldTcbSlot`이 가리키는 자리에 실제로 `mov`로 써야 하므로(더
+// 이상 `push`가 알아서 스택에 쌓아 주지 않음), 널 포인터가 아니라
+// 반드시 유효한 쓰기 가능 메모리를 가리켜야 한다 - gIdleTaskTcb와
+// 같은 이유로 Slab 대신 정적 배열.
+TaskTcb gDiscardedBootTcb[kMaxCores];
+
 // 이 코어에서 지금 실행 중인 Task - runLoop()/onTick()/yieldCurrent()
 // 만 갱신한다. [갱신, 2026-09-19, PN-D47FBB8D] `nullptr`은 이제 오직
 // 부팅 극초반(`startTickOnThisCore()` 호출 이후, 이 코어의
@@ -1550,9 +1567,11 @@ void Scheduler::onTick(InterruptFrame* frame) {
     // 않던 결함, PN-414BF822 실측 확인 - `kSpawnInitProcess()`가
     // 스폰한 `init`이 무한 대기 루프에 들어간 뒤로는 다시는 idle로
     // 안 돌아가 `kSpawnServiceProcesses()`가 스폰한 서비스들이 전부
-    // 대기만 함). 이제는 미루지 않는다 - 아래 전환 지점이
-    // `next->hasEverRun` 값으로 어느 메커니즘을 쓸지만 고른다(위
-    // `kContextSwitchToFreshTask` 문서 주석 참고).
+    // 대기만 함). 이제는 미루지 않는다 - [갱신, 2026-09-20, PN-81E49523
+    // 2단계] 당시엔 아래 전환 지점이 `next->hasEverRun` 값으로 두
+    // 메커니즘(`kContextSwitch`/`kContextSwitchToFreshTask`) 중 골랐지만,
+    // 그 구분 자체가 이제 `kContextSwitchFromISR` 하나로 통일되며
+    // 사라졌다 - 아래 그 함수 호출부 주석 참고.
 
     // Zombie면(PN-71C3D483 - kTaskOnFallingToEnd가 self-terminate 제출
     // 직전 스스로 표시해 둔 상태) 재삽입하지 않는다 - 곧 리액터의
@@ -1696,58 +1715,58 @@ void Scheduler::onTick(InterruptFrame* frame) {
         gCurrentTask[coreIndex] = next;
     }
     next->state = TaskState::Running;
-    // [정정, 2026-09-19, PN-414BF822] `next`가 이번이 첫 디스패치인지
-    // (`hasEverRun`을 아래에서 true로 확정하기 **전에**) 먼저 따로
-    // 기억해 둔다 - 이 값으로 바로 아래 전환 지점이 어느 메커니즘을
-    // 쓸지 고른다(예전엔 이 자리에 도달하는 next가 항상 hasEverRun
-    // ==true거나 Zombie 예외뿐이라는 전제가 있었으나, 이제 never-run
-    // next도 정상적으로 이 지점까지 온다 - 위 pickNext() 직후 문서
-    // 주석 참고).
-    const bool wasNeverRun = !next->hasEverRun;
-    next->hasEverRun = true;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
     kSyncDebugRegs(next);
     kSyncFsBase(next);
-    // current의 커널 스택(지금 이 인터럽트 프레임이 쌓여 있는 바로 그
-    // 스택) 위에서 호출 중이라, 나중에 current가 다시 선택되면 이
-    // 호출 지점 바로 다음부터 재개되어 자연스럽게 kIsrHandler ->
-    // isr_common_stub -> iretq로 이어진다(자기 자신의 InterruptFrame
-    // 그대로) - kContextSwitch/kContextSwitchToFreshTask 둘 다 "현재
-    // 실행 흐름 저장" 절반은 동일해 이 점은 어느 쪽을 쓰든 변하지 않는다.
-    //
-    // [신규, 2026-09-19, PN-414BF822, 설계자 답변(QU-CC3BB5AE)] next가
-    // 이번이 첫 디스패치면(`wasNeverRun`) `kContextSwitchToFreshTask`로
-    // 진짜 iretq 기반 착지를 시킨다(task.h의 그 함수 문서 주석 참고) -
-    // 이미 한 번이라도 디스패치된 적 있으면 기존 `kContextSwitch`
-    // (협조적 전환 전제) 그대로.
+    // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 지시("컨텍스트 스위치
+    // 자체를 kContextSwitchFromISR과 kContextSwitch 둘로 나눠 구현")]
+    // 이 함수는 인터럽트 핸들러(타이머 ISR) 내부에서 실행 중이므로,
+    // `frame`(하드웨어+isr_common_stub이 이미 만들어 둔 진짜
+    // InterruptFrame)을 그대로 current의 TaskTcb로 캡처하는
+    // `kContextSwitchFromISR`을 쓴다 - current의 커널 스택(지금 이
+    // 인터럽트 프레임이 쌓여 있는 바로 그 스택) 위에서 호출 중이므로,
+    // 나중에 current가 다시 선택되면 바로 이 `frame` 그대로 iretq되어
+    // 재개된다. next가 이번이 첫 디스패치인지 여부와 무관하게 항상
+    // 이 함수 하나로 통일된다 - next->tcb는 이미 한 번이라도
+    // 디스패치된 적 있는 Task라면 실제 캡처된 TaskTcb를, 한 번도 없는
+    // Task라면 Task::init()이 지어 둔 가짜 TaskTcb를 가리키며, 어느
+    // 쪽이든 모양이 완전히 같아(TaskTcb=InterruptFrame) 이 함수 하나로
+    // 균일하게 착지한다(예전 PN-414BF822의 `kContextSwitchToFreshTask`/
+    // `hasEverRun` 분기는 이 통일로 더 이상 필요 없어져 제거됨 - 그
+    // 분기가 있었던 근본 이유(popfq+ret의 RFLAGS 타이밍 위험)가 iretq
+    // 기반 착지로 애초에 사라졌기 때문).
     static_assert(kGdtKernelCodeSelector == 0x08 && kGdtKernelDataSelector == 0x10,
-                  "gdt.h 값이 바뀌면 context_switch.S의 kContextSwitchToFreshTask 리터럴도 같이 바꿀 것");
-    if (wasNeverRun) {
-        kContextSwitchToFreshTask(&current->savedRsp, next->kernelStackTop,
-                                   reinterpret_cast<uint64_t>(next->entryFn),
-                                   reinterpret_cast<uint64_t>(next->entryArg));
-    } else {
-        kContextSwitch(&current->savedRsp, next->savedRsp);
-    }
-    // [수정, 2026-09-18, PN-B5FD7B75, 설계자 승인(QU-29793535, 방향 A)]
-    // 이 줄이 바로 그 "재개 지점"이다 - current가 나중에 이 Task-to-Task
-    // 직접 전환으로 다시 선택되면(다른 코어의 onTick()이 next로 이
-    // current를 고르거나, 이 코어의 runLoop() idle→Task 경로가 골라도)
-    // 실행이 정확히 여기(kContextSwitch 호출 바로 다음)로 돌아온다.
-    // SP-83A07867 §3.2가 원래 "CR3 재동기화 필요 재개 지점은 정확히
-    // 세 곳(kTaskStartTrampoline/yieldCurrent/parkCurrent 재개)"으로
-    // 확정했지만, 이 네 번째 재개 지점은 그 목록에서 빠져 있었다 -
-    // runLoop()의 idle→Task 디스패치가 "재개 지점이 스스로 CR3를
-    // 동기화한다"고 신뢰하고 CR3 동기화를 생략하기 때문에, 이 지점이
-    // 스스로 동기화하지 않으면 CR3가 전혀 재동기화되지 않은 채 current
-    // 자신의 ring3 코드가 실행돼 즉시 #PF로 죽는다(실측 재현,
-    // PN-B5FD7B75 재현 로그 참고). kSyncCr3의 skip-if-same 최적화
-    // 덕분에 이미 next->userPml4Phys로 CR3가 그대로인 다른 흔한
-    // 재개 경로(예: 다른 코어가 이 Task를 이어서 실행할 때는 그
-    // 코어 자신의 CR3만 신경 쓰면 됨)에서는 추가 비용이 없다.
-    kSyncCr3(current);
+                  "gdt.h 값이 바뀌면 context_switch.S/task.cpp/async_task.cpp의 리터럴도 같이 바꿀 것");
+    // [수정, 2026-09-20, PN-81E49523 2단계 - minicore-3c 교차 진단으로
+    // 발견] 바로 위 문단이 설명하는 실제 전환 호출 자체가 누락돼
+    // 있었다 - kSyncCr3(next) 등으로 next의 디스패치 상태만 준비해
+    // 두고 실제 레지스터 저장/복원(iretq 착지)을 한 번도 안 한 채
+    // 함수가 그대로 끝나 버려서, current가 다시 원래 인터럽트 프레임
+    // 그대로(그러나 CR3는 이미 next로 바뀐 채) 재개되던 것이 크래시의
+    // 근본 원인이었다(cr2≈0x8 - kContextSwitchFromISR을 호출한 적이
+    // 없으니 current->tcb는 여전히 이전 상태 그대로였고, 그 다음
+    // 인터럽트가 그 어긋난 CR3 위에서 또 전환을 시도하며 실제로
+    // null에 가까운 tcb를 통해 쓰기가 일어난 것으로 보인다).
+    kContextSwitchFromISR(&current->tcb, next->tcb, frame);
+    // [제거, 2026-09-20, PN-81E49523 2단계] 예전엔 여기 `kSyncCr3(current)`
+    // 호출이 있었다(PN-B5FD7B75가 발견한 "네 번째 CR3 재동기화 지점"
+    // 수정) - 그 근거는 "current가 나중에 다시 선택되면 실행이 정확히
+    // 여기(바로 위 호출 다음)로 돌아온다"는 전제였는데, `kContextSwitchFromISR`
+    // 도입으로 그 전제가 깨졌다: current의 캡처가 이제 `frame`(진짜
+    // 원래 인터럽트 지점)이라, current가 재개되면 이 자리로 전혀
+    // 돌아오지 않고 곧장 그 원래 지점으로 iretq된다 - 이 줄은 이제
+    // 절대 도달하지 않는 죽은 코드였다. **수정된 진짜 불변조건**: CR3
+    // 재동기화 책임은 항상 "next를 실제로 디스패치하는 쪽"이 진다 -
+    // 이 함수는 이미 위에서 `kSyncCr3(next)`를 부르므로 next 쪽은
+    // 문제없다. current가 나중에 (다른 코어의 onTick()/이 코어의
+    // runLoop() idle→Task 경로 등) 어딘가에서 next 취급을 받아 다시
+    // 뽑힐 때, **그 시점의 디스패처가 다시 `kSyncCr3(next)`를 불러야
+    // 한다** - `runLoop()`의 idle→Task 디스패치도 이제 이 규칙을
+    // 예외 없이 따르도록 맞췄다(그 함수 문서 주석 참고, 예전엔 "재개
+    // 지점이 스스로 동기화한다"고 믿고 생략했으나 그 신뢰가 더 이상
+    // 성립하지 않음).
 }
 
 void Scheduler::requestForcedMigration(uint32_t fromCore, uint32_t targetCore) {
@@ -1765,7 +1784,7 @@ void Scheduler::requestForcedMigration(uint32_t fromCore, uint32_t targetCore) {
     Lapic::sendFixedIpi(Acpi::cpuApicId(fromCore), static_cast<uint8_t>(kForcedMigrationVector));
 }
 
-void Scheduler::onForcedMigration(InterruptFrame*) {
+void Scheduler::onForcedMigration(InterruptFrame* frame) {
     // 가장 먼저 EOI - onTick()과 정확히 같은 이유(위 kForcedMigrationVector
     // 선언부 주석과 onTick() 자신의 주석 참고). 이 아래서 kContextSwitch로
     // 다른 Task의 스택으로 전환하면 이 함수 호출은 그 Task가 다시
@@ -1830,32 +1849,19 @@ void Scheduler::onForcedMigration(InterruptFrame*) {
         gCurrentTask[coreIndex] = next;
     }
     next->state = TaskState::Running;
-    // [신규, 2026-09-18, PN-44C91D6E - 정정, 2026-09-19, PN-414BF822]
-    // onTick()과 정확히 같은 이유로 wasNeverRun을 먼저 기억해 둔다 -
-    // 이 함수도 인터럽트 컨텍스트(IPI 핸들러)에서 pickNext()로 뽑은
-    // next를 그대로 쓰므로, "이 API는 수동/진단 전용이라 지금은
-    // never-run Task를 여기서 처음 디스패치할 자동 경로가 없다"는
-    // 예전 가정에 안전을 기대지 않는다(경로가 없다는 게 방어는
-    // 아니다) - onTick()과 동일하게 항상 안전한 쪽을 쓴다.
-    const bool wasNeverRun = !next->hasEverRun;
-    next->hasEverRun = true;
     kSyncRsp0ForDispatch(next);
     kSyncCr3(next);
     kSyncFpu(next, coreIndex);
     kSyncDebugRegs(next);
     kSyncFsBase(next);
-    if (wasNeverRun) {
-        kContextSwitchToFreshTask(&current->savedRsp, next->kernelStackTop,
-                                   reinterpret_cast<uint64_t>(next->entryFn),
-                                   reinterpret_cast<uint64_t>(next->entryArg));
-    } else {
-        kContextSwitch(&current->savedRsp, next->savedRsp);
-    }
-    // [수정, 2026-09-18, PN-B5FD7B75] onTick()의 동일 지점과 정확히
-    // 같은 이유 - 이 Task-to-Task 직접 전환도 current의 재개 지점을
-    // 여기(kContextSwitch 바로 다음)에 남기므로, onTick()과 똑같이
-    // 네 번째 재개 지점에 해당한다. 같은 함수 위의 onTick() 주석 참고.
-    kSyncCr3(current);
+    // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 지시] onTick()과
+    // 정확히 같은 이유로 `kContextSwitchFromISR`로 통일 - `frame`(이
+    // IPI 핸들러 자신의 InterruptFrame)을 그대로 current의 TaskTcb로
+    // 캡처한다. onTick() 위쪽의 상세 주석 참고.
+    kContextSwitchFromISR(&current->tcb, next->tcb, frame);
+    // [제거, 2026-09-20, PN-81E49523 2단계] onTick()과 정확히 같은
+    // 이유로 여기 있던 `kSyncCr3(current)`를 제거했다 - 그 함수의
+    // 해당 주석 참고(이제 절대 도달하지 않는 죽은 코드였음).
 }
 
 // [신규, 2026-09-17, PN-2008220B] kTaskStartTrampoline과 동일한
@@ -1883,59 +1889,44 @@ void Scheduler::enterIdleLoop() {
     asm volatile("pushfq; pop %0" : "=r"(currentRflags));
 
     uint8_t* stackTop = gIdleStack[coreIndex] + sizeof(gIdleStack[coreIndex]);
-    // [갱신, 2026-09-20, PN-81E49523 1단계, QU-AA1AA7F9] task.cpp의
-    // Task::init()과 정확히 같은 레이아웃(그 함수 문서 주석의 "쓰는
-    // 순서는 pop되는 순서의 정반대" 설명 참고, kContextSwitch가 이제
-    // 전체 GPR+RFLAGS를 pop한다) - rbx에 &runLoop을 실어
-    // kIdleLoopTrampoline이 그대로 call한다. runLoop()은 인자를 받지
-    // 않으므로 r12(트램폴린이 rdi로 옮기는 kTaskStartTrampoline과 달리
-    // 이 트램폴린은 그 mov도 안 함)를 비롯한 나머지 GPR은 그냥 0으로
-    // 채운다.
-    auto* sp = reinterpret_cast<uint64_t*>(stackTop);
-    *(--sp) = reinterpret_cast<uint64_t>(&kIdleLoopTrampoline);  // "return address"
-    *(--sp) = currentRflags;                                      // RFLAGS: 호출 시점 그대로 보존
-    *(--sp) = 0;                                                  // rax
-    *(--sp) = reinterpret_cast<uint64_t>(&runLoop);               // rbx -> 트램폴린이 call
-    *(--sp) = 0;                                                  // rcx
-    *(--sp) = 0;                                                  // rdx
-    *(--sp) = 0;                                                  // rsi
-    *(--sp) = 0;                                                  // rdi
-    *(--sp) = 0;                                                  // rbp
-    *(--sp) = 0;                                                  // r8
-    *(--sp) = 0;                                                  // r9
-    *(--sp) = 0;                                                  // r10
-    *(--sp) = 0;                                                  // r11
-    *(--sp) = 0;                                                  // r12 (미사용)
-    *(--sp) = 0;                                                  // r13
-    *(--sp) = 0;                                                  // r14
-    *(--sp) = 0;                                                  // r15
+    // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 지시] `gIdleTaskTcb[coreIndex]`
+    // (위 선언부 참고 - 부팅 극초반 제약으로 Slab이 아니라 정적 배열)를
+    // 필드별로 직접 채운다. rbx에 &runLoop을 실어 kIdleLoopTrampoline이
+    // 그대로 call한다. runLoop()은 인자를 받지 않으므로 r12(트램폴린이
+    // rdi로 옮기는 kTaskStartTrampoline과 달리 이 트램폴린은 그 mov도
+    // 안 함)를 비롯한 나머지 GPR은 그냥 0으로 채운다. rspOld=stackTop
+    // (이 코어의 idle 전용 커널 스택 top 그대로).
+    TaskTcb* tcb = &gIdleTaskTcb[coreIndex];
+    *tcb = TaskTcb{};
+    tcb->rbx = reinterpret_cast<uint64_t>(&runLoop);            // 트램폴린이 call
+    tcb->rip = reinterpret_cast<uint64_t>(&kIdleLoopTrampoline);
+    tcb->cs = 0x08;                                             // kGdtKernelCodeSelector
+    tcb->rflags = currentRflags;                                // 호출 시점 그대로 보존
+    tcb->rspOld = reinterpret_cast<uint64_t>(stackTop);
+    tcb->ssOld = 0x10;                                          // kGdtKernelDataSelector
 
     // [신규, 2026-09-19, PN-D47FBB8D] 이 코어의 idle/리액터를
     // `gIdleTask[coreIndex]`(진짜 `Task`)로 등록한다 - 일반
     // `Task::init()`을 쓰지 않는 이유는 위 gIdleTask 선언부 문서
     // 주석 그대로(부팅 극초반 Page/Slab 할당자 의존 회피, RFLAGS
-    // 보존 등 이 함수 고유의 제약과 안 맞음) - 방금 손으로 지은
-    // 스택 프레임을 그대로 이 Task의 savedRsp로 삼는다.
-    gIdleTask[coreIndex].savedRsp = reinterpret_cast<uint64_t>(sp);
+    // 보존 등 이 함수 고유의 제약과 안 맞음) - 방금 채운 고정 TaskTcb
+    // 블록을 그대로 이 Task의 tcb로 삼는다.
+    gIdleTask[coreIndex].tcb = tcb;
     gIdleTask[coreIndex].taskClass = TaskClass::Idle;
     gIdleTask[coreIndex].state = TaskState::Running;
-    // PN-44C91D6E의 "never-run Task를 중첩 인터럽트에서 첫 디스패치
-    // 하면 위험하다"는 우려가 여기는 해당 없다 - 지금 이 함수 자신이
-    // 그 첫 디스패치이고, 인터럽트에 중첩된 게 아니라 이 코어의 순수
-    // 부팅 흐름 그 자체다(kTaskStartTrampoline/kIdleLoopTrampoline이
-    // 똑같이 "가짜 kContextSwitch 프레임"이라는 점만 같을 뿐).
-    gIdleTask[coreIndex].hasEverRun = true;
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
         gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
     }
 
     // 지금 서 있는 스택(BSP의 kMain()/AP의 kApMain()이 쓰던 부팅
-    // 스택)은 다시는 돌아오지 않으므로 그 RSP를 저장할 슬롯이 진짜로
-    // 필요하지는 않지만, kContextSwitch의 시그니처를 그대로 재사용하기
-    // 위해 버리는 지역 변수를 하나 둔다.
-    uint64_t discardedOldRsp = 0;
-    kContextSwitch(&discardedOldRsp, gIdleTask[coreIndex].savedRsp);
+    // 스택)은 다시는 돌아오지 않으므로 그 캡처 결과가 진짜로 필요하지는
+    // 않지만, kContextSwitch의 저장 절반이 *oldTcbSlot이 가리키는
+    // 자리에 실제로 값을 써야 하므로(더 이상 push가 스택에 알아서
+    // 쌓아 주지 않음 - PN-81E49523 2단계) 유효한 스크래치를 가리키게
+    // 한다.
+    TaskTcb* discardedOldTcb = &gDiscardedBootTcb[coreIndex];
+    kContextSwitch(&discardedOldTcb, gIdleTask[coreIndex].tcb);
     // runLoop()은 [[noreturn]]이라 여기로 절대 돌아오지 않는다 -
     // 컴파일러에게도 그렇게 알려 둔다(이 함수 자신도 [[noreturn]]).
     __builtin_unreachable();
@@ -2006,7 +1997,7 @@ void Scheduler::runLoop() {
         // 넘어가는 시점(kContextSwitch 내부의 mov rsp,rsi) 사이에 이
         // 코어의 틱이 끼어들면, onTick이 "next가 이미 실행 중"이라고
         // 착각해 아직 idle 스택 위에 있는 이 kContextSwitch 호출을
-        // next 자신의 것처럼 다시 가로채어 버린다(next->savedRsp가
+        // next 자신의 것처럼 다시 가로채어 버린다(next->tcb가
         // idle 스택의 스냅샷으로 덮어쓰임 - 실측으로 발견한 버그).
         // 여기서 끝 인터럽트는 kContextSwitch의 pushfq/popfq를 통해
         // idle 쪽에만 저장되고(나중에 idle이 재개될 때만 다시 반영),
@@ -2019,28 +2010,26 @@ void Scheduler::runLoop() {
             gCurrentTask[coreIndex] = next;
         }
         next->state = TaskState::Running;
-        // [신규, 2026-09-18, PN-44C91D6E - 정정, 2026-09-19, PN-414BF822]
-        // 이 idle->Task 디스패치는 협조적 컨텍스트(인터럽트에 중첩되지
-        // 않음)라 never-run Task도 원래부터 `kContextSwitch`로 안전하게
-        // 첫 디스패치할 수 있는 자리다 - `onTick()`(인터럽트 컨텍스트)
-        // 쪽만 별도로 `kContextSwitchToFreshTask`가 필요했을 뿐,
-        // 이 경로는 그대로 둔다. hasEverRun을 여기서 확정해 두면
-        // onTick()이 이 Task를 다시 볼 때 이미 true이므로 (여전히
-        // 유효한) 기존 kContextSwitch 분기를 탄다.
-        next->hasEverRun = true;
-        // CR3는 여기서 안 건드린다(kSyncCr3 문서 주석 참고 - PN-2008220B
-        // 이후로는 "이 idle 컨텍스트의 스택이 안전하지 않을 수 있다"는
-        // 이유가 아니라, SP-83A07867이 확정한 CR3 동기화 지점 통합
-        // 정책을 그대로 지키는 것뿐이다). **SP-83A07867로
-        // 더 이상 여기서 신경 쓸 필요가 없다** - 이 kContextSwitch가
-        // 도착하는 지점(최초 실행이면 kTaskStartTrampoline의
-        // kSyncCr3OnTaskStart 호출, yieldCurrent/parkCurrent로
-        // 파킹됐다가 재개되는 것이면 그 함수들 자신의 재개 지점)이
-        // 전부 자기 자신의 안전한 스택으로 이미 넘어온 뒤 CR3를
-        // 동기화하므로, runLoop()은 그 도착 지점이 무엇이든 몰라도
-        // 된다(§3.2 - 이 설계의 핵심 이점).
+        // [갱신, 2026-09-20, PN-81E49523 2단계] 예전엔 여기서 CR3를
+        // 건드리지 않았다 - "이 kContextSwitch가 도착하는 지점(최초
+        // 실행이면 kTaskStartTrampoline의 kSyncCr3OnTaskStart 호출,
+        // yieldCurrent/parkCurrent 재개면 그 함수들 자신의 재개 지점)이
+        // 전부 자기 자신의 안전한 스택으로 넘어온 뒤 스스로 CR3를
+        // 동기화한다"는 신뢰(SP-83A07867 §3.2) 때문이었다. 그런데
+        // `kContextSwitchFromISR` 도입으로 이 신뢰가 깨졌다 - onTick()/
+        // onForcedMigration()에 의해 "current"로 캡처됐던 Task가 이
+        // 자리에서 next로 뽑히면, 그 Task의 tcb는 실제 원래 인터럽트
+        // 지점(순수 ring3/커널 코드, 스스로 CR3를 동기화하는 코드가
+        // 전혀 없음)을 그대로 담고 있다 - 그래서 이제는 **모든 디스패처가
+        // 예외 없이 `kSyncCr3(next)`를 불러야 한다**는 단순한 규칙으로
+        // 통일했다(onTick()/onForcedMigration()의 해당 주석 참고 -
+        // 그쪽은 이미 그렇게 하고 있었다). `kSyncCr3`의 skip-if-same
+        // 최적화 덕분에 실제로 CR3가 그대로인 흔한 경우(kTaskStartTrampoline/
+        // yieldCurrent/parkCurrent처럼 스스로도 동기화하는 도착 지점)엔
+        // 추가 비용이 없다.
         kSyncRsp0ForDispatch(next);
-        kContextSwitch(&gIdleTask[coreIndex].savedRsp, next->savedRsp);
+        kSyncCr3(next);
+        kContextSwitch(&gIdleTask[coreIndex].tcb, next->tcb);
         // yieldCurrent()로 되돌아온 경우에만 이 지점으로 온다(onTick의
         // Task-to-Task 직접 전환은 이 프레임을 거치지 않는다) - 다음
         // 루프에서 pickNext가 새 상태를 다시 판단한다. 이 시점의
@@ -2105,7 +2094,7 @@ void Scheduler::yieldCurrent() {
     // 스택 위에 있을 때 CR3를 미리 gBootPml4Phys로 되돌린다(위
     // kSyncCr3ForIdleTransition 문서 주석 참고).
     kSyncCr3ForIdleTransition();
-    kContextSwitch(&current->savedRsp, gIdleTask[coreIndex].savedRsp);
+    kContextSwitch(&current->tcb, gIdleTask[coreIndex].tcb);
     // **SP-83A07867(QU-892AB38A 설계자 답변, 2026-09-15) - 이 재개
     // 지점이 바로 §3.2 갈래②의 세 곳 중 하나다.** 위 kContextSwitch가
     // 반환한 이 시점은 이미 이 Task 자신의(안전한) 스택으로 넘어온
@@ -2166,7 +2155,7 @@ void Scheduler::parkCurrent() {
     // PN-57CF48DB - yieldCurrent()와 같은 이유로 여기서도 idle로
     // 떠나기 전에 CR3를 미리 gBootPml4Phys로 되돌린다.
     kSyncCr3ForIdleTransition();
-    kContextSwitch(&current->savedRsp, gIdleTask[coreIndex].savedRsp);
+    kContextSwitch(&current->tcb, gIdleTask[coreIndex].tcb);
     // SP-83A07867 §3.2 갈래②의 나머지 한 곳 - yieldCurrent()의 재개
     // 지점과 완전히 동일한 이유로 여기서도 CR3를 동기화한다(위
     // yieldCurrent() 주석 참고 - 이 함수가 첫 실제 소비자가 되기
@@ -2223,7 +2212,7 @@ void Scheduler::retireCurrentTask() {
     // 지점은 재개가 없어(zombie, 다시 뽑히지 않음) 도착 지점에서
     // 뒤늦게 동기화할 기회 자체가 없다.
     kSyncCr3ForIdleTransition();
-    kContextSwitch(&current->savedRsp, gIdleTask[coreIndex].savedRsp);
+    kContextSwitch(&current->tcb, gIdleTask[coreIndex].tcb);
     // 이 지점으로 다시는 돌아오지 않는다(current는 이미 Zombie로
     // 어느 스케줄 큐에도 없어 다시 뽑힐 수 없다) - kAsyncTaskEntryWrapper
     // 와 동일한 패턴의 방어적 무한 루프.
@@ -2259,6 +2248,9 @@ void Scheduler::cancelPendingSyscalls(UserThread* userThread) {
             // 리액터는 autoFree=false라 이미 손을 뗀 상태이므로
             // 여기서 대신 반납한다.
             GenericSlabAllocator::free(reinterpret_cast<void*>(asyncTask->stackBase), kAsyncTaskStackSize);
+            if (asyncTask->tcb) {
+                GenericSlabAllocator::free(asyncTask->tcb, sizeof(TaskTcb));  // PN-81E49523 2단계 - stackBase와 별도 할당
+            }
             GenericSlabAllocator::free(asyncTask, sizeof(AsyncTask));
             userThread->pendingSyscalls.erase(slot);
             return;
@@ -2308,6 +2300,13 @@ void Scheduler::retireTask(Task* task) {
     // scheduler.h 문서 주석 참고).
     task->state = TaskState::Zombie;
     PageFrameAllocator::freeOrder(task->kernelStackPhys, kOrderForCleanup(task->kernelStackSize));
+    // [신규, 2026-09-20, PN-81E49523 2단계] tcb가 이제 커널 스택과
+    // 완전히 별도의 Slab 할당 - 위 커널 스택 반납과 별개로 반드시
+    // 여기서도 반납해야 새지 않는다.
+    if (task->tcb) {
+        GenericSlabAllocator::free(task->tcb, sizeof(TaskTcb));
+        task->tcb = nullptr;
+    }
 }
 
 void Scheduler::disablePreemption() {

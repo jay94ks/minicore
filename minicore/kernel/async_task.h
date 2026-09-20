@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_ASYNC_TASK_H
 #define MINICORE_KERNEL_ASYNC_TASK_H
 
+#include "interrupt_frame.h"
 #include "libkenv/chunked_list.h"
 #include "libkenv/coroutine.h"
 #include "libkenv/shared_ptr.h"
@@ -15,7 +16,7 @@ namespace kernel {
 // 커널 전용 비동기 프레임워크(SP-F682B889, 확정) - kernel::Task보다
 // 훨씬 가벼운 전용 스택을 쓰는 스케줄링 가능 단위. Task와 같은
 // 소프트웨어 컨텍스트 전환(kContextSwitch)을 그대로 재사용한다(구조가
-// 거의 동일 - savedRsp 오프셋 0 고정, task.h의 Task와 같은 불변조건).
+// 거의 동일 - tcb 오프셋 0 고정, task.h의 Task와 같은 불변조건).
 using AsyncTaskSubjectCode = uint32_t;   // 어느 AsyncTaskHandler에 속하는지
 using AsyncTaskManageCode = uint64_t;    // 그 작업 주체 안에서 이 인스턴스를 식별하는 관리 코드
 
@@ -266,10 +267,12 @@ private:
 };
 
 struct AsyncTask {
-    // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이
-    // 오프셋(항상 첫 필드)을 그대로 참조한다 - task.h의 Task와 동일한
-    // 불변조건.
-    uint64_t savedRsp = 0;
+    // [갱신, 2026-09-20, PN-81E49523 2단계] context_switch.S의
+    // kContextSwitch/kTaskStartTrampoline이 이 오프셋(항상 첫 필드)을
+    // 그대로 참조한다 - task.h의 Task::tcb와 동일한 불변조건/타입
+    // (TaskTcb=InterruptFrame, 별도 변환 없이 kContextSwitch에 바로
+    // 넘길 수 있어야 함).
+    TaskTcb* tcb = nullptr;
 
     uint64_t stackBase = 0;  // GenericSlabAllocator가 준 가상주소(해제 시 필요)
     AsyncTaskState state = AsyncTaskState::Ready;
@@ -278,7 +281,7 @@ struct AsyncTask {
     // 코루틴으로 구현돼 co_await로 suspend된 경우에만 값이 채워진다
     // (스택풀 모드 또는 co_await 없이 끝까지 실행된 코루틴은 비어
     // 있음, `AsyncExecCoro::done()`이 이미 true이므로 저장할 필요가
-    // 없다 - stackBase/savedRsp가 스택풀 모드 전용이듯 이 필드는
+    // 없다 - stackBase/tcb가 스택풀 모드 전용이듯 이 필드는
     // 정확히 "코루틴이 아직 끝나지 않고 남아 있을 때"만 유효하다).
     // `AsyncReactor::drainOnce()`가 이 필드로 재개 방식을 고른다 -
     // 비어 있으면 기존 `kContextSwitch`(스택풀), 채워져 있으면

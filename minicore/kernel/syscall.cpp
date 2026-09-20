@@ -319,6 +319,9 @@ Syscall::MultiWaitResult Syscall::waitForAnyOf(const AsyncTaskManageCode* tokens
             }
             if (readyTask) {
                 GenericSlabAllocator::free(reinterpret_cast<void*>(readyTask->stackBase), kAsyncTaskStackSize);
+                if (readyTask->tcb) {
+                    GenericSlabAllocator::free(readyTask->tcb, sizeof(TaskTcb));  // PN-81E49523 2단계 - stackBase와 별도 할당
+                }
                 GenericSlabAllocator::free(readyTask, sizeof(AsyncTask));
             }
             return result;

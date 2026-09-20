@@ -110,6 +110,21 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
     // 가리키게 된다.
     kernel::kSyncFsBaseToUser(static_cast<kernel::UserThread*>(self));
 
+    // [신규, 2026-09-20, PN-81E49523 2단계 디버깅 중 발견] `cli`로
+    // 인터럽트를 잠깐 끈 뒤 pushq 시퀀스를 진행한다 - 이 5개의 push가
+    // 진짜 iretq 프레임 하나를 원자적으로 구성하는 중인데, 그 도중
+    // 타이머 틱이 끼어들면 캡처되는 InterruptFrame이 "본격적인 트랩
+    // 경계"가 아니라 이 인라인 asm 블록 한중간을 가리키게 된다 -
+    // `kContextSwitchFromISR` 도입(PN-81E49523 2단계) 이후 타이밍이
+    // 미묘하게 달라지며 QEMU 실측으로 처음 재현된 레이스(그 전엔
+    // 이 몇 안 되는 명령어 사이에 틱이 끼어들 확률이 낮아 관측되지
+    // 않았을 뿐 - 근본적으로는 이 함수가 항상 안고 있던 취약점).
+    // `pushq $0x202`(RFLAGS, IF=1)가 iretq 완료 시점에 원자적으로
+    // 반영되므로, 여기서 끈 인터럽트는 iretq가 실제로 ring3 착지를
+    // 마치는 바로 그 순간에 자동으로 다시 켜진다 - isr_common_epilogue
+    // 가 이미 의존하는 것과 동일한 x86_64 iretq 원자성.
+    asm volatile("cli" ::: "memory");
+
     // iretq 프레임(SS/RSP/RFLAGS/CS/RIP)을 쌓은 뒤 iretq로 실제 특권
     // 레벨 전환을 일으킨다.
     asm volatile(
@@ -158,6 +173,11 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
 
     kernel::kSyncFsBaseToUser(self);
 
+    // [신규, 2026-09-20, PN-81E49523 2단계 디버깅 중 발견] kEnterRing3와
+    // 동일한 이유 - 이 pushq 시퀀스 도중 타이머 틱이 끼어드는 레이스를
+    // 막는다(그 함수 문서 주석 참고).
+    asm volatile("cli" ::: "memory");
+
     // `"D"(startArg)` - 컴파일러가 이 값을 RDI에 실어 두게 강제한다
     // (SysV 첫 인자 레지스터). 그 뒤 push들은 RDI를 전혀 건드리지
     // 않으므로 iretq가 실행되는 순간에도 RDI는 그대로 startArg다.
@@ -205,6 +225,11 @@ constexpr kernel::uint64_t kMmapRegionCeil = kUserStackTop - kUserStackSize - 0x
         : "rax", "memory");
 
     kernel::kSyncFsBaseToUser(self);
+
+    // [신규, 2026-09-20, PN-81E49523 2단계 디버깅 중 발견] kEnterRing3와
+    // 동일한 이유 - 아래 22개 push 시퀀스 도중 타이머 틱이 끼어드는
+    // 레이스를 막는다(그 함수 문서 주석 참고).
+    asm volatile("cli" ::: "memory");
 
     // isr_common_stub(isr.S)의 push 순서(r15..rax, 마지막 push=rax가
     // 최저 주소)와 정확히 같은 레이아웃을 이 함수 자신의 스택 위에

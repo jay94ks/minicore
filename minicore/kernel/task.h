@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_TASK_H
 #define MINICORE_KERNEL_TASK_H
 
+#include "interrupt_frame.h"
 #include "libkcont/intrusive_list.h"
 #include "libkenv/chunked_list.h"
 #include "libkenv/shared_ptr.h"
@@ -148,14 +149,22 @@ private:
 };
 
 // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이 구조체의
-// savedRsp 오프셋(항상 첫 필드, 오프셋 0)을 그대로 참조한다 - 필드
-// 순서를 바꾸려면 그쪽 어셈블리도 같이 확인해야 한다.
+// tcb 오프셋(항상 첫 필드, 오프셋 0)을 그대로 참조한다 - 필드 순서를
+// 바꾸려면 그쪽 어셈블리도 같이 확인해야 한다.
 struct Task {
-    // 이 Task가 스위칭 아웃될 때의 RSP(커널 스택 안, kContextSwitch가
-    // push한 레지스터들의 맨 위를 가리킨다). init() 직후엔 아직 한
-    // 번도 실행되지 않은 상태로 kTaskStartTrampoline에 진입하도록
-    // 미리 꾸며 둔 스택을 가리킨다.
-    uint64_t savedRsp = 0;
+    // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 지시("TaskTcb 자체를
+    // Task 구조체에 계속 유지해두고, kContextSwitch에 바로 넘길 수 있는
+    // 형태로 유지")] 이 Task의 마지막으로 캡처된 완전한 레지스터
+    // 상태(TaskTcb=InterruptFrame, interrupt_frame.h)를 직접 가리키는
+    // 포인터 - `kContextSwitch`/`kContextSwitchFromISR`에 그대로
+    // 넘겨(추가 변환/복사 없이) 다음 전환의 newTcb 인자로 쓸 수 있다.
+    // 실제로 가리키는 위치는 상황에 따라 다르다: 이 Task 자신의 커널
+    // 스택 위(`kContextSwitch`가 그 자리에서 조립한 프레임, 협조적
+    // 전환), 인터럽트가 만든 진짜 InterruptFrame 그대로(`kContextSwitchFromISR`,
+    // 재조립 없이 그 주소만 저장), 또는 `Task::init()`이 미리 지어 둔
+    // 가짜 최초 프레임 - 셋 다 모양이 완전히 같아(TaskTcb) 어느 쪽이든
+    // 균일하게 재개 가능하다.
+    TaskTcb* tcb = nullptr;
 
     uint64_t kernelStackPhys = 0;  // PageFrameAllocator가 준 물리주소(해제 시 필요)
     uint64_t kernelStackSize = 0;
@@ -231,40 +240,15 @@ struct Task {
     TaskClass taskClass = TaskClass::Normal;
     uint32_t affinityMask = kTaskAffinityAllCores;
 
-    // [신규, 2026-09-18, PN-44C91D6E - 수정, 2026-09-19, PN-414BF822,
-    // 설계자 답변(QU-CC3BB5AE)] 이 Task가 실제로 한 번이라도 디스패치된
-    // 적 있는지 - Task::init() 직후에는 항상 false, `runLoop()`의
-    // idle->Task 디스패치/`onTick()`의 Task-to-Task 직접 전환 어느
-    // 쪽이든 실제 디스패치 직전에 true로 확정된다.
-    //
-    // **[정정, PN-414BF822]** 원래(PN-44C91D6E)는 이 플래그가
-    // "`onTick()`이 이 Task를 아예 미루고 큐에 도로 넣는다"는 회피용
-    // 판단에 쓰였다 - 그런데 그 회피가 "현재 실행 중인 Task가 절대
-    // 자발적으로 CPU를 내려놓지 않으면(예: `for(;;) { pause; }`),
-    // 이 코어가 다시는 idle로 안 돌아가 이 Task가 영원히 첫 디스패치를
-    // 못 받는" 라이브락을 낳았다(devmgr/fs/pubreg가 전혀 실행되지
-    // 않던 결함, PN-414BF822 실측 확인). 설계자 답변(QU-CC3BB5AE):
-    // "인터럽트에서 작업이 전환되는 것을 단일 메서드로 과도하게
-    // 일반화하지 말고, iretq로 인터럽트가 리턴되는 시점의 스택에
-    // push된 레지스터/cs/플래그로 전환되는 컨텍스트 스위칭 variation이
-    // 필요하다" - 이제 `Scheduler::onTick()`은 이 플래그로 **미루지
-    // 않고**, 어느 전환 메커니즘을 쓸지만 고른다: `true`면 기존
-    // `kContextSwitch`(콜리세이브+RFLAGS만 저장/복원, 협조적 전환용),
-    // `false`면 `kContextSwitchToFreshTask`(진짜 `iretq`로 착지시켜
-    // RFLAGS의 IF=1이 하드웨어가 보장하는 원자적 인터럽트-복귀
-    // 시점에만 반영되게 하는 전용 variation, 아래 `entryFn`/`entryArg`
-    // 참고)를 쓴다.
-    bool hasEverRun = false;
-
-    // [신규, 2026-09-19, PN-414BF822] `hasEverRun==false`일 때
-    // `Scheduler::onTick()`이 `kContextSwitchToFreshTask()`(context_switch.S)
-    // 에 넘길 진입점/인자 - `Task::init()`이 채운다. 기존 kContextSwitch
-    // 기반 첫 디스패치(`runLoop()`의 idle->Task 경로)가 여전히 쓰는
-    // "가짜 콜리세이브 프레임"(savedRsp가 가리키는 스택 최상단, 그대로
-    // 유지됨)과는 별개의, 병행하는 표현이다 - 어느 경로로 첫 디스패치
-    // 되든 이 Task가 결국 도달해야 하는 지점(entry(arg) 호출)은 같다.
-    TaskEntry entryFn = nullptr;
-    void* entryArg = nullptr;
+    // [제거, 2026-09-20, PN-81E49523 2단계] `hasEverRun`/`entryFn`/
+    // `entryArg` 필드는 여기 있었다 - `Scheduler::onTick()`/
+    // `onForcedMigration()`이 "next가 한 번도 디스패치된 적 있는지"에
+    // 따라 `kContextSwitch`/`kContextSwitchToFreshTask` 중 고르던
+    // 시절(PN-414BF822)의 흔적으로, 그 분기 자체가 이제 `kContextSwitchFromISR`
+    // 하나로 통일되며 완전히 죽은 필드가 됐다(Task::init()이 짓는 가짜
+    // 최초 프레임이 이제 완전한 `TaskTcb`라 별도 entryFn/entryArg 인자
+    // 전달 없이 그 프레임 자체가 rbx/r12 자리에 entry/arg를 담아
+    // 옮긴다 - context_switch.S 참고). 제거함.
 
     // [신규, PN-A74871F2, DC-8EA1E7F6/PL-2D3184BC "Task 자료구조" 절이
     // 원래 요구했으나 구현에서 누락됐던 필드 - RM-F2DAFF66 §1-A 발견]
@@ -432,30 +416,39 @@ struct Task {
     void init(TaskEntry entry, void* arg, uint64_t stackSize = kTaskDefaultKernelStackSize);
 };
 
-// 현재 실행 흐름의 레지스터 상태를 저장하고 newRsp로 전환한다 -
-// *oldRspSlot에 전환 전 RSP를 기록한다. 소프트웨어 방식 컨텍스트
-// 스위칭(DC-8EA1E7F6/QU-BA001D73 - "하드웨어 TSS 대신 소프트웨어
-// 스위칭") - x86_64 System V 콜리세이브 레지스터(rbx/rbp/r12-r15)와
-// RFLAGS만 저장/복원한다(caller-saved 레지스터는 C++ 호출 규약상
-// 이미 호출부가 필요하면 자기 스택에 저장해 뒀을 것이므로 안 건드림).
-extern "C" void kContextSwitch(uint64_t* oldRspSlot, uint64_t newRsp);
+// [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 답변(QU-2FC61718)+후속
+// 지시("TaskTcb 자체를 Task 구조체에 계속 유지해두고, kContextSwitch에
+// 바로 넘길 수 있는 형태로 유지")] 현재 실행 흐름의 완전한 레지스터
+// 상태(TaskTcb=InterruptFrame, interrupt_frame.h)를 이 자리에서 직접
+// 조립해 저장하고 newTcb로 전환한다 - `*oldTcbSlot`에 전환 전
+// TaskTcb*(=`&current->tcb`가 넘기는 그 슬롯)를 기록한다. 복원은
+// 예외 없이 `isr_common_epilogue`(isr.S)로 점프해 `newTcb`가 가리키는
+// 자리를 그대로 새 RSP로 삼아 진짜 `iretq`로 착지한다(x86_64 표준
+// 구현 방식) - 포인터 하나만 넘기면 되므로 별도 복사/변환 오버헤드가
+// 없다. 평범한 C++ 함수 호출로 불리는 협조적 전환 전용(Scheduler::
+// parkCurrent()/yieldCurrent() 등, 인터럽트에 중첩되지 않음) - 인터럽트
+// 핸들러 내부에서는 대신 `kContextSwitchFromISR`을 쓴다.
+extern "C" void kContextSwitch(TaskTcb** oldTcbSlot, TaskTcb* newTcb);
 
-// [신규, 2026-09-19, PN-414BF822, 설계자 답변(QU-CC3BB5AE)] `kContextSwitch`
-// 의 "현재 실행 흐름 저장" 앞부분(pushfq+콜리세이브 push+*oldRspSlot=rsp)
-// 은 완전히 동일하게 재사용하지만, 복원 쪽은 `popfq`+`ret`(협조적 전환
-// 전제 - RFLAGS를 미리 CPU에 반영한 뒤에도 몇 명령어 더 진행해야
-// 목적지에 안전하게 도착함) 대신, `newStackTop`/`entryFn`/`entryArg`로
-// 완전한 `InterruptFrame`을 그 자리에서 합성해 `isr_common_epilogue`
-// (`isr.S`, `kResumeForkedRing3`가 이미 증명한 것과 같은 기법)로 점프해
-// **진짜 `iretq` 한 번**으로 착지시킨다 - RFLAGS(IF=1 포함)가 하드웨어의
-// 원자적 "인터럽트로부터 복귀" 시점에만 반영되므로, popfq 직후~목적지
-// 코드가 안정되기 전 사이에 인터럽트가 조기에 재중첩될 위험이 없다.
-// 한 번도 디스패치된 적 없는(`hasEverRun==false`) Task를 `onTick()`
-// (타이머 인터럽트 컨텍스트)에서 처음 디스패치할 때 전용으로 쓴다 -
-// `runLoop()`의 idle->Task 첫 디스패치(협조적 컨텍스트, 원래도 안전)는
-// 여전히 기존 `kContextSwitch`를 그대로 쓴다.
-extern "C" void kContextSwitchToFreshTask(uint64_t* oldRspSlot, uint64_t newStackTop, uint64_t entryFn,
-                                            uint64_t entryArg);
+// [신규, 2026-09-20, PN-81E49523 2단계, 설계자 지시("컨텍스트 스위치
+// 자체를 kContextSwitchFromISR과 kContextSwitch 둘로 나눠 구현")]
+// 인터럽트 핸들러 내부(`Scheduler::onTick()`/`onForcedMigration()`,
+// 둘 다 하드웨어+`isr_common_stub`이 이미 만들어 둔 진짜
+// `InterruptFrame*`을 인자로 받고 있음)에서 전용으로 쓴다 -
+// `currentFrame`이 가리키는 그 실제 프레임을 그대로 "이 Task의 마지막
+// 캡처"로 삼으므로(다시 조립할 필요가 전혀 없음) `kContextSwitch`보다
+// 훨씬 단순하다. 복원 쪽은 `kContextSwitch`와 완전히 동일하게
+// `isr_common_epilogue`로 점프 - 두 함수 모두 저장 결과물이 정확히
+// 같은 `TaskTcb` 모양이라, 어느 쪽으로 저장됐든 다음 재개는 어느
+// 함수를 통해서도 안전하다(`next->tcb`를 그대로 새 `newTcb`로 넘기기만
+// 하면 됨). `Scheduler::onTick()`/`onForcedMigration()`이 이 함수
+// 하나로 통일되면서, 예전에 있었던 "next가 한 번도 디스패치된 적
+// 있는지"(`hasEverRun`)에 따라 `kContextSwitch`/`kContextSwitchToFreshTask`
+// 중 고르던 분기 자체가 사라졌다(Task::init()이 짓는 가짜 최초 프레임도
+// 이제 완전한 TaskTcb라 이 함수 하나로 균일하게 착지 가능 - PN-414BF822가
+// 그 분기를 도입했던 근본 이유(popfq/ret의 RFLAGS 타이밍 위험)가
+// iretq 기반 착지로 애초에 사라졌기 때문).
+extern "C" void kContextSwitchFromISR(TaskTcb** oldTcbSlot, TaskTcb* newTcb, TaskTcb* currentFrame);
 
 }  // namespace kernel
 

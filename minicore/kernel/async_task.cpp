@@ -209,11 +209,29 @@ AsyncTaskQueue gPreemptiveQueues[kMaxCores];
 kernel::AsyncTask* gCurrentAsyncTask[kMaxCores] = {};
 
 // 이 코어에서 "지금 이 자리"(runLoop()의 idle 인라인 호출이든, §4 (C)
-// 경로의 IPI 핸들러든)가 AsyncTask로 전환하기 직전의 자기 자신 RSP -
-// AsyncTask::yield()가 돌아올 자리(옛 "리액터 Task 컨텍스트"와 정확히
-// 같은 역할, 이름만 유지 - 별도 Task가 아니게 됐다고 해서 이 슬롯
-// 자체의 의미가 바뀌지는 않는다).
-kernel::uint64_t gReactorSavedRsp[kMaxCores] = {};
+// 경로의 IPI 핸들러든)가 AsyncTask로 전환하기 직전의 자기 자신
+// TaskTcb* - AsyncTask::yield()가 돌아올 자리(옛 "리액터 Task 컨텍스트"와
+// 정확히 같은 역할, 이름만 유지 - 별도 Task가 아니게 됐다고 해서 이
+// 슬롯 자체의 의미가 바뀌지는 않는다). [갱신, 2026-09-20, PN-81E49523
+// 2단계] `uint64_t`에서 `TaskTcb*`로 - kContextSwitch에 변환 없이
+// 바로 넘기기 위함.
+//
+// [수정, 2026-09-20, PN-81E49523 2단계 - minicore-3c 교차 진단 +
+// 실측으로 확인] 이 배열은 예전엔 `uint64_t`(RSP 값 자체)라 그냥
+// 0에서 시작해도 안전했다(옛 kContextSwitch가 push한 뒤의 RSP를
+// 대입만 했다) - 그런데 `TaskTcb*`로 바뀌면서 새 kContextSwitch의
+// 저장 절반이 "이 포인터가 가리키는 곳에 필드를 직접 쓴다"로 바뀌어,
+// 이 포인터 자신이 미리 유효한 버퍼를 가리키고 있어야 하는데 아무도
+// 채워 준 적이 없었다(Task::tcb/AsyncTask::tcb가 각자 init()에서
+// slab 할당을 받는 것과 달리, 이 전역은 그런 초기화 지점이 아예
+// 없었다) - 부팅 후 첫 `AsyncReactor::drainOnce()`가 §4(C) 경로로
+// 반드시 한 번은 도달하는 시점(4개 서비스 스폰 직후 첫 IPI 강제
+// 드레인)에 `*(TaskTcb*)nullptr`에 레지스터를 쓰다 크래시했다(cr2=
+// 0x8=offsetof(TaskTcb,rbx), 이전 세션이 보고한 그 신호 그대로) -
+// `gIdleTaskTcb`/`gDiscardedBootTcb`와 같은 패턴으로 전용 정적 버퍼를
+// 만들고 `AsyncReactor::init()`에서 한 번에 연결한다.
+kernel::TaskTcb gReactorTcbStorage[kMaxCores];
+kernel::TaskTcb* gReactorSavedRsp[kMaxCores] = {};
 
 // AsyncReactor::drainOnce()의 재진입 방지 플래그(2026-09-16 재구조,
 // PN-FEAAF154) - 이미 이 코어에서 드레인이 진행 중일 때(gReactorSavedRsp
@@ -358,6 +376,12 @@ void kReleaseAsyncTask(AsyncTask* task) {
         task->weakRef = nullptr;
     }
     GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
+    if (task->tcb) {
+        // [신규, 2026-09-20, PN-81E49523 2단계] tcb가 이제 stackBase와
+        // 완전히 별도의 Slab 할당 - AsyncTask 자신을 반납하기 전에
+        // 먼저 반납해야 새지 않는다.
+        GenericSlabAllocator::free(task->tcb, sizeof(TaskTcb));
+    }
     GenericSlabAllocator::free(task, sizeof(AsyncTask));
 }
 
@@ -386,37 +410,29 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
         stackBase = 0;
-        savedRsp = 0;
+        tcb = nullptr;
         return;  // 호출부(submit)가 stackBase==0을 확인해 실패 처리해야 한다
     }
     stackBase = reinterpret_cast<uint64_t>(stack);
 
-    // [갱신, 2026-09-20, PN-81E49523 1단계, QU-AA1AA7F9] kContextSwitch가
-    // 이제 전체 GPR+RFLAGS를 pop한다(context_switch.S 참고) - task.cpp의
-    // Task::init()과 완전히 동일한 레이아웃(그 함수 문서 주석의 "쓰는
-    // 순서는 pop되는 순서의 정반대" 설명 참고), entry만
+    // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 지시] task.cpp의
+    // Task::init()과 완전히 동일한 이유/레이아웃 - 이 AsyncTask 전용
+    // 고정 TaskTcb 블록을 커널 스택(=이 AsyncTask 전용 실행 스택
+    // `stackBase`)과 완전히 별도로 Slab에서 할당한다. entry만
     // kAsyncTaskEntryWrapper로 고정하고 arg는 이 AsyncTask 자신(this)이다.
     const uint64_t stackTop = stackBase + kAsyncTaskStackSize;
-    auto* sp = reinterpret_cast<uint64_t*>(stackTop);
-    *(--sp) = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);
-    *(--sp) = 0x202;                                            // RFLAGS: IF=1
-    *(--sp) = 0;                                                // rax
-    *(--sp) = reinterpret_cast<uint64_t>(&kAsyncTaskEntryWrapper);  // rbx -> 트램폴린이 call
-    *(--sp) = 0;                                                // rcx
-    *(--sp) = 0;                                                // rdx
-    *(--sp) = 0;                                                // rsi
-    *(--sp) = 0;                                                // rdi
-    *(--sp) = 0;                                                // rbp
-    *(--sp) = 0;                                                // r8
-    *(--sp) = 0;                                                // r9
-    *(--sp) = 0;                                                // r10
-    *(--sp) = 0;                                                // r11
-    *(--sp) = reinterpret_cast<uint64_t>(this);                 // r12 -> 트램폴린이 rdi로 옮김
-    *(--sp) = 0;                                                // r13
-    *(--sp) = 0;                                                // r14
-    *(--sp) = 0;                                                // r15
-
-    savedRsp = reinterpret_cast<uint64_t>(sp);
+    if (tcb) {
+        GenericSlabAllocator::free(tcb, sizeof(TaskTcb));
+    }
+    tcb = reinterpret_cast<TaskTcb*>(GenericSlabAllocator::alloc(sizeof(TaskTcb)));
+    *tcb = TaskTcb{};
+    tcb->rbx = reinterpret_cast<uint64_t>(&kAsyncTaskEntryWrapper);  // 트램폴린이 call
+    tcb->r12 = reinterpret_cast<uint64_t>(this);                     // 트램폴린이 rdi로 옮김
+    tcb->rip = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);
+    tcb->cs = 0x08;                                                  // kGdtKernelCodeSelector
+    tcb->rflags = 0x202;                                             // IF=1
+    tcb->rspOld = stackTop;
+    tcb->ssOld = 0x10;                                               // kGdtKernelDataSelector
 }
 
 void AsyncTask::yield() {
@@ -437,7 +453,7 @@ void AsyncTask::yield() {
     // 쪽의 "같은 Task가 큐와 currentTask에 동시에 존재" 경쟁과 달리,
     // submitCompletion은 이 AsyncTask 자체를 currentTask 여부로 분기하지
     // 않고 그냥 큐에 넣기만 하므로 이중 스케줄링 경로가 없다.
-    kContextSwitch(&self->savedRsp, gReactorSavedRsp[coreIndex]);
+    kContextSwitch(&self->tcb, gReactorSavedRsp[coreIndex]);
     // 리액터가 이 AsyncTask를 다시 뽑아 재개하면 이 지점으로 돌아온다.
 }
 
@@ -580,6 +596,13 @@ void AsyncReactor::init() {
     // 이유) - AP는 이 클래스를 위해 더 이상 아무것도 부를 필요가 없다
     // (코어별 큐는 이미 정적 배열, 전용 Task 자체가 없어졌다).
     Idt::registerHandler(kAsyncDrainVector, kAsyncDrainIsr);
+    // [신규, 2026-09-20, PN-81E49523 2단계] gReactorSavedRsp 문서 주석
+    // 참고 - 모든 코어의 슬롯이 첫 drainOnce() 이전에 이미 유효한
+    // 버퍼를 가리키도록 여기서 한 번에 연결한다(순수 정적 배열 쓰기라
+    // 이 코어/저 코어 구분 없이 BSP 혼자 전부 채워도 안전).
+    for (uint32_t i = 0; i < kMaxCores; ++i) {
+        gReactorSavedRsp[i] = &gReactorTcbStorage[i];
+    }
 }
 
 bool AsyncReactor::drainOnce(uint32_t coreIndex) {
@@ -749,7 +772,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             // 재사용 - 인터럽트 자체는 막지 않아 EOI/하드웨어 처리는 정상
             // 진행됨).
             PreemptionGuard guard;
-            kContextSwitch(&gReactorSavedRsp[coreIndex], task->savedRsp);
+            kContextSwitch(&gReactorSavedRsp[coreIndex], task->tcb);
         }
         // [PN-584DB994] coroHandle 분기와 동일 - 리액터/idle 컨텍스트로
         // 돌아가기 전 CR3를 이 재개/진입 이전 값으로 되돌린다.

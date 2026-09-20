@@ -191,46 +191,38 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
 #endif
     kernelStackTop = stackTop;
 
-    // [갱신, 2026-09-20, PN-81E49523 1단계, QU-AA1AA7F9] kContextSwitch가
-    // 이제 전체 GPR+RFLAGS를 pop한다(context_switch.S 참고) - **push는
-    // 스택을 감소 방향으로 채우므로 "쓰는 순서"는 "pop되는 순서"의
-    // 정반대다**: 실제 pop 순서는 r15,r14,...,rax,popfq,ret(가장 먼저
-    // pop되는 r15가 가장 낮은 주소=savedRsp) - 그래서 여기서는 높은
-    // 주소부터 retaddr, rflags, rax, rbx, ..., r15 순으로 써야 마지막
-    // 쓰기(r15)가 가장 낮은 주소(=savedRsp)에 정확히 오게 된다. rbx=entry,
-    // r12=arg로 채워 kTaskStartTrampoline이 그대로 꺼내 쓰게 하고,
-    // 나머지 GPR은 안 쓰므로 0으로 채운다. RFLAGS는 IF=1(인터럽트 허용,
-    // 비트9)만 켜서 시작한다.
-    auto* sp = reinterpret_cast<uint64_t*>(stackTop);
-    *(--sp) = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);  // "return address"
-    *(--sp) = 0x202;                                              // RFLAGS: IF=1 + 예약된 비트1
-    *(--sp) = 0;                                                  // rax
-    *(--sp) = reinterpret_cast<uint64_t>(entry);                  // rbx -> 트램폴린이 call
-    *(--sp) = 0;                                                  // rcx
-    *(--sp) = 0;                                                  // rdx
-    *(--sp) = 0;                                                  // rsi
-    *(--sp) = 0;                                                  // rdi
-    *(--sp) = 0;                                                  // rbp
-    *(--sp) = 0;                                                  // r8
-    *(--sp) = 0;                                                  // r9
-    *(--sp) = 0;                                                  // r10
-    *(--sp) = 0;                                                  // r11
-    *(--sp) = reinterpret_cast<uint64_t>(arg);                    // r12 -> 트램폴린이 rdi로 옮김
-    *(--sp) = 0;                                                  // r13
-    *(--sp) = 0;                                                  // r14
-    *(--sp) = 0;                                                  // r15
+    // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 지시("TaskTcb 자체를
+    // Task 구조체에 계속 유지해두고, kContextSwitch에 바로 넘길 수
+    // 있는 형태로 유지" + "커널 스택을 할당하는 방식으로 Tcb를 유지
+    // 하지 말고, Slab 할당자를 변형하든 어떻게 하든해서 Tcb 자체를
+    // 할당하여 활용")] 이 Task 전용 고정 `TaskTcb` 블록을 커널 스택과
+    // 완전히 별도로 Slab에서 할당하고, kTaskStartTrampoline이 기대하는
+    // 최초 진입 상태를 필드별로 직접 채운다 - `kContextSwitch`/
+    // `kContextSwitchFromISR`의 복원 쪽(`isr_common_epilogue`로 점프)이
+    // 이 블록 자체를 그대로 새 RSP로 삼아 iretq하므로(context_switch.S
+    // 참고), rip/cs/rflags/rspOld/ssOld까지 전부 여기서 실제 값으로
+    // 채워야 한다. rbx=entry, r12=arg로 채워 kTaskStartTrampoline이
+    // 그대로 꺼내 쓰게 하고, 나머지 GPR은 안 쓰므로 0. rspOld=stackTop
+    // (이 Task의 커널 스택을 통째로 물려준다 - TaskTcb 블록 자체는
+    // 커널 스택과 무관한 별도 메모리이므로 "이 프레임이 차지한 자리를
+    // 되돌려준다"는 옛 관례가 아니라 그냥 이 Task의 진짜 스택 top).
+    if (tcb) {
+        // [신규, 2026-09-20, PN-81E49523 2단계] fpuContext.reset()과
+        // 동일한 이유 - memset(0) 없이 재사용되는 경로에서 이전 수명의
+        // TaskTcb 블록이 새지 않도록 먼저 반납한다.
+        GenericSlabAllocator::free(tcb, sizeof(TaskTcb));
+    }
+    tcb = reinterpret_cast<TaskTcb*>(GenericSlabAllocator::alloc(sizeof(TaskTcb)));
+    *tcb = TaskTcb{};
+    tcb->rbx = reinterpret_cast<uint64_t>(entry);      // 트램폴린이 call
+    tcb->r12 = reinterpret_cast<uint64_t>(arg);         // 트램폴린이 rdi로 옮김
+    tcb->rip = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);
+    tcb->cs = 0x08;                                     // kGdtKernelCodeSelector
+    tcb->rflags = 0x202;                                // IF=1 + 예약된 비트1
+    tcb->rspOld = stackTop;
+    tcb->ssOld = 0x10;                                  // kGdtKernelDataSelector
 
-    savedRsp = reinterpret_cast<uint64_t>(sp);
     state = TaskState::Ready;
-    hasEverRun = false;  // PN-44C91D6E - task.h 문서 주석 참고
-    // [신규, 2026-09-19, PN-414BF822] kContextSwitchToFreshTask()가
-    // onTick()에서 이 Task를 직접(인터럽트 컨텍스트에서) 첫 디스패치할
-    // 때 쓸 값 - 위 가짜 콜리세이브 프레임에 이미 같은 값을 심어 뒀지만
-    // (rbx/r12 자리), 그건 kContextSwitch의 pop 규약 전용이라 별도
-    // 명명 필드로도 남겨 둔다(둘 다 같은 entry/arg를 가리키는 병행
-    // 표현일 뿐, 이 Task가 실제로 도달해야 하는 지점은 동일하다).
-    entryFn = entry;
-    entryArg = arg;
     // [신규, 2026-09-19, PN-8726CDBD] async_task.h의 AsyncTask::init()이
     // selfWaitable을 명시적으로 리셋해 두는 것과 같은 이유 - 이 Task가
     // (memset(0)을 새로 거치지 않고) 재사용되는 경로가 있다면 이전
