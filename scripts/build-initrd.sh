@@ -40,13 +40,17 @@ mkdir -p "${STAGE_DIR}"
 # 한다(경로 접두어 없이 "init"/"pubreg") - cpio 아카이브 안에도 이
 # 이름 그대로 들어가도록 스테이징 디렉터리 안에서 상대경로로 넘긴다.
 # pubreg(PN-185406F6, 2026-09-17) 추가 - init과 동일한 이유.
+# authmgr(PN-24A2B6F5/PN-CFEAEF40, 2026-09-20) 추가 - v1은 스캐폴딩만
+# (실제 프로토콜은 후속 세션), 부팅 매니페스트 왕복 자체는 pubreg와
+# 동일하게 검증 대상.
 cp "${BUILD_USERLAND_DIR}/minicore-init/init" "${STAGE_DIR}/init"
 cp "${BUILD_USERLAND_DIR}/minicore-pubreg/pubreg" "${STAGE_DIR}/pubreg"
+cp "${BUILD_USERLAND_DIR}/minicore-authmgr/authmgr" "${STAGE_DIR}/authmgr"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr)"

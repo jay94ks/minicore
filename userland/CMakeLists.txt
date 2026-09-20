@@ -40,6 +40,11 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BI
 # out-of-tree add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/pubreg ${CMAKE_CURRENT_BINARY_DIR}/minicore-pubreg)
 
+# authmgr(SP-8B6B8D25 §3.1 항목8, PN-24A2B6F5/PN-CFEAEF40) -
+# init/pubreg와 동일한 이유의 out-of-tree add_subdirectory. v1은
+# 스캐폴딩만(PN-CFEAEF40) - 실제 프로토콜/libkvdb 연동은 후속 세션.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/authmgr ${CMAKE_CURRENT_BINARY_DIR}/minicore-authmgr)
+
 # fs(SP-8B6B8D25 §4-A, PN-452FF696) - **[제외, 2026-09-20,
 # SP-43331889/QU-5FC58B06] 더 이상 유저랜드 ELF가 아니다**, devmgr과
 # 동일한 이유로 Process 없는 순수 커널 KernelThread로 완전 흡수돼

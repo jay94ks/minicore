@@ -102,7 +102,7 @@ kernel::uint64_t gInitImageSize = 0;
 bool gInitImageFound = false;
 
 // 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - initrd 안에서
-// "net"/"tty"/"pubreg"라는 정확한 이름과 일치하는 실행 파일을 찾아
+// "net"/"tty"/"pubreg"/"authmgr"라는 정확한 이름과 일치하는 실행 파일을 찾아
 // ProcessRole::KernelService로 스폰하는 고정 이름 목록("pubreg"는
 // [추가, 2026-09-16, 설계자 지시 - SP-B071E628 "프로세스간 공개
 // 인터페이스" 재설계로 5번째 커널 서비스 신설], SP-EAB162FC §2.2가
@@ -113,16 +113,26 @@ bool gInitImageFound = false;
 // kSpawnServiceProcesses() 호출부 근처 kSpawnDevmgrKernelThread()/
 // kSpawnFsKernelThread() 참고) initrd 안에 실행 파일 자체가
 // 없어졌다(scripts/build-initrd.sh도 더 이상 이 둘을 담지 않음).
+// **[추가, 2026-09-20, SP-8B6B8D25 §3.1 항목8, PN-24A2B6F5/
+// PN-CFEAEF40]** "authmgr"(6번째 커널 서비스, 사용자 신원 관리)이
+// pubreg와 동일한 이유로 이 목록에 새로 추가됐다 - v1은 스캐폴딩만
+// (PN-CFEAEF40 범위, 실제 프로토콜은 후속 세션).
 // "init"과 완전히 같은 물리 메모리 안전성 이유(위 gInitImageBuffer
 // 문서 주석 참고 - PageFrameAllocator::init() 이전에 커널 BSS 안으로
 // 복사해 둬야 그 예약 범위에 자동으로 포함된다)로 각자 전용 정적
 // 버퍼를 쓴다. v1은 이 이름들 각각 정확히 하나의 인스턴스만 지원
 // (여러 개가 있으면 마지막으로 매치된 것만 남는다 - 지금은 문제되지
 // 않음, 실제로 여러 인스턴스가 필요해지면 재검토).
-constexpr kernel::uint32_t kServiceManifestCount = 3;
+// [추가, 2026-09-20, SP-8B6B8D25 §3.1 항목8, PN-24A2B6F5/PN-CFEAEF40]
+// "authmgr"(6번째 커널 서비스, 사용자 신원 관리) - v1은 스캐폴딩만
+// (PN-CFEAEF40 범위) - 실제 프로토콜 처리는 minicore/authmgr/main.cpp가
+// accept 직후 즉시 close하는 상태라, 이 매니페스트 항목이 있어도 아직
+// 유의미한 요청 왕복은 일어나지 않는다.
+constexpr kernel::uint32_t kServiceManifestCount = 4;
 kernel::uint8_t gNetImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gTtyImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gPubregImageBuffer[kMaxInitImageSize];
+kernel::uint8_t gAuthmgrImageBuffer[kMaxInitImageSize];
 
 struct ServiceManifestEntry {
     const char* name;
@@ -136,6 +146,7 @@ ServiceManifestEntry gServiceManifest[kServiceManifestCount] = {
     {"net", 3, gNetImageBuffer},
     {"tty", 3, gTtyImageBuffer},
     {"pubreg", 6, gPubregImageBuffer},
+    {"authmgr", 7, gAuthmgrImageBuffer},
 };
 
 // 부팅 모듈(initrd)이 있으면 libcpio로 훑어 로그를 남기고(QU-9DCDCE3E -
