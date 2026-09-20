@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-20T05:42:36.155Z
+  updatedAt: 2026-09-20T07:58:07.840Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1592,6 +1592,22 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 - **조치**: `PN-6CE4DD35`로 등록(우선순위 낮음, `requestForcedMigration()`에
   실제 호출부가 생기는 시점과 함께 처리 권장).
 - **현재 상태**: 갭 등록 완료, 미해소(추적은 `PN-6CE4DD35`로 이관).
+
+- **[점검 완료, 2026-09-20] `SP-5130284C`(인터럽트 컨텍스트 SharedPtr
+  소멸 지연 메커니즘, approved)** - §7 착수 순서 5단계 전부 코드로
+  확인됨: `gInterruptDepth[kAcpiMaxCpus]`+isr.S 증감 배선(1단계),
+  `ControlBlockBase::_deferredNext`+`kPushDeferredDestructionImpl`/
+  `kDrainDeferredDestructions`(deferred_destruction.cpp, 2단계),
+  `releaseStrong()` 통합(§3.2-a 정정대로 `_destroyOwned`/
+  `releaseWeak` 둘 다 지연, 3단계), `AsyncReactor::drainOnce()` 드레인
+  호출(4단계), 표준 회귀 3종(5단계) - 전부 갭 없음. 다만 §3.2의
+  "`isr_common_epilogue`에 감소를 걸면 충분"이라는 서술이 실제로는
+  세 경로(자연 복귀/`kContextSwitchFromISR`/`kResumeForkedRing3`)로
+  나뉘어 처리된다는 걸 놓치고 있어 문서에 §3.2-c로 보강 완료(코드
+  갭 아님 - 실제 구현은 처음부터 세 경로를 정확히 구분해 뒀음, 이
+  세션이 직접 작성한 코드라 대조 확인). §6의 "수정 전/후 스트레스
+  재현" 항목은 `PN-4137C88C`가 이미 "실측 시도 안 함"으로 정직하게
+  기록해 둔 별도의 QA 갭이라 이 문서에 중복 등록하지 않는다.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
