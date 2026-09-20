@@ -2,19 +2,44 @@
  * "컨텍스트 전환 메커니즘은 소프트웨어 방식의 스위칭을 기본으로
  * 한다") - x86 하드웨어 TSS 태스크 스위칭은 안 쓴다.
  *
- * kContextSwitch(oldRspSlot=rdi, newRsp=rsi): System V AMD64 콜리
- * 세이브 레지스터(rbx/rbp/r12-r15)와 RFLAGS를 현재 스택에 push하고
- * 그 RSP를 *oldRspSlot에 저장한 뒤, RSP를 newRsp로 바꿔 그 자리의
- * 값들을 pop한다 - 마지막 ret가 그 태스크가 스위칭 아웃됐던 지점
- * (기존에 이미 한 번이라도 디스패치된 Task, 협조적 전환 전제)으로
- * 이어간다.
+ * kContextSwitch(oldRspSlot=rdi, newRsp=rsi): 현재 스택에 RFLAGS +
+ * 전체 GPR(rax/rbx/rcx/rdx/rsi/rdi/rbp/r8-r15, 15개)을 push하고 그
+ * RSP를 *oldRspSlot에 저장한 뒤, RSP를 newRsp로 바꿔 그 자리의 값들을
+ * pop한다 - 마지막 ret가 그 태스크가 스위칭 아웃됐던 지점(기존에
+ * 이미 한 번이라도 디스패치된 Task, 협조적 전환 전제)으로 이어간다.
+ *
+ * [갱신, 2026-09-20, PN-81E49523 1단계, 설계자 답변(QU-AA1AA7F9) -
+ * "단계적 통합. 컨텍스트 스위치는 언제나 전체 레지스터를 저장하고
+ * 복원해야만해"] 원래는 System V AMD64 콜리세이브 레지스터(rbx/rbp/
+ * r12-r15)만 push/pop했다 - 이 함수가 평범한 C++ 함수 호출로 불리는
+ * 한(실제로 항상 그렇다) caller-saved 레지스터는 컴파일러가 호출부
+ * 자신의 스택에 이미 안전하게 미뤄 두므로 그 좁은 집합만으로도 기술적
+ * 정확성 자체엔 문제가 없었다. 그런데도 설계자가 "언제나 전체
+ * 레지스터"를 명시적으로 요구한 이유: "쓰레드의 마지막으로 캡쳐된
+ * TCB"라는 개념(PN-81E49523 배경)이 케이스1-3(Task 최초 디스패치/
+ * ring3 최초 진입/fork 재개, 전부 완전한 InterruptFrame 값을 다룸)과
+ * 케이스4(이 함수가 담당하는, 이미 실행된 적 있는 스레드의 정지→재개)
+ * 사이에서 "완전한 레지스터 집합"이라는 균일한 모양을 갖도록 - 실제
+ * 재개 메커니즘(이 함수는 여전히 협조적 pop+ret, 케이스1-3/#DB는
+ * iretq 프레임 합성)을 당장 통일하는 것은 QU-AA1AA7F9가 지적한 대로
+ * 이 커널의 거의 모든 블로킹 syscall 핸들러를 코루틴 스타일로
+ * 재설계해야 하는 훨씬 큰 후속 단계로 미루되, 그 전에 먼저 "캡처되는
+ * 값의 모양"부터 케이스 구분 없이 통일하는 것이 이번 1단계다.
  *
  * [신규, 2026-09-19, PN-414BF822] `kContextSwitchToFreshTask`(아래,
- * kTaskStartTrampoline 앞)는 이 함수의 "저장" 절반은 그대로 재사용
- * 하되, "복원" 절반을 진짜 `iretq` 기반으로 바꾼 variation - 한 번도
- * 디스패치된 적 없는 Task를 인터럽트 컨텍스트(`onTick()`)에서 첫
- * 디스패치할 때만 쓴다(설계자 답변 QU-CC3BB5AE - "인터럽트에서 작업
- * 전환을 단일 메서드로 과도하게 일반화하지 말 것").
+ * kTaskStartTrampoline 앞)는 이 함수의 "저장" 절반과 **정확히 같은
+ * push 순서**를 그대로 재사용하되(위 1단계 변경 이후에도 두 "저장"
+ * 절반은 항상 바이트 단위로 일치해야 한다 - 이 절반으로 저장된
+ * Task가 나중에 평범한 kContextSwitch의 "복원" 절반으로 재개될 수
+ * 있으므로), "복원" 절반을 진짜 `iretq` 기반으로 바꾼 variation -
+ * 한 번도 디스패치된 적 없는 Task를 인터럽트 컨텍스트(`onTick()`)에서
+ * 첫 디스패치할 때만 쓴다(설계자 답변 QU-CC3BB5AE - "인터럽트에서
+ * 작업 전환을 단일 메서드로 과도하게 일반화하지 말 것").
+ *
+ * Task::init()(task.cpp)/AsyncTask::init()(async_task.cpp)이 한 번도
+ * 실행된 적 없는 새 스택을 "이 함수로 막 돌아온 것처럼" 수동으로
+ * 꾸며 둘 때도 아래와 정확히 같은 pop 순서(레지스터 값 배치)를
+ * 따라야 한다 - 편집 시 그 두 파일도 함께 확인할 것.
  */
 
 .intel_syntax noprefix
@@ -25,8 +50,17 @@
 .global kContextSwitch
 kContextSwitch:
     pushfq
-    push rbp
+    push rax
     push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
     push r12
     push r13
     push r14
@@ -39,8 +73,17 @@ kContextSwitch:
     pop r14
     pop r13
     pop r12
-    pop rbx
+    pop r11
+    pop r10
+    pop r9
+    pop r8
     pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     popfq
     ret
 
@@ -75,8 +118,17 @@ kContextSwitch:
 .global kContextSwitchToFreshTask
 kContextSwitchToFreshTask:
     pushfq
-    push rbp
+    push rax
     push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
     push r12
     push r13
     push r14

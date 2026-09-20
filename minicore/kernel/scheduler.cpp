@@ -1883,16 +1883,28 @@ void Scheduler::enterIdleLoop() {
     asm volatile("pushfq; pop %0" : "=r"(currentRflags));
 
     uint8_t* stackTop = gIdleStack[coreIndex] + sizeof(gIdleStack[coreIndex]);
-    // task.cpp의 Task::init()과 정확히 같은 레이아웃(그 함수 문서
-    // 주석 참고) - rbx에 &runLoop을 실어 kIdleLoopTrampoline이 그대로
-    // call한다. runLoop()은 인자를 받지 않으므로 r12(트램폴린이
-    // rdi로 옮기는 kTaskStartTrampoline과 달리 이 트램폴린은 그 mov도
-    // 안 함)는 그냥 0으로 채운다.
+    // [갱신, 2026-09-20, PN-81E49523 1단계, QU-AA1AA7F9] task.cpp의
+    // Task::init()과 정확히 같은 레이아웃(그 함수 문서 주석의 "쓰는
+    // 순서는 pop되는 순서의 정반대" 설명 참고, kContextSwitch가 이제
+    // 전체 GPR+RFLAGS를 pop한다) - rbx에 &runLoop을 실어
+    // kIdleLoopTrampoline이 그대로 call한다. runLoop()은 인자를 받지
+    // 않으므로 r12(트램폴린이 rdi로 옮기는 kTaskStartTrampoline과 달리
+    // 이 트램폴린은 그 mov도 안 함)를 비롯한 나머지 GPR은 그냥 0으로
+    // 채운다.
     auto* sp = reinterpret_cast<uint64_t*>(stackTop);
     *(--sp) = reinterpret_cast<uint64_t>(&kIdleLoopTrampoline);  // "return address"
     *(--sp) = currentRflags;                                      // RFLAGS: 호출 시점 그대로 보존
-    *(--sp) = 0;                                                  // rbp
+    *(--sp) = 0;                                                  // rax
     *(--sp) = reinterpret_cast<uint64_t>(&runLoop);               // rbx -> 트램폴린이 call
+    *(--sp) = 0;                                                  // rcx
+    *(--sp) = 0;                                                  // rdx
+    *(--sp) = 0;                                                  // rsi
+    *(--sp) = 0;                                                  // rdi
+    *(--sp) = 0;                                                  // rbp
+    *(--sp) = 0;                                                  // r8
+    *(--sp) = 0;                                                  // r9
+    *(--sp) = 0;                                                  // r10
+    *(--sp) = 0;                                                  // r11
     *(--sp) = 0;                                                  // r12 (미사용)
     *(--sp) = 0;                                                  // r13
     *(--sp) = 0;                                                  // r14

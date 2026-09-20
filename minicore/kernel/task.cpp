@@ -175,16 +175,30 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
 #endif
     kernelStackTop = stackTop;
 
-    // kContextSwitch가 기대하는 pop 순서(r15,r14,r13,r12,rbx,rbp,
-    // popfq,ret)와 정확히 대응하도록, 스택을 높은 주소부터 채워
-    // 낮은 주소가 top(=savedRsp)이 되게 한다 - context_switch.S 참고.
-    // rbx=entry, r12=arg로 채워 kTaskStartTrampoline이 그대로 꺼내
-    // 쓰게 한다. RFLAGS는 IF=1(인터럽트 허용, 비트9)만 켜서 시작한다.
+    // [갱신, 2026-09-20, PN-81E49523 1단계, QU-AA1AA7F9] kContextSwitch가
+    // 이제 전체 GPR+RFLAGS를 pop한다(context_switch.S 참고) - **push는
+    // 스택을 감소 방향으로 채우므로 "쓰는 순서"는 "pop되는 순서"의
+    // 정반대다**: 실제 pop 순서는 r15,r14,...,rax,popfq,ret(가장 먼저
+    // pop되는 r15가 가장 낮은 주소=savedRsp) - 그래서 여기서는 높은
+    // 주소부터 retaddr, rflags, rax, rbx, ..., r15 순으로 써야 마지막
+    // 쓰기(r15)가 가장 낮은 주소(=savedRsp)에 정확히 오게 된다. rbx=entry,
+    // r12=arg로 채워 kTaskStartTrampoline이 그대로 꺼내 쓰게 하고,
+    // 나머지 GPR은 안 쓰므로 0으로 채운다. RFLAGS는 IF=1(인터럽트 허용,
+    // 비트9)만 켜서 시작한다.
     auto* sp = reinterpret_cast<uint64_t*>(stackTop);
     *(--sp) = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);  // "return address"
     *(--sp) = 0x202;                                              // RFLAGS: IF=1 + 예약된 비트1
-    *(--sp) = 0;                                                  // rbp
+    *(--sp) = 0;                                                  // rax
     *(--sp) = reinterpret_cast<uint64_t>(entry);                  // rbx -> 트램폴린이 call
+    *(--sp) = 0;                                                  // rcx
+    *(--sp) = 0;                                                  // rdx
+    *(--sp) = 0;                                                  // rsi
+    *(--sp) = 0;                                                  // rdi
+    *(--sp) = 0;                                                  // rbp
+    *(--sp) = 0;                                                  // r8
+    *(--sp) = 0;                                                  // r9
+    *(--sp) = 0;                                                  // r10
+    *(--sp) = 0;                                                  // r11
     *(--sp) = reinterpret_cast<uint64_t>(arg);                    // r12 -> 트램폴린이 rdi로 옮김
     *(--sp) = 0;                                                  // r13
     *(--sp) = 0;                                                  // r14

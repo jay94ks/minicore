@@ -391,16 +391,26 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     }
     stackBase = reinterpret_cast<uint64_t>(stack);
 
-    // kContextSwitch의 pop 순서(r15,r14,r13,r12,rbx,rbp,popfq,ret)와
-    // 정확히 대응하도록 스택을 구성한다 - task.cpp의 Task::init()과
-    // 완전히 동일한 레이아웃, entry만 kAsyncTaskEntryWrapper로 고정하고
-    // arg는 이 AsyncTask 자신(this)이다.
+    // [갱신, 2026-09-20, PN-81E49523 1단계, QU-AA1AA7F9] kContextSwitch가
+    // 이제 전체 GPR+RFLAGS를 pop한다(context_switch.S 참고) - task.cpp의
+    // Task::init()과 완전히 동일한 레이아웃(그 함수 문서 주석의 "쓰는
+    // 순서는 pop되는 순서의 정반대" 설명 참고), entry만
+    // kAsyncTaskEntryWrapper로 고정하고 arg는 이 AsyncTask 자신(this)이다.
     const uint64_t stackTop = stackBase + kAsyncTaskStackSize;
     auto* sp = reinterpret_cast<uint64_t*>(stackTop);
     *(--sp) = reinterpret_cast<uint64_t>(&kTaskStartTrampoline);
     *(--sp) = 0x202;                                            // RFLAGS: IF=1
-    *(--sp) = 0;                                                // rbp
+    *(--sp) = 0;                                                // rax
     *(--sp) = reinterpret_cast<uint64_t>(&kAsyncTaskEntryWrapper);  // rbx -> 트램폴린이 call
+    *(--sp) = 0;                                                // rcx
+    *(--sp) = 0;                                                // rdx
+    *(--sp) = 0;                                                // rsi
+    *(--sp) = 0;                                                // rdi
+    *(--sp) = 0;                                                // rbp
+    *(--sp) = 0;                                                // r8
+    *(--sp) = 0;                                                // r9
+    *(--sp) = 0;                                                // r10
+    *(--sp) = 0;                                                // r11
     *(--sp) = reinterpret_cast<uint64_t>(this);                 // r12 -> 트램폴린이 rdi로 옮김
     *(--sp) = 0;                                                // r13
     *(--sp) = 0;                                                // r14
