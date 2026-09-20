@@ -126,7 +126,12 @@ struct DeviceOwnerEntry {
     bool used = false;
     uint32_t bus = 0, device = 0, function = 0;
     uint64_t mmioBase = 0;
-    WeakPtr<Process> owner;
+    // [갱신, 2026-09-20, SP-43331889 §3-1] 원래 WeakPtr<Process> - "이
+    // 슬롯의 소유자가 아직 살아있는가"만 확인하는 순수 liveness 체크라
+    // (owner.lock()의 반환값 자체는 한 번도 역참조되지 않는다) Process
+    // 전용일 이유가 없다 - Process 없는 KernelThread(devmgr/fs, §1)도
+    // 그대로 소유자가 될 수 있게 WeakPtr<Task>로 일반화했다.
+    WeakPtr<Task> owner;
 };
 
 DeviceOwnerEntry gDeviceOwners[kMaxDeviceOwnerEntries];
@@ -158,7 +163,11 @@ bool kIsBarOwned(uint32_t bus, uint32_t device, uint32_t function, uint64_t mmio
 // 아래서 재확인 없이 바로 빈 슬롯에 꽂는 건 안전하다, 호출부가
 // 항상 이 순서로만 부르는 devmgr 단일 인스턴스 전제와도 일치,
 // SP-9DD4F3EA §4a-3). 빈 슬롯이 없으면 false(테이블 포화).
-bool kClaimBar(uint32_t bus, uint32_t device, uint32_t function, uint64_t mmioBase, const SharedPtr<Process>& owner) {
+// [갱신, 2026-09-20, SP-43331889 §3-1] owner 파라미터를 Process 전용
+// SharedPtr<Process>에서 SharedPtr<Task>로 일반화(위 DeviceOwnerEntry
+// 문서 주석과 같은 이유) - 호출부는 이제 Process를 거치지 않고
+// 제출자 Task 자신(task->submitterTask.resolve())을 바로 넘긴다.
+bool kClaimBar(uint32_t bus, uint32_t device, uint32_t function, uint64_t mmioBase, const SharedPtr<Task>& owner) {
     SpinlockGuard guard(gDeviceOwnerLock);
     for (auto& entry : gDeviceOwners) {
         if (entry.used && kMatchesOwnerEntry(entry, bus, device, function, mmioBase) && entry.owner.lock()) {
@@ -177,7 +186,7 @@ bool kClaimBar(uint32_t bus, uint32_t device, uint32_t function, uint64_t mmioBa
             entry.device = device;
             entry.function = function;
             entry.mmioBase = mmioBase;
-            entry.owner = WeakPtr<Process>(owner);
+            entry.owner = WeakPtr<Task>(owner);
             return true;
         }
     }
@@ -287,7 +296,12 @@ public:
             co_return;
         }
 
-        if (!kClaimBar(args->bus, args->device, args->function, args->mmioBase, process)) {
+        // [갱신, 2026-09-20, SP-43331889 §3-1] Process가 아니라 제출자
+        // Task 자신을 직접 넘긴다(kClaimBar가 이제 WeakPtr<Task>로
+        // 일반화됨) - 이 핸들러는 여전히 UserThread 전용 경로라 결과는
+        // 동일하지만, KernelThread 직접 호출부(§3, 착수 전)가 나중에
+        // 이 함수를 재사용할 때 `process` 없이도 그대로 쓸 수 있다.
+        if (!kClaimBar(args->bus, args->device, args->function, args->mmioBase, task->submitterTask.resolve())) {
             process->addressSpace.unmapRegion(mappedAddr, kMappingSize);
             args->error = ChannelError::ResourceExhausted;
             co_return;
