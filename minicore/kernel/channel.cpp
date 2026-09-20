@@ -848,44 +848,12 @@ class CloseBridgeHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<CloseBridgeArgs*>(argsRaw);
-        // [수정, 2026-09-17, PN-9CC66142] 다른 핸들러와 동일한 이유로
-        // 호출자의 openBridges에서 검증한다. 이미 닫혀 목록에서 빠진
-        // 핸들로 다시 closeBridge를 부르면 여기서 InvalidHandle이
-        // 나온다 - 예전의 "closedLocal==true면 멱등 처리" 분기는
-        // 이제 도달 불가능해졌다(같은 핸들이 살아있는 채로 closedLocal
-        // 만 true인 상태가 없다 - 아래에서 closedLocal을 세우는 것과
-        // openBridges에서 빼는 것을 같은 호출 안에서 함께 하므로).
-        SharedPtr<BridgePipe> bridge = kResolveOwnedBridge(task, args->bridge);
-        if (!bridge) {
+        SharedPtr<Task> caller = task->submitterTask.lock();
+        if (!caller) {
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
-        bridge->closedLocal = true;
-
-        AsyncTaskWaitQueue woken = kWakeForClose(bridge.get());
-        for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
-            AsyncReactor::submitCompletion(t);
-        }
-
-        // [수정, 2026-09-17, PN-9CC66142] 반납은 이제 참조 카운팅이
-        // 담당한다 - "양쪽 다 closedLocal"을 기다리지 않는다. 호출자
-        // 자신의 openBridges에서 이 슬롯을 지워 자기 몫의 강한 참조를
-        // 내려놓으면, 상대(peer) 쪽이 아직 자기 몫을 들고 있는 한
-        // BridgePipe 객체는 안전하게 살아있다(peer.lock() 계속 유효) -
-        // 상대도 이미 닫아 자기 몫을 내려놨다면 두 객체 다 자연히
-        // destroy()까지 끝난다. 별도 destroyPair() 호출이 필요 없다.
-        // [갱신, 2026-09-20, SP-43331889 §3-1] Process 전용
-        // kProcessFromSubmitter 대신 kOwnerOpenBridgesOf로 일반화.
-        SharedPtr<Task> submitter = task->submitterTask.lock();
-        OpenBridgeList* bridges = kOwnerOpenBridgesOf(submitter.get());
-        if (bridges) {
-            auto* rawTarget = bridge.get();
-            auto* slot = bridges->find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
-            if (slot) {
-                bridges->erase(slot);
-            }
-        }
-        args->error = ChannelError::None;
+        kCloseBridgeSync(caller, args->bridge, &args->error);
         co_return;
     }
     void onFailure(AsyncTask*) override {}
@@ -976,6 +944,50 @@ CloseBridgeHandler gCloseBridgeHandler;
 DestroyChannelHandler gDestroyChannelHandler;
 
 }  // namespace
+
+// [신규, 2026-09-20, SP-43331889 §7(fs 전환)] channel.h 선언 참고 -
+// OpenChannelHandler::onExec()과 달리 이름 있는 채널/유저 포인터
+// 검증 경로가 아예 없다(커널 모드 직접 호출자 전용, 이름 없는
+// 채널만 다룸).
+void kOpenNamelessChannelSync(const SharedPtr<Task>& caller, ChannelId* outChannelId, BridgeHandle* outChannelHandle,
+                              ChannelError* outError) {
+    Channel* channel = kCreateNamedChannel(nullptr, 0, outError);
+    if (!channel) {
+        return;
+    }
+    channel->owner = DontDeref<Task>(caller.get());
+    *outChannelId = channel->channelId;
+    *outChannelHandle = channel->channelId;
+}
+
+// [신규, 2026-09-20, SP-43331889 §7(fs 전환)] `CloseBridgeHandler::
+// onExec()` 본문 그대로 - `kResolveOwnedBridge(AsyncTask*, ...)`가
+// 필요로 하던 `task->submitterTask.lock()` 간접 참조를 걷어내고
+// `caller`를 직접 쓴다(커널 모드 직접 호출자는 애초에 AsyncTask를
+// 거치지 않으므로).
+void kCloseBridgeSync(const SharedPtr<Task>& caller, uint64_t bridgeHandle, ChannelError* outError) {
+    OpenBridgeList* bridges = kOwnerOpenBridgesOf(caller.get());
+    if (!bridges) {
+        *outError = ChannelError::InvalidHandle;
+        return;
+    }
+    auto* rawTarget = reinterpret_cast<BridgePipe*>(bridgeHandle);
+    auto* slot = bridges->find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
+    if (!slot) {
+        *outError = ChannelError::InvalidHandle;
+        return;
+    }
+    SharedPtr<BridgePipe> bridge = slot->value;
+    bridge->closedLocal = true;
+
+    AsyncTaskWaitQueue woken = kWakeForClose(bridge.get());
+    for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
+        AsyncReactor::submitCompletion(t);
+    }
+
+    bridges->erase(slot);
+    *outError = ChannelError::None;
+}
 
 void Channel::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointOpenChannel, &gOpenChannelHandler);

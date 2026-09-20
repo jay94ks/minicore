@@ -6,6 +6,7 @@
 #include "debug_session.h"
 #include "delayed_exec.h"
 #include "../devmgr/devmgr_service.h"
+#include "../fs/fs_service.h"
 #include "dma_buffer.h"
 #include "gdt.h"
 #include "hvm_start_info.h"
@@ -101,24 +102,24 @@ kernel::uint64_t gInitImageSize = 0;
 bool gInitImageFound = false;
 
 // 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - initrd 안에서
-// "fs"/"net"/"tty"/"pubreg"라는 정확한 이름과 일치하는 실행 파일을
-// 찾아 ProcessRole::KernelService로 스폰하는 고정 이름 목록("pubreg"는
+// "net"/"tty"/"pubreg"라는 정확한 이름과 일치하는 실행 파일을 찾아
+// ProcessRole::KernelService로 스폰하는 고정 이름 목록("pubreg"는
 // [추가, 2026-09-16, 설계자 지시 - SP-B071E628 "프로세스간 공개
 // 인터페이스" 재설계로 5번째 커널 서비스 신설], SP-EAB162FC §2.2가
 // 이미 이 다섯 이름을 공식화해 둠 - PN-185406F6 항목1). **[제외,
-// 2026-09-20, SP-43331889/QU-23B339AB/QU-ECEE5990] "devmgr"은 더
-// 이상 이 ELF 기반 매니페스트에 없다** - Process 없는 순수 커널
-// KernelThread로 완전 흡수돼(아래 kSpawnServiceProcesses() 호출부
-// 근처 kSpawnDevmgrKernelThread() 참고) initrd 안에 실행 파일 자체가
-// 없어졌다(scripts/build-initrd.sh도 더 이상 devmgr을 담지 않음).
+// 2026-09-20, SP-43331889/QU-23B339AB/QU-ECEE5990/QU-5FC58B06]
+// "devmgr"/"fs" 둘 다 더 이상 이 ELF 기반 매니페스트에 없다** -
+// Process 없는 순수 커널 KernelThread로 완전 흡수돼(아래
+// kSpawnServiceProcesses() 호출부 근처 kSpawnDevmgrKernelThread()/
+// kSpawnFsKernelThread() 참고) initrd 안에 실행 파일 자체가
+// 없어졌다(scripts/build-initrd.sh도 더 이상 이 둘을 담지 않음).
 // "init"과 완전히 같은 물리 메모리 안전성 이유(위 gInitImageBuffer
 // 문서 주석 참고 - PageFrameAllocator::init() 이전에 커널 BSS 안으로
 // 복사해 둬야 그 예약 범위에 자동으로 포함된다)로 각자 전용 정적
 // 버퍼를 쓴다. v1은 이 이름들 각각 정확히 하나의 인스턴스만 지원
 // (여러 개가 있으면 마지막으로 매치된 것만 남는다 - 지금은 문제되지
 // 않음, 실제로 여러 인스턴스가 필요해지면 재검토).
-constexpr kernel::uint32_t kServiceManifestCount = 4;
-kernel::uint8_t gFsImageBuffer[kMaxInitImageSize];
+constexpr kernel::uint32_t kServiceManifestCount = 3;
 kernel::uint8_t gNetImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gTtyImageBuffer[kMaxInitImageSize];
 kernel::uint8_t gPubregImageBuffer[kMaxInitImageSize];
@@ -132,7 +133,6 @@ struct ServiceManifestEntry {
 };
 
 ServiceManifestEntry gServiceManifest[kServiceManifestCount] = {
-    {"fs", 2, gFsImageBuffer},
     {"net", 3, gNetImageBuffer},
     {"tty", 3, gTtyImageBuffer},
     {"pubreg", 6, gPubregImageBuffer},
@@ -403,11 +403,10 @@ void kSpawnServiceProcesses() {
 
 // [신규, 2026-09-20, SP-43331889 §7] devmgr을 Process 없는 순수 커널
 // `KernelThread`로 직접 스폰한다 - 위 kSpawnServiceProcesses()의 ELF
-// 매니페스트 경로(fs/net/tty/pubreg)와 달리 initrd/ELF 로드가
-// 전혀 없다(kernel::kDevmgrKernelMain은 그냥 함수 포인터,
-// minicore/devmgr/main.cpp 문서 주석 참고). ProcessRole/essential
-// 같은 Process 전용 개념도 없다 - §7-1의 무한 대기 루프가 유일한
-// 안전장치.
+// 매니페스트 경로(net/tty/pubreg)와 달리 initrd/ELF 로드가 전혀
+// 없다(kernel::kDevmgrKernelMain은 그냥 함수 포인터, minicore/devmgr/
+// main.cpp 문서 주석 참고). ProcessRole/essential 같은 Process
+// 전용 개념도 없다 - §7-1의 무한 대기 루프가 유일한 안전장치.
 void kSpawnDevmgrKernelThread() {
     kernel::KernelThread* thread = kernel::kSpawnKernelThread(kernel::kDevmgrKernelMain, nullptr);
     if (!thread) {
@@ -416,6 +415,19 @@ void kSpawnDevmgrKernelThread() {
     }
     kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
     kernel::Logger::info("minicore: devmgr KernelThread spawned (Process-less)");
+}
+
+// [신규, 2026-09-20, SP-43331889 §7, QU-5FC58B06] fs도 devmgr과
+// 완전히 동일한 방식으로 Process 없는 순수 커널 `KernelThread`로
+// 직접 스폰한다 - minicore/fs/main.cpp 문서 주석 참고.
+void kSpawnFsKernelThread() {
+    kernel::KernelThread* thread = kernel::kSpawnKernelThread(kernel::kFsKernelMain, nullptr);
+    if (!thread) {
+        kernel::Logger::error("minicore: fs KernelThread allocation FAILED");
+        return;
+    }
+    kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
+    kernel::Logger::info("minicore: fs KernelThread spawned (Process-less)");
 }
 
 }  // namespace
@@ -756,6 +768,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kSpawnInitProcess();
     kSpawnServiceProcesses();
     kSpawnDevmgrKernelThread();
+    kSpawnFsKernelThread();
 
     // 이 지점부터 BSP 자신도 스케줄러 디스패치 루프에 들어간다 -
     // 절대 반환하지 않는다(PL-2D3184BC 5/6단계). runLoop()을 직접

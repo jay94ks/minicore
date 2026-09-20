@@ -89,6 +89,23 @@ struct BridgePipe;
 // 공유한다 - 순수 리팩터링, openChannel의 기존 동작은 무변경.
 Channel* kCreateNamedChannel(const char* name, uint64_t nameLength, ChannelError* outError);
 
+// [신규, 2026-09-20, SP-43331889 §7(fs 전환)] 이름 없는 채널 하나를
+// 개설하고 소유자를 `caller`로 채운다 - `OpenChannelHandler::onExec()`
+// (channel.cpp)이 이름 있는 채널까지 함께 다루는 것과 달리, fs/devmgr
+// 같은 커널 모드 직접 호출자는 전부 이름 없는 채널만 필요로 해서
+// (VFS 라우팅은 이름이 아니라 MountTable의 channelId로 이뤄짐) 그
+// 좁은 경우만 다루는 별도 함수로 둔다 - 이름 있는 채널을 커널 모드
+// 직접 호출자가 필요로 하게 되면 그때 일반화한다(지금은 그런 호출자가
+// 없다).
+void kOpenNamelessChannelSync(const SharedPtr<Task>& caller, ChannelId* outChannelId, BridgeHandle* outChannelHandle,
+                               ChannelError* outError);
+
+// [신규, 2026-09-20, SP-43331889 §7(fs 전환)] `CloseBridgeHandler::
+// onExec()` 본문 - `kEnumerateDevicesSync`와 같은 이유로 익명
+// 네임스페이스 밖으로 뺐다(다만 CloseBridgeHandler는 계속 이 함수를
+// 호출하도록 리팩터링됨 - 로직 중복 없음).
+void kCloseBridgeSync(const SharedPtr<Task>& caller, uint64_t bridgeHandle, ChannelError* outError);
+
 // AsyncTask 여러 개를 FIFO로 대기시키는 침습적 큐 - AsyncTask::next를
 // 재사용한다(파킹돼 있는 동안엔 AsyncReactor 실행 큐에 없어 비어
 // 있음 - kernel::Task가 WaitQueue에서 Task::next를 재사용하는 것과

@@ -2,7 +2,7 @@
 #define MINICORE_FS_AHCI_H
 
 #include "block_device.h"
-#include "libmc/types.h"
+#include "libkenv/types.h"
 
 // SP-C2670F69 §3.1-§3.5 - AHCI(SATA 스토리지 컨트롤러) 드라이버.
 // **[뒤집힘, 2026-09-20, QU-1FB6A7A4 답변 - "블록 디바이스는 그냥
@@ -14,20 +14,27 @@
 // 직접 수행하는 것으로 재확정됐다. `minicore/devmgr`에서 여기로
 // 옮겨 왔다(PN-4E6EA13D/PN-F60E405A A가 만든 것과 로직은 동일 -
 // 파일 위치와 소비자만 바뀌었다).
+// **[전환, 2026-09-20, SP-43331889/QU-5FC58B06] fs가 Process 없는
+// 커널 KernelThread로 흡수되며 `mc::` -> `kernel::` 타입 전환** -
+// AllocDmaBuffer의 커널 모드 매핑 설계는 아직 미정이라(dma_buffer.h
+// 문서 주석 참고) 이 파일이 쓰는 DMA 버퍼 alloc/free는 당분간
+// 전부 `ChannelError::NotSupported`로 실패한다 - 즉 이 드라이버의
+// 구조는 완전하지만 실제 장치 인식(IDENTIFY 등 DMA가 필요한 모든
+// 명령)은 그 설계가 결정되기 전까지 실패로 우아하게 되돌아간다.
 
 namespace ahci {
 
 // AHCI 1.3.1 사양 §3 - 포트당 최대 32개 커맨드 슬롯(§3.1 "슬롯
 // free-list 관리 - 컨트롤러가 광고하는 슬롯 수만큼", §3.5의 NCQ 동시
 // 발급에도 그대로 쓰인다는 서술과 일치하는 상한).
-constexpr mc::uint32_t kMaxCommandSlots = 32;
+constexpr kernel::uint32_t kMaxCommandSlots = 32;
 
 // 이 포트가 실제로 초기화에 성공하고 장치가 붙어 있는지까지 확인했을
 // 때만 채워지는, IDENTIFY DEVICE 검증 결과.
 struct PortProbeResult {
     bool devicePresent = false;    // PxSSTS.DET==3(장치 있음+통신 확립)
     bool identifySucceeded = false;
-    mc::uint16_t identifyData[256] = {};  // ATA IDENTIFY DEVICE 응답(워드 단위, 리틀엔디안 그대로)
+    kernel::uint16_t identifyData[256] = {};  // ATA IDENTIFY DEVICE 응답(워드 단위, 리틀엔디안 그대로)
 };
 
 // [SP-C2670F69 §3.1] 포트 하나 - 커맨드 리스트(1페이지)/FIS 수신
@@ -44,7 +51,7 @@ public:
     // 64비트 물리주소를 못 받음)이면 true - AllocDmaBuffer 호출마다
     // physAddrLimit=32로 강제한다(SP-39F18E30 §5-A, 레거시 대비용이지만
     // AHCI 컨트롤러도 이론상 S64A=0일 수 있어 그대로 존중).
-    bool init(mc::uint64_t hbaVirtAddr, mc::uint32_t portIndex, mc::uint32_t slotCount, bool use32BitDma);
+    bool init(kernel::uint64_t hbaVirtAddr, kernel::uint32_t portIndex, kernel::uint32_t slotCount, bool use32BitDma);
 
     // §3.1 "최소한의 실제 I/O" 검증 지점 - 비-NCQ IDENTIFY DEVICE(0xEC)
     // 를 슬롯 0 하나만 써서 발급하고 완료까지 폴링한다(인터럽트 미배선,
@@ -58,8 +65,8 @@ public:
     // 최대 전송량은 PRDT 엔트리 1개의 상한(버디 할당자 kMaxOrder=10과
     // 일치하는 4MiB-1)을 넘지 않아야 한다. 장치가 없거나 발급/완료에
     // 실패하면 false.
-    bool readSectors(mc::uint64_t lba, mc::uint32_t count, void* outBuf);
-    bool writeSectors(mc::uint64_t lba, mc::uint32_t count, const void* buf);
+    bool readSectors(kernel::uint64_t lba, kernel::uint32_t count, void* outBuf);
+    bool writeSectors(kernel::uint64_t lba, kernel::uint32_t count, const void* buf);
 
     // FLUSH CACHE EXT(0xEA) - 데이터 전송이 없는 커맨드(PRDT 없음).
     // BlockDevice::flush()가 그대로 위임한다.
@@ -74,15 +81,15 @@ private:
     // 전송이 없는 커맨드(FLUSH 등)로 간주해 PRDT 자체를 생략한다.
     // isWrite는 커맨드 헤더 W 비트(전송 방향)에만 반영 - 실제 데이터를
     // 그 방향으로 복사하는 책임은 호출부에 있다.
-    bool issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32_t sectorCount, bool isWrite,
-                          mc::uint64_t dataPhysAddr, mc::uint32_t dataBytes);
+    bool issueAtaCommand(kernel::uint8_t command, kernel::uint64_t lba, kernel::uint32_t sectorCount, bool isWrite,
+                          kernel::uint64_t dataPhysAddr, kernel::uint32_t dataBytes);
 
-    mc::uint64_t _portRegBase = 0;   // 이 포트의 레지스터 블록 시작 가상주소
-    mc::uint64_t _clbVirtAddr = 0;   // 커맨드 리스트 가상주소(1페이지)
-    mc::uint64_t _fbVirtAddr = 0;    // FIS 수신 버퍼 가상주소(1페이지)
-    mc::uint32_t _clbDmaHandle = 0;
-    mc::uint32_t _fbDmaHandle = 0;
-    mc::uint32_t _slotCount = 0;
+    kernel::uint64_t _portRegBase = 0;   // 이 포트의 레지스터 블록 시작 가상주소
+    kernel::uint64_t _clbVirtAddr = 0;   // 커맨드 리스트 가상주소(1페이지)
+    kernel::uint64_t _fbVirtAddr = 0;    // FIS 수신 버퍼 가상주소(1페이지)
+    kernel::uint32_t _clbDmaHandle = 0;
+    kernel::uint32_t _fbDmaHandle = 0;
+    kernel::uint32_t _slotCount = 0;
     bool _use32BitDma = false;  // CAP.S64A==0이면 커맨드 구조체도 하위 4GiB 이내로 강제(§5-A)
 };
 
@@ -90,7 +97,7 @@ private:
 // 확인, PI 비트마스크로 실제 존재하는 포트만 AhciPort로 구성한다.
 class AhciController {
 public:
-    bool init(mc::uint64_t mmioVirtAddr);
+    bool init(kernel::uint64_t mmioVirtAddr);
 
     // 초기화된 포트 중 실제로 장치가 붙어 있는(DET==3) 첫 번째 포트를
     // 찾아 IDENTIFY DEVICE까지 실행한다. 성공하면 outPort에 그 포트를
@@ -99,9 +106,9 @@ public:
     bool probeFirstDevice(PortProbeResult* outResult, AhciPort** outPort);
 
 private:
-    mc::uint64_t _mmioVirtAddr = 0;
-    mc::uint32_t _slotCount = 0;
-    mc::uint32_t _portsImplemented = 0;  // PI 비트마스크 그대로
+    kernel::uint64_t _mmioVirtAddr = 0;
+    kernel::uint32_t _slotCount = 0;
+    kernel::uint32_t _portsImplemented = 0;  // PI 비트마스크 그대로
     AhciPort _ports[32];
     bool _portInitialized[32] = {};
 };
@@ -115,22 +122,22 @@ public:
     // port: AhciController::probeFirstDevice()가 채워 준 포트(이미
     // IDENTIFY 완료 상태). identifyData: 같은 호출의 PortProbeResult::
     // identifyData - 그대로 복사해 둔다.
-    void init(AhciPort* port, const mc::uint16_t* identifyData);
+    void init(AhciPort* port, const kernel::uint16_t* identifyData);
 
-    mc::uint32_t blockSize() const override { return _blockSize; }
-    mc::uint64_t blockCount() const override { return _blockCount; }
-    bool readBlocks(mc::uint64_t lba, mc::uint32_t count, void* buf) override;
-    bool writeBlocks(mc::uint64_t lba, mc::uint32_t count, const void* buf) override;
+    kernel::uint32_t blockSize() const override { return _blockSize; }
+    kernel::uint64_t blockCount() const override { return _blockCount; }
+    bool readBlocks(kernel::uint64_t lba, kernel::uint32_t count, void* buf) override;
+    bool writeBlocks(kernel::uint64_t lba, kernel::uint32_t count, const void* buf) override;
     bool flush() override;
     // [v1] TRIM(DATA SET MANAGEMENT) 미구현 - BlockDevice 문서 주석이
     // 명시한 대로 미지원 장치는 그냥 true(성공)를 반환해도 데이터
     // 정확성에 영향이 없다(최적화 힌트일 뿐).
-    bool trim(mc::uint64_t lba, mc::uint32_t count) override;
+    bool trim(kernel::uint64_t lba, kernel::uint32_t count) override;
 
 private:
     AhciPort* _port = nullptr;
-    mc::uint32_t _blockSize = 512;
-    mc::uint64_t _blockCount = 0;
+    kernel::uint32_t _blockSize = 512;
+    kernel::uint64_t _blockCount = 0;
 };
 
 }  // namespace ahci

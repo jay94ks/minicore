@@ -282,64 +282,13 @@ class RequestIoPermissionHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<RequestIoPermissionArgs*>(argsRaw);
-
-        // [갱신, 2026-09-20, SP-43331889 §3] 이 핸들러는 여전히
-        // UserThread 트랩 경로 전용이라 아래 isUserLevel 가드가 원래의
-        // "!process → InvalidHandle" 동작과 정확히 동일한 결과를 낸다 -
-        // 다만 이제 KernelThread 제출자를 InvalidHandle로 거절하지
-        // 않는다(§3 착수 후 devmgr/fs 직접 호출이 이 함수를 재사용할
-        // 길을 열어 둔다).
         SharedPtr<Task> caller = task->submitterTask.lock();
-        if (!caller || (caller->isUserLevel && !kOwnerProcessOf(caller.get()))) {
+        if (!caller) {
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
-
-        kEnsureDeviceCache();
-        const DeviceDescriptor* dev = kFindCachedDevice(args->bus, args->device, args->function);
-        if (!dev) {
-            args->error = ChannelError::NotFound;
-            co_return;
-        }
-
-        // args->mmioBase가 이 장치가 실제로 광고한 BAR 중 하나인지
-        // 확인 - 그 외 값은 임의 물리주소 접근 시도(보안 검증,
-        // RequestIoPermissionArgs 문서 주석 참고).
-        bool validBar = false;
-        for (uint64_t base : dev->mmioBases) {
-            if (base != 0 && base == args->mmioBase) {
-                validBar = true;
-                break;
-            }
-        }
-        if (!validBar) {
-            args->error = ChannelError::NotFound;
-            co_return;
-        }
-
-        if (kIsBarOwned(args->bus, args->device, args->function, args->mmioBase)) {
-            args->error = ChannelError::InvalidHandle;
-            co_return;
-        }
-
-        // v1 고정 4KiB - RequestIoPermissionArgs 문서 주석의 "v1 축소
-        // 범위" 참고(실제 BAR 크기 조회 절차 미구현).
-        constexpr uint64_t kMappingSize = 4096;
-        uint64_t mappedAddr = 0;
-        if (!kMapMmioForCaller(caller.get(), args->mmioBase, kMappingSize, &mappedAddr)) {
-            args->error = ChannelError::ResourceExhausted;
-            co_return;
-        }
-
-        if (!kClaimBar(args->bus, args->device, args->function, args->mmioBase, caller)) {
-            kUnmapMmioForCaller(caller.get(), mappedAddr, kMappingSize);
-            args->error = ChannelError::ResourceExhausted;
-            co_return;
-        }
-
-        args->mappedVirtualAddr = mappedAddr;
-        args->assignedIrqVector = 0;  // v1: MSI/MSI-X 배정 미구현(문서 주석 참고)
-        args->error = ChannelError::None;
+        kRequestIoPermissionSync(caller, args->bus, args->device, args->function, args->mmioBase,
+                                  &args->mappedVirtualAddr, &args->assignedIrqVector, &args->error);
         co_return;
     }
     void onFailure(AsyncTask*) override {}
@@ -370,6 +319,69 @@ void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescri
     }
     *outTotalCount = total;
     *capacity = filled;
+}
+
+// [신규, 2026-09-20, SP-43331889 §7(fs 전환)] `RequestIoPermissionHandler::
+// onExec()` 본문 - pnp.h 선언 참고. `caller`가 트랩 경로에선 이미
+// `task->submitterTask.lock()`로 해석된 뒤 넘어오지만(null 가드는
+// 호출부 책임), 커널 모드 직접 호출자는 자기 자신의 `Task*`를 그대로
+// 넘긴다. `caller->isUserLevel && !kOwnerProcessOf(...)` 가드는
+// "UserThread인데 소속 Process가 없다"는 비정상 상태만 거절할 뿐,
+// KernelThread(isUserLevel==false) 호출자는 이 조건 자체가 항상
+// false라 그대로 통과한다.
+void kRequestIoPermissionSync(const SharedPtr<Task>& caller, uint32_t bus, uint32_t device, uint32_t function,
+                               uint64_t mmioBase, uint64_t* outMappedVirtualAddr, uint32_t* outAssignedIrqVector,
+                               ChannelError* outError) {
+    if (caller->isUserLevel && !kOwnerProcessOf(caller.get())) {
+        *outError = ChannelError::InvalidHandle;
+        return;
+    }
+
+    kEnsureDeviceCache();
+    const DeviceDescriptor* dev = kFindCachedDevice(bus, device, function);
+    if (!dev) {
+        *outError = ChannelError::NotFound;
+        return;
+    }
+
+    // mmioBase가 이 장치가 실제로 광고한 BAR 중 하나인지 확인 - 그 외
+    // 값은 임의 물리주소 접근 시도(보안 검증, RequestIoPermissionArgs
+    // 문서 주석 참고).
+    bool validBar = false;
+    for (uint64_t base : dev->mmioBases) {
+        if (base != 0 && base == mmioBase) {
+            validBar = true;
+            break;
+        }
+    }
+    if (!validBar) {
+        *outError = ChannelError::NotFound;
+        return;
+    }
+
+    if (kIsBarOwned(bus, device, function, mmioBase)) {
+        *outError = ChannelError::InvalidHandle;
+        return;
+    }
+
+    // v1 고정 4KiB - RequestIoPermissionArgs 문서 주석의 "v1 축소
+    // 범위" 참고(실제 BAR 크기 조회 절차 미구현).
+    constexpr uint64_t kMappingSize = 4096;
+    uint64_t mappedAddr = 0;
+    if (!kMapMmioForCaller(caller.get(), mmioBase, kMappingSize, &mappedAddr)) {
+        *outError = ChannelError::ResourceExhausted;
+        return;
+    }
+
+    if (!kClaimBar(bus, device, function, mmioBase, caller)) {
+        kUnmapMmioForCaller(caller.get(), mappedAddr, kMappingSize);
+        *outError = ChannelError::ResourceExhausted;
+        return;
+    }
+
+    *outMappedVirtualAddr = mappedAddr;
+    *outAssignedIrqVector = 0;  // v1: MSI/MSI-X 배정 미구현(문서 주석 참고)
+    *outError = ChannelError::None;
 }
 
 void PnpService::registerSyscallEndpoints() {

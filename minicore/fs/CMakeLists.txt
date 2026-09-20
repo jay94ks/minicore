@@ -1,19 +1,15 @@
-# minicore/fs - VFS 마운트 지점 실질 처리 서비스 프로세스(SP-8B6B8D25
-# §4-A, PN-452FF696). minicore/devmgr/pubreg/init과 같은 이유(SP-9DD4F3EA
-# §4a-3류 "인스턴스는 무조건 1개") - 일반 유저 앱과 완전히 같은 실행 파일
-# 형태(ET_EXEC, 0x400000, 비-PIE)를 써야 해서 userland/ 빌드 트리를 그대로
-# 재사용한다(minicore/pubreg/CMakeLists.txt와 동일한 out-of-tree 관례 -
-# 이 파일도 그 빌드 트리 안에서만 구성된다, 단독 configure 불가).
-add_executable(fs main.cpp ahci.cpp)
+# minicore/fs - VFS 마운트 지점 실질 처리 서비스(SP-8B6B8D25 §4-A,
+# PN-452FF696). **[전환, 2026-09-20, SP-43331889/QU-5FC58B06]** 더
+# 이상 별도 유저랜드 ELF가 아니다 - fs가 커널에 완전 흡수되며(Process
+# 없는 순수 커널 Task) 이 디렉터리는 이제 minicore_kernel에 직접
+# 링크되는 OBJECT 라이브러리를 만든다(userland/ 빌드 트리에서는 더
+# 이상 이 서브디렉터리를 구성하지 않는다 - userland/CMakeLists.txt
+# 참고, minicore/devmgr/CMakeLists.txt와 동일한 패턴).
+add_library(minicore_fs OBJECT main.cpp ahci.cpp)
 
-set_target_properties(fs PROPERTIES
-    LINK_DEPENDS ${MINICORE_USERLAND_LINKER_SCRIPT}
-    SUFFIX ""
-)
-
-target_link_options(fs PRIVATE -T ${MINICORE_USERLAND_LINKER_SCRIPT})
-# libcenv(PN-4E6EA13D/QU-1FB6A7A4, ahci.cpp - devmgr에서 이관) - 커맨드
-# 헤더/PRDT/FIS 구조체를 매번 제로 초기화하는 memset 호출이 컴파일러
-# 생성으로 필요해진다(pubreg의 선례와 동일한 이유, userland/libs/
-# libcenv 참고).
-target_link_libraries(fs PRIVATE libmc libcenv)
+# minicore/kernel의 헤더(pnp.h/task.h 등)를 이 디렉터리 밖에서도
+# 찾을 수 있게 명시적으로 추가한다(devmgr/CMakeLists.txt와 동일한
+# 이유 - fs는 물리적으로 다른 디렉터리에 있다, fs_service.h/ahci.h/
+# block_device.h는 같은 디렉터리라 그대로 찾아짐).
+target_include_directories(minicore_fs PRIVATE ${CMAKE_SOURCE_DIR}/minicore/kernel)
+target_link_libraries(minicore_fs PRIVATE libkenv)

@@ -1,46 +1,53 @@
 #include "ahci.h"
 
-#include "libcenv/mem.h"
-#include "libmc/pnp.h"
-#include "libmc/syscall.h"
+#include "dma_buffer.h"
+#include "libkenv/mem.h"
+#include "pnp.h"
+#include "scheduler.h"
+#include "task.h"
 
 namespace ahci {
 
 namespace {
 
+using kernel::uint16_t;
+using kernel::uint32_t;
+using kernel::uint64_t;
+using kernel::uint8_t;
+
 // --- HBA(전역) 레지스터 오프셋(AHCI 1.3.1 사양 §3.1) ---
-constexpr mc::uint64_t kRegCap = 0x00;   // Host Capabilities
-constexpr mc::uint64_t kRegGhc = 0x04;   // Global Host Control
-constexpr mc::uint64_t kRegPi = 0x0C;    // Ports Implemented
-constexpr mc::uint64_t kPortRegionBase = 0x100;
-constexpr mc::uint64_t kPortRegionStride = 0x80;
+constexpr uint64_t kRegCap = 0x00;   // Host Capabilities
+constexpr uint64_t kRegGhc = 0x04;   // Global Host Control
+constexpr uint64_t kRegPi = 0x0C;    // Ports Implemented
+constexpr uint64_t kPortRegionBase = 0x100;
+constexpr uint64_t kPortRegionStride = 0x80;
 
 // --- 포트별 레지스터 오프셋(포트 블록 시작 기준, §3.3) ---
-constexpr mc::uint64_t kPortClb = 0x00;
-constexpr mc::uint64_t kPortClbu = 0x04;
-constexpr mc::uint64_t kPortFb = 0x08;
-constexpr mc::uint64_t kPortFbu = 0x0C;
-constexpr mc::uint64_t kPortIs = 0x10;
-constexpr mc::uint64_t kPortCmd = 0x18;
-constexpr mc::uint64_t kPortTfd = 0x20;
-constexpr mc::uint64_t kPortSsts = 0x28;
-constexpr mc::uint64_t kPortSerr = 0x30;
-constexpr mc::uint64_t kPortCi = 0x38;
+constexpr uint64_t kPortClb = 0x00;
+constexpr uint64_t kPortClbu = 0x04;
+constexpr uint64_t kPortFb = 0x08;
+constexpr uint64_t kPortFbu = 0x0C;
+constexpr uint64_t kPortIs = 0x10;
+constexpr uint64_t kPortCmd = 0x18;
+constexpr uint64_t kPortTfd = 0x20;
+constexpr uint64_t kPortSsts = 0x28;
+constexpr uint64_t kPortSerr = 0x30;
+constexpr uint64_t kPortCi = 0x38;
 
 // CAP 비트(§3.1.1)
-constexpr mc::uint32_t kCapNpMask = 0x1F;    // bits4:0 - Number of Ports - 1
-constexpr mc::uint32_t kCapNcsShift = 8;
-constexpr mc::uint32_t kCapNcsMask = 0x1F;   // bits12:8 - Number of Command Slots - 1
-constexpr mc::uint32_t kCapS64a = 1u << 31;  // 64비트 주소 지정 지원
+constexpr uint32_t kCapNpMask = 0x1F;    // bits4:0 - Number of Ports - 1
+constexpr uint32_t kCapNcsShift = 8;
+constexpr uint32_t kCapNcsMask = 0x1F;   // bits12:8 - Number of Command Slots - 1
+constexpr uint32_t kCapS64a = 1u << 31;  // 64비트 주소 지정 지원
 
 // GHC 비트(§3.1.2)
-constexpr mc::uint32_t kGhcAe = 1u << 31;  // AHCI Enable
+constexpr uint32_t kGhcAe = 1u << 31;  // AHCI Enable
 
 // PxCMD 비트(§3.3.7)
-constexpr mc::uint32_t kPortCmdSt = 1u << 0;   // Start
-constexpr mc::uint32_t kPortCmdFre = 1u << 4;  // FIS Receive Enable
-constexpr mc::uint32_t kPortCmdFr = 1u << 14;  // FIS Receive Running
-constexpr mc::uint32_t kPortCmdCr = 1u << 15;  // Command List Running
+constexpr uint32_t kPortCmdSt = 1u << 0;   // Start
+constexpr uint32_t kPortCmdFre = 1u << 4;  // FIS Receive Enable
+constexpr uint32_t kPortCmdFr = 1u << 14;  // FIS Receive Running
+constexpr uint32_t kPortCmdCr = 1u << 15;  // Command List Running
 
 // PxTFD 비트(§3.3.8)
 // [가설 검증 후 원복, 2026-09-20, PN-584DB994 §갱신14] 한때 이 비트가
@@ -52,20 +59,20 @@ constexpr mc::uint32_t kPortCmdCr = 1u << 15;  // Command List Running
 // 와 비교하는 것으로 미뤄, 실제로는 **하위 바이트(비트7:0)가 STATUS
 // 레지스터 사본**이고 원래 코드의 비트0(STATUS.ERR)이 처음부터
 // 맞았다 - 원복.
-constexpr mc::uint32_t kPortTfdErr = 1u << 0;
+constexpr uint32_t kPortTfdErr = 1u << 0;
 
 // PxSSTS.DET(§3.3.10) - 3이면 장치 있음 + 통신 확립.
-constexpr mc::uint32_t kPortSstsDetMask = 0x0F;
-constexpr mc::uint32_t kPortSstsDetPresent = 0x3;
+constexpr uint32_t kPortSstsDetMask = 0x0F;
+constexpr uint32_t kPortSstsDetPresent = 0x3;
 
-constexpr mc::uint64_t kDmaPageSize = 4096;
+constexpr uint64_t kDmaPageSize = 4096;
 
 // v1 폴링 상한 - 실측 후 조정 대상(RM-23F4B687 §4). 인터럽트 배선
 // (§3.3)이 아직 없어 스핀 폴링으로 완료를 확인한다.
-constexpr mc::uint32_t kPollIterations = 20000000;
+constexpr uint32_t kPollIterations = 20000000;
 
-volatile mc::uint32_t* kReg32(mc::uint64_t baseVirtAddr, mc::uint64_t offset) {
-    return reinterpret_cast<volatile mc::uint32_t*>(baseVirtAddr + offset);
+volatile uint32_t* kReg32(uint64_t baseVirtAddr, uint64_t offset) {
+    return reinterpret_cast<volatile uint32_t*>(baseVirtAddr + offset);
 }
 
 // --- 커맨드 리스트/커맨드 테이블/FIS 구조체(§3.1의 계층도가 가리키는
@@ -73,95 +80,94 @@ volatile mc::uint32_t* kReg32(mc::uint64_t baseVirtAddr, mc::uint64_t offset) {
 
 // 커맨드 헤더 - 커맨드 리스트의 슬롯 하나(32바이트, 사양 §4.2.2).
 struct CommandHeader {
-    mc::uint32_t dw0;  // bits4:0=CFL(FIS 길이, DWORD 단위), bit6=W(쓰기), bits31:16=PRDTL(PRDT 개수)
-    mc::uint32_t prdbc;  // 전송된 바이트 수(하드웨어가 갱신) - out
-    mc::uint32_t ctbaLow;
-    mc::uint32_t ctbaHigh;
-    mc::uint32_t reserved[4];
+    uint32_t dw0;  // bits4:0=CFL(FIS 길이, DWORD 단위), bit6=W(쓰기), bits31:16=PRDTL(PRDT 개수)
+    uint32_t prdbc;  // 전송된 바이트 수(하드웨어가 갱신) - out
+    uint32_t ctbaLow;
+    uint32_t ctbaHigh;
+    uint32_t reserved[4];
 };
 static_assert(sizeof(CommandHeader) == 32, "AHCI 사양 §4.2.2 - 커맨드 헤더는 32바이트 고정");
 
 // PRDT(Physical Region Descriptor Table) 엔트리(16바이트, 사양 §4.2.3.3).
 struct PrdtEntry {
-    mc::uint32_t dbaLow;
-    mc::uint32_t dbaHigh;
-    mc::uint32_t reserved;
-    mc::uint32_t dw3;  // bits21:0=byte count-1, bit31=I(완료 시 인터럽트)
+    uint32_t dbaLow;
+    uint32_t dbaHigh;
+    uint32_t reserved;
+    uint32_t dw3;  // bits21:0=byte count-1, bit31=I(완료 시 인터럽트)
 };
 static_assert(sizeof(PrdtEntry) == 16, "AHCI 사양 §4.2.3.3 - PRDT 엔트리는 16바이트 고정");
 
 // 커맨드 테이블 레이아웃(사양 §4.2.3) - CFIS(64바이트 예약) + ACMD(16,
 // 이 드라이버는 안 씀) + 예약(48) 다음 오프셧 0x80부터 PRDT 배열.
-constexpr mc::uint64_t kCmdTablePrdtOffset = 0x80;
+constexpr uint64_t kCmdTablePrdtOffset = 0x80;
 
 // Register Host-to-Device FIS(20바이트, 사양 §10.3.4).
 struct RegH2dFis {
-    mc::uint8_t fisType;     // 0x27
-    mc::uint8_t pmportAndC;  // bit7=1(Command)
-    mc::uint8_t command;
-    mc::uint8_t features0;
-    mc::uint8_t lba0, lba1, lba2, device;
-    mc::uint8_t lba3, lba4, lba5, features1;
-    mc::uint8_t countLow, countHigh, icc, control;
-    mc::uint8_t reserved[4];
+    uint8_t fisType;     // 0x27
+    uint8_t pmportAndC;  // bit7=1(Command)
+    uint8_t command;
+    uint8_t features0;
+    uint8_t lba0, lba1, lba2, device;
+    uint8_t lba3, lba4, lba5, features1;
+    uint8_t countLow, countHigh, icc, control;
+    uint8_t reserved[4];
 };
 static_assert(sizeof(RegH2dFis) == 20, "AHCI 사양 §10.3.4 - Register H2D FIS는 20바이트 고정");
 
-constexpr mc::uint8_t kFisTypeRegH2d = 0x27;
-constexpr mc::uint8_t kAtaCommandIdentifyDevice = 0xEC;
-constexpr mc::uint8_t kAtaCommandReadDmaExt = 0x25;
-constexpr mc::uint8_t kAtaCommandWriteDmaExt = 0x35;
-constexpr mc::uint8_t kAtaCommandFlushCacheExt = 0xEA;
+constexpr uint8_t kFisTypeRegH2d = 0x27;
+constexpr uint8_t kAtaCommandIdentifyDevice = 0xEC;
+constexpr uint8_t kAtaCommandReadDmaExt = 0x25;
+constexpr uint8_t kAtaCommandWriteDmaExt = 0x35;
+constexpr uint8_t kAtaCommandFlushCacheExt = 0xEA;
 
 // AllocDmaBuffer 왕복 하나를 묶어 둔 헬퍼 - virt/phys/handle 세 값을
 // 전부 호출부에 돌려준다(PxCLB류 레지스터에는 물리주소, 실제 메모리
 // 접근에는 가상주소 둘 다 필요하므로).
 struct DmaAlloc {
-    mc::uint64_t virtAddr = 0;
-    mc::uint64_t physAddr = 0;
-    mc::uint32_t handle = 0;
+    uint64_t virtAddr = 0;
+    uint64_t physAddr = 0;
+    uint32_t handle = 0;
 };
 
-bool kAllocDma(mc::uint64_t sizeBytes, bool use32Bit, DmaAlloc* out) {
-    mc::AllocDmaBufferArgs args;
-    args.sizeBytes = sizeBytes;
-    args.physAddrLimit = use32Bit ? 32 : 0;
-    mc::SyscallToken token = mc::submit(mc::kSyscallEndpointAllocDmaBuffer, &args);
-    if (token != 0) {
-        mc::wait(token);
-    }
-    if (args.error != mc::ChannelError::None) {
-        return false;
-    }
-    out->virtAddr = args.virtualAddr;
-    out->physAddr = args.physicalAddr;
-    out->handle = args.handle;
-    return true;
+// [전환, 2026-09-20, SP-43331889/QU-5FC58B06] 트랩(mc::submit/wait)
+// 대신 kernel::kAllocDmaBufferSync()/kFreeDmaBufferSync()를 직접
+// 호출한다 - fs 자신이 이미 커널 안에 있어 트랩 자체가 무의미
+// (devmgr과 동일한 이유). 이 fs KernelThread 자기 자신을
+// `SharedPtr<kernel::Task>`로 얻어 매 호출마다 caller로 넘긴다
+// (dma_buffer.h 문서 주석 참고 - 커널 모드 분기는 아직 설계 미정이라
+// 매번 `ChannelError::NotSupported`로 실패하지만, 이 호출 자체는
+// 구조적으로 완전하다).
+kernel::SharedPtr<kernel::Task> kCurrentFsTask() {
+    auto* self = static_cast<kernel::KernelThread*>(kernel::Scheduler::currentTask());
+    return self->weakAsTask().lock();
 }
 
-void kFreeDma(mc::uint32_t handle) {
-    mc::FreeDmaBufferArgs args;
-    args.handle = handle;
-    mc::SyscallToken t = mc::submit(mc::kSyscallEndpointFreeDmaBuffer, &args);
-    if (t != 0) {
-        mc::wait(t);
-    }
+bool kAllocDma(uint64_t sizeBytes, bool use32Bit, DmaAlloc* out) {
+    kernel::ChannelError error = kernel::ChannelError::None;
+    kernel::kAllocDmaBufferSync(kCurrentFsTask(), sizeBytes, use32Bit ? 32 : 0, &out->virtAddr, &out->physAddr,
+                                 &out->handle, &error);
+    return error == kernel::ChannelError::None;
+}
+
+void kFreeDma(uint32_t handle) {
+    kernel::ChannelError error = kernel::ChannelError::None;
+    kernel::kFreeDmaBufferSync(kCurrentFsTask(), handle, &error);
 }
 
 }  // namespace
 
-bool AhciPort::init(mc::uint64_t hbaVirtAddr, mc::uint32_t portIndex, mc::uint32_t slotCount, bool use32BitDma) {
-    _portRegBase = hbaVirtAddr + kPortRegionBase + static_cast<mc::uint64_t>(portIndex) * kPortRegionStride;
+bool AhciPort::init(uint64_t hbaVirtAddr, uint32_t portIndex, uint32_t slotCount, bool use32BitDma) {
+    _portRegBase = hbaVirtAddr + kPortRegionBase + static_cast<uint64_t>(portIndex) * kPortRegionStride;
     _slotCount = slotCount;
     _use32BitDma = use32BitDma;
 
     // §3.3.7 포트 시작 절차(사양) - PxCLB/PxFB를 새로 채우기 전에 이미
     // 실행 중이면 먼저 정지시킨다(부팅 직후라 보통 이미 꺼져 있지만
     // 방어적으로 확인).
-    volatile mc::uint32_t* cmd = kReg32(_portRegBase, kPortCmd);
+    volatile uint32_t* cmd = kReg32(_portRegBase, kPortCmd);
     if (*cmd & (kPortCmdSt | kPortCmdFre)) {
-        *cmd &= ~static_cast<mc::uint32_t>(kPortCmdSt | kPortCmdFre);
-        for (mc::uint32_t i = 0; i < kPollIterations; ++i) {
+        *cmd &= ~static_cast<uint32_t>(kPortCmdSt | kPortCmdFre);
+        for (uint32_t i = 0; i < kPollIterations; ++i) {
             if (!(*cmd & (kPortCmdCr | kPortCmdFr))) {
                 break;
             }
@@ -192,10 +198,10 @@ bool AhciPort::init(mc::uint64_t hbaVirtAddr, mc::uint32_t portIndex, mc::uint32
     // PxCLB/PxCLBU, PxFB/PxFBU에 물리주소를 채운다(사양 §3.3.1/§3.3.3) -
     // 포트가 정지된 상태에서만 안전하게 쓸 수 있다(위에서 이미 정지
     // 확인).
-    *kReg32(_portRegBase, kPortClb) = static_cast<mc::uint32_t>(clb.physAddr & 0xFFFFFFFFu);
-    *kReg32(_portRegBase, kPortClbu) = static_cast<mc::uint32_t>(clb.physAddr >> 32);
-    *kReg32(_portRegBase, kPortFb) = static_cast<mc::uint32_t>(fb.physAddr & 0xFFFFFFFFu);
-    *kReg32(_portRegBase, kPortFbu) = static_cast<mc::uint32_t>(fb.physAddr >> 32);
+    *kReg32(_portRegBase, kPortClb) = static_cast<uint32_t>(clb.physAddr & 0xFFFFFFFFu);
+    *kReg32(_portRegBase, kPortClbu) = static_cast<uint32_t>(clb.physAddr >> 32);
+    *kReg32(_portRegBase, kPortFb) = static_cast<uint32_t>(fb.physAddr & 0xFFFFFFFFu);
+    *kReg32(_portRegBase, kPortFbu) = static_cast<uint32_t>(fb.physAddr >> 32);
 
     // 이전 세션이 남긴 오류/인터럽트 상태 비우기(사양 §10.1.2 포트
     // 초기화 절차) - PxSERR/PxIS는 write-1-to-clear.
@@ -219,8 +225,8 @@ bool AhciPort::init(mc::uint64_t hbaVirtAddr, mc::uint32_t portIndex, mc::uint32
 // H2D FIS 포맷 덕분). lba/sectorCount가 무의미한 커맨드(IDENTIFY/
 // FLUSH 등)는 0으로 넘기면 된다. dataBytes==0이면 데이터 전송이 없는
 // 커맨드(FLUSH)로 간주해 PRDT 자체를 생략한다(PRDTL=0).
-bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32_t sectorCount, bool isWrite,
-                                mc::uint64_t dataPhysAddr, mc::uint32_t dataBytes) {
+bool AhciPort::issueAtaCommand(uint8_t command, uint64_t lba, uint32_t sectorCount, bool isWrite,
+                                uint64_t dataPhysAddr, uint32_t dataBytes) {
     // 커맨드 테이블(슬롯 0 전용, CFIS + PRDT 1개) - 페이지 하나면
     // CFIS(0x80 예약 영역) + PRDT 엔트리 1개(16바이트)를 넉넉히 담는다.
     DmaAlloc cmdTable;
@@ -238,14 +244,14 @@ bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32
     fis->pmportAndC = 0x80;  // bit7=1(Command), PM port=0
     fis->command = command;
     fis->device = 0;
-    fis->lba0 = static_cast<mc::uint8_t>(lba & 0xFF);
-    fis->lba1 = static_cast<mc::uint8_t>((lba >> 8) & 0xFF);
-    fis->lba2 = static_cast<mc::uint8_t>((lba >> 16) & 0xFF);
-    fis->lba3 = static_cast<mc::uint8_t>((lba >> 24) & 0xFF);
-    fis->lba4 = static_cast<mc::uint8_t>((lba >> 32) & 0xFF);
-    fis->lba5 = static_cast<mc::uint8_t>((lba >> 40) & 0xFF);
-    fis->countLow = static_cast<mc::uint8_t>(sectorCount & 0xFF);
-    fis->countHigh = static_cast<mc::uint8_t>((sectorCount >> 8) & 0xFF);
+    fis->lba0 = static_cast<uint8_t>(lba & 0xFF);
+    fis->lba1 = static_cast<uint8_t>((lba >> 8) & 0xFF);
+    fis->lba2 = static_cast<uint8_t>((lba >> 16) & 0xFF);
+    fis->lba3 = static_cast<uint8_t>((lba >> 24) & 0xFF);
+    fis->lba4 = static_cast<uint8_t>((lba >> 32) & 0xFF);
+    fis->lba5 = static_cast<uint8_t>((lba >> 40) & 0xFF);
+    fis->countLow = static_cast<uint8_t>(sectorCount & 0xFF);
+    fis->countHigh = static_cast<uint8_t>((sectorCount >> 8) & 0xFF);
 
     const bool hasData = dataBytes > 0;
     if (hasData) {
@@ -253,8 +259,8 @@ bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32
         // 길이-1"(사양 §4.2.3.3).
         auto* prdt = reinterpret_cast<PrdtEntry*>(cmdTable.virtAddr + kCmdTablePrdtOffset);
         prdt[0] = PrdtEntry{};
-        prdt[0].dbaLow = static_cast<mc::uint32_t>(dataPhysAddr & 0xFFFFFFFFu);
-        prdt[0].dbaHigh = static_cast<mc::uint32_t>(dataPhysAddr >> 32);
+        prdt[0].dbaLow = static_cast<uint32_t>(dataPhysAddr & 0xFFFFFFFFu);
+        prdt[0].dbaHigh = static_cast<uint32_t>(dataPhysAddr >> 32);
         prdt[0].dw3 = dataBytes - 1;  // 인터럽트 비트(I)는 안 씀(폴링 방식)
     }
 
@@ -269,8 +275,8 @@ bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32
     if (hasData) {
         header[0].dw0 |= (1u << 16);  // PRDTL=1
     }
-    header[0].ctbaLow = static_cast<mc::uint32_t>(cmdTable.physAddr & 0xFFFFFFFFu);
-    header[0].ctbaHigh = static_cast<mc::uint32_t>(cmdTable.physAddr >> 32);
+    header[0].ctbaLow = static_cast<uint32_t>(cmdTable.physAddr & 0xFFFFFFFFu);
+    header[0].ctbaHigh = static_cast<uint32_t>(cmdTable.physAddr >> 32);
 
     // 슬롯 0의 이전 오류 상태를 비우고(PxSERR write-1-to-clear) 발급한다
     // (PxCI 비트0 세팅, 사양 §5.5).
@@ -284,13 +290,13 @@ bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32
     // 이 v1 최소 검증 범위 밖).
     bool completed = false;
     bool ioError = false;
-    for (mc::uint32_t i = 0; i < kPollIterations; ++i) {
-        const mc::uint32_t ci = *kReg32(_portRegBase, kPortCi);
+    for (uint32_t i = 0; i < kPollIterations; ++i) {
+        const uint32_t ci = *kReg32(_portRegBase, kPortCi);
         if (!(ci & 1u)) {
             completed = true;
             break;
         }
-        const mc::uint32_t tfd = *kReg32(_portRegBase, kPortTfd);
+        const uint32_t tfd = *kReg32(_portRegBase, kPortTfd);
         if (tfd & kPortTfdErr) {
             ioError = true;
             break;
@@ -304,7 +310,7 @@ bool AhciPort::issueAtaCommand(mc::uint8_t command, mc::uint64_t lba, mc::uint32
 bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
     *outResult = PortProbeResult{};
 
-    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+    volatile uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
     if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent) {
         return false;  // 장치 없음 - AhciController::probeFirstDevice가 다음 포트로 넘어간다
     }
@@ -319,8 +325,8 @@ bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
 
     const bool ok = issueAtaCommand(kAtaCommandIdentifyDevice, 0, 0, false, identifyBuf.physAddr, 512);
     if (ok) {
-        auto* words = reinterpret_cast<mc::uint16_t*>(identifyBuf.virtAddr);
-        for (mc::uint32_t i = 0; i < 256; ++i) {
+        auto* words = reinterpret_cast<uint16_t*>(identifyBuf.virtAddr);
+        for (uint32_t i = 0; i < 256; ++i) {
             outResult->identifyData[i] = words[i];
         }
         outResult->identifySucceeded = true;
@@ -330,13 +336,13 @@ bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
     return outResult->identifySucceeded;
 }
 
-bool AhciPort::readSectors(mc::uint64_t lba, mc::uint32_t count, void* outBuf) {
-    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+bool AhciPort::readSectors(uint64_t lba, uint32_t count, void* outBuf) {
+    volatile uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
     if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent || count == 0) {
         return false;
     }
 
-    const mc::uint64_t bytes = static_cast<mc::uint64_t>(count) * 512u;
+    const uint64_t bytes = static_cast<uint64_t>(count) * 512u;
     DmaAlloc dataBuf;
     if (!kAllocDma(bytes, _use32BitDma, &dataBuf)) {
         return false;
@@ -344,7 +350,7 @@ bool AhciPort::readSectors(mc::uint64_t lba, mc::uint32_t count, void* outBuf) {
 
     // READ DMA EXT(0x25, LBA48) - 장치->호스트 전송이라 W=0.
     const bool ok =
-        issueAtaCommand(kAtaCommandReadDmaExt, lba, count, false, dataBuf.physAddr, static_cast<mc::uint32_t>(bytes));
+        issueAtaCommand(kAtaCommandReadDmaExt, lba, count, false, dataBuf.physAddr, static_cast<uint32_t>(bytes));
     if (ok) {
         memcpy(outBuf, reinterpret_cast<const void*>(dataBuf.virtAddr), bytes);
     }
@@ -353,13 +359,13 @@ bool AhciPort::readSectors(mc::uint64_t lba, mc::uint32_t count, void* outBuf) {
     return ok;
 }
 
-bool AhciPort::writeSectors(mc::uint64_t lba, mc::uint32_t count, const void* buf) {
-    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+bool AhciPort::writeSectors(uint64_t lba, uint32_t count, const void* buf) {
+    volatile uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
     if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent || count == 0) {
         return false;
     }
 
-    const mc::uint64_t bytes = static_cast<mc::uint64_t>(count) * 512u;
+    const uint64_t bytes = static_cast<uint64_t>(count) * 512u;
     DmaAlloc dataBuf;
     if (!kAllocDma(bytes, _use32BitDma, &dataBuf)) {
         return false;
@@ -368,14 +374,14 @@ bool AhciPort::writeSectors(mc::uint64_t lba, mc::uint32_t count, const void* bu
 
     // WRITE DMA EXT(0x35, LBA48) - 호스트->장치 전송이라 W=1.
     const bool ok =
-        issueAtaCommand(kAtaCommandWriteDmaExt, lba, count, true, dataBuf.physAddr, static_cast<mc::uint32_t>(bytes));
+        issueAtaCommand(kAtaCommandWriteDmaExt, lba, count, true, dataBuf.physAddr, static_cast<uint32_t>(bytes));
 
     kFreeDma(dataBuf.handle);
     return ok;
 }
 
 bool AhciPort::flushCache() {
-    volatile mc::uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
+    volatile uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
     if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent) {
         return false;
     }
@@ -383,20 +389,20 @@ bool AhciPort::flushCache() {
     return issueAtaCommand(kAtaCommandFlushCacheExt, 0, 0, false, 0, 0);
 }
 
-bool AhciController::init(mc::uint64_t mmioVirtAddr) {
+bool AhciController::init(uint64_t mmioVirtAddr) {
     _mmioVirtAddr = mmioVirtAddr;
 
-    volatile mc::uint32_t* ghc = kReg32(mmioVirtAddr, kRegGhc);
+    volatile uint32_t* ghc = kReg32(mmioVirtAddr, kRegGhc);
     *ghc |= kGhcAe;
 
-    const mc::uint32_t cap = *kReg32(mmioVirtAddr, kRegCap);
-    const mc::uint32_t numPorts = (cap & kCapNpMask) + 1;
+    const uint32_t cap = *kReg32(mmioVirtAddr, kRegCap);
+    const uint32_t numPorts = (cap & kCapNpMask) + 1;
     _slotCount = ((cap >> kCapNcsShift) & kCapNcsMask) + 1;
     const bool use32BitDma = (cap & kCapS64a) == 0;
 
     _portsImplemented = *kReg32(mmioVirtAddr, kRegPi);
 
-    for (mc::uint32_t i = 0; i < numPorts && i < 32; ++i) {
+    for (uint32_t i = 0; i < numPorts && i < 32; ++i) {
         if (!(_portsImplemented & (1u << i))) {
             continue;
         }
@@ -406,7 +412,7 @@ bool AhciController::init(mc::uint64_t mmioVirtAddr) {
 }
 
 bool AhciController::probeFirstDevice(PortProbeResult* outResult, AhciPort** outPort) {
-    for (mc::uint32_t i = 0; i < 32; ++i) {
+    for (uint32_t i = 0; i < 32; ++i) {
         if (!_portInitialized[i]) {
             continue;
         }
@@ -422,17 +428,17 @@ namespace {
 
 // ATA-8 ACS IDENTIFY DEVICE 워드 위치(전부 사양 표준 - 커널/AHCI
 // 고유 값 아님).
-constexpr mc::uint32_t kIdWordLba28Low = 60;
-constexpr mc::uint32_t kIdWordLba28High = 61;
-constexpr mc::uint32_t kIdWordLba48Bit = 83;   // bit10 - LBA48 지원 여부
-constexpr mc::uint32_t kIdWordLba48Base = 100;  // 100-103, 64비트 리틀엔디안 워드
-constexpr mc::uint32_t kIdWordPhysLogicalSector = 106;  // bit14=1(유효), bit12=1(논리섹터>256워드)
-constexpr mc::uint32_t kIdWordLogicalSectorSizeLow = 117;
-constexpr mc::uint32_t kIdWordLogicalSectorSizeHigh = 118;
+constexpr uint32_t kIdWordLba28Low = 60;
+constexpr uint32_t kIdWordLba28High = 61;
+constexpr uint32_t kIdWordLba48Bit = 83;   // bit10 - LBA48 지원 여부
+constexpr uint32_t kIdWordLba48Base = 100;  // 100-103, 64비트 리틀엔디안 워드
+constexpr uint32_t kIdWordPhysLogicalSector = 106;  // bit14=1(유효), bit12=1(논리섹터>256워드)
+constexpr uint32_t kIdWordLogicalSectorSizeLow = 117;
+constexpr uint32_t kIdWordLogicalSectorSizeHigh = 118;
 
 }  // namespace
 
-void AhciBlockDevice::init(AhciPort* port, const mc::uint16_t* identifyData) {
+void AhciBlockDevice::init(AhciPort* port, const uint16_t* identifyData) {
     _port = port;
 
     // §3.0 "blockSize() - 보통 512 또는 4096" - word106 bit14(유효 비트)
@@ -440,10 +446,10 @@ void AhciBlockDevice::init(AhciPort* port, const mc::uint16_t* identifyData) {
     // words117-118(32비트, 워드 단위)을 실제 크기로 쓴다. 아니면 표준
     // 512바이트 섹터(사양 기본값)로 남긴다.
     _blockSize = 512;
-    const mc::uint16_t physLogical = identifyData[kIdWordPhysLogicalSector];
+    const uint16_t physLogical = identifyData[kIdWordPhysLogicalSector];
     if ((physLogical & (1u << 14)) && (physLogical & (1u << 12))) {
-        const mc::uint32_t sectorWords = static_cast<mc::uint32_t>(identifyData[kIdWordLogicalSectorSizeLow]) |
-                                          (static_cast<mc::uint32_t>(identifyData[kIdWordLogicalSectorSizeHigh]) << 16);
+        const uint32_t sectorWords = static_cast<uint32_t>(identifyData[kIdWordLogicalSectorSizeLow]) |
+                                          (static_cast<uint32_t>(identifyData[kIdWordLogicalSectorSizeHigh]) << 16);
         if (sectorWords > 0) {
             _blockSize = sectorWords * 2;
         }
@@ -452,26 +458,26 @@ void AhciBlockDevice::init(AhciPort* port, const mc::uint16_t* identifyData) {
     // §3.0 "blockCount()" - LBA48을 지원하면 words100-103(64비트), 아니면
     // words60-61(32비트, LBA28)로 계산한다(ATA-8 ACS 표준 필드).
     if (identifyData[kIdWordLba48Bit] & (1u << 10)) {
-        _blockCount = static_cast<mc::uint64_t>(identifyData[kIdWordLba48Base]) |
-                      (static_cast<mc::uint64_t>(identifyData[kIdWordLba48Base + 1]) << 16) |
-                      (static_cast<mc::uint64_t>(identifyData[kIdWordLba48Base + 2]) << 32) |
-                      (static_cast<mc::uint64_t>(identifyData[kIdWordLba48Base + 3]) << 48);
+        _blockCount = static_cast<uint64_t>(identifyData[kIdWordLba48Base]) |
+                      (static_cast<uint64_t>(identifyData[kIdWordLba48Base + 1]) << 16) |
+                      (static_cast<uint64_t>(identifyData[kIdWordLba48Base + 2]) << 32) |
+                      (static_cast<uint64_t>(identifyData[kIdWordLba48Base + 3]) << 48);
     } else {
-        _blockCount = static_cast<mc::uint64_t>(identifyData[kIdWordLba28Low]) |
-                      (static_cast<mc::uint64_t>(identifyData[kIdWordLba28High]) << 16);
+        _blockCount = static_cast<uint64_t>(identifyData[kIdWordLba28Low]) |
+                      (static_cast<uint64_t>(identifyData[kIdWordLba28High]) << 16);
     }
 }
 
-bool AhciBlockDevice::readBlocks(mc::uint64_t lba, mc::uint32_t count, void* buf) {
+bool AhciBlockDevice::readBlocks(uint64_t lba, uint32_t count, void* buf) {
     return _port->readSectors(lba, count, buf);
 }
 
-bool AhciBlockDevice::writeBlocks(mc::uint64_t lba, mc::uint32_t count, const void* buf) {
+bool AhciBlockDevice::writeBlocks(uint64_t lba, uint32_t count, const void* buf) {
     return _port->writeSectors(lba, count, buf);
 }
 
 bool AhciBlockDevice::flush() { return _port->flushCache(); }
 
-bool AhciBlockDevice::trim(mc::uint64_t, mc::uint32_t) { return true; }
+bool AhciBlockDevice::trim(uint64_t, uint32_t) { return true; }
 
 }  // namespace ahci

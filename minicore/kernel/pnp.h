@@ -91,6 +91,21 @@ constexpr SyscallEndpointId kSyscallEndpointRequestIoPermission = kMakeSyscallEn
 void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescriptor* outDevices,
                            uint32_t* outTotalCount);
 
+// [신규, 2026-09-20, SP-43331889 §7(fs 전환)] `RequestIoPermissionHandler::
+// onExec()` 본문(pnp.cpp) - `kEnumerateDevicesSync`와 같은 이유로
+// 익명 네임스페이스 밖으로 뺐다. `caller`는 트랩 경로에선
+// `task->submitterTask.lock()`, 커널 모드 직접 호출(fs 등)에서는
+// 호출자 자신의 `weakAsTask().lock()`을 그대로 넘긴다 - `kClaimBar()`가
+// `const SharedPtr<Task>&`를 요구해 `Task*`가 아니라 `SharedPtr<Task>`를
+// 받는다(`kMapMmioForCaller()`/`kUnmapMmioForCaller()`엔 `caller.get()`로
+// 넘김). `kMapMmioForCaller()`가 이미 `caller->isUserLevel`로
+// 분기하므로 이 함수는 그 분기를 그대로 물려받는다(KernelThread
+// 분기는 아직 실제 호출자가 없어 미검증 - pnp.cpp의 `kMapMmioForCaller`
+// 문서 주석 참고, fs 전환이 첫 실제 호출자가 된다).
+void kRequestIoPermissionSync(const SharedPtr<Task>& caller, uint32_t bus, uint32_t device, uint32_t function,
+                               uint64_t mmioBase, uint64_t* outMappedVirtualAddr, uint32_t* outAssignedIrqVector,
+                               ChannelError* outError);
+
 class PnpService {
 public:
     // 부팅 시 한 번 호출 - EnumerateDevices/RequestIoPermission

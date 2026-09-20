@@ -40,9 +40,12 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BI
 # out-of-tree add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/pubreg ${CMAKE_CURRENT_BINARY_DIR}/minicore-pubreg)
 
-# fs(SP-8B6B8D25 §4-A, PN-452FF696) - init/devmgr/pubreg와 동일한
-# 이유의 out-of-tree add_subdirectory.
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/fs ${CMAKE_CURRENT_BINARY_DIR}/minicore-fs)
+# fs(SP-8B6B8D25 §4-A, PN-452FF696) - **[제외, 2026-09-20,
+# SP-43331889/QU-5FC58B06] 더 이상 유저랜드 ELF가 아니다**, devmgr과
+# 동일한 이유로 Process 없는 순수 커널 KernelThread로 완전 흡수돼
+# 이 유저랜드 빌드 트리에서 뺐다(minicore/fs/CMakeLists.txt는 이제
+# top-level CMakeLists.txt가 커널 빌드 트리에서 직접
+# add_subdirectory한다).
 
 # dbgtarget(PN-87D6B615 "남은 범위" 2번, 디버그 세션 E2E 전용 디버기) -
 # init/devmgr/pubreg/fs와 동일한 이유의 out-of-tree add_subdirectory.

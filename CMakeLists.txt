@@ -36,18 +36,21 @@ add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
 
-# [신규, 2026-09-20, SP-43331889 §7, QU-23B339AB/QU-ECEE5990] devmgr -
-# 커널에 완전 흡수돼(Process 없는 순수 커널 Task) 더 이상 별도
-# 유저랜드 ELF가 아니다 - minicore/devmgr/CMakeLists.txt 문서 주석
-# 참고. fs는 아직 유저랜드에 남아 있다(AllocDmaBuffer의 커널 모드
-# 매핑 설계가 아직 미정 - SP-43331889 §3-1).
+# [신규, 2026-09-20, SP-43331889 §7, QU-23B339AB/QU-ECEE5990] devmgr/
+# fs - 커널에 완전 흡수돼(Process 없는 순수 커널 Task) 더 이상 별도
+# 유저랜드 ELF가 아니다 - minicore/devmgr(/fs)/CMakeLists.txt 문서
+# 주석 참고. fs의 AllocDmaBuffer 커널 모드 매핑 설계는 여전히 미정
+# (dma_buffer.h 문서 주석) - 설계자 지시(QU-5FC58B06)로 그 설계
+# 결정과 무관하게 구조 전체를 먼저 옮겼다.
 add_subdirectory(minicore/devmgr)
+add_subdirectory(minicore/fs)
 
 add_executable(minicore.elf)
 target_link_libraries(minicore.elf PRIVATE
     minicore_arch_x86_64
     minicore_kernel
     minicore_devmgr
+    minicore_fs
     libkenv
     libcpio
     libkmm
