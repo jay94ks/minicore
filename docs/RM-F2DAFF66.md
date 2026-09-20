@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-20T05:39:21.165Z
+  updatedAt: 2026-09-20T05:42:36.155Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -423,6 +423,26 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
     반복됨).
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-20] `SP-5A255B7C`(비동기 프레임워크 우선 설계
+  원칙 평가 - 동기 구현의 wrapper화 검토, approved)** - §5가 제안한
+  `MutexCore`/정책 주입 구조(`BasicMutex<Policy>`, `Mutex =
+  BasicMutex<ParkingPolicy>`, `AsyncMutex = BasicMutex<YieldingPolicy>`)가
+  실제로 `minicore/kernel/mutex_core.h`/`semaphore_core.h`에 그대로
+  구현돼 있음을 코드로 확인 - 문서 §9가 스스로 "SP-0666DB3C §13으로
+  반영 완료"라 표시해 둔 그대로였다. 오히려 구현이 문서의 원 스케치를
+  실측으로 넘어서는 개선(§13 원문은 `tryAcquire()`/`onContended()`를
+  두 단계로 그렸으나, 그 사이 창에서 wakeup 유실 경쟁이 실측 확인돼
+  - PN-C9625015와 동일 클래스 - 하나의 스핀락 보유 구간 안에서
+  확인+대기등록을 원자적으로 묶는 Mesa 모니터 패턴으로 수정,
+  `PN-B41D8C0E`가 이후 `EnableSharedFromThis`/`WeakPtr` 별칭 생성까지
+  추가)까지 코드 주석에 전부 추적코드와 함께 정직하게 남아 있음 -
+  이런 종류의 "설계 대비 개선"은 방치된 갭이 아니라 이 방법론이 찾는
+  대상(§14)에 해당하지 않는다. §8의 열린 하위 과제 3개 중 1번(재진입
+  Mutex)은 `PN-4D60D49C`(scheduled)로, 2번(`SemaphoreCore` 정리)은
+  이미 코드 존재로 완료 확인, 3번(devmgr 비동기 소비자)은 범위 밖
+  후속 과제로 별도 추적 대상(이 문서가 새로 등록할 필요 없음 - 실제
+  devmgr 연결 시점에 자연히 §6-3 원칙을 적용하면 됨). 갭 없음.
 
 - **[점검 완료, 2026-09-19] `SP-6BEAE0C1`(일반 프로세스 생성 syscall
   fork/exec류 - 동적 Process 풀/COW/프로세스 트리 원 설계, approved)** -
@@ -1582,6 +1602,7 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 - [ ] (`SP-9A6D579F` 항목은 §2로 이동 - 2026-09-18 갱신 완료)
 - [ ] (`SP-9DD4F3EA`/`SP-CC1CF30E` 항목은 각각 §1/§2로 이동 - 2026-09-20 갱신 완료)
 - [ ] (`SP-ECC59BAE` 항목은 §1로 이동 - 2026-09-20 갱신 완료, PN-6CE4DD35 등록)
+- [ ] (`SP-5A255B7C` 항목은 §2로 이동 - 2026-09-20 갱신 완료, 갭 없음)
 
 (`SP-B1E258D8`(RCU) 항목은 approved 전환 + `PN-495C11B7` 구현
 완료까지 끝나 아래 §2로 이동했다.)
