@@ -18,6 +18,24 @@ namespace {
 
 uint32_t gInterruptDepth[kAcpiMaxCpus] = {};
 
+// [신규, 2026-09-21, PN-D7B66FE4, DC-53B93BFF (B)] 코어별 전용
+// 인터럽트 디스패치 스택 - deferred_destruction.h의 kEnterInterruptDepth/
+// kLeaveInterruptDepth 문서 주석 참고(Linux percpu irq stack과 동일한
+// 원칙, SP-677210E6의 하드웨어 IST1-4와는 다른 메커니즘). 관측된
+// 초과폭(~8.5KiB, PN-584DB994 갱신29)에 비해 넉넉한 여유를 둔다 -
+// gIstStacks(gdt.cpp)와 동일한 "alignas(16) + top = base+size" 관례.
+constexpr uint32_t kInterruptDispatchStackSize = 32 * 1024;
+alignas(16) uint8_t gInterruptDispatchStacks[kAcpiMaxCpus][kInterruptDispatchStackSize];
+
+// 가장 바깥쪽(중첩 아닌) 인터럽트 진입이 스왑 직전의 원래 rsp를
+// 잠깐 맡겨 두는 곳 - 그 코어에서 대응하는 이탈이 원래 스택으로
+// 되돌아갈 때만 읽는다.
+uint64_t gSavedTaskRspForOutermostInterrupt[kAcpiMaxCpus] = {};
+
+uint64_t kInterruptDispatchStackTop(uint32_t coreIndex) {
+    return reinterpret_cast<uint64_t>(&gInterruptDispatchStacks[coreIndex][kInterruptDispatchStackSize]);
+}
+
 AtomicPtr<ControlBlockBase> gDeferredHead{nullptr};
 
 bool kIsInInterruptContext() {
@@ -55,18 +73,29 @@ void kDrainDeferredDestructions() {
 
 }  // namespace kernel
 
-// [신규, 2026-09-20, SP-5130284C §3.2] isr.S/context_switch.S가 직접
-// call하는 리프 함수 - extern "C"라 이름이 안 맹글링되지만, 익명
-// 네임스페이스(gInterruptDepth)에는 같은 번역 단위 안이라 그대로
-// 접근 가능(익명 네임스페이스의 암묵적 using-directive).
-extern "C" void kEnterInterruptDepth() {
+// [신규, 2026-09-20, SP-5130284C §3.2 / 갱신, 2026-09-21, PN-D7B66FE4]
+// isr.S/context_switch.S가 직접 call하는 리프 함수 - extern "C"라
+// 이름이 안 맹글링되지만, 익명 네임스페이스(gInterruptDepth 등)에는
+// 같은 번역 단위 안이라 그대로 접근 가능(익명 네임스페이스의 암묵적
+// using-directive). 반환값의 의미는 deferred_destruction.h 문서
+// 주석 참고 - isr.S만 실제로 그 값을 써서 rsp를 바꾼다.
+extern "C" kernel::uint64_t kEnterInterruptDepth(kernel::uint64_t currentRsp) {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
     asm volatile("incl %0" : "+m"(kernel::gInterruptDepth[idx]) : : "memory");
+    if (kernel::gInterruptDepth[idx] != 1) {
+        return 0;  // 중첩 - 이미 전용 스택 위에 있으므로 되감지 않는다
+    }
+    kernel::gSavedTaskRspForOutermostInterrupt[idx] = currentRsp;
+    return kernel::kInterruptDispatchStackTop(idx);
 }
 
-extern "C" void kLeaveInterruptDepth() {
+extern "C" kernel::uint64_t kLeaveInterruptDepth() {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
     asm volatile("decl %0" : "+m"(kernel::gInterruptDepth[idx]) : : "memory");
+    if (kernel::gInterruptDepth[idx] != 0) {
+        return 0;  // 아직 바깥쪽 인터럽트가 진행 중 - 스택을 되돌리지 않는다
+    }
+    return kernel::gSavedTaskRspForOutermostInterrupt[idx];
 }
 
 // [신규, 2026-09-21, PN-584DB994] kIsrHandler(idt.cpp)가 이 인터럽트가
