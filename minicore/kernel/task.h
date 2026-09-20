@@ -431,32 +431,67 @@ struct Task {
 };
 
 // [신규, 2026-09-20, SP-43331889 §1, DC-91ABD922/QU-23B339AB 확정
-// 반영] "커널 모드 프로세스"(devmgr/fs 등을 커널에 완전 통합하되
-// `Process` 추상화 자체(자원그룹 소속/fd 테이블/essential+respawn/
-// 프로세스 트리 가시성)는 그대로 유지하기 위한 실행 단위 - `UserThread`
-// (syscall.h)와 정확히 같은 상속 패턴(`EnableSharedFromThis`까지
-// 포함, `weakAsTask()` 공개 래퍼도 동일한 이유로 필요 - `process.cpp`의
-// 외부 헬퍼가 `sharedFromThis()`(protected)에 접근 못 함)이나, ELF
-// 로드/유저 스택/별도 `pml4Phys` 없이 순수 C++ 함수 포인터를 entry로
-// 쓴다는 점이 다르다. `isUserLevel`은 항상 false(ring0이므로 CR3
+// 반영 - §1 2026-09-20 최종 개정, 설계자 답변(QU-ECEE5990, "(B)
+// devmgr/fs를 idle/리액터처럼 Process에 전혀 속하지 않는 순수 커널
+// Task로 완전히 단순화") 반영] "커널 모드 Task"(devmgr/fs 등을 커널에
+// 완전 통합) - `Process` 소속이 전혀 없다(자원그룹 회계/fd 테이블/
+// essential+respawn/프로세스 트리 가시성 전부 포기, idle/리액터와
+// 완전히 같은 지위 - "ps로 가시될 필요 없는 대상"이라는 설계자
+// 의견 그대로). 최초 초안은 `Process` 소속(`process` 필드,
+// `Process::execKernelEntry()`)을 유지하려 했으나 이 답변으로
+// 폐기됐다 - 대신 자유 함수 `kSpawnKernelThread()`(아래)로 Process
+// 없이 직접 띄운다.
+//
+// `UserThread`(syscall.h)와 상속 패턴(`EnableSharedFromThis`까지
+// 포함, `weakAsTask()`/`sharedSelf()`/`ensureSelfRef()`/`allocate()`/
+// `release()`/`_selfRef` 전부 `UserThread`와 동일한 이유로 그대로
+// 복제 - `submitterTask` 체이닝이 성립하려면 정적/동적 생성 양쪽 다
+// 컨트롤 블록이 있어야 한다는 사정이 완전히 같다, syscall.h의
+// `UserThread::_selfRef` 문서 주석 참고)은 그대로 같지만, ELF 로드/
+// 유저 스택/별도 `pml4Phys`도 없고 이제 `Process` 링크도 없다는 점이
+// 다르다. **[구현 중 확인, 2026-09-20] `Task::init(entry, arg)`를
+// 그대로 상속해 쓴다** - 최초 설계는 `kResumeForkedRing3`류 별도
+// ring0 프레임 합성이 필요하다고 가정했으나, `Task::init()`이 이미
+// 모든 커널 전용 Task(idle/리액터 등)를 위해 정확히 이 일(cs=0x08/
+// ss=0x10/rflags=0x202/rip=kTaskStartTrampoline로 채운 TaskTcb 준비)
+// 을 하고 있어 그대로 재사용 가능함을 발견했다 - 새 어셈블리/프레임
+// 합성 코드 불필요. `isUserLevel`은 항상 false(ring0이므로 CR3
 // 재동기화/ring3 진입 로직을 전부 건너뜀), `isKernelMode`는 항상
-// true(위 필드 참고) - `Task::init()`이 아니라 이 클래스 전용 초기화
-// 경로(`Process::execKernelEntry()`, SP-43331889 §2, 아직 미구현)가
-// 채운다. v1은 커널 모드 프로세스당 이 스레드 하나만 허용(devmgr/fs
-// 둘 다 현재 단일 스레드) - `Process::kernelThread` 별도 필드로 담아
-// 기존 `Process::threads`(UserThread 전용)를 건드리지 않는다.
+// true(단순 식별용 플래그 - `kOwnerProcessOf()`가 참고하지는 않는다,
+// 어차피 이 클래스는 소유 Process가 없으므로) - `kSpawnKernelThread()`
+// 가 채운 뒤 상속받은 `init()`을 그대로 호출한다. v1은 인스턴스당
+// 스레드 하나(devmgr/fs 둘 다 현재 단일 스레드).
 class KernelThread : public Task, public EnableSharedFromThis<KernelThread> {
 public:
     WeakPtr<Task> weakAsTask() { return WeakPtr<Task>(sharedFromThis(), static_cast<Task*>(this)); }
+    SharedPtr<KernelThread> sharedSelf() { return sharedFromThis(); }
 
-    // UserThread::process와 동일한 역할/동일한 순환 include 회피 관례.
-    WeakPtr<Process> process;
-
-    // ring0 최초 진입 시 부를 함수 포인터/인자 - `Process::
-    // execKernelEntry()`가 채운다(SP-43331889 §2).
+    // ring0 최초 진입 시 부를 함수 포인터/인자 - 참고용 보관일 뿐(실제
+    // 진입 배선은 상속받은 `Task::init(entry, arg)`이 TaskTcb의
+    // rbx/r12에 직접 싣는다, 위 클래스 문서 참고).
     void (*entry)(void*) = nullptr;
     void* entryArg = nullptr;
+
+    // UserThread::allocate()/release()/ensureSelfRef()와 완전히 동일한
+    // 계약(task.cpp에 구현) - 정적/동적 생성 양쪽 다 `submitterTask`
+    // 체이닝이 성립하려면 이 컨트롤 블록이 필요하다.
+    static KernelThread* allocate();
+    static void release(KernelThread* thread);
+    bool ensureSelfRef();
+
+private:
+    SharedPtr<KernelThread> _selfRef;
 };
+
+// [신규, 2026-09-20, SP-43331889 §2 개정 - 설계자 답변(QU-ECEE5990)
+// 반영, 최초 설계였던 `Process::execKernelEntry()`를 대체] devmgr/fs
+// 등 "커널 모드 Task"를 Process 없이 곧바로 띄운다 - idle/리액터와
+// 동일한 지위(Process 소속 없음). `Process::execImage()`와 동일한
+// 관례로 실제 스케줄링(`Scheduler::enqueue()`)은 호출부 책임 - 이
+// 함수는 `KernelThread`를 할당/초기화만 하고 반환한다. 실패는
+// `KernelThread::allocate()`의 슬랩 고갈 한 가지뿐(ELF 파싱/페이지
+// 매핑처럼 실패할 수 있는 단계가 아예 없음)이라 실패 시 nullptr.
+KernelThread* kSpawnKernelThread(void (*entry)(void*), void* arg);
 
 // [갱신, 2026-09-20, PN-81E49523 2단계, 설계자 답변(QU-2FC61718)+후속
 // 지시("TaskTcb 자체를 Task 구조체에 계속 유지해두고, kContextSwitch에

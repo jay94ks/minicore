@@ -256,4 +256,61 @@ void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     asm volatile("sti" ::: "memory");
 }
 
+namespace {
+// [신규, 2026-09-20, SP-43331889 §1] UserThread의 kNoOpReleaseUserThread
+// (syscall.cpp)와 완전히 같은 근거 - `_selfRef`의 강한 참조가 0이
+// 되는 순간엔 아무 것도 하지 않는다, 실제 반납은 항상 release()의
+// GenericSlabAllocator::free()가 명시적으로 담당.
+void kNoOpReleaseKernelThread(KernelThread*) {}
+}  // namespace
+
+// [신규, 2026-09-20, SP-43331889 §1] UserThread::allocate()/release()/
+// ensureSelfRef()(syscall.cpp)와 완전히 같은 패턴 - KernelThread의
+// 모든 필드(Task 상속분 포함)가 0/nullptr NSDMI라 memset한 raw 슬랩
+// 메모리가 placement new 없이도 "방금 생성된" 상태와 동일해진다.
+KernelThread* KernelThread::allocate() {
+    void* raw = GenericSlabAllocator::alloc(sizeof(KernelThread));
+    if (!raw) {
+        return nullptr;
+    }
+    memset(raw, 0, sizeof(KernelThread));
+    auto* thread = reinterpret_cast<KernelThread*>(raw);
+    thread->_selfRef = kMakeShared<KernelThread>(thread, &kNoOpReleaseKernelThread);
+    if (!thread->_selfRef) {
+        GenericSlabAllocator::free(raw, sizeof(KernelThread));
+        return nullptr;
+    }
+    return thread;
+}
+
+bool KernelThread::ensureSelfRef() {
+    if (_selfRef) {
+        return true;  // 이미 채워져 있음(allocate() 경로) - 멱등
+    }
+    _selfRef = kMakeShared<KernelThread>(this, &kNoOpReleaseKernelThread);
+    return static_cast<bool>(_selfRef);
+}
+
+void KernelThread::release(KernelThread* thread) {
+    thread->_selfRef.reset();
+    thread->fpuContext.reset();
+    GenericSlabAllocator::free(thread, sizeof(KernelThread));
+}
+
+// [신규, 2026-09-20, SP-43331889 §2 개정 - 설계자 답변(QU-ECEE5990,
+// "Process 없는 순수 커널 Task로 완전히 단순화")] task.h 문서 주석
+// 참고 - `Process::execImage()`와 동일한 관례로 `Scheduler::enqueue()`
+// 는 호출부 책임(반환된 포인터를 넘겨야 실제로 스케줄된다).
+KernelThread* kSpawnKernelThread(void (*entry)(void*), void* arg) {
+    KernelThread* thread = KernelThread::allocate();
+    if (!thread) {
+        return nullptr;
+    }
+    thread->isKernelMode = true;
+    thread->entry = entry;
+    thread->entryArg = arg;
+    thread->init(entry, arg);  // allocate()가 이미 _selfRef를 채워 뒀다(위 참고).
+    return thread;
+}
+
 }  // namespace kernel

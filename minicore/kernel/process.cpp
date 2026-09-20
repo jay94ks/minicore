@@ -1891,18 +1891,19 @@ bool kCanViewProcessStatus(const Process& caller, const Process& target) {
                              kPermOwnerRead);
 }
 
-// [신규, 2026-09-20, SP-43331889 §4] process.h 문서 주석 참고 -
-// `Task`에 가상 함수를 두지 않고(오프셋 0 `tcb` 불변조건) 평범한
-// bool 플래그로 `UserThread`/`KernelThread`를 구분해 분기한다.
+// [신규, 2026-09-20, SP-43331889 §4, 2026-09-20 개정(QU-ECEE5990,
+// "Process 없는 순수 커널 Task로 완전히 단순화")] process.h 문서
+// 주석 참고 - `Task`에 가상 함수를 두지 않고(오프셋 0 `tcb` 불변조건)
+// 평범한 bool 플래그로 분기한다. `KernelThread`는 애초에 어떤
+// `Process`에도 속하지 않으므로(idle/리액터와 동일한 지위) `isUserLevel`
+// 이 아닌 모든 Task(순수 커널 Task 전부 - idle/리액터/`KernelThread`
+// 구분 없이)는 그냥 소유 Process가 없다.
 SharedPtr<Process> kOwnerProcessOf(Task* task) {
     if (!task) {
         return SharedPtr<Process>();
     }
     if (task->isUserLevel) {
         return static_cast<UserThread*>(task)->process.lock();
-    }
-    if (task->isKernelMode) {
-        return static_cast<KernelThread*>(task)->process.lock();
     }
     return SharedPtr<Process>();
 }
