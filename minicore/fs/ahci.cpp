@@ -43,6 +43,15 @@ constexpr mc::uint32_t kPortCmdFr = 1u << 14;  // FIS Receive Running
 constexpr mc::uint32_t kPortCmdCr = 1u << 15;  // Command List Running
 
 // PxTFD 비트(§3.3.8)
+// [가설 검증 후 원복, 2026-09-20, PN-584DB994 §갱신14] 한때 이 비트가
+// "ERROR 레지스터 사본(비트7:0)/STATUS 레지스터 사본(비트15:8)"
+// 순서라 생각해 STS.ERR을 비트8로 옮기는 수정을 시도했으나, 실측
+// 재현(40회)에서 크래시율이 5%대→35%(14/40)로 오히려 크게 악화돼
+// 명백히 틀린 가설로 반증됐다 - Linux ahci.h가 `PORT_TFDATA`의
+// **하위 바이트**를 시프트 없이 그대로 `ATA_BUSY(0x80)`/`ATA_DRQ(0x08)`
+// 와 비교하는 것으로 미뤄, 실제로는 **하위 바이트(비트7:0)가 STATUS
+// 레지스터 사본**이고 원래 코드의 비트0(STATUS.ERR)이 처음부터
+// 맞았다 - 원복.
 constexpr mc::uint32_t kPortTfdErr = 1u << 0;
 
 // PxSSTS.DET(§3.3.10) - 3이면 장치 있음 + 통신 확립.
