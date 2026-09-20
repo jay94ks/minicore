@@ -21,6 +21,15 @@ struct InterruptFrame {
     uint64_t ssOld;
 };
 
+// [신규, 2026-09-20, PN-81E49523 2단계, 설계자 답변] "쓰레드의 마지막으로
+// 캡쳐된 TCB"라는 개념을 가리키는 이름 - 설계자 지시("InterruptFrame을
+// 여러 갈래로 쪼개어놔서 혼란스럽다"는 QU-47A83CDF 지적과 일치하게)로
+// 별도 타입을 새로 만들지 않고 기존 InterruptFrame을 그대로 재사용한다.
+// 케이스1-3/#DB(완전한 InterruptFrame)와 케이스4(Scheduler::parkCurrent
+// 기반 협조적 재개)를 개념적으로 같은 이름으로 부르기 위한 순수 별칭 -
+// 새 필드/의미를 추가하지 않는다.
+using TaskTcb = InterruptFrame;
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_INTERRUPT_FRAME_H
