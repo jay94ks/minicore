@@ -1,5 +1,6 @@
 #include "idt.h"
 
+#include "deferred_destruction.h"
 #include "gdt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
@@ -867,6 +868,20 @@ void kTerminateFaultingUserTask(kernel::SignalNumber signal) {
 // - 그 외(진짜 잘못된 접근, 다른 예외 전부)는 진단 로그를 남기고
 //   멈추다.
 extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
+    // [신규, 2026-09-21, PN-584DB994, 설계자 지시] "인터럽트가 발생하면
+    // 가장 먼저 해야 할 일은 현재 Task의 tcb에 인터럽트 프레임을
+    // 캡처해 진행 상황을 보존하는 것" - 벡터별 분기(EOI, 스케줄링
+    // 결정 등)보다 먼저, 무조건 이 자리에서 한다. 단 이 인터럽트가
+    // 중첩(다른 인터럽트 처리 도중)이 아닐 때만 - 중첩이면 `frame`이
+    // 원래 Task의 진짜 재개 지점이 아니라 "바깥쪽 인터럽트 처리 도중
+    // 어딘가"를 가리켜, 그걸 tcb에 담으면 오히려 커널 내부 지점으로
+    // 오염시킨다(scheduler.h의 `captureCurrentFrame()` 문서 주석
+    // 참고). `kEnterInterruptDepth()`가 isr_common_stub에서 이미 이
+    // 인터럽트분을 반영해 놨으므로, 여기서 읽는 값이 정확히 1이면
+    // "지금 어떤 Task를 직접 인터럽트했다(중첩 아님)"는 뜻이다.
+    if (kCurrentInterruptDepth() == 1) {
+        kernel::Scheduler::captureCurrentFrame(frame);
+    }
     if (frame->vector == kernel::kTimerVector) {
         kernel::Timer::onTick();
         kernel::Lapic::sendEoi();

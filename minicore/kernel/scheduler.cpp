@@ -2155,6 +2155,22 @@ void Scheduler::resyncDebugRegsForCurrentTask() {
     }
 }
 
+void Scheduler::captureCurrentFrame(InterruptFrame* frame) {
+    // [신규, 2026-09-21, PN-584DB994, 설계자 지시] 위 scheduler.h의
+    // 문서 주석 참고 - 호출부(kIsrHandler)가 이미 "중첩 아님"을
+    // 확인했다는 전제 하에, 그냥 지금 이 인터럽트가 정말로 트랩한
+    // Task의 tcb에 그 프레임을 그대로 복사해 둔다. `TaskTcb`(=
+    // `InterruptFrame`의 별칭)라 대입 연산자 하나로 176바이트 전체가
+    // 복사된다 - `kContextSwitchFromISR`의 "저장" 절반과 완전히
+    // 동일한 값을 만들지만, 훨씬 이른 시점(스케줄링 결정보다 먼저)에
+    // 무조건 실행돼 그 결정이 재진입/지연되어도 tcb 자체는 항상
+    // 최신 상태를 유지한다.
+    Task* current = currentTask();
+    if (current && current->tcb) {
+        *current->tcb = *frame;
+    }
+}
+
 Task* Scheduler::taskOnCore(uint32_t coreIndex) {
     RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
     return gCurrentTask[coreIndex];

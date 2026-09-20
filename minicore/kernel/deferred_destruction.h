@@ -41,4 +41,13 @@ void kDrainDeferredDestructions();
 extern "C" void kEnterInterruptDepth();
 extern "C" void kLeaveInterruptDepth();
 
+// [신규, 2026-09-21, PN-584DB994, 설계자 지시] `kEnterInterruptDepth()`가
+// 이미 이 인터럽트분을 반영해 증가시킨 뒤의 값 - `kIsrHandler`(idt.cpp)
+// 가 호출 시점에 이 값이 정확히 1이면 "지금 이 인터럽트가 어떤
+// Task를 직접 인터럽트했다(중첩 아님)"는 뜻이라, 그 경우에만
+// `Scheduler::captureCurrentFrame()`을 불러 그 Task의 tcb를 즉시
+// 갱신한다(중첩이면 `frame`이 원래 Task의 진짜 재개 지점이 아니라
+// "바깥쪽 인터럽트 처리 도중 어딘가"라 오히려 tcb를 오염시킨다).
+extern "C" unsigned int kCurrentInterruptDepth();
+
 #endif  // MINICORE_KERNEL_DEFERRED_DESTRUCTION_H

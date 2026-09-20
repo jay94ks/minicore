@@ -68,3 +68,12 @@ extern "C" void kLeaveInterruptDepth() {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
     asm volatile("decl %0" : "+m"(kernel::gInterruptDepth[idx]) : : "memory");
 }
+
+// [신규, 2026-09-21, PN-584DB994] kIsrHandler(idt.cpp)가 이 인터럽트가
+// 중첩인지(값 > 1) 아닌지(값 == 1) 판단하는 데 쓴다 - deferred_destruction.h
+// 문서 주석 참고. 단순 읽기라 kEnter/LeaveInterruptDepth처럼 인라인
+// asm으로 강제할 필요 없음(load 자체가 쪼개질 위험이 없는 단순 조회).
+extern "C" unsigned int kCurrentInterruptDepth() {
+    const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
+    return kernel::gInterruptDepth[idx];
+}
