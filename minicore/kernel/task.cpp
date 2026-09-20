@@ -123,6 +123,22 @@ kernel::uint64_t kMakeTaskTlsBlock() {
 
 namespace kernel {
 
+// [신규, 2026-09-20, PN-C536F352] task.h의 TaskOwnerRef 선언 참고 -
+// Scheduler::currentCoreIndex()/currentTask()를 참조해야 하는데
+// scheduler.h가 이미 task.h를 include하므로 여기(task.cpp, 이미
+// scheduler.h를 include함)에 정의를 둔다.
+TaskOwnerRef TaskOwnerRef::capture(WeakPtr<Task> owner) {
+    TaskOwnerRef ref;
+    ref._ownerTask = owner;
+    ref._ownerCoreIndexAtCapture = Scheduler::currentCoreIndex();
+    return ref;
+}
+
+bool TaskOwnerRef::isCurrentCoreOwner() const {
+    SharedPtr<Task> owner = resolve();
+    return owner && owner.get() == Scheduler::currentTask();
+}
+
 void Task::init(TaskEntry entry, void* arg, uint64_t stackSize) {
     // [신규, 2026-09-17, PN-73E61BD1 항목1] `waitQueueLink`(libkcont
     // `Node`)의 "비어 있음" 표현은 nullptr이 아니라 자기 자신을

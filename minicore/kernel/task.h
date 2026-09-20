@@ -79,6 +79,74 @@ struct TaskFpuContext {
     void destroy() {}
 };
 
+// [신규, 2026-09-20, PN-C536F352, RM-23F4B687 - onExec() currentTask()
+// 오용 재발(다섯 번) 근본 수정] "지금 이 코어가 실행 중인 Task"(호출
+// 시점 전역 상태, `Scheduler::currentTask()`)와 "이 작업을 누가
+// 맡겼는가"(제출 시점 정체성)는 구조적으로 다른 개념인데, 둘 다
+// `Task*`로 조회 가능해 보이는 게 착시를 유발해 같은 버그가 다섯 번
+// 재발했다(`AsyncTask`의 onExec() 계열 콜백은 리액터 자신의 Task
+// 컨텍스트에서 실행되므로 제출자와 다르다). `AsyncTask::submitterTask`
+// (async_task.h)가 이미 "제출 시점에 캡처해 둔 WeakPtr<Task>로만
+// owner를 찾는다"는 안전한 관례를 애드혹으로 구현해 왔는데, 이 타입은
+// 그 관례를 이름 있는 재사용 가능한 값 타입으로 일반화한다 - 새로
+// 이런 지연 실행 콜백을 작성하는 코드가 매번 같은 필드를 손으로 다시
+// 만드는 대신 이 타입을 쓰게 하는 것이 목적("규칙을 기억하기"에서
+// "타입을 재사용하기"로).
+//
+// **`captureCurrent()`가 아니라 `capture(WeakPtr<Task>)`인 이유**:
+// 설계안(PN-C536F352)이 처음 스케치한 모양은 인자 없는 정적 팩토리
+// (`Scheduler::currentTask()`를 내부에서 알아서 스냅샷)였으나, 실제
+// 구현 중 확인한 사실 - `Task` 자신은 `EnableSharedFromThis<Task>`를
+// 상속하지 않는다(그 SharedPtr 제어 블록은 파생 클래스, 예:
+// `UserThread : public Task, public EnableSharedFromThis<UserThread>`
+// 쪽에만 있다 - `syscall.h`의 `weakAsThis()` 참고) - 그래서 "지금의
+// `Task*`를 범용적으로 `WeakPtr<Task>`로 바꾸는" 마법 같은 무인자
+// 정적 함수는 만들 수 없다. 대신 호출자가 이미 자기 자신의 진짜
+// `WeakPtr<Task>`(예: `UserThread::weakAsTask()`)를 손에 쥔 **진짜
+// 제출 시점**에 그 값을 그대로 넘기는 형태로 캡처한다 - 의미상으로는
+// 스케치의 `captureCurrent()`와 동일(제출 시점 스냅샷, 이후 이
+// 팩토리를 지연 실행 컨텍스트에서 다시 부르면 안 됨)하고 실제로
+// 구현 가능하다.
+//
+// **여러 번 호출해도 안전한 이유**: `resolve()`(및 호환용 별칭
+// `lock()`)는 자신이 들고 있는 불변 `WeakPtr<Task>`만 원자적으로
+// lock()할 뿐 `gCurrentTask[coreIndex]` 같은 코어별 전역 상태를 전혀
+// 참조하지 않는다 - 그래서 재진입/동시 호출 모두 그 자체로 안전하고,
+// "잘못된 컨텍스트에서 불렀는지" 검출이 애초에 필요 없다.
+class TaskOwnerRef {
+public:
+    TaskOwnerRef() = default;
+
+    // owner - 진짜 제출 컨텍스트(syscall 트랩, AsyncTask::submit() 등)
+    // 에서 호출자가 이미 얻어 둔 자기 자신의 WeakPtr<Task>. 이 값을
+    // 나중에 지연 실행 컨텍스트(onExec() 등)에서 다시 계산하려 들면
+    // 이 타입이 막으려는 바로 그 버그가 재발하므로 절대 그러지 않는다.
+    // (task.cpp에 정의 - Scheduler::currentCoreIndex() 참조가 필요한데
+    // scheduler.h가 이미 task.h를 include하므로 여기서 scheduler.h를
+    // include하면 순환 include가 된다.)
+    static TaskOwnerRef capture(WeakPtr<Task> owner);
+
+    // 대상이 이미 죽었으면 빈 SharedPtr(널 아님, 빈 값) - 기존
+    // WeakPtr::lock() 관례 그대로 호출자가 매번 유효성을 확인한다.
+    SharedPtr<Task> resolve() const { return _ownerTask.lock(); }
+
+    // 호환용 별칭 - `WeakPtr<Task>` 시절부터 있던 `submitterTask.lock()`
+    // 관례를 그대로 재사용하는 기존 호출부가 이 타입으로 교체돼도
+    // 안 깨지게 한다.
+    SharedPtr<Task> lock() const { return resolve(); }
+
+    // 디버깅/방어적 assert 전용 - "지금 이 호출이 정말 소유자 자신의
+    // 실행 흐름 위에서 일어났는가"(코어 무관, Task가 그사이 다른
+    // 코어로 마이그레이션했을 수도 있음). onExec()의 정상 동작에는
+    // 쓰지 않는다(그게 바로 이 타입이 막으려는 버그 클래스이므로).
+    // (task.cpp에 정의 - capture()와 같은 순환 include 이유)
+    bool isCurrentCoreOwner() const;
+
+private:
+    WeakPtr<Task> _ownerTask;
+    uint32_t _ownerCoreIndexAtCapture = 0;  // 참고용 - resolve()/lock()이 안 씀
+};
+
 // context_switch.S의 kContextSwitch/kTaskStartTrampoline이 이 구조체의
 // savedRsp 오프셋(항상 첫 필드, 오프셋 0)을 그대로 참조한다 - 필드
 // 순서를 바꾸려면 그쪽 어셈블리도 같이 확인해야 한다.

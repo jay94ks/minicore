@@ -211,7 +211,11 @@ AsyncTaskManageCode Syscall::submit(SyscallEndpointId endpointId, void* args) {
     // currentTask()`가 정확한 마지막 순간이다 - onExec()은 나중에
     // AsyncReactor가 자기 스택 위에서 실행하므로 그 안에서는 이미
     // 늦다(async_task.h의 `submitterTask` 필드 주석 참고).
-    task->submitterTask = self->weakAsTask();
+    // [갱신, 2026-09-20, PN-C536F352] TaskOwnerRef::capture() - 바로
+    // 이 지점이 "진짜 제출 컨텍스트"라는 사실 자체가 TaskOwnerRef의
+    // 핵심 불변조건(제출 시점에만 캡처, 지연 실행 컨텍스트에서는
+    // 절대 재호출 금지)이다.
+    task->submitterTask = TaskOwnerRef::capture(self->weakAsTask());
 
     const AsyncTaskManageCode token = reinterpret_cast<AsyncTaskManageCode>(task);
     if (!self->pendingSyscalls.insert(UserThread::PendingSyscall{endpointId, token})) {

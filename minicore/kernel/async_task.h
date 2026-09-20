@@ -7,11 +7,10 @@
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "task.h"  // TaskOwnerRef(submitterTask, PN-C536F352) - 완전한 정의 필요
 #include "waitable.h"
 
 namespace kernel {
-
-struct Task;  // 포인터로만 참조(waitingTask) - 전체 정의는 task.h
 
 // 커널 전용 비동기 프레임워크(SP-F682B889, 확정) - kernel::Task보다
 // 훨씬 가벼운 전용 스택을 쓰는 스케줄링 가능 단위. Task와 같은
@@ -321,14 +320,22 @@ struct AsyncTask {
     // 아직 정확한 시점(pendingSyscalls 부기 근처)에 이 필드를 자동으로
     // 채운다 - 개별 syscall 핸들러는 이 필드를 신경 쓸 필요 없이
     // `onExec()`에서 `task->submitterTask.lock()`으로 그냥 얻는다.
-    // `waitingTask`와 동일한 이유로 `WeakPtr`(제출자가 완료 전에 먼저
-    // 죽어도 안전하게 빈 값을 반환 - UAF 방지, PN-B4987BF6의 self-ref
-    // 패턴이 이미 검증한 것과 같은 종류의 안전성). `Syscall::submit()`을
-    // 거치지 않는 제출 경로(`Syscall::submitDetached()`, 프레임워크
-    // 내부 재제출 등)는 이 필드를 채우지 않는다 - 그런 경로는 애초에
-    // "제출자"라는 개념이 아직 필요해진 적이 없다(RM-23F4B687 §4,
-    // 실사용처가 생기면 그때 확장).
-    WeakPtr<Task> submitterTask;
+    // `waitingTask`와 동일한 이유로 WeakPtr 기반(제출자가 완료 전에
+    // 먼저 죽어도 안전하게 빈 값을 반환 - UAF 방지, PN-B4987BF6의
+    // self-ref 패턴이 이미 검증한 것과 같은 종류의 안전성). `Syscall::
+    // submit()`을 거치지 않는 제출 경로(`Syscall::submitDetached()`,
+    // 프레임워크 내부 재제출 등)는 이 필드를 채우지 않는다 - 그런
+    // 경로는 애초에 "제출자"라는 개념이 아직 필요해진 적이 없다
+    // (RM-23F4B687 §4, 실사용처가 생기면 그때 확장).
+    //
+    // [갱신, 2026-09-20, PN-C536F352] 타입을 `WeakPtr<Task>`에서
+    // `TaskOwnerRef`(task.h)로 전환 - 이 필드 자체가 바로 그 타입이
+    // 일반화한 "애드혹 선례"였다(TaskOwnerRef 문서 주석 참고).
+    // `TaskOwnerRef::lock()`이 `WeakPtr::lock()`과 동일하게 동작하는
+    // 호환 별칭이라 기존 `submitterTask.lock()` 호출부(channel.cpp/
+    // debug_session.cpp/process.cpp 등 전체)는 전혀 안 건드려도 그대로
+    // 컴파일된다 - 이번 전환은 대입 지점 두 곳(초기화/리셋)만 바뀐다.
+    TaskOwnerRef submitterTask;
 
     // false면 완료(Completed/Failed) 후에도 리액터가 이 AsyncTask
     // 구조체/전용 스택을 자동으로 반납하지 않는다 - 결과를 나중에
