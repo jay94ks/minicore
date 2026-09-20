@@ -307,11 +307,50 @@ class KPanicWatch(gdb.Breakpoint):
         return True
 
 
+class SyncCr3Watch(gdb.Breakpoint):
+    # [신규, 갱신27] PN-584DB994 갱신26이 새로 잡은 더블폴트(vector=8,
+    # rip=kSyncCr3+82, rspOld가 스택 범위 밖의 낮은 값)의 근본 원인을
+    # 좁히기 위해 - kSyncCr3(Task* task) 호출마다 task->tcb->rspOld
+    # (InterruptFrame::rspOld, TaskTcb=InterruptFrame이라 tcb 오프셋
+    # +160)를 직접 읽어 "이미 이 함수에 들어오는 시점부터 비정상적인
+    # 낮은 값인지"를 확인한다. 정상이면 조용히 넘어가고(매 컨텍스트
+    # 전환마다 불려 매우 잦음 - 로그 폭주 방지), 비정상이면(하이
+    # 캐노니컬 커널 범위 밖) 그 자리에서 즉시 멈춰 어느 Task/어떤
+    # 값이었는지 남긴다 - 이게 걸리면 손상이 kSyncCr3 진입 "이전"에
+    # 이미 일어났다는 결정적 증거, 안 걸리는데도 더블폴트가 재현되면
+    # kSyncCr3 실행 "도중"에 손상된다는 뜻으로 조사 방향이 갈린다.
+    def stop(self):
+        frame = gdb.selected_frame()
+        task_ptr = int(frame.read_register("rdi")) & 0xFFFFFFFFFFFFFFFF
+        if task_ptr == 0:
+            return False
+        try:
+            tcb_ptr = int(gdb.parse_and_eval(f"*(unsigned long*)0x{task_ptr:x}")) & 0xFFFFFFFFFFFFFFFF
+            if tcb_ptr == 0:
+                return False
+            rsp_old = int(gdb.parse_and_eval(f"*(unsigned long*)0x{tcb_ptr + 160:x}")) & 0xFFFFFFFFFFFFFFFF
+        except gdb.error:
+            return False
+        # 정상 범위: 이 커널의 모든 실제 커널 스택은 direct map/전용
+        # 매핑 상 하이 캐노니컬(0xffff8000...) 영역에 있다 - 그보다
+        # 낮으면(유저 영역대인 0x400000류거나 이번처럼 ~1MB류 낮은
+        # 값이면) 이미 손상된 것으로 본다.
+        if rsp_old < 0xFFFF000000000000:
+            log(f"*** kSyncCr3 진입 시점부터 손상된 tcb->rspOld 발견 *** "
+                f"task=0x{task_ptr:x} tcb=0x{tcb_ptr:x} rspOld=0x{rsp_old:x} - "
+                f"kSyncCr3 호출 이전에 이미 비정상(정상이면 0xffff8000... 대여야 함)")
+            gdb.execute("bt")
+            return True
+        return False
+
+
 AllocEntry("kernel::PageFrameAllocator::allocOrder", "rdi")
 AllocEntry("kernel::PageFrameAllocator::allocOrderBelow", "rsi")
 FreeEntry("kernel::PageFrameAllocator::freeOrder", internal=False)
 EnterDepthWatch("kEnterInterruptDepth", internal=False)
 LeaveDepthWatch("kLeaveInterruptDepth", internal=False)
 KPanicWatch("kPanic", internal=False)
+SyncCr3Watch("kSyncCr3", internal=False)
 log("armed - watching kernel::PageFrameAllocator alloc*/freeOrder for double-alloc/double-free "
-    "+ kEnter/LeaveInterruptDepth for interrupt-context detection + kPanic for depth-at-crash")
+    "+ kEnter/LeaveInterruptDepth for interrupt-context detection + kPanic for depth-at-crash "
+    "+ kSyncCr3 entry tcb->rspOld sanity check")

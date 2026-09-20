@@ -44,6 +44,13 @@ for i in $(seq 1 "${MAX_TRIES}"); do
         grep '^\[pn584-alloc\] kPanic 도달' "${GDB_LOG}"
         exit 0
     fi
+    # [수정, 갱신27] SyncCr3Watch(kSyncCr3 진입 시점 tcb->rspOld 검증)
+    # 히트도 정확히 분류 - 위 두 태그와 다른 별도 문구.
+    if grep -q '^\[pn584-alloc\] \*\*\* kSyncCr3' "${GDB_LOG}"; then
+        echo "*** kSyncCr3 tcb corruption HIT on attempt ${i} - see ${GDB_LOG} ***"
+        grep '^\[pn584-alloc\] \*\*\* kSyncCr3' "${GDB_LOG}"
+        exit 0
+    fi
     echo "attempt ${i}: no hit"
 done
 
