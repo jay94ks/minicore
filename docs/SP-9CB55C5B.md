@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9CB55C5B
   status: approved
-  updatedAt: 2026-09-17T02:03:13.827Z
+  updatedAt: 2026-09-20T08:07:00.446Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -197,9 +197,23 @@ QU-764C5624 답변("임의 프로세스 대상이 필요함")은 **해석(resolv
 
 ## 7. 요약 — 이 문서가 확정 짓는 것 / 안 짓는 것
 
-- **제안(확정 아님, §4 QU 대기)**: `ProcessId`를 포인터값에서
-  세대 태그 슬롯 인덱스로 바꾸는 `kResolveProcessId()` 메커니즘.
-- **확정 안 함(§4가 명시적으로 열어 둠)**: `Kill`의 최종 권한 스코프.
-- **후속 계획으로 분리**: 테이블 동시성 보호(§5), pid ABI 마이그레이션
-  승인(§6) - 둘 다 이 문서 승인 이후 별도 PN으로 등록 예정.
+- ~~**제안(확정 아님, §4 QU 대기)**: `ProcessId`를 포인터값에서
+  세대 태그 슬롯 인덱스로 바꾸는 `kResolveProcessId()` 메커니즘.~~
+  **[갱신, 2026-09-20, RM-F2DAFF66 점검]** 이 절은 QU-78E4159E
+  답변 전에 쓰여 있어 이제 표현이 낡았다 - §2/§3의 `kResolveProcessId()`
+  메커니즘 자체는 이 문서 승인 시점에 이미 확정된 것이었고(§4는 오직
+  "Kill의 권한 스코프"만 열어 뒀을 뿐 §2/§3을 재검토 대상으로 두지
+  않았음), 실제로 `PN-C39882D0`(세대 태그 슬롯 테이블 + `kAllocateProcessId`/
+  `kResolveProcessId`/`kFreeProcessId`, commit ba7e4f5)로 구현
+  완료됐다.
+- ~~**확정 안 함(§4가 명시적으로 열어 둠)**: `Kill`의 최종 권한
+  스코프.~~ **[해소, 2026-09-20]** `SP-30FCC8AE`(uid/gid+RWX+root)로
+  분리 설계된 뒤 `PN-88E62419`(commit 반영, `kCanSendSignal()`
+  - KernelService 예외 → 직계 부모 예외 → `kCheckPermission()`
+  순서)로 실제 배선까지 완료.
+- **후속 계획으로 분리**: 테이블 동시성 보호(§5, `PN-AA30E4C8` -
+  `gProcessTableLock`을 plain Spinlock에서 `RwSpinlock`으로 교체,
+  원래 "조회는 락 없음" 주석이 실재하는 데이터 경쟁이었음을 발견해
+  함께 수정), pid ABI 마이그레이션 승인(§6, `PN-C39882D0`가
+  QU-AB5247DD 승인까지 받아 함께 구현) - 둘 다 완료.
 

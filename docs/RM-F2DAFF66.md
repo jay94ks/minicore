@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-20T07:58:07.840Z
+  updatedAt: 2026-09-20T08:07:19.030Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -423,6 +423,23 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
     반복됨).
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-20] `SP-9CB55C5B`(Kill 대상 확장 - 안전한
+  ProcessId 해석 메커니즘, approved)** - §2/§3의 세대 태그 슬롯
+  테이블 + `kResolveProcessId()`는 `PN-C39882D0`(commit ba7e4f5)로
+  구현 완료(`process.h`/`process.cpp`), §4가 분리 위임한 Kill 권한
+  스코프는 `SP-30FCC8AE`(uid/gid+RWX+root)로 확정된 뒤
+  `PN-88E62419`가 `kCanSendSignal()`(KernelService 예외 → 직계 부모
+  예외 → `kCheckPermission()`)로 실제 배선까지 완료(코드 확인:
+  process.cpp:1760 `kCanSendSignal`, 1807 `KillHandler::onExec`의
+  `kResolveProcessId` 호출), §5의 테이블 동시성 보호도 `PN-AA30E4C8`
+  (`gProcessTableLock`을 `RwSpinlock`으로 교체, commit 666b92b)로
+  완료. **문서 자체의 결함 발견**: §7 요약 절이 QU-78E4159E 답변
+  이전 시점 표현("제안, 확정 아님")과 §5의 후속 계획 귀속(엉뚱하게
+  `PN-90BD044E`로 적었던 내 첫 시도의 오기까지 포함)이 낡아 있어
+  `document_patch`로 정정(실제 담당은 `PN-AA30E4C8`, `PN-90BD044E`는
+  "같은 패턴"이라는 순수 참고 관계일 뿐 무관). 코드 자체는 갭 없음 -
+  문서만 낡아 있던 사례.
 
 - **[점검 완료, 2026-09-20] `SP-5A255B7C`(비동기 프레임워크 우선 설계
   원칙 평가 - 동기 구현의 wrapper화 검토, approved)** - §5가 제안한
