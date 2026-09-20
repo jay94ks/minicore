@@ -15,4 +15,10 @@ set_target_properties(init PROPERTIES
 )
 
 target_link_options(init PRIVATE -T ${MINICORE_USERLAND_LINKER_SCRIPT})
-target_link_libraries(init PRIVATE libmc)
+# [예방 조치, 2026-09-21, PN-235D8985] pubreg/authmgr과 동일하게
+# libcenv를 미리 링크해 둔다 - 컴파일러가 생성하는 memcpy/memset 호출이
+# 나중에 조금이라도 추가되면 그 시점에야 undefined symbol 링크 에러를
+# 만나게 되는 문제(devmgr에서 실제로 겪음, PN-A40787C8)를 예방한다.
+# libcenv는 순수 OBJECT 라이브러리라 안 쓰이면 링크 결과물에 아무
+# 영향이 없다.
+target_link_libraries(init PRIVATE libmc libcenv)
