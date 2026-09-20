@@ -458,16 +458,6 @@ void kHandleNmi(kernel::InterruptFrame* frame) {
             for (;;) {
                 asm volatile("cli; hlt");
             }
-        case kernel::NmiReason::ClearDebugRegs:
-            // [신규, 2026-09-19, PN-EA968DF0] DebugHalt/WatchdogTrap과
-            // 달리 이 코어를 정지시키지 않는다 - DR7만 즉시 꺼서 이
-            // 코어가 지금 실행 중인 무엇이든 더 이상 하드웨어
-            // 브레이크포인트를 트리거하지 못하게 한 뒤 정상적으로
-            // 계속 실행한다(nmi.h `NmiReason::ClearDebugRegs` 문서
-            // 주석 참고 - 다음 디스패치 시점에 `Scheduler::
-            // kSyncDebugRegs()`가 올바른 값으로 다시 싣는다).
-            asm volatile("mov %0, %%dr7" : : "r"(0ULL));
-            return;
         case kernel::NmiReason::None:
         default:
             // 설명 안 되는 NMI(진짜 하드웨어 NMI 등 극히 드문 경우) -

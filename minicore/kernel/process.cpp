@@ -1,5 +1,6 @@
 #include "process.h"
 
+#include "debug_session.h"
 #include "gdt.h"
 #include "libelf/elf.h"
 #include "libkenv/mem.h"
@@ -481,6 +482,33 @@ void Process::destroy() {
         group->removeMember(this);
         group = nullptr;
     }
+    // [신규, 2026-09-20, PN-0AC554C2 갱신6 답변 2번, PN-EA968DF0 재작성과
+    // 같은 라운드에 반영] "DebugSession은 디버거에 의해 유지되므로
+    // 디버거가 종료되면 바로 정리, 타깃만 종료된 경우 디버거 폴링 시
+    // 오류코드로 알림" - 이 프로세스가 죽을 때 자신이 디버거였던 자식
+    // 세션들을 즉시 정리한다(DebugAttach는 직계 부모-자식만 허용하므로
+    // 후보는 `children`뿐). 정리하지 않으면 그 자식의 정지된 스레드가
+    // 다시는 올 리 없는 DebugContinue를 영원히 기다리며 멈춰 있게 된다 -
+    // DebugContinueHandler와 동일하게 pausedByDebugger를 내리고
+    // (그룹이 아직 frozen이 아니면) 실제로 다시 깨운다.
+    children.forEach([this](SharedPtr<Process>& child, auto*) {
+        if (!child || !child->debugSession.active) {
+            return;
+        }
+        SharedPtr<Process> debugger = child->debugSession.debuggerProcess.lock();
+        if (!debugger || debugger.get() != this) {
+            return;
+        }
+        child->debugSession.active = false;
+        child->debugSession.pausedByDebugger.store(0);
+        if (!(child->group && child->group->frozen)) {
+            child->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
+                if (UserThread* t = threadRef.get()) {
+                    Scheduler::enqueue(Scheduler::currentCoreIndex(), t);
+                }
+            });
+        }
+    });
     memoryBytesUsed = 0;
     // [신규, SP-39F18E30 §4/§6 항목3, PN-FFC2F062] addressSpace.unmapAll()
     // 은 VmaBacking::FixedPhysical의 가상 매핑만 해제하고 물리 프레임은

@@ -2172,6 +2172,43 @@ void Scheduler::parkCurrent() {
     asm volatile("sti");
 }
 
+// [신규, 2026-09-20, PN-EA968DF0, QU-47A83CDF 답변] parkCurrent()와
+// 계약은 동일(Blocked 전환은 호출부 책임, 어느 큐에도 안 넣음, idle로
+// 전환)하지만, 이 함수 자신은 "지금 여기"(자기 자신의 C 콜스택 안)를
+// kContextSwitch로 캡처하지 않는다 - 이미 하드웨어+isr_common_stub이
+// 만들어 둔 진짜 `frame`을 그대로 `kContextSwitchFromISR`로
+// `caller->tcb`에 복사해 넣는다. 그 결과 이 호출은 **절대 반환하지
+// 않는다** - parkCurrent()처럼 "나중에 이 함수 지점으로 재개돼 CR3/
+// FPU/디버그레지스터를 다시 맞추고 sti"하는 꼬리 코드 자체가 없다
+// (그럴 필요가 없다 - `caller`가 나중에 다시 뽑히면 `onTick()`/
+// `runLoop()`의 기존 디스패치 코드가 이미 `kSyncCr3(next)` 등을
+// 전부 하고 있고, 이 Task는 `frame`이 가리키던 원래 ring3 지점으로
+// 곧장 `iretq`되기 때문 - kContextSwitchFromISR로 캡처된 다른 모든
+// Task와 완전히 동일하게 취급된다). 첫 소비자는
+// `kHandleUserBreakpointHit()`(debug_session.cpp) - #DB ISR이 예전
+// 처럼 자기 자신의 C 콜스택을 코어 공유 IST4 위에 얼어붙은 채로
+// 남겨 두지 않고, 이 함수 호출이 끝나는 즉시(=반환하지 않고 곧장
+// idle로 넘어가는 순간) IST4를 완전히 비워 다른 스레드의 #DB가
+// 안전하게 재사용할 수 있게 한다.
+[[noreturn]] void Scheduler::parkFromISR(Task* caller, InterruptFrame* frame) {
+    asm volatile("cli");
+    const uint32_t coreIndex = currentCoreIndex();
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
+    }
+    // parkCurrent()와 동일한 이유(PN-57CF48DB) - idle로 떠나기 전에
+    // CR3를 미리 되돌린다.
+    kSyncCr3ForIdleTransition();
+    kContextSwitchFromISR(&caller->tcb, gIdleTask[coreIndex].tcb, frame);
+    // 도달 불가 - kContextSwitchFromISR의 "복원" 절반이 곧장
+    // isr_common_epilogue로 jmp해 idle 자신의 재개 지점(runLoop())에
+    // 착지한다. kTaskOnFallingToEnd/retireCurrentTask와 동일한 방어적
+    // 무한 루프.
+    for (;;) {
+    }
+}
+
 void Scheduler::retireCurrentTask() {
     // yieldCurrent()/parkCurrent()와 같은 이유로 cli - gCurrentTask를
     // 지우기 전에 clean-up 큐에 먼저 넣으면, 그 사이 끼인 스케줄러 틱이

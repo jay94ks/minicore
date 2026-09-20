@@ -220,6 +220,26 @@ public:
     // 없으므로 이중 스케줄링 걱정 없이 안전하게 즉시 큐에 넣을 수 있다).
     static void parkCurrent();
 
+    // [신규, 2026-09-20, PN-EA968DF0, QU-47A83CDF 답변("모든 동작은
+    // 마지막으로 캡쳐된 TCB를 변경하는 걸로 수행할 수 있어")] parkCurrent()
+    // 와 정확히 같은 계약(어느 큐에도 안 넣음, Blocked로 전환, idle로
+    // 전환)이지만 **인터럽트 핸들러 내부에서** 부를 때 쓴다 - 이미
+    // 하드웨어+isr_common_stub이 만들어 둔 진짜 `InterruptFrame`(frame)
+    // 이 있으므로, parkCurrent()처럼 이 함수 자신의 C 콜스택 안에서
+    // kContextSwitch로 "지금 여기"를 캡처하는 대신 `kContextSwitchFromISR`
+    // 로 `frame`을 그대로 caller의 TaskTcb에 복사해 넣는다 - 그 결과
+    // 이 Task가 나중에 다시 뽑히면 이 함수를 "반환"하며 재개되는 게
+    // 아니라, 곧장 원래 인터럽트 지점(ring3)으로 iretq된다(onTick()의
+    // Task-to-Task 전환과 동일한 메커니즘 - 첫 소비자는
+    // kHandleUserBreakpointHit(), debug_session.cpp의 IST4 재진입
+    // 버그를 근본적으로 없앤다: 이 함수가 반환하면 그 즉시 IST4가
+    // 다시 완전히 비므로, 다른 스레드의 #DB가 곧바로 이어서 그 자리를
+    // 재사용해도 안전하다). 호출부가 이미 `caller->state`를 확정한
+    // 뒤(예: Blocked) 불러야 한다 - 이 함수 자신은 상태를 건드리지
+    // 않는다(parkCurrent()와의 유일한 차이 - ISR 호출부마다 상태
+    // 전이 사유가 다를 수 있어 그 결정은 호출부 몫으로 남긴다).
+    [[noreturn]] static void parkFromISR(Task* caller, InterruptFrame* frame);
+
     // PL-2D3184BC "Task 종료 프로토콜"(설계자 지시, QU-26F9420E 답변
     // 2번, 2026-09-14) - kTaskFallingToEnd(context_switch.S, 예전
     // kTaskStartTrampoline_halt)가 "Kernel-Level Task가 계속 커널에

@@ -17,23 +17,14 @@ namespace kernel {
 // gPendingMask와 동일한 발상으로, 발신자가 보내기 직전 코어별 사유
 // 슬롯(nmi.cpp의 파일 스코프 배열)을 먼저 채워 수신측 ISR이 구분하게
 // 한다.
-// [신규, 2026-09-19, PN-EA968DF0 근본 원인 수정] `ClearDebugRegs` -
-// DebugHalt/WatchdogTrap과 달리 이 코어를 영구 정지시키지 않는다(처리
-// 후 정상적으로 계속 실행) - 코어당 하나뿐인 #DB용 IST4가 고정
-// 최상단 주소로 매번 리셋되는 하드웨어 자원이라, 한 스레드가
-// `parkCurrent()`로 그 위에 얼어붙어 있는 동안 같은 코어에서 다른
-// 스레드가 같은 하드웨어 브레이크포인트를 또 히트하면 그 얼어붙은
-// 호출 체인의 스택 메모리를 덮어써 손상시킨다(debug_session.cpp
-// `kHandleUserBreakpointHit` 문서 주석 참고) - `Scheduler::
-// kSyncDebugRegs()`가 디스패치 시점에 `pausedByDebugger`를 확인해
-// DR7을 0으로 싣는 것만으로는 **이미 DR7이 로드된 채 계속 실행
-// 중인(재디스패치 없이) 코어**를 막지 못한다(실측 확인 - dispatch
-// 시점 게이트만으로는 15회 중 13-14회 여전히 재현). NMI(마스크
-// 불가능, cli로도 못 막음)로 그 코어에 즉시 DR7=0을 강제해 이 창을
-// 몇 명령어 수준으로 좁힌다 - `kHandleUserBreakpointHit`가 첫 스레드를
-// 파킹하는 바로 그 순간, 이 프로세스의 다른 스레드가 실행 중일 수
-// 있는 다른 온라인 코어 전부에게 보낸다.
-enum class NmiReason : uint32_t { None = 0, DebugHalt = 1, WatchdogTrap = 2, ClearDebugRegs = 3 };
+// [제거, 2026-09-20, PN-EA968DF0] `ClearDebugRegs`(구 값 3)는 코어당
+// 공유 IST4에 #DB 콜 체인이 "얼어붙어" 남는 문제(parkCurrent() 기반
+// 설계)를 완화하려던 방편이었다 - PN-81E49523의 TCB 통합으로
+// `kHandleUserBreakpointHit()`가 `Scheduler::parkFromISR()`을 통해
+// IST4를 즉시 완전히 비우도록 재작성되며 그 문제 자체가 사라져
+// 이 완화책도 함께 제거됐다(debug_session.cpp `kHandleUserBreakpointHit`
+// 문서 주석 참고).
+enum class NmiReason : uint32_t { None = 0, DebugHalt = 1, WatchdogTrap = 2 };
 
 class Nmi {
 public:

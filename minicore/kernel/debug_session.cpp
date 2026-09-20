@@ -1,17 +1,13 @@
 #include "debug_session.h"
 
-#include "acpi.h"
 #include "idt.h"
 #include "interrupt_frame.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
-#include "logger.h"
-#include "nmi.h"
 #include "paging.h"
 #include "process.h"
 #include "resource_group.h"
 #include "scheduler.h"
-#include "smp.h"
 
 namespace kernel {
 
@@ -787,48 +783,44 @@ public:
 
 DebugWriteMemoryHandler gDebugWriteMemoryHandler;
 
-// [신규, 2026-09-18, PN-49C2F890, 설계자 지시("디버그 인터럽트에서
-// 해당 task를 블록 처리하고 블로킹 원인으로 디버거를 셋팅해두면
-// 이런 복잡한 메커니즘이 필요하지 않게된다")] 코어별 "지금 이
-// 코어의 #DB 전용 IST4 위에 kHandleUserBreakpointHit()의 콜 체인이
-// Scheduler::parkCurrent()로 얼어붙어 있다" 플래그 - #DB가 발생할
-// 때마다 CPU가 그 코어의 TSS.ist4를 같은 고정 최상단 주소로 리셋하는
-// 공유 스택(gdt.cpp의 gIstStacks)이라, 이 플래그가 서 있는 동안 같은
-// 코어에서 또 다른 #DB가 파킹을 시도하면 첫 번째 Task의 얼어붙은
-// 프레임이 덮어써져 손상된다(QU-8172431E에서 이 세션이 확인한 위험).
-// 설계자가 QU-8172431E에서 세 후보 중 "코어당 동시 파킹 1개 제한"
-// 정책을 확정 - 이 배열이 그 정책의 유일한 강제 지점이다. 두 번째
-// 이후의 히트는 안전하게 기존 지연 경로(pausedByDebugger만 세우고
-// 반환 - Scheduler::onTick()이 다음 틱에 처리)로 대체하면 되는데,
-// 이 시점엔 이미 첫 번째로 파킹된 Task가 이 코어에 "대체 실행
-// 후보"로 존재하므로 PN-49C2F890 원래 갭(대체 후보 자체가 없어
-// 영원히 검사가 안 도는 문제)이 애초에 성립하지 않는다.
-bool gDebugParkedOnCore[kAcpiMaxCpus] = {};
-
-// [갱신, 2026-09-18, PN-49C2F890] #DB ISR(idt.cpp의
-// kHandleDebugException)이 하드웨어 브레이크포인트 적중 시 부르는
-// 콜백 - Idt::registerDebugCallback()으로 등록한다.
+// [갱신, 2026-09-20, PN-EA968DF0, QU-47A83CDF 답변("모든 동작은
+// 마지막으로 캡쳐된 TCB를 변경하는 걸로 수행") + PN-81E49523(TCB
+// 통합) 완료로 근본 재작성] #DB ISR(idt.cpp의 kHandleDebugException)
+// 이 하드웨어 브레이크포인트 적중 시 부르는 콜백 -
+// Idt::registerDebugCallback()으로 등록한다.
 //
-// 이 코어에 아직 다른 디버깅 대상이 파킹돼 있지 않으면(위
-// gDebugParkedOnCore), `Scheduler::parkCurrent()`를 직접 호출해
-// **그 자리에서 즉시** Task를 Blocked로 전환하고 idle로 넘긴다 -
-// `parkCurrent()`는 이 함수(`kHandleDebugException`←`kIsrHandler`
-// ←`isr_common_stub`의 C 호출 체인 안에 있음)의 콜리세이브
-// 레지스터를 IST4 스택 위에 남겨 둔 채 떠났다가, 나중에 누군가
-// `Scheduler::enqueue()`로 다시 큐에 넣어 정상 재개되면 바로 이
-// 호출 다음 지점부터 이어서 실행된다 - 그대로 반환하면
-// `isr_common_epilogue`의 pop+iretq를 거쳐 "브레이크포인트가 걸렸던
-// 바로 그 ring3 지점"으로 정확히 복귀한다(원리상 PN-44C91D6E가
-// `kResumeForkedRing3`을 검증하며 확인한 것과 같은 "인터럽트 프레임
-// 그대로 재사용" 패턴). 이미 다른 대상이 파킹돼 있으면(코어당 1개
-// 제한, 위 플래그 문서 참고) 기존 지연 경로로 안전하게 대체한다.
+// **예전 설계(PN-49C2F890)와 근본적으로 다른 점**: 예전엔
+// `Scheduler::parkCurrent()`를 직접 호출해 이 함수 자신의 C 콜스택
+// (`kHandleDebugException`←`kIsrHandler`←`isr_common_stub`)을 코어
+// 공유 IST4 스택 위에 "얼어붙은 채" 남겨 뒀다 - #DB마다 CPU가 그
+// 코어의 TSS.ist4를 같은 고정 최상단 주소로 리셋하는 공유 스택이라,
+// 이 상태로 남아있는 동안 같은 코어에서 다른 스레드가 또 #DB를 내면
+// 하드웨어가 그 자리를 다시 리셋해 첫 번째 Task의 얼어붙은 콜 체인을
+// 덮어썼다(PN-EA968DF0이 실측으로 확정한 근본 원인) - "코어당 동시
+// 파킹 1개 제한"(gDebugParkedOnCore)과 NMI 방송으로 완화를 시도했지만
+// 미해결 잔여 크래시가 남아 있었다.
+//
+// **새 설계**: `frame`(하드웨어+isr_common_stub이 이미 만들어 둔 진짜
+// InterruptFrame, IST4 위)을 `Scheduler::parkFromISR()`이 곧장
+// `thread->tcb`(이 스레드 전용, Slab에 영속 할당된 TaskTcb 블록)로
+// 복사해 넣고 idle로 전환한다 - 이 함수는 그 호출 이후 **다시는
+// 반환하지 않는다**(parkFromISR 자체가 [[noreturn]]). 그 결과 IST4는
+// 이 콜백이 끝나는 바로 그 순간(=반환하지 않고 곧장 idle로 넘어가는
+// 순간) 완전히 비므로, 그 다음 명령어에서 바로 다른 스레드의 #DB가
+// 발생해도 안전하게 재사용할 수 있다 - "코어당 동시 파킹 1개 제한"
+// 정책과 그걸 강제하던 gDebugParkedOnCore/NMI ClearDebugRegs 방송
+// 전체가 더 이상 필요 없다(얼어붙어 남는 상태 자체가 없어짐).
+//
+// `debugLiveFramePtr`도 이제 `frame`(IST4 위 임시 위치)이 아니라
+// `thread->tcb`(안정된 Slab 블록, `TaskTcb = InterruptFrame` 별칭이라
+// 타입은 그대로)를 가리킨다 - DebugGetRegisters/DebugSetRegisters는
+// 코드 변경 없이 그대로 동작한다(이미 포인터를 통해 그 자리를 직접
+// 읽고 쓰는 관례였으므로, 가리키는 대상만 더 안정적인 곳으로 바뀜).
 bool kHandleUserBreakpointHit(InterruptFrame* frame, uint64_t dr6) {
     constexpr uint64_t kDr6BreakpointMask = 0xF;      // B0-B3(하드웨어 브레이크포인트)
-    // [구현 완료, 2026-09-17, SP-9A6D579F §3.4, PN-87D6B615 "남은
-    // 범위" 1번] BS(비트 14) - RFLAGS.TF로 유발된 싱글스텝 트랩. 이
-    // 콜백이 실제로 "왜 멈췄는지"를 구분할 필요는 없다(하드웨어
-    // 브레이크포인트든 싱글스텝이든 아래 로직은 완전히 동일 -
-    // pausedByDebugger를 세우고 true 반환) - 그래서 두 마스크를 OR로
+    // BS(비트 14) - RFLAGS.TF로 유발된 싱글스텝 트랩. 이 콜백이 실제로
+    // "왜 멈췄는지"를 구분할 필요는 없다(하드웨어 브레이크포인트든
+    // 싱글스텝이든 아래 로직은 완전히 동일) - 그래서 두 마스크를 OR로
     // 합쳐 하나의 조건으로 취급한다.
     constexpr uint64_t kDr6SingleStepMask = 0x4000;   // BS
     if ((dr6 & (kDr6BreakpointMask | kDr6SingleStepMask)) == 0) {
@@ -856,82 +848,11 @@ bool kHandleUserBreakpointHit(InterruptFrame* frame, uint64_t dr6) {
         return false;
     }
     proc->debugSession.pausedByDebugger.store(1);
-
-    const uint32_t coreIndex = Scheduler::currentCoreIndex();
-    if (gDebugParkedOnCore[coreIndex]) {
-        // [수정, 2026-09-19, PN-06A7C439 실측 발견 - 진짜 멀티스레드
-        // 동시 히트로 처음 노출된 잠재 버그] 이미 이 코어에서 다른
-        // 디버깅 대상이 파킹돼 있다 - 위 정책상 이번엔 파킹하지 않고
-        // 기존 지연 경로(다음 스케줄러 틱의 kIsPausedByDebugger 검사,
-        // scheduler.cpp)로 대체한다. **여기서 kSaveDebugRegistersSnapshot()
-        // 를 부르면 안 된다** - `frame`은 이 코어의 공유 IST4 트랩
-        // 프레임(고정 최상단 리셋 주소)인데, 이미 다른 스레드가 바로
-        // 그 자리에 `parkCurrent()`로 얼어붙어 있는 중이라(스레드
-        // 하나뿐이던 시절엔 같은 코어에서 진짜 서로 다른 스레드가 동시에
-        // #DB를 두 번 낼 수 없어 드러나지 않았던 gap) 여기서 스냅숏을
-        // 찍으면 그 얼어붙은 프레임 메모리를 이 스레드 것으로 덮어써
-        // 버린다 - 실측 재현: dbgtarget 2-스레드 하네스(PN-06A7C439)에서
-        // 이렇게 얻은 `debugLiveFramePtr`로 두 스레드 모두 write-back한
-        // 뒤 재개하니 한쪽이 커널 주소로 rip가 튀어 Invalid Opcode로
-        // PANIC(스택 내용이 실제로 덮어써졌다는 증거). 이 스레드 자신의
-        // 진짜 스냅숏은 나중에 "지연 경로"(onTick()이 이 스레드 자신의
-        // 전용 커널 스택 위 프레임으로 안전하게 찍음)에서만 채워지게
-        // 그냥 둔다.
-        return true;
-    }
-    gDebugParkedOnCore[coreIndex] = true;
-    // [신규, 2026-09-19, PN-EA968DF0 근본 원인 수정] 이 코어의 IST4가
-    // 이 스레드 전용으로 얼어붙기 직전, 이 프로세스의 다른 스레드가
-    // 실행 중일 수 있는 다른 온라인 코어 전부에게 즉시 DR7=0을
-    // 강제한다(NMI - 마스크 불가능, 대상 코어가 지금 무엇을 하고
-    // 있든 몇 명령어 안에 도착) - `Scheduler::kSyncDebugRegs()`의
-    // 디스패치 시점 게이트(`pausedByDebugger` 확인)만으로는 **이미
-    // DR7이 로드된 채 재디스패치 없이 계속 실행 중인 코어**를 막지
-    // 못한다는 게 실측으로 확인됐다(nmi.h `NmiReason::ClearDebugRegs`
-    // 문서 주석 참고) - 이 방송이 그 창을 닫는다. **알려진 v1 한계**:
-    // 대상 코어가 이 프로세스와 무관한 **다른** 디버그 세션의
-    // 브레이크포인트를 걸어 뒀다면 그것도 함께 잠깐 꺼진다(다음
-    // 디스패치에서 스스로 복구) - 지금은 디버그 세션이 흔치 않고
-    // 동시에 여러 개 활성인 시나리오가 실측된 적 없어 감수한다
-    // (RM-23F4B687 §4, 실제 필요해지면 프로세스별 타겟팅으로 좁힌다).
-    {
-        const uint32_t cpuCount = Acpi::cpuCount();
-        for (uint32_t i = 0; i < cpuCount; ++i) {
-            if (i == coreIndex || !Smp::isCoreOnline(i)) {
-                continue;
-            }
-            Nmi::send(i, NmiReason::ClearDebugRegs);
-        }
-    }
-    // [신규, 2026-09-18, PN-49C2F890] 이 지점부터는 이 코어의 IST4가
-    // 진짜로 이 스레드 전용으로 얼어붙으므로(gDebugParkedOnCore 가드가
-    // 보장) `frame`을 안전하게 스냅숏 대상으로 쓸 수 있다 - 위 분기와
-    // 반대로 여기서만 찍는다(2026-09-18, PN-06A7C439로 위치 이동 -
-    // 원래는 이 가드 확인 전에 무조건 찍고 있었다).
-    //
-    // [알려진 갭, 2026-09-19, PN-06A7C439 실측 발견 - 미해결] 위
-    // gDebugParkedOnCore 재확인이 "같은 코어에서 동시에 두 스레드가
-    // 파킹 시도"만 막을 뿐, **이 스레드가 여기서 parkCurrent()로 얼어붙어
-    // 있는 동안, 같은 코어에서 다른(정지되지 않은) 형제 스레드가 정상
-    // 실행되다가 이 프로세스의 공유 브레이크포인트를 다시 히트하거나
-    // 타이머 틱으로 지연 경로(onTick())를 타는 상호작용까지는 막지
-    // 못한다** - 실제 dbgtarget 2-스레드 하네스(같은 프로세스, 공유
-    // EXECUTE 브레이크포인트)로 재현: 그런 상호작용이 겹치면 이미 정지된
-    // 스레드가 가리키던 `*debugLiveFramePtr`(당시엔 별도 사본
-    // `debugSavedRegisters`였음 - QU-47A83CDF 답변으로 이후 제거)이
-    // 손상되고(rip가 세그먼트 셀렉터 값처럼 보이는 임의 값으로 바뀌거나
-    // 커널 주소로 튐) 재개 시 Invalid
-    // Opcode/Page Fault로 PANIC한다 - 근본 원인은 아직 확정하지 못했다
-    // (IST4 자체의 재사용은 아닌 것으로 보임 - gIstStacks는 코어별로
-    // 이미 분리돼 있음, PN-EA968DF0 참고). `Process::debugSession`/
-    // `UserThread`의 디버그 필드들이 AsyncReactor(BSP 전용, 직렬화 보장)
-    // 를 거치지 않고 이 함수와 `Scheduler::onTick()`처럼 **원시 ISR/
-    // 스케줄러 틱 컨텍스트에서 여러 코어가 직접 동시에** 건드린다는 점이
-    // 유력한 용의선 - 별도 세션의 집중 조사가 필요(PN-EA968DF0).
-    kSaveDebugRegistersSnapshot(task, frame);
-    Scheduler::parkCurrent();  // 재개될 때까지(DebugContinue 등) 여기서 멈춘다
-    gDebugParkedOnCore[coreIndex] = false;
-    return true;
+    // 이제 이 스레드 전용 안정 버퍼(thread->tcb)를 가리킨다 - IST4
+    // 위 임시 `frame`이 아니다(위 함수 문서 주석 참고).
+    thread->debugLiveFramePtr = thread->tcb;
+    thread->state = TaskState::Blocked;
+    Scheduler::parkFromISR(thread, frame);  // 반환하지 않음
 }
 
 }  // namespace
