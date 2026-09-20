@@ -87,5 +87,10 @@ void SyscallFastPath::setKernelRspForThisCore(uint64_t kernelRsp) {
 // 관례 - context_switch.S도 같은 이유로 이런 래퍼를 거친다).
 extern "C" kernel::uint64_t kSyscallFastDispatch(kernel::uint64_t verb, kernel::uint64_t arg0,
                                                   kernel::uint64_t arg1) {
-    return kernel::kDispatchSyscallVerb(verb, arg0, arg1);
+    // [수정, 2026-09-21, PN-1DFCB337] `syscall` 빠른 경로는 isr_common_stub을
+    // 거치지 않아 진짜 InterruptFrame이 없다(gInterruptDepth도 안
+    // 건드림) - null을 넘겨 self-terminate류 분기가 예전 sti+hlt
+    // 방식을 그대로 쓰게 한다(syscall.h의 kDispatchSyscallVerb 문서
+    // 주석 참고).
+    return kernel::kDispatchSyscallVerb(verb, arg0, arg1, nullptr);
 }

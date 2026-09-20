@@ -94,13 +94,22 @@ struct SelfTerminateThreadArgs {
 // (0=submit/1=wait), RDI/RSI=verb별 인자, 반환값이 새 RAX가 된다.
 // **self-terminate(verb=submit + endpointId=kSyscallEndpointSelfTerminate)
 // 는 이 함수가 반환하지 않는다** - `kTaskOnFallingToEnd()` 호출 후
-// sti+hlt 루프로 영원히 대체되므로, 양쪽 트랩 스텁(idt.cpp의 int 0x80
-// 경로, syscall_fastpath.cpp의 `syscall` 경로) 모두 "이 함수가 반환하지
-// 않으면 그 뒤 ring3 복귀 코드(iretq/sysretq)도 실행되지 않는다"는
-// 계약에 이미 의존하고 있다 - 정의는 idt.cpp(기존 int 0x80 핸들러가
-// 있던 자리, kTaskOnFallingToEnd/Syscall::submit·wait 전부 이미
-// 그쪽에서 쓰고 있었음).
-uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1);
+// `frame`이 있으면(=int 0x80) `Scheduler::parkFromISR()`로, 없으면
+// (=syscall 빠른 경로) sti+hlt 루프로 영원히 대체되므로, 양쪽 트랩
+// 스텁(idt.cpp의 int 0x80 경로, syscall_fastpath.cpp의 `syscall`
+// 경로) 모두 "이 함수가 반환하지 않으면 그 뒤 ring3 복귀 코드
+// (iretq/sysretq)도 실행되지 않는다"는 계약에 이미 의존하고 있다 -
+// 정의는 idt.cpp(기존 int 0x80 핸들러가 있던 자리, kTaskOnFallingToEnd/
+// Syscall::submit·wait 전부 이미 그쪽에서 쓰고 있었음).
+//
+// [수정, 2026-09-21, PN-1DFCB337] `frame` 인자 신설 - int 0x80
+// 경로(idt.cpp의 kHandleSyscallTrap)는 isr_common_stub이 이미
+// gInterruptDepth를 늘려 둔 진짜 InterruptFrame을 그대로 넘기고,
+// `syscall` 빠른 경로(syscall_fastpath.cpp)는 애초에 그 카운터를
+// 안 건드리므로 null을 넘긴다 - self-terminate류 분기가 이 값의
+// 유무로 "카운터를 닫아야 하는지"를 판단한다(kCheckSignalCheckpoint
+// 문서 주석 참고, idt.cpp).
+uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1, InterruptFrame* frame);
 
 // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] 프로세스 안에서만
 // 유일한(전역 유일 아님) 스레드 식별자 - `Process::threads`가 단일

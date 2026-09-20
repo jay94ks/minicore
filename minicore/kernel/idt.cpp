@@ -614,10 +614,22 @@ extern "C" void kThreadOnFallingToEnd(kernel::int32_t exitCode);
 // 뿐이다. 도달한다면 안전한 기본값(Default와 동일하게 종료)으로
 // 폴백한다 - "말없이 무시"보다 "일단 안전하게 종료"가 이 프로젝트의
 // 일관된 선택(SpawnProcess flags 검증 등과 같은 원칙).
-// `kTerminateFaultingUserTask`/self-terminate와 동일한 패턴
-// (kTaskOnFallingToEnd + sti+hlt 루프)을 재사용 - 호출부(int 0x80/
-// `syscall` 양쪽)로 절대 반환하지 않는다.
-bool kCheckSignalCheckpoint() {
+//
+// [수정, 2026-09-21, PN-1DFCB337] 이 함수는 `int 0x80`(진짜
+// InterruptFrame이 있음)과 `syscall` 명령 빠른 경로(syscall_fastpath.cpp,
+// InterruptFrame 자체가 없음 - isr_common_stub을 아예 안 거쳐
+// gInterruptDepth도 증가시키지 않음) 양쪽에서 불린다. 예전엔 두
+// 경로 모두 `sti`+`for(;;) hlt`로 반환하지 않았는데, `int 0x80` 쪽만
+// `kTerminateFaultingUserTask`와 똑같이 이 인터럽트분의
+// `kLeaveInterruptDepth` 짝을 영원히 못 맞추는 결함이 있었다(자세한
+// 근거는 그 함수의 문서 주석/PN-1DFCB337 참고) - `syscall` 빠른
+// 경로는 애초에 그 카운터를 증가시킨 적이 없어 이 결함과 무관하다.
+// `frame`이 있으면(=`int 0x80`) `Scheduler::parkFromISR()`로 카운터
+// 감소까지 함께 마치며 idle로 전환하고, `frame`이 null이면(=`syscall`
+// 빠른 경로) 예전 `sti`+`hlt` 그대로 유지한다(카운터가 애초에
+// 관여하지 않으므로 안전 - 다음 스케줄러 틱이 다른 Task로 전환할
+// 때까지 대기하는 원래 방식 그대로).
+bool kCheckSignalCheckpoint(kernel::InterruptFrame* frame) {
     auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
     if (!thread) {
         return false;
@@ -644,6 +656,9 @@ bool kCheckSignalCheckpoint() {
         // Default 또는 (아직 도달 불가능한) Handler 폴백 - 종료.
         kernel::Logger::info("minicore: signal checkpoint - terminating UserThread (pending signal, non-Ignore disposition)");
         kTaskOnFallingToEnd();
+        if (frame) {
+            kernel::Scheduler::parkFromISR(thread, frame);  // 반환하지 않음
+        }
         asm volatile("sti");
         for (;;) {
             asm volatile("hlt");
@@ -668,11 +683,13 @@ namespace kernel {
 // 감싸는 래퍼 하나로 통일했다 - self-terminate(kSyscallVerbSubmit
 // 분기의 sti+hlt 루프)만 유일하게 이 함수 밖으로 반환하지 않는다.
 namespace {
-uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1) {
+uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1, kernel::InterruptFrame* frame) {
     // [PN-71E50394 항목3 나머지] 어떤 verb든 실제로 처리하기 전에
     // 먼저 체크포인트를 통과해야 한다 - Kill/Terminate가 걸려 있으면
     // 이 호출에서 반환하지 않는다(아래 kCheckSignalCheckpoint 참고).
-    kCheckSignalCheckpoint();
+    // frame은 kCheckSignalCheckpoint 문서 주석 참고(int 0x80이면
+    // 실제 값, syscall 빠른 경로면 null).
+    kCheckSignalCheckpoint(frame);
     switch (verb) {
         case kSyscallVerbSubmit: {
             const auto endpointId = static_cast<SyscallEndpointId>(arg0);
@@ -692,6 +709,15 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1) {
             // 지킨다(kTaskFallingToEndHalt와 동일한 역할).
             if (endpointId == kSyscallEndpointSelfTerminate) {
                 kTaskOnFallingToEnd();
+                // [수정, 2026-09-21, PN-1DFCB337] kCheckSignalCheckpoint와
+                // 동일한 이유 - frame이 있으면(int 0x80) parkFromISR로
+                // 이 인터럽트분의 카운터까지 정확히 닫는다.
+                if (frame) {
+                    auto* self = kernel::Scheduler::currentTask();
+                    if (self) {
+                        kernel::Scheduler::parkFromISR(self, frame);  // 반환하지 않음
+                    }
+                }
                 asm volatile("sti");
                 for (;;) {
                     asm volatile("hlt");
@@ -717,6 +743,12 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1) {
                     }
                 }
                 kThreadOnFallingToEnd(exitCode);
+                // [수정, 2026-09-21, PN-1DFCB337] 위 kSyscallEndpointSelfTerminate
+                // 분기와 동일한 이유 - frame이 있으면(int 0x80)
+                // parkFromISR로 이 인터럽트분의 카운터까지 정확히 닫는다.
+                if (frame && current) {
+                    kernel::Scheduler::parkFromISR(current, frame);  // 반환하지 않음
+                }
                 asm volatile("sti");
                 for (;;) {
                     asm volatile("hlt");
@@ -778,12 +810,12 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1) {
 // `userFsBase`를 소비하는 첫 지점). self-terminate(kSyscallVerbSubmit
 // 분기)만 이 함수 밖으로 반환하지 않아 유저 복원이 실행되지 않는데,
 // 그 Task는 어차피 다시는 ring3로 안 돌아가므로 정확히 의도한 동작이다.
-uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1) {
+uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1, InterruptFrame* frame) {
     Task* current = Scheduler::currentTask();
     if (current) {
         kSyncFsBase(current);
     }
-    const uint64_t result = kDispatchSyscallVerbBody(verb, arg0, arg1);
+    const uint64_t result = kDispatchSyscallVerbBody(verb, arg0, arg1, frame);
     if (current && current->isUserLevel) {
         kSyncFsBaseToUser(static_cast<UserThread*>(current));
     }
@@ -807,14 +839,14 @@ void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
         if (current) {
             kernel::kSyncFsBase(current);
         }
-        kCheckSignalCheckpoint();
+        kCheckSignalCheckpoint(frame);
         kernel::kHandleForkSyscall(frame);
         if (current && current->isUserLevel) {
             kernel::kSyncFsBaseToUser(static_cast<kernel::UserThread*>(current));
         }
         return;
     }
-    frame->rax = kernel::kDispatchSyscallVerb(frame->rax, frame->rdi, frame->rsi);
+    frame->rax = kernel::kDispatchSyscallVerb(frame->rax, frame->rdi, frame->rsi, frame);
 }
 
 // [QU-04C420BF, SP-0666DB3C, PN-71E50394 항목3] ring3(유저) 코드가
