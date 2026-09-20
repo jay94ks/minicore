@@ -238,9 +238,27 @@ class KPanicWatch(gdb.Breakpoint):
                     stack_size = int(gdb.parse_and_eval(f"*(unsigned long*)0x{task_ptr + 16:x}"))
                     stack_bottom = stack_top - stack_size
                     headroom = fault_rsp - stack_bottom
-                    stack_note = (f" task=0x{task_ptr:x} kernelStack=[0x{stack_bottom:x}, 0x{stack_top:x}) "
-                                  f"fault_rsp=0x{fault_rsp:x} headroom={headroom} bytes"
-                                  f"{' *** 스택 바닥 이미 넘음(오버플로) ***' if headroom < 0 else ''}")
+                    # [수정, 갱신23 - 실측으로 발견] 첫 실측에서
+                    # headroom>0인데도 fault_rsp가 stack_top보다 위(=이
+                    # gCurrentTask가 가리키는 스택 범위 자체를 완전히
+                    # 벗어남)인 경우를 headroom만 보고 "여유 있음"으로
+                    # 오판할 뻔했다 - "바닥 아래로 넘침"과 "이 Task의
+                    # 스택 범위 자체가 아님"은 서로 다른 이상 징후라
+                    # 따로 표시한다. 후자는 gCurrentTask가 실제 폴트
+                    # 시점 이후(중첩된 onTick()이 이미 next로 갱신)의
+                    # 값을 가리켜, 우리가 지금 읽는 "current task"가
+                    # 폴트 당시 진짜로 그 스택 위에서 돌던 Task가
+                    # 아닐 수 있다는 뜻일 수 있다.
+                    if fault_rsp > stack_top:
+                        stack_note = (f" task=0x{task_ptr:x} kernelStack=[0x{stack_bottom:x}, 0x{stack_top:x}) "
+                                      f"fault_rsp=0x{fault_rsp:x}(스택 top보다 {fault_rsp - stack_top}바이트 위) "
+                                      f"*** fault_rsp가 이 Task의 스택 범위 밖 - gCurrentTask가 폴트 이후 "
+                                      f"갱신됐거나(중첩 onTick이 이미 next로 바꿔치기) 전혀 다른 스택 위에서 "
+                                      f"실행 중이었을 가능성 ***")
+                    else:
+                        stack_note = (f" task=0x{task_ptr:x} kernelStack=[0x{stack_bottom:x}, 0x{stack_top:x}) "
+                                      f"fault_rsp=0x{fault_rsp:x} headroom={headroom} bytes"
+                                      f"{' *** 스택 바닥 이미 넘음(오버플로) ***' if headroom < 0 else ''}")
             except gdb.error as e:
                 stack_note = f" 스택 여유 계산 실패({e})"
             cr2_note = ""
