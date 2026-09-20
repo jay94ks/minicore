@@ -47,6 +47,8 @@
 .intel_syntax noprefix
 .code64
 
+.extern kLeaveInterruptDepth
+
 .section .text
 
 .global kContextSwitch
@@ -165,7 +167,18 @@ kContextSwitchFromISR:
     mov r9, [rdx+168]
     mov [r8+168], r9
 
-    mov rsp, rsi
+    /* [신규, 2026-09-20, SP-5130284C] 이 인터럽트가 "다른 Task로
+     * 전환하며" 끝나는 경로 - 깊이 카운터를 1 내린다. 반드시 `mov
+     * rsp, rsi` **이전**에 해야 한다 - 그 다음부터는 rsp가 newTcb(다른
+     * Task의 고정 176바이트 TaskTcb 블록) 안을 가리키게 되고, 거기서
+     * `call`을 하면 반환주소 push가 그 블록의 레지스터 필드를
+     * 깨뜨린다. rsi(newTcb)는 System V 콜리세이브 rbx에 잠깐 옮겨
+     * 이 call을 넘겨(kLeaveInterruptDepth는 rbx를 보존) 그대로 다시
+     * 쓴다 - isr.S의 자연 복귀 경로(같은 Task로 복귀)와 합쳐
+     * "인터럽트 진입 하나당 정확히 한 번의 감소"를 이룬다. */
+    mov rbx, rsi
+    call kLeaveInterruptDepth
+    mov rsp, rbx
     jmp isr_common_epilogue
 
 /* Task::init()이 이 Task 전용 고정 TaskTcb 블록(Slab 할당, task.cpp

@@ -93,6 +93,18 @@ void kDestroyAndFree(T* ptr) {
 // 이 분리 덕분에 `SharedPtr<T,Deleter>`가 `ControlBlockBase*`만
 // 들면(=T를 몰라도) 되고, 실제로 가리키는 대상(`T* _ptr`)은 별도
 // 필드로 독립시킬 수 있어 별칭(aliasing) 생성자가 가능해진다.
+class ControlBlockBase;
+
+// [신규, 2026-09-20, SP-5130284C] libkenv는 Scheduler/인터럽트 개념을
+// 몰라야 하므로(deferred_destruction.h 문서 주석 참고 - 순환 include
+// 방지), 커널 레이어가 부팅 시 채우는 함수포인터 훅만 여기 선언한다.
+// nullptr(아직 등록 전, 또는 이 훅 자체를 안 쓰는 빌드)이면 항상
+// "지연 불필요"로 취급해 기존 즉시 반납 경로 그대로 동작한다.
+using ShouldDeferHeavyDestructionFn = bool (*)();
+using PushDeferredDestructionFn = void (*)(ControlBlockBase*);
+inline ShouldDeferHeavyDestructionFn gShouldDeferHeavyDestruction = nullptr;
+inline PushDeferredDestructionFn gPushDeferredDestructionHook = nullptr;
+
 class ControlBlockBase {
 public:
     // WeakPtr::lock()이 쓴다 - "0에서 다시 살아나지 않게" CAS 루프로
@@ -116,8 +128,40 @@ public:
     void addStrongRefUnchecked() { _strongCount.fetchAdd(1); }
     void addWeakRef() { _weakCount.fetchAdd(1); }
 
+    // [신규, 2026-09-20, SP-5130284C §3.2-a] 지연 경로를 타면
+    // releaseStrong()이 원래(즉시 경로에서) 했을 일 전체 -
+    // `_destroyOwned` 호출 다음 `releaseWeak()`까지 - 를 나중에
+    // 안전한 컨텍스트(kDrainDeferredDestructions())에서 대신
+    // 재현하는 데 쓴다. `_destroyOwned`/`releaseWeak()` 어느 쪽도
+    // 인터럽트 컨텍스트에서 부르면 안 되므로(둘 다 락 기반 할당자/
+    // Process::destroy() 등을 거칠 수 있음) 반드시 이 함수로 묶어서
+    // 한 번에 나중에 실행한다 - 즉시 경로처럼 두 호출 사이에 다른
+    // 코드가 끼어들 여지가 없다.
+    void finishDeferredDestruction() {
+        _destroyOwned(this);
+        releaseWeak();
+    }
+
+    // [신규, 2026-09-20, SP-5130284C §3.1] 지연 파괴 스택(Treiber,
+    // 침습적) 연결용 - kPushDeferredDestruction/kDrainDeferredDestructions
+    // (deferred_destruction.cpp)만 쓴다. 별도 할당 없이 이 컨트롤
+    // 블록 자신을 노드로 재사용하므로 인터럽트 컨텍스트에서도 push가
+    // 안전하다(순수 CAS, 락/할당 없음).
+    void setDeferredNext(ControlBlockBase* next) { _deferredNext.store(next); }
+    ControlBlockBase* deferredNext() const { return _deferredNext.load(); }
+
     void releaseStrong() {
         if (_strongCount.fetchSub(1) == 1) {
+            // [신규, 2026-09-20, SP-5130284C] 지금 인터럽트 컨텍스트라면
+            // (커널 레이어가 등록해 둔 훅이 그렇다고 답하면) _destroyOwned/
+            // releaseWeak 둘 다 여기서 부르지 않고 이 컨트롤 블록 자체를
+            // 지연 스택에 push만 하고 곧장 반환한다(§3.2-a - 둘 중 하나만
+            // 미루면 이 수정의 존재 이유가 무력화된다). 훅이 등록 전이면
+            // (부팅 극초반) 항상 기존 즉시 경로 그대로.
+            if (gShouldDeferHeavyDestruction && gShouldDeferHeavyDestruction()) {
+                gPushDeferredDestructionHook(this);
+                return;
+            }
             _destroyOwned(this);  // 원래 소유 객체 소멸(파생 타입이 세팅한 트램폴린)
             releaseWeak();        // 강한 참조 전부 사라짐 - 암묵적 weak 1개도 해제
         }
@@ -133,6 +177,9 @@ protected:
     AtomicU32 _weakCount;
     void (*_destroyOwned)(ControlBlockBase*) = nullptr;  // init()이 채움
     void (*_freeSelf)(ControlBlockBase*) = nullptr;      // init()이 채움
+
+private:
+    AtomicPtr<ControlBlockBase> _deferredNext{nullptr};
 };
 
 // [SP-201238BB §2] `Deleter`를 템플릿 파라미터로 받는다(SharedPtr에도

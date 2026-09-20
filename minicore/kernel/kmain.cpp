@@ -29,6 +29,7 @@
 #include "process.h"
 #include "rcu.h"
 #include "resource_group.h"
+#include "deferred_destruction.h"
 #include "scheduler.h"
 #include "serial.h"
 #include "smp.h"
@@ -525,6 +526,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 큐를 만들어 두고, 실제 디스패치는 각 코어가 Scheduler::runLoop()
     // 에 들어가면서 시작된다 - PL-2D3184BC 4/5/6단계).
     kernel::Scheduler::init();
+    // [신규, 2026-09-20, SP-5130284C] Scheduler::currentCoreIndex()를
+    // 실제로 쓰므로(deferred_destruction.cpp) Scheduler::init() 이후에
+    // 등록해야 한다 - libkenv/shared_ptr.h의 함수포인터 훅을 이때부터
+    // 채워, 이 시점 이후 SharedPtr 소멸이 인터럽트 컨텍스트에서
+    // 일어나도 안전하게 지연되도록 한다(PN-4137C88C).
+    kernel::kInitDeferredDestruction();
 
     kernel::PageFrameAllocator::init(
         memmap, memmapEntries,

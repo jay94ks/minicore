@@ -1,6 +1,7 @@
 #include "async_task.h"
 
 #include "acpi.h"
+#include "deferred_destruction.h"
 #include "delayed_exec.h"
 #include "idt.h"
 #include "interrupt_frame.h"
@@ -613,6 +614,14 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
     // 매 호출마다 먼저 확인한다(AsyncTask 코루틴 재개 상태를 전혀
     // 건드리지 않아 재진입 중에도 안전).
     Rcu::drainCallbacksOnThisCore();
+
+    // [신규, 2026-09-20, SP-5130284C, PN-4137C88C] 인터럽트 컨텍스트
+    // (onTick()/onForcedMigration() 등)에서 SharedPtr가 마지막 강한
+    // 참조를 잃어 지연됐던 무거운 소멸(예: Process::destroy())을
+    // 지금(이 안전한 리액터 컨텍스트) 대신 실행한다 - 위 Rcu 드레인과
+    // 동일한 이유로 gDraining 재진입 가드와 무관하게 매 호출마다 먼저
+    // 확인한다.
+    kDrainDeferredDestructions();
 
     if (gDraining[coreIndex]) {
         // 이미 이 코어에서(runLoop() 인라인 호출이든 §4 (C) IPI
