@@ -66,7 +66,7 @@
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-19T17:48:08.056Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
 | [SP-4DCD0E6A](./SP-4DCD0E6A.md) | Minicore Lock-free/Concurrent 컨테이너 템플릿(LockFreeList/LockFreeVector/LockFreeQueue/ConcurrentMap/ConcurrentRbtree) — 설계 제안 | approved | 2026-09-17T17:24:15.924Z |
-| [SP-5130284C](./SP-5130284C.md) | 인터럽트 컨텍스트 유발 SharedPtr 소멸 지연 메커니즘 — 설계 제안 (PN-4137C88C, QU-A07B9019) | review | 2026-09-20T06:32:46.578Z |
+| [SP-5130284C](./SP-5130284C.md) | 인터럽트 컨텍스트 유발 SharedPtr 소멸 지연 메커니즘 — 설계 제안 (PN-4137C88C, QU-A07B9019) | approved | 2026-09-20T06:53:29.801Z |
 | [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved | 2026-09-16T00:21:27.201Z |
 | [SP-5D965B74](./SP-5D965B74.md) | procfs — 커널 상태 노출 파일시스템 스키마 설계 제안 | approved | 2026-09-20T03:55:08.695Z |
 | [SP-5EE7384A](./SP-5EE7384A.md) | ResourceGroup — cgroup 유사 자원 그룹 체계 설계 제안 | deprecated | 2026-09-17T03:04:11.492Z |
