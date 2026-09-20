@@ -2058,6 +2058,12 @@ Task* Scheduler::currentTask() {
     return gCurrentTask[coreIndex];
 }
 
+void Scheduler::resyncDebugRegsForCurrentTask() {
+    if (Task* current = currentTask()) {
+        kSyncDebugRegs(current);
+    }
+}
+
 Task* Scheduler::taskOnCore(uint32_t coreIndex) {
     RwSpinlockReadGuard guard(gCurrentTaskLock[coreIndex]);
     return gCurrentTask[coreIndex];

@@ -194,6 +194,21 @@ public:
     // 이 코어에서 지금 실행 중인 Task - 없으면(idle) nullptr.
     static Task* currentTask();
 
+    // [신규, 2026-09-20, PN-5E722656, QU-9BEE4D07 답변 (A)] 이 코어의
+    // `currentTask()`가 가리키는 Task를 대상으로 DR0-3/DR7을 지금
+    // 당장 다시 싣는다 - `kSyncDebugRegs()`(scheduler.cpp 내부 전용
+    // 함수)의 유일한 외부 노출 창구. `DebugSetBreakpoint`가 대상
+    // 프로세스의 스레드가 지금 실행 중일 수 있는 모든 온라인 코어에
+    // IPI로 이 함수를 강제 호출시키는 용도(debug_session.cpp의
+    // `kDebugRegSyncIsr`) - 원래는 다음 디스패치까지 최대 한
+    // 타임퀀텀 지연되던 것을, 코어를 독점하는 경쟁 없는 hot-loop
+    // 스레드도 즉시 반영받도록 만든다(PN-5E722656이 실측으로 확정한
+    // "재디스패치가 영원히 안 올 수 있다"는 잔여 갭의 수정).
+    // 대상이 유저 Task가 아니거나 디버그 세션이 없으면 `kSyncDebugRegs`
+    // 자신이 이미 안전하게 무해한 값(전부 0)을 싣는다 - 이 함수
+    // 호출부는 "지금 여기 있는 게 디버기인지" 미리 확인할 필요가 없다.
+    static void resyncDebugRegsForCurrentTask();
+
     // [PN-D132A1E9/QU-DE2828A1] 임의의 다른 코어에서 지금 실행 중인
     // Task를 조회한다(없으면 nullptr) - currentTask()는 호출자 자신의
     // 코어만 보므로, "이 프로세스를 지금 실제로 실행 중인 코어들"을

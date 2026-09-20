@@ -27,6 +27,7 @@ bool kIsFixedVector(uint32_t vector) {
     if (vector == 0xE1) return true;  // kLoadBalanceWakeVector(scheduler.cpp)
     if (vector == 0xE2) return true;  // kForcedMigrationVector(scheduler.h)
     if (vector == 0xE3) return true;  // kAsyncDrainVector(async_task.cpp)
+    if (vector == 0xE4) return true;  // kDebugRegSyncVector(debug_session.cpp)
     if (vector == 0xFF) return true;  // spurious(lapic.h 관례)
     return false;
 }

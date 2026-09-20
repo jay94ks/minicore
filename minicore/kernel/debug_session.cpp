@@ -1,13 +1,16 @@
 #include "debug_session.h"
 
+#include "acpi.h"
 #include "idt.h"
 #include "interrupt_frame.h"
+#include "lapic.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "paging.h"
 #include "process.h"
 #include "resource_group.h"
 #include "scheduler.h"
+#include "smp.h"
 
 namespace kernel {
 
@@ -328,6 +331,44 @@ public:
 
 DebugDetachHandler gDebugDetachHandler;
 
+// [신규, 2026-09-20, PN-5E722656, QU-9BEE4D07 답변 (A)] DebugSetBreakpoint
+// 직후 대상 프로세스의 스레드가 실행 중일 수 있는 모든 온라인 코어에
+// 보내는 강제 재동기화 IPI 전용 벡터 - "다음 디스패치까지 최대 한
+// 타임퀀텀 지연"이라는 기존 설계(SP-9A6D579F §5)가 "경쟁 없이 코어를
+// 독점하는 hot-loop 스레드는 재디스패치 자체가 영원히 안 와 그 지연이
+// 무기한이 될 수 있다"는 실측 확인된 잔여 갭을 닫는다. `kAsyncDrainVector`
+// (async_task.cpp, 0xE3) 다음 번호 - `interrupt_subscription.cpp`의
+// `kIsFixedVector()`에도 등록돼 있어야 한다.
+constexpr uint32_t kDebugRegSyncVector = 0xE4;
+
+// ISR 자신은 "지금 이 코어가 누구를 디버깅 세션 유무와 무관하게
+// 실행 중이든" DR0-3/DR7만 다시 싣는다(Scheduler::
+// resyncDebugRegsForCurrentTask() 문서 주석 참고) - 이 IPI를 받는
+// 코어가 정말 대상 프로세스를 실행 중인지 미리 확인할 필요가 없다
+// (kSyncDebugRegs 자신이 그 판단을 이미 한다). EOI는 공통 ISR
+// 스텁이 처리(kAsyncDrainIsr와 동일 관례).
+void kDebugRegSyncIsr(InterruptFrame*) { Scheduler::resyncDebugRegsForCurrentTask(); }
+
+// [신규, 2026-09-20, PN-5E722656] 이 프로세스의 스레드가 지금 실행
+// 중일 수 있는 다른 온라인 코어 전부에게 위 IPI를 보낸다 - 호출자
+// 자신의 코어는 제외(디버거 자신이 지금 실행 중인 코어라 이
+// syscall의 대상 프로세스를 실행 중일 수 없다). 정확히 어느 코어가
+// 대상 프로세스를 실행 중인지 추적하지 않고 그냥 전체 방송하는 이유는
+// (구 NMI ClearDebugRegs 방송과 같은 절충) - ISR 자신이 무해하게
+// no-op이므로 과잉 발송의 비용은 코어당 IPI 처리 한 번뿐이고, 매
+// DebugSetBreakpoint 호출마다(빈번하지 않음) 일어나는 일이라 실측
+// 후 조정 대상으로 남긴다(RM-23F4B687 §4).
+void kBroadcastDebugRegSync() {
+    const uint32_t selfCore = Scheduler::currentCoreIndex();
+    const uint32_t cpuCount = Acpi::cpuCount();
+    for (uint32_t i = 0; i < cpuCount; ++i) {
+        if (i == selfCore || !Smp::isCoreOnline(i)) {
+            continue;
+        }
+        Lapic::sendFixedIpi(Acpi::cpuApicId(i), static_cast<uint8_t>(kDebugRegSyncVector));
+    }
+}
+
 // [신규, 2026-09-17, SP-9A6D579F §3.4] DebugSetBreakpoint 본체 -
 // DebugDetachHandler와 정확히 같은 권한 검증 패턴(§6 "호출자가 그
 // pid의 활성 세션의 debuggerProcess가 아니면 PermissionDenied, 세션
@@ -373,15 +414,21 @@ public:
         slot.enabled = args->enable;
         slot.address = args->address;
         slot.condition = args->condition;
-        // [중요] 여기서는 하드웨어 DR0-3/DR7에 아무것도 쓰지 않는다 -
-        // 이 syscall을 호출한 스레드(디버거 자신)가 지금 이 코어에서
-        // 실행 중이라 DR 레지스터를 건드리면 디버거 자신에게 영향을
-        // 준다. 실제 하드웨어 반영은 대상(target->threads의 스레드)이
-        // 다음 디스패치될 때 `Scheduler::onTick()` 등이 부르는
-        // `kSyncDebugRegs()`(scheduler.cpp, SP-83A07867 §3.2 네 번째
-        // 훅)가 그 시점에 대상 자신의 코어에서 대신 한다 - §5가 이미
-        // "다음 디스패치에서 반영, 최악의 경우 한 타임퀀텀 지연"이라고
-        // 명시해 둔 그대로.
+        // [갱신, 2026-09-20, PN-5E722656, QU-9BEE4D07 답변 (A)] 이
+        // syscall을 호출한 디버거 자신이 지금 실행 중인 코어의
+        // DR0-3/DR7은 여전히 건드리지 않는다(디버거는 이 프로세스의
+        // 대상이 아니므로) - 대신 다른 온라인 코어 전부에게 IPI를
+        // 보내 그 자리에서 `kSyncDebugRegs()`를 강제로 재호출시킨다.
+        // 예전엔 "다음 디스패치까지 최대 한 타임퀀텀 지연"(§5)에
+        // 전적으로 의존했는데, 경쟁 없이 코어를 독점하는 hot-loop
+        // 스레드는 재디스패치 자체가 영원히 안 와 그 지연이 무기한이
+        // 될 수 있음이 실측으로 확인돼(PN-5E722656) 이 즉시 방송을
+        // 추가했다 - 지금 이 순간 대상 스레드가 실제로 그 코어에서
+        // 실행 중이면 IPI가 도착하는 즉시 반영되고, 이미 Blocked 등
+        // 다른 이유로 실행 중이 아니면 이 IPI는 그 코어의 무관한
+        // Task에 대해 무해한 재확인(kSyncDebugRegs는 그 Task가
+        // 대상이 아니면 아무 것도 안 함)으로 끝난다.
+        kBroadcastDebugRegSync();
         args->error = ChannelError::None;
         co_return;
     }
@@ -871,6 +918,10 @@ void DebugSessionService::registerSyscallEndpoints() {
 
 void DebugSessionService::registerDebugCallback() {
     Idt::registerDebugCallback(&kHandleUserBreakpointHit);
+    // [신규, 2026-09-20, PN-5E722656] BSP에서 한 번만(tlb_shootdown.cpp/
+    // async_task.cpp와 동일한 이유 - 전역 IDT 등록, AP는 이 벡터를
+    // 위해 따로 부를 게 없다).
+    Idt::registerHandler(kDebugRegSyncVector, kDebugRegSyncIsr);
 }
 
 }  // namespace kernel
