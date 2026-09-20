@@ -33,9 +33,16 @@ for i in $(seq 1 "${MAX_TRIES}"); do
     pkill -f "qemu-system-x86_64.*minicore-grub-gdb.iso" 2>/dev/null
     wait "${QEMU_SHELL_PID}" 2>/dev/null
 
-    if grep -qE "DOUBLE ALLOC|DOUBLE/UNKNOWN FREE" "${GDB_LOG}"; then
-        echo "*** HIT on attempt ${i} - see ${GDB_LOG} ***"
+    # [수정, 2026-09-20] pn584_alloc_hunt2.sh와 동일한 이유 - STOPPED
+    # 배너 문구 자체에 "DOUBLE ALLOC"가 들어 있어 kPanic만 걸려도
+    # 오분류됐다. 실제 log() 태그로 정확히 구분한다.
+    if grep -qE '^\[pn584-alloc\] \*\*\* DOUBLE' "${GDB_LOG}"; then
+        echo "*** DOUBLE-ALLOC/FREE HIT on attempt ${i} - see ${GDB_LOG} ***"
         exit 0
+    fi
+    if grep -q '^\[pn584-alloc\] kPanic 도달' "${GDB_LOG}"; then
+        echo "*** (참고, 이 헌트는 이중할당 전용이라 kPanic은 실패로 안 침) kPanic HIT on attempt ${i} - see ${GDB_LOG} ***"
+        grep '^\[pn584-alloc\] kPanic 도달' "${GDB_LOG}"
     fi
     CALLS=$(grep -c "^\[pn584-alloc\]" "${GDB_LOG}" 2>/dev/null || echo 0)
     echo "attempt ${i}: no double-alloc/double-free observed (log lines: ${CALLS})"

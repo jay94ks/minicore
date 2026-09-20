@@ -28,12 +28,20 @@ for i in $(seq 1 "${MAX_TRIES}"); do
     pkill -f "qemu-system-x86_64.*minicore-grub-gdb.iso" 2>/dev/null
     wait "${QEMU_SHELL_PID}" 2>/dev/null
 
-    if grep -qE "DOUBLE ALLOC|DOUBLE/UNKNOWN FREE" "${GDB_LOG}"; then
-        echo "*** DOUBLE-ALLOC HIT on attempt ${i} - see ${GDB_LOG} ***"
+    # [수정, 2026-09-20] pn584_alloc_connect.gdb의 STOPPED 배너 문구
+    # 자체가 "DOUBLE ALLOC" 텍스트를 포함해서(정지 원인과 무관하게
+    # 항상 출력됨), 예전 grep 패턴이 kPanic만 걸린 경우도 전부
+    # "DOUBLE-ALLOC HIT"로 오분류했다(실측으로 발견 - 두 번의
+    # "DOUBLE-ALLOC HIT" 보고가 실제로는 둘 다 kPanic이었음). 이제
+    # pn584_alloc_watch.py의 실제 log() 태그(`[pn584-alloc] ***
+    # DOUBLE`/`[pn584-alloc] kPanic 도달`)로 정확히 구분한다.
+    if grep -qE '^\[pn584-alloc\] \*\*\* DOUBLE' "${GDB_LOG}"; then
+        echo "*** DOUBLE-ALLOC/FREE HIT on attempt ${i} - see ${GDB_LOG} ***"
         exit 0
     fi
-    if grep -q "STOPPED" "${GDB_LOG}"; then
+    if grep -q '^\[pn584-alloc\] kPanic 도달' "${GDB_LOG}"; then
         echo "*** kPanic HIT on attempt ${i} - see ${GDB_LOG} ***"
+        grep '^\[pn584-alloc\] kPanic 도달' "${GDB_LOG}"
         exit 0
     fi
     echo "attempt ${i}: no hit"
