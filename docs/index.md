@@ -6,6 +6,7 @@
 | 추적 코드 | 제목 | 상태 | 최종 수정 |
 |---|---|---|---|
 | [DC-01434F82](./DC-01434F82.md) | 비동기 프레임워크(SP-F682B889) 세부 결정 미정 | archived | 2026-09-15T05:46:52.264Z |
+| [DC-06FC78E8](./DC-06FC78E8.md) | PN-584DB994 근본 원인 확정 - onTick()/onForcedMigration()의 EOI~kContextSwitchFromISR 창이 자기 자신에 대해 재진입 보호가 없음 - 수정 설계 확인 요청 | review | 2026-09-20T14:14:01.244Z |
 | [DC-0CC88ABB](./DC-0CC88ABB.md) | HPET 없는 환경에서 스케줄러 LAPIC 틱과 Timer 전역 틱의 하드웨어 소유권 충돌 | archived | 2026-09-15T05:47:07.531Z |
 | [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
