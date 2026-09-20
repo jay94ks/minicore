@@ -66,7 +66,7 @@
 | [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | approved | 2026-09-18T06:56:19.330Z |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-19T17:48:08.056Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
-| [SP-43331889](./SP-43331889.md) | devmgr/fs 커널 흡수 + 유저모드 드라이버 지원 — 설계 제안 (DC-91ABD922/QU-23B339AB 확정 반영) | review | 2026-09-20T09:13:33.421Z |
+| [SP-43331889](./SP-43331889.md) | devmgr/fs 커널 흡수 + 유저모드 드라이버 지원 — 설계 제안 (DC-91ABD922/QU-23B339AB 확정 반영) | review | 2026-09-20T09:25:25.403Z |
 | [SP-4DCD0E6A](./SP-4DCD0E6A.md) | Minicore Lock-free/Concurrent 컨테이너 템플릿(LockFreeList/LockFreeVector/LockFreeQueue/ConcurrentMap/ConcurrentRbtree) — 설계 제안 | approved | 2026-09-17T17:24:15.924Z |
 | [SP-5130284C](./SP-5130284C.md) | 인터럽트 컨텍스트 유발 SharedPtr 소멸 지연 메커니즘 — 설계 제안 (PN-4137C88C, QU-A07B9019) | approved | 2026-09-20T07:57:07.026Z |
 | [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved | 2026-09-16T00:21:27.201Z |
