@@ -179,6 +179,17 @@ class KPanicWatch(gdb.Breakpoint):
     # "이 순간에도 인터럽트 컨텍스트 안인가"(중첩 인터럽트/재진입
     # 가능성). InterruptFrame(interrupt_frame.h)의 vector 필드는
     # rax~r15(15개, 각 8바이트) 다음 오프셋 120에 있다.
+    #
+    # [신규, 갱신21] #PF(vector=0xe) 변종에서 cr2(폴트 주소)를 함께
+    # 찍어 물리 페이지 이중소유 가설과 직접 연결을 시도한다(갱신20이
+    # 남긴 "다음 세션 우선순위" 2번) - cr2가 direct map 범위
+    # (K_DIRECT_MAP_BASE 이상)에 있으면 그 물리주소가 지금 우리
+    # `outstanding` 장부에 실제로 잡혀 있는(=정상적으로 할당된 채인)
+    # 페이지인지 대조한다 - 있으면 "정상 할당된 페이지에서 폴트가
+    # 났다"는 뜻이라 매핑 자체가 깨졌다는 정황(이중할당으로 그 물리
+    # 프레임의 페이지테이블 엔트리가 다른 소유자에게 재사용되며
+    # 깨졌을 가능성), 없으면 그냥 무관한 별개의 커널 포인터 버그일
+    # 가능성이 커진다.
     def stop(self):
         frame = gdb.selected_frame()
         frame_ptr = int(frame.read_register("rdi")) & 0xFFFFFFFFFFFFFFFF
@@ -189,8 +200,28 @@ class KPanicWatch(gdb.Breakpoint):
         try:
             vector = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 120:x}"))
             error_code = int(gdb.parse_and_eval(f"*(unsigned long*)0x{frame_ptr + 128:x}"))
+            cr2_note = ""
+            if vector == 0xE:
+                try:
+                    cr2 = int(frame.read_register("cr2")) & 0xFFFFFFFFFFFFFFFF
+                    cr2_note = f" cr2=0x{cr2:x}"
+                    if cr2 >= K_DIRECT_MAP_BASE:
+                        physAddr = cr2 - K_DIRECT_MAP_BASE
+                        pageAddr = physAddr & ~0xFFF
+                        if pageAddr in outstanding:
+                            order, idx, allocDepth = outstanding[pageAddr]
+                            cr2_note += (f" -> direct-map phys=0x{pageAddr:x}가 outstanding 장부에 "
+                                         f"있음(call#{idx}, order={order}, alloc시 interrupt_depth={allocDepth}) - "
+                                         f"정상 할당된 페이지에서 폴트남(매핑 손상 정황, 이중할당 가설과 부합)")
+                        else:
+                            cr2_note += (f" -> direct-map phys=0x{pageAddr:x}가 outstanding 장부에 없음 "
+                                         f"(해제됐거나 애초에 이 계측 이후 할당된 적 없는 페이지)")
+                    else:
+                        cr2_note += " -> direct map 범위 밖(유저 영역 또는 커널 코드/데이터 가상주소)"
+                except gdb.error as e:
+                    cr2_note = f" cr2 읽기 실패({e})"
             log(f"kPanic 도달 - vector=0x{vector:x} error_code=0x{error_code:x} "
-                f"interrupt_depth={depth} "
+                f"interrupt_depth={depth}{cr2_note} "
                 f"({'인터럽트 컨텍스트 안(중첩)!' if depth > 1 else '정상 깊이'})")
         except gdb.error as e:
             log(f"kPanic 도달 - frame=0x{frame_ptr:x} 필드 읽기 실패({e}), interrupt_depth={depth}")
