@@ -98,17 +98,59 @@ const DeviceDescriptor* kFindCachedDevice(uint32_t bus, uint32_t device, uint32_
     return nullptr;
 }
 
-// [channel.cpp의 kProcessFromSubmitter(PN-9CC66142)와 동일한 패턴
-// 재사용] "이 AsyncTask를 제출한 UserThread가 속한 Process"를 얻는다 -
-// channel.h가 이 헬퍼를 외부에 노출하지 않아(파일 스코프) 여기 다시
-// 만든다(관계도에 중복 패턴으로 기록해 둠, DC-21647E46).
-SharedPtr<Process> kProcessFromSubmitterForPnp(AsyncTask* task) {
-    SharedPtr<Task> submitter = task->submitterTask.lock();
-    if (!submitter) {
-        return SharedPtr<Process>();
+// [제거, 2026-09-20, SP-43331889 §3-1] 여기 있던
+// `kProcessFromSubmitterForPnp(AsyncTask*)`(PN-9CC66142/DC-21647E46,
+// channel.cpp의 옛 kProcessFromSubmitter와 동일한 패턴)는 `submitter`
+// 를 무조건 `static_cast<UserThread*>`해 Process 없는 KernelThread
+// 제출자(devmgr/fs, §1 확정)엔 잠재적 UB였다 - 아래 `kMapMmioForCaller`/
+// `kClaimBar`가 `kOwnerProcessOf(Task*)`(process.h §4)와 `Task*` 직접
+// 전달로 완전히 대체했다.
+
+// [신규, 2026-09-20, SP-43331889 §3] RequestIoPermission의 MMIO 매핑 -
+// UserThread 호출자는 기존과 동일하게 자신의 `Process::addressSpace`
+// 에 매핑(ring3 접근 가능, PAGE_USER)하지만, KernelThread 호출자는
+// 별도 주소공간이 없으므로 `IoApic::init()`(ioapic.cpp:65-77)이 이미
+// 증명해 둔 패턴 그대로 예약된 고정 커널 가상주소 슬롯에
+// `Paging::mapPage()`로 직접 매핑한다(PAGE_USER 없음, ring0 전용).
+// v1은 커널 모드 드라이버 MMIO가 동시에 하나뿐이라는 전제(devmgr/fs
+// 모두 단일 스레드) - 여러 개 동시 지원이 필요해지면 슬롯을 배열로
+// 늘린다.
+//
+// **[미검증, 2026-09-20]** isKernelMode 분기는 아직 실제로 타는
+// 호출 경로가 없다(devmgr/fs가 여전히 UserThread라 이 분기를 안 씀) -
+// §3의 devmgr/fs 직접 호출 재작성이 끝나 KernelThread가 이 함수를
+// 실제로 부르는 순간이 이 분기의 첫 QEMU 실측이다(SP-43331889 §3-1
+// "실측 없이 진행하지 않는다" 원칙과 일관 - 다만 로직 자체는
+// `IoApic::init()`의 이미 검증된 패턴을 그대로 복제했을 뿐 새로
+// 발명한 게 없다).
+constexpr uint64_t kKernelDriverMmioScratchVirtBase = 0xFFFF901000003000UL;  // LAPIC(lapic.cpp)+0x3000, HPET 바로 다음 페이지
+
+bool kMapMmioForCaller(Task* caller, uint64_t physAddr, uint64_t length, uint64_t* outVirtAddr) {
+    if (caller->isUserLevel) {
+        SharedPtr<Process> process = kOwnerProcessOf(caller);
+        if (!process) {
+            return false;
+        }
+        return process->addressSpace.mapRegion(length, PAGE_WRITABLE | PAGE_USER | PAGE_CACHE_DISABLE,
+                                                VmaBacking::FixedPhysical, physAddr, outVirtAddr);
     }
-    auto* thread = static_cast<UserThread*>(submitter.get());
-    return thread->process.lock();
+    if (caller->isKernelMode) {
+        Paging::mapPage(kKernelDriverMmioScratchVirtBase, physAddr, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
+        *outVirtAddr = kKernelDriverMmioScratchVirtBase;
+        return true;
+    }
+    return false;
+}
+
+// BAR 소유권 획득이 실패한 되돌리기 전용 - v1의 커널 모드 고정 슬롯은
+// 재사용 예정이라 명시적으로 되돌릴 게 없다(그 슬롯을 다시 매핑하는
+// 다음 호출이 자연히 덮어쓴다).
+void kUnmapMmioForCaller(Task* caller, uint64_t virtAddr, uint64_t length) {
+    if (caller->isUserLevel) {
+        if (SharedPtr<Process> process = kOwnerProcessOf(caller)) {
+            process->addressSpace.unmapRegion(virtAddr, length);
+        }
+    }
 }
 
 // [SP-9DD4F3EA §3.3a] BAR별 소유 프로세스 기록 - "이 BAR를 이미
@@ -211,11 +253,32 @@ bool kValidateEnumerateBuffer(AsyncTask* task, const void* ptr, uint64_t length)
     return Paging::isUserRangeValid(reinterpret_cast<uint64_t>(ptr), length, thread->userPml4Phys);
 }
 
+// [신규, 2026-09-20, SP-43331889 §3] EnumerateDevicesHandler::onExec()
+// 본문 - 유저 포인터 검증(트랩 경계를 넘는 syscall에서만 의미 있음)은
+// 호출부 책임으로 남기고, 캐시 조회/페이지네이션 로직만 이 함수에
+// 담는다. 커널 모드 직접 호출부(devmgr, §3 착수 시 이 함수를 그대로
+// 재사용)와 기존 syscall 트랩 어댑터(아래 핸들러) 둘 다 여기로 온다.
+void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescriptor* outDevices,
+                           uint32_t* outTotalCount) {
+    kEnsureDeviceCache();
+    uint32_t total = gDeviceCacheCount;
+    uint32_t start = startIndex;
+    uint32_t filled = 0;
+    if (start < total) {
+        uint32_t available = total - start;
+        filled = available < *capacity ? available : *capacity;
+        for (uint32_t i = 0; i < filled; ++i) {
+            outDevices[i] = gDeviceCache[start + i];
+        }
+    }
+    *outTotalCount = total;
+    *capacity = filled;
+}
+
 class EnumerateDevicesHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<EnumerateDevicesArgs*>(argsRaw);
-        kEnsureDeviceCache();
 
         uint64_t bufferBytes = static_cast<uint64_t>(args->capacity) * sizeof(DeviceDescriptor);
         if (!kValidateEnumerateBuffer(task, args->outDevices, bufferBytes)) {
@@ -223,18 +286,7 @@ public:
             co_return;
         }
 
-        uint32_t total = gDeviceCacheCount;
-        uint32_t start = args->startIndex;
-        uint32_t filled = 0;
-        if (start < total) {
-            uint32_t available = total - start;
-            filled = available < args->capacity ? available : args->capacity;
-            for (uint32_t i = 0; i < filled; ++i) {
-                args->outDevices[i] = gDeviceCache[start + i];
-            }
-        }
-        args->totalCount = total;
-        args->capacity = filled;
+        kEnumerateDevicesSync(args->startIndex, &args->capacity, args->outDevices, &args->totalCount);
         args->error = ChannelError::None;
         co_return;
     }
@@ -253,8 +305,14 @@ public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<RequestIoPermissionArgs*>(argsRaw);
 
-        SharedPtr<Process> process = kProcessFromSubmitterForPnp(task);
-        if (!process) {
+        // [갱신, 2026-09-20, SP-43331889 §3] 이 핸들러는 여전히
+        // UserThread 트랩 경로 전용이라 아래 isUserLevel 가드가 원래의
+        // "!process → InvalidHandle" 동작과 정확히 동일한 결과를 낸다 -
+        // 다만 이제 KernelThread 제출자를 InvalidHandle로 거절하지
+        // 않는다(§3 착수 후 devmgr/fs 직접 호출이 이 함수를 재사용할
+        // 길을 열어 둔다).
+        SharedPtr<Task> caller = task->submitterTask.lock();
+        if (!caller || (caller->isUserLevel && !kOwnerProcessOf(caller.get()))) {
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
@@ -290,19 +348,13 @@ public:
         // 범위" 참고(실제 BAR 크기 조회 절차 미구현).
         constexpr uint64_t kMappingSize = 4096;
         uint64_t mappedAddr = 0;
-        if (!process->addressSpace.mapRegion(kMappingSize, PAGE_WRITABLE | PAGE_USER | PAGE_CACHE_DISABLE,
-                                              VmaBacking::FixedPhysical, args->mmioBase, &mappedAddr)) {
+        if (!kMapMmioForCaller(caller.get(), args->mmioBase, kMappingSize, &mappedAddr)) {
             args->error = ChannelError::ResourceExhausted;
             co_return;
         }
 
-        // [갱신, 2026-09-20, SP-43331889 §3-1] Process가 아니라 제출자
-        // Task 자신을 직접 넘긴다(kClaimBar가 이제 WeakPtr<Task>로
-        // 일반화됨) - 이 핸들러는 여전히 UserThread 전용 경로라 결과는
-        // 동일하지만, KernelThread 직접 호출부(§3, 착수 전)가 나중에
-        // 이 함수를 재사용할 때 `process` 없이도 그대로 쓸 수 있다.
-        if (!kClaimBar(args->bus, args->device, args->function, args->mmioBase, task->submitterTask.resolve())) {
-            process->addressSpace.unmapRegion(mappedAddr, kMappingSize);
+        if (!kClaimBar(args->bus, args->device, args->function, args->mmioBase, caller)) {
+            kUnmapMmioForCaller(caller.get(), mappedAddr, kMappingSize);
             args->error = ChannelError::ResourceExhausted;
             co_return;
         }
