@@ -15,6 +15,16 @@ OVMF_CODE="${MINICORE_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_SRC="${MINICORE_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS_RW="${BUILD_DIR}/OVMF_VARS_4M.rw.fd"
 TIMEOUT_SECS="${MINICORE_QEMU_TIMEOUT:-10}"
+# [신규, PN-7FBF255A 체크리스트 5번 - 커널 ELF 로더] efi_main이
+# 이제 이 파일을 ESP 루트의 \MINICORE.ELF에서 직접 열어 읽는다 -
+# bootx64.efi(PE32+)와 minicore.elf(ELF)는 링크 단계에서 전혀
+# 연결된 적 없는 별개 바이너리라, GRUB/Xen이 multiboot2/PVH
+# 경로에서 대신 해 주던 "커널 이미지를 읽어 들이는" 역할을 이
+# UEFI 스텁이 직접 해야 한다. 기본 경로는 run-qemu.sh/run-grub.sh
+# 가 이미 쓰는 커널 빌드 산출물 - 없으면(커널을 아직 안 빌드했으면)
+# 경고만 찍고 UEFI 스텁 자체의 부팅/메모리맵 검증은 계속 진행한다
+# (이 스크립트의 기존 용도 - 스텁 자체 검증 - 를 깨지 않기 위함).
+KERNEL_ELF="${MINICORE_KERNEL_ELF:-${ROOT_DIR}/build/minicore.elf}"
 
 cmake -S "${ROOT_DIR}/minicore/boot-uefi" -B "${BUILD_DIR}" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/minicore/boot-uefi/cmake/toolchain-uefi-x86_64.cmake" \
@@ -24,6 +34,12 @@ cmake --build "${BUILD_DIR}" >/dev/null
 rm -rf "${ESP_DIR}"
 mkdir -p "${ESP_DIR}/EFI/BOOT"
 cp "${BUILD_DIR}/bootx64.efi" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
+
+if [[ -f "${KERNEL_ELF}" ]]; then
+    cp "${KERNEL_ELF}" "${ESP_DIR}/MINICORE.ELF"
+else
+    echo "(경고: ${KERNEL_ELF} 없음 - 커널 ELF 로더 검증은 건너뜀, 먼저 커널을 빌드하세요)"
+fi
 
 # OVMF_VARS는 QEMU가 실행 중 써야 해서 읽기전용 시스템 사본을 매번
 # 새로 복사한다(원본 오염 방지).

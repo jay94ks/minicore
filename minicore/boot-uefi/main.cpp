@@ -11,6 +11,7 @@
 //
 // GOP(그래픽 출력 프로토콜) 조회와 ExitBootServices() 핸드오프(체크
 // 리스트 4번 나머지 + 5번)는 여전히 다음 증분 몫이다.
+#include "efi/file.h"
 #include "efi/memory.h"
 #include "efi/system_table.h"
 #include "efi/types.h"
@@ -54,9 +55,17 @@ void kPrintUint64(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL* conOut, unsigned long long va
 constexpr unsigned long long kMemoryMapBufferCapacity = 32 * 1024;
 unsigned char gMemoryMapBuffer[kMemoryMapBufferCapacity];
 
+// [신규, PN-7FBF255A 체크리스트 5번 - 커널 ELF 로더 1단계: 파일
+// 읽기만] 실측 크기(3,270,400바이트, 2026-09-22 WSL 빌드)보다
+// 넉넉한 정적 버퍼 - AllocatePool/동적 배치 없이 이 단계에서는
+// "읽어 들이기"까지만 검증한다. 실제 물리주소 배치(AllocatePages
+// 기반 PT_LOAD 세그먼트 복사)는 다음 증분 몫.
+constexpr unsigned long long kKernelElfBufferCapacity = 8 * 1024 * 1024;
+unsigned char gKernelElfBuffer[kKernelElfBufferCapacity];
+
 }  // namespace
 
-extern "C" EFI_STATUS efi_main(EFI_HANDLE /*imageHandle*/, EFI_SYSTEM_TABLE* systemTable) {
+extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable) {
     if (!systemTable) {
         return kEfiSuccess;
     }
@@ -152,6 +161,84 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE /*imageHandle*/, EFI_SYSTEM_TABLE* sys
             }
         } else if (conOut && queryStatus == kEfiBufferTooSmall) {
             kPrint(conOut, u"minicore: static memory map buffer too small - increase kMemoryMapBufferCapacity\r\n");
+        }
+
+        // [신규, PN-7FBF255A 체크리스트 5번 - 커널 ELF 로더 1단계]
+        // bootx64.efi와 minicore.elf는 링크 단계에서 전혀 연결된 적
+        // 없는 별개 바이너리라(PE32+/COFF vs ELF, 각자 다른 툴체인) -
+        // "GDT/페이지 테이블 전환 후 higher_half_entry로 점프"가
+        // 의미를 가지려면 그 전에 이 UEFI 스텁이 커널 ELF 자신을 ESP
+        // 에서 직접 읽어 들여야 한다(GRUB/Xen이 multiboot2/PVH 경로에서
+        // 대신 해 주던 일). 이번 증분은 "읽어 들이기"까지만 검증하고,
+        // PT_LOAD 세그먼트를 실제 물리주소로 배치하는 것(AllocatePages
+        // 필요)은 다음 증분 몫이다.
+        EFI_LOADED_IMAGE_PROTOCOL* loadedImage = nullptr;
+        EFI_STATUS protoStatus = systemTable->BootServices->HandleProtocol(
+            imageHandle, const_cast<EFI_GUID*>(&kEfiLoadedImageProtocolGuid), reinterpret_cast<void**>(&loadedImage));
+        if (protoStatus != kEfiSuccess || !loadedImage) {
+            if (conOut) {
+                kPrint(conOut, u"minicore: HandleProtocol(LoadedImage) failed, status=");
+                kPrintUint64(conOut, protoStatus);
+                kPrint(conOut, u"\r\n");
+            }
+        } else {
+            if (conOut) {
+                kPrint(conOut, u"minicore: LoadedImage ok, DeviceHandle=");
+                kPrintUint64(conOut, reinterpret_cast<unsigned long long>(loadedImage->DeviceHandle));
+                kPrint(conOut, u"\r\n");
+            }
+            EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* fileSystem = nullptr;
+            protoStatus = systemTable->BootServices->HandleProtocol(
+                loadedImage->DeviceHandle, const_cast<EFI_GUID*>(&kEfiSimpleFileSystemProtocolGuid),
+                reinterpret_cast<void**>(&fileSystem));
+            if (protoStatus != kEfiSuccess || !fileSystem) {
+                if (conOut) {
+                    kPrint(conOut, u"minicore: HandleProtocol(SimpleFileSystem) failed, status=");
+                    kPrintUint64(conOut, protoStatus);
+                    kPrint(conOut, u"\r\n");
+                }
+            } else {
+                EFI_FILE_PROTOCOL* root = nullptr;
+                protoStatus = fileSystem->OpenVolume(fileSystem, &root);
+                if (protoStatus != kEfiSuccess || !root) {
+                    if (conOut) {
+                        kPrint(conOut, u"minicore: OpenVolume failed\r\n");
+                    }
+                } else {
+                    EFI_FILE_PROTOCOL* kernelFile = nullptr;
+                    // ESP 루트 바로 아래 - scripts/run-uefi.sh가
+                    // \MINICORE.ELF로 배치한다(다음 증분).
+                    protoStatus = root->Open(root, &kernelFile, const_cast<CHAR16*>(u"\\MINICORE.ELF"),
+                                              kEfiFileModeRead, 0);
+                    if (protoStatus != kEfiSuccess || !kernelFile) {
+                        if (conOut) {
+                            kPrint(conOut, u"minicore: Open(\\MINICORE.ELF) failed, status=");
+                            kPrintUint64(conOut, protoStatus);
+                            kPrint(conOut, u"\r\n");
+                        }
+                    } else {
+                        unsigned long long readSize = kKernelElfBufferCapacity;
+                        protoStatus = kernelFile->Read(kernelFile, &readSize, gKernelElfBuffer);
+                        if (protoStatus == kEfiSuccess) {
+                            const bool isElf = readSize >= 4 && gKernelElfBuffer[0] == 0x7F &&
+                                                gKernelElfBuffer[1] == 'E' && gKernelElfBuffer[2] == 'L' &&
+                                                gKernelElfBuffer[3] == 'F';
+                            if (conOut) {
+                                kPrint(conOut, u"minicore: kernel ELF read bytes=");
+                                kPrintUint64(conOut, readSize);
+                                kPrint(conOut, u" magicOk=");
+                                kPrintUint64(conOut, isElf ? 1 : 0);
+                                kPrint(conOut, u"\r\n");
+                            }
+                        } else if (conOut) {
+                            kPrint(conOut, u"minicore: kernel ELF read failed, status=");
+                            kPrintUint64(conOut, protoStatus);
+                            kPrint(conOut, u"\r\n");
+                        }
+                        kernelFile->Close(kernelFile);
+                    }
+                }
+            }
         }
     }
 

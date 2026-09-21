@@ -19,6 +19,16 @@ using BOOLEAN = unsigned char;
 
 struct EFI_SYSTEM_TABLE;
 
+// [신규, PN-7FBF255A 체크리스트 5번 - 커널 ELF 로더] UEFI 명세의
+// EFI_GUID - LocateProtocol/HandleProtocol이 프로토콜을 식별하는 데
+// 쓴다(efi/file.h의 LoadedImage/SimpleFileSystem GUID 등).
+struct EFI_GUID {
+    unsigned int Data1;
+    unsigned short Data2;
+    unsigned short Data3;
+    unsigned char Data4[8];
+};
+
 // UEFI 명세 - x64에서 오류 상태는 최상위 비트(0x8000000000000000)가
 // 서 있다. 지금 실제로 구분해야 하는 값 둘만 정의한다(체크리스트
 // 4번 GetMemoryMap이 크기 질의 시 항상 EFI_BUFFER_TOO_SMALL을

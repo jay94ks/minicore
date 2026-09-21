@@ -40,7 +40,32 @@ struct EFI_BOOT_SERVICES {
     EFI_STATUS(EFIAPI* GetMemoryMap)(unsigned long long* MemoryMapSize, void* MemoryMap,
                                       unsigned long long* MapKey, unsigned long long* DescriptorSize,
                                       unsigned int* DescriptorVersion);
-    // AllocatePool/FreePool 이후 필드는 아직 안 씀 - 선언하지 않는다.
+    // [신규, PN-7FBF255A 체크리스트 5번 - 커널 ELF 로더] AllocatePool
+    // ~ UninstallProtocolInterface까지는 안 씀 - UEFI 명세의 실제
+    // 필드 순서 그대로 자리만 차지(오프셋 유지, 이 파일 상단 문서
+    // 주석의 관례 그대로).
+    void* AllocatePool;
+    void* FreePool;
+    void* CreateEvent;
+    void* SetTimer;
+    void* WaitForEvent;
+    void* SignalEvent;
+    void* CloseEvent;
+    void* CheckEvent;
+    void* InstallProtocolInterface;
+    void* ReinstallProtocolInterface;
+    void* UninstallProtocolInterface;
+    // efi_main이 LoadedImageProtocol(imageHandle)/SimpleFileSystemProtocol
+    // (DeviceHandle)을 얻는 데 실제로 쓴다 - 둘 다 특정 핸들이 이미
+    // 손에 있는 경우라 LocateProtocol이 아니라 이 함수로 충분하다.
+    EFI_STATUS(EFIAPI* HandleProtocol)(EFI_HANDLE Handle, EFI_GUID* Protocol, void** Interface);
+    // Reserved 이후(RegisterProtocolNotify ~ LocateHandleBuffer, 그
+    // 사이의 LoadImage/StartImage/Exit/UnloadImage/ExitBootServices/
+    // GetNextMonotonicCount/Stall/SetWatchdogTimer/ConnectController/
+    // DisconnectController/OpenProtocol/CloseProtocol/
+    // OpenProtocolInformation/ProtocolsPerHandle 포함)는 아직 안 씀 -
+    // 선언하지 않는다(LocateProtocol/ExitBootServices/AllocatePages의
+    // 실제 시그니처는 그 함수들을 실제로 쓰는 다음 증분에서 추가).
 };
 
 struct EFI_SYSTEM_TABLE {
