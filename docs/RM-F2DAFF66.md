@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-21T14:05:22.657Z
+  updatedAt: 2026-09-21T14:54:26.181Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1749,8 +1749,12 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
 - **조치**: `PN-4048116F`로 등록(해결 방식 두 후보 - WeakPtr 지연 GC
   vs 종료 경로에서 명시적 순회 - 는 CLAUDE.md 규칙4에 따라 착수 세션이
   설계자 확인 후 결정).
-- **현재 상태**: 갭 등록 완료, 미해소(추적은 `PN-4048116F`로 이관).
-  같은 파일의 별개 결함(`PN-BD276A24`, onCancel 댕글링 포인터)은 이미
+- **현재 상태**: [해소, 2026-09-21, 커밋 `c61a8b9`] `PN-4048116F`가
+  설계자 답변(`QU-5BC539E2`)에 따라 "종료 경로에서 명시적 순회" 방식으로
+  구현 완료 - `InterruptSubscriptionService::releaseAllForTask()`를
+  `kFinalizeProcessTermination`/`SelfTerminateThreadHandler`(기존
+  종료 감지 지점)에서 호출. 자세한 내용은 `PN-4048116F` 참고. 같은
+  파일의 별개 결함(`PN-BD276A24`, onCancel 댕글링 포인터)도 이미
   해소돼 있어 §2에 별도 기록하지 않고 여기서 함께 언급만 한다.
 
 - **[점검 완료, 2026-09-21] `SP-7CC5693A`(VFS 커널 서브시스템,
