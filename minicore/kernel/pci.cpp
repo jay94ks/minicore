@@ -79,6 +79,39 @@ kernel::uint64_t kMmconfigVirtAddress(kernel::uint8_t device, kernel::uint8_t fu
            offset;
 }
 
+// [신규, 2026-09-21, PN-B87A5BBA] 레거시 CONFIG_ADDRESS(0xCF8)/
+// CONFIG_DATA(0xCFC) 접근은 두 번의 별도 포트 I/O(주소 선택 -> 데이터
+// 접근)로 이뤄지는데, 그 사이에 아무 동기화도 없었다 - 그 창에서
+// 인터럽트가 끼어들어 PCI config space를 또 건드리면 CONFIG_ADDRESS가
+// 바뀐 채로 원래 호출의 데이터 접근이 이어져 완전히 엉뚱한 장치/
+// 레지스터를 건드린다(실제 Double Fault로 재현된 근거는 PN-B87A5BBA
+// 참고). `Scheduler::PreemptionGuard`는 스케줄러의 태스크 전환
+// 결정만 미룰 뿐 인터럽트 전달 자체는 막지 않아(gPreemptDisableCount
+// 확인은 `Scheduler::onTick()` 자신만 함) 이 레이스엔 안 맞는다 -
+// 진짜 인터럽트 차단이 필요하다. 무조건 `cli`+`sti` 페어(scheduler.cpp의
+// enqueue() 등)는 "항상 인터럽트가 켜진 채로 불린다"는 전제라 이미
+// cli된 컨텍스트(예: 어떤 인터럽트 핸들러가 진단/상태확인차 PCI
+// config를 읽는 경우)에서 불리면 그 핸들러의 IF=0 불변조건을 실수로
+// 깨뜨릴 위험이 있다 - 그래서 여기서는 진입 시점의 실제 RFLAGS를
+// 저장해 뒀다가 그대로 복원한다(enterIdleLoop()의 rflags 보존과 같은
+// 이유/기법). MMCONFIG(ECAM) 경로는 단일 MMIO 접근이라 이 레이스
+// 자체가 없어 감쌀 필요 없다.
+class PciConfigAccessGuard {
+public:
+    PciConfigAccessGuard() {
+        asm volatile("pushfq; pop %0; cli" : "=r"(savedRflags_) : : "memory");
+    }
+    ~PciConfigAccessGuard() {
+        asm volatile("push %0; popfq" : : "r"(savedRflags_) : "memory", "cc");
+    }
+
+    PciConfigAccessGuard(const PciConfigAccessGuard&) = delete;
+    PciConfigAccessGuard& operator=(const PciConfigAccessGuard&) = delete;
+
+private:
+    kernel::uint64_t savedRflags_;
+};
+
 void kScanBus(kernel::uint8_t bus, kernel::Pci::EnumerateCallback callback);
 
 void kScanFunction(kernel::uint8_t bus, kernel::uint8_t device, kernel::uint8_t function, kernel::Pci::EnumerateCallback callback) {
@@ -165,6 +198,7 @@ uint32_t Pci::readConfig32(uint8_t bus, uint8_t device, uint8_t function, uint8_
     if (kShouldUseMmconfig(bus)) {
         return *reinterpret_cast<volatile uint32_t*>(kMmconfigVirtAddress(device, function, offset));
     }
+    PciConfigAccessGuard guard;
     arch::kOutL(kConfigAddressPort, kLegacyConfigAddress(bus, device, function, offset));
     return arch::kInL(kConfigDataPort);
 }
@@ -174,6 +208,7 @@ void Pci::writeConfig32(uint8_t bus, uint8_t device, uint8_t function, uint8_t o
         *reinterpret_cast<volatile uint32_t*>(kMmconfigVirtAddress(device, function, offset)) = value;
         return;
     }
+    PciConfigAccessGuard guard;
     arch::kOutL(kConfigAddressPort, kLegacyConfigAddress(bus, device, function, offset));
     arch::kOutL(kConfigDataPort, value);
 }
@@ -187,6 +222,7 @@ uint16_t Pci::readConfig16(uint8_t bus, uint8_t device, uint8_t function, uint8_
     if (kShouldUseMmconfig(bus)) {
         return *reinterpret_cast<volatile uint16_t*>(kMmconfigVirtAddress(device, function, offset));
     }
+    PciConfigAccessGuard guard;
     arch::kOutL(kConfigAddressPort, kLegacyConfigAddress(bus, device, function, offset));
     return arch::kInW(static_cast<uint16_t>(kConfigDataPort + (offset & 2)));
 }
@@ -196,6 +232,7 @@ void Pci::writeConfig16(uint8_t bus, uint8_t device, uint8_t function, uint8_t o
         *reinterpret_cast<volatile uint16_t*>(kMmconfigVirtAddress(device, function, offset)) = value;
         return;
     }
+    PciConfigAccessGuard guard;
     arch::kOutL(kConfigAddressPort, kLegacyConfigAddress(bus, device, function, offset));
     arch::kOutW(static_cast<uint16_t>(kConfigDataPort + (offset & 2)), value);
 }
@@ -204,6 +241,7 @@ uint8_t Pci::readConfig8(uint8_t bus, uint8_t device, uint8_t function, uint8_t 
     if (kShouldUseMmconfig(bus)) {
         return *reinterpret_cast<volatile uint8_t*>(kMmconfigVirtAddress(device, function, offset));
     }
+    PciConfigAccessGuard guard;
     arch::kOutL(kConfigAddressPort, kLegacyConfigAddress(bus, device, function, offset));
     return arch::kInB(static_cast<uint16_t>(kConfigDataPort + (offset & 3)));
 }
