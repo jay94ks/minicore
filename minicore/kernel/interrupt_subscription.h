@@ -119,7 +119,7 @@ struct InterruptWaiterQueue {
 // 리셋).
 struct InterruptSubscriber {
     bool used = false;
-    Task* owner = nullptr;   // v1은 명시적 Unsubscribe로만 정리(§6 - 종료 시 자동 정리는 PN-40E976F2 이후)
+    Task* owner = nullptr;   // [갱신, 2026-09-21, PN-4048116F] 명시적 Unsubscribe뿐 아니라, 이 Task가 죽으면(devmgr Kill 등) InterruptSubscriptionService::releaseAllForTask()가 자동 정리한다(scheduler.cpp의 kFinalizeProcessTermination/SelfTerminateThreadHandler 호출부 참고)
     uint32_t priority = 0;   // 낮을수록 높은 우선순위 - 슬롯 배열은 항상 (exclusive 먼저, 그다음 이 값 오름차순)으로 유지
     bool exclusive = false;  // true면 "커널 서비스"(ProcessRole::KernelService) 전용 배타적 수신자
     InterruptEvent events[kInterruptEventQueueCapacity];
@@ -189,6 +189,15 @@ class InterruptSubscriptionService {
 public:
     // 부팅 시 한 번 호출 - 위 4개 endpoint 전부를 SyscallRegistry에 등록한다.
     static void registerSyscallEndpoints();
+
+    // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] 위 InterruptSubscriber::owner
+    // 문서 주석이 예고해 둔 "종료 시 자동 정리" - devmgr 등이 크래시/Kill로
+    // 명시적 UnsubscribeInterrupt 없이 죽어도 이 Task가 owner인 모든 벡터의
+    // 구독 슬롯을 UnsubscribeInterruptHandler와 동일하게(`*slot =
+    // InterruptSubscriber{}`) 리셋한다 - 새 죽음 감지 지점을 만들지 않고,
+    // scheduler.cpp의 kFinalizeProcessTermination()/SelfTerminateThreadHandler
+    // (이미 존재하는 프로세스·스레드 종료 지점)가 이 함수를 호출한다.
+    static void releaseAllForTask(Task* task);
 };
 
 }  // namespace kernel

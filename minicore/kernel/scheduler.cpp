@@ -6,6 +6,7 @@
 #include "gdt.h"
 #include "idt.h"
 #include "interrupt_frame.h"
+#include "interrupt_subscription.h"
 #include "lapic.h"
 #include "libkcont/intrusive_list.h"
 #include "libkenv/spinlock.h"
@@ -898,6 +899,23 @@ void kResurrectSpawnTrampoline(void* arg) {
 // `process->destroy()`(주소공간 반납)부터 고아 입양/좀비 마킹/essential
 // 패닉/resurrect 예약까지 전부 담당한다.
 void kFinalizeProcessTermination(SharedPtr<Process>& process) {
+    // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변("Process가 죽을 때
+    // 커널은 그걸 감지할 수 있어. 그 때 그걸 정리하는 것으로 구현해")]
+    // InterruptSubscriber::owner(interrupt_subscription.h)의 "종료 시
+    // 자동 정리"를 여기서 실행한다 - 이 함수가 바로 그 감지 지점이다.
+    // destroy()는 threads를 건드리지 않으므로(아래 §... "Process::destroy()는
+    // threads를 안 건드리므로" 참고, process.cpp:872) 이 시점에도 여전히
+    // 유효하다 - call0(SelfTerminateHandler)는 자신을 여기 도달하기 전에
+    // threads에서 지우지 않으므로 이 순회로 커버된다. call9
+    // (SelfTerminateThreadHandler)의 마지막 스레드는 이미 자신을 erase+
+    // release한 뒤 여기로 넘어오므로(아래 두 호출부 참고) 그쪽은 UserThread::
+    // release() 직전의 별도 releaseAllForTask() 호출로 커버한다.
+    process->threads.forEach([](SharedPtr<UserThread>& threadRef, auto*) {
+        if (threadRef) {
+            InterruptSubscriptionService::releaseAllForTask(threadRef.get());
+        }
+    });
+
     // Resurrect(SP-EAB162FC §6, 2026-09-16 §6.3/§6.4 개정 반영) -
     // destroy() 이후에도 Process 객체 자체(캐스팅 근거: 정적/
     // 장기수명 인스턴스 - destroy()는 주소공간만 반납할 뿐 이
@@ -1118,6 +1136,11 @@ public:
             if (slot) {
                 process->threads.erase(slot);
             }
+            // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] 이 스레드가
+            // process->threads에서 이미 지워졌으므로(바로 위) 아래
+            // kFinalizeProcessTermination()의 순회로는 더 이상 안 잡힌다 -
+            // release() 직전(포인터가 아직 유효할 때)에 직접 정리한다.
+            InterruptSubscriptionService::releaseAllForTask(userThread);
             UserThread::release(userThread);
             // 이 필드가 쥐고 있던 "joiner 몫" 하나를 내려놓는다(AsyncTask
             // 자신의 몫은 그 AsyncTask가 나중에 반납될 때 별도로 처리).
@@ -1144,6 +1167,9 @@ public:
             if (slot) {
                 process->threads.erase(slot);
             }
+            // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] 위 join 분기와
+            // 동일한 이유 - release() 직전에 이 스레드가 owner인 구독을 정리한다.
+            InterruptSubscriptionService::releaseAllForTask(userThread);
             UserThread::release(userThread);
 
             // [신규, 2026-09-18, SP-76250478 §3.2, PN-0EB2FABF] "프로세스의

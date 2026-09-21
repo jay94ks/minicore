@@ -336,6 +336,28 @@ GetInterruptDumpHandler gGetInterruptDumpHandler;
 
 }  // namespace
 
+// [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] UnsubscribeInterruptHandler와
+// 완전히 동일한 리셋(`*slot = InterruptSubscriber{}`)을 죽은 Task가
+// owner인 모든 벡터에 대해 반복한다 - 벡터 하나당 최대 kMaxSubscribersPerVector
+// (8) 슬롯뿐이라 256개 벡터를 전부 훑어도 가볍다(부팅 이후 Subscribe/
+// Unsubscribe 빈도와 같은 급). 이 함수를 부르는 시점(kFinalizeProcessTermination/
+// SelfTerminateThreadHandler)엔 이미 그 Task가 다시는 Subscribe/Unsubscribe를
+// 제출할 수 없으므로, 이 순회 도중 같은 슬롯을 동시에 건드릴 경쟁자가 없다 -
+// 그래도 ISR(kInterruptSubscriptionIsr)과의 경쟁은 여전히 가능해 sub.lock을
+// 그대로 잡는다.
+void InterruptSubscriptionService::releaseAllForTask(Task* task) {
+    if (!task) {
+        return;
+    }
+    for (auto& sub : gSubscriptions) {
+        SpinlockGuard guard(sub.lock);
+        if (InterruptSubscriber* slot = kFindSubscriberByOwner(sub, task)) {
+            *slot = InterruptSubscriber{};
+            kSortSubscribers(sub.subscribers, kMaxSubscribersPerVector);
+        }
+    }
+}
+
 bool InterruptDelegation::allow(uint32_t vector) {
     if (vector >= 256 || kIsFixedVector(vector)) {
         return false;
