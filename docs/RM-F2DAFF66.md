@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-20T08:07:19.030Z
+  updatedAt: 2026-09-21T11:54:09.985Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -422,7 +422,72 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
     (현재는 계획 쪽만 갱신되고 설계 문서 쪽은 누락되는 비대칭이
     반복됨).
 
+## §1-Q. [발견 및 해소, 2026-09-21] `SP-83A07867` §9-사전의 교차
+참조가 낡아 있었음 - coroHandle.resume() CR3 미동기화 갭은 이미
+해소됐는데 "미해결"로 계속 표시돼 있었음
+
+`SP-83A07867`(스케줄러 디스패치 CR3 동기화 통합, approved) §9-사전이
+"AsyncReactor::drainOnce()의 coroHandle.resume() 재개 경로도 CR3
+미동기화 위험에 노출 - PN-2008220B에서 미해결로 남아 있다"고 서술한
+상태였다. 실제로는: `PN-2008220B`(완료) 자신의 범위는 idle 컨텍스트를
+안전한 전용 스택으로 옮기는 것뿐이었고, 진짜 CR3 동기화 로직은
+후속으로 분리된 `PN-387C18A5`가 담당했는데, 그 계획이 2026-09-18에
+`PN-0EB2FABF` 4단계(Join syscall - 이 커널 최초의 진짜 `co_await`
+소비자)로 실측 PANIC까지 재현하며 `kSyncCr3ForAsyncExecEntry`/
+`kRestoreCr3AfterAsyncExecEntry` 재사용으로 완료돼 있었다(`PN-929CE93E`도
+같은 커밋으로 완료). `SP-83A07867`이 갱신되지 않아 이미 닫힌 갭이
+계속 "미해결"로 읽히는 상태였다 - 문서에 해소 각주 추가로 정정
+완료. **현재 상태**: 코드 자체는 이미 갭 없음(§2로 이동), 문서만
+낡아 있던 사례.
+
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-21] `SP-E9B44929`(Syscall Group+Call 2단계
+  인코딩, approved)** - §7 요약 절이 §6의 세 미결 질문(슬롯 저장
+  구조/breaking ABI 승인/그룹 번호 배정 방식)을 여전히 "확정 안 함"
+  으로 적어 뒀지만, §6-A가 이미 전부 답변받고 구현까지 끝낸 상태
+  (부팅 순서 함정으로 힙 대신 정적 범프 풀로 교체한 실측 버그
+  수정 포함)였다 - `minicore/kernel/syscall.h`의
+  `kMakeSyscallEndpointId`/`kSyscallGroupOf`/`kSyscallCallOf` 실제
+  존재를 git_grep으로 확인, §7 각주로 정정. 갭 없음(코드 기준),
+  또 문서 요약 절만 낡아 있던 사례.
+
+- **[점검 완료, 2026-09-21] `SP-83A07867`(스케줄러 디스패치 CR3
+  동기화 통합, approved)** - §3.2/§8의 CR3 동기화 지점 전부(§3.2의
+  네 지점 + §10이 발견한 다섯 번째 Task-to-Task 직접 전환 지점)
+  구현·실측 검증 완료(`PN-40210D5A`/`PN-A3C7471F`/`PN-B5FD7B75` 전부
+  completed). §9-사전이 추적하던 세 번째 재개 경로(coroHandle.resume())
+  CR3 미동기화 갭도 위 §1-Q에서 확인한 대로 이미 완료 - 문서의
+  교차 참조 각주만 낡아 있어 정정. 갭 없음(코드 기준).
+
+- **[점검 완료, 2026-09-21] `SP-9F1DB1D8`(gCurrentTask 크로스코어
+  접근 보호 - RwSpinlock 설계, approved)** - §2/§6/§7(모든
+  `gCurrentTask` 접근에 예외 없이 `RwSpinlock` 적용, `currentTask()`
+  포함)이 `PN-D3597800`(completed, commit 2d0da74)으로 구현 완료 -
+  구현 중 최초 조사(§1)가 놓친 두 접근부(`retireCurrentTask()`/
+  `handleFpuTrap()`)를 추가로 발견해 함께 수정했다고 정직하게 기록.
+  §7이 별도 설계로 분리한 "onExec() currentTask() 오용 재발 방지"는
+  `PN-C536F352`(completed, commit 75bb8f0, `TaskOwnerRef` 도입)로
+  별도 완료 - 설계 스케치의 무인자 정적 팩토리(`captureCurrentFrame`류
+  자동 캡처)가 `Task`가 `EnableSharedFromThis`를 상속하지 않아 실제로는
+  불가능했다는 점, 기존 ~40개 `submitterTask.lock()` 호출부를 건드리지
+  않기 위해 `TaskOwnerRef::lock()`을 호환 별칭으로 남긴 최소 침습
+  선택까지 문서에 정직하게 남아 있다. 갭 없음.
+
+- **[점검 완료, 2026-09-21] `SP-CA3C3E57`(Channel/BridgeHandle 안전한
+  핸들 해석 세부 설계, approved)** - §2/§4/§5(세대 태그 슬롯 테이블
+  `kResolveChannelId`/`kAllocateChannelId`/`kFreeChannelId` + 세
+  호출부 교체)와 §6.1(소유자 필드 `Channel::ownerProcess`, Accept/
+  Destroy 권한 검증) 전부 commit 74f0f75로 구현 완료(문서 자체가
+  이미 정직하게 명시 - 실제 syscall 왕복을 통한 PermissionDenied
+  거부 경로는 유저랜드 소비자 부재로 end-to-end 미검증이라는 caveat
+  포함). §6-A의 `DontDeref<T>` 타입 승격은 `PN-18FDBFF3`(completed,
+  commit f454faf)로 별도 완료 확인. 문서가 범위 밖으로 분리해 둔
+  `PN-260D7D73`(Channel을 SharedPtr 관리로 전면 마이그레이션)은
+  착수 조건 충족을 이미 확인했으면서도 "DontDeref<T> 완료로 남은
+  위험이 순수 확률적 ABA뿐이라 시급하지 않다"는 근거로 의도적으로
+  `scheduled` 상태에서 보류 중 - 문서 자신의 우선순위 판단과 실제
+  상태가 정확히 일치. 갭 없음.
 
 - **[점검 완료, 2026-09-20] `SP-9CB55C5B`(Kill 대상 확장 - 안전한
   ProcessId 해석 메커니즘, approved)** - §2/§3의 세대 태그 슬롯
@@ -1625,6 +1690,137 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   세션이 직접 작성한 코드라 대조 확인). §6의 "수정 전/후 스트레스
   재현" 항목은 `PN-4137C88C`가 이미 "실측 시도 안 함"으로 정직하게
   기록해 둔 별도의 QA 갭이라 이 문서에 중복 등록하지 않는다.
+
+- **[점검 완료, 2026-09-21] `SP-677210E6`(TSS/IST 예외 스택 서브시스템,
+  approved)** - GDT/TSS 확장(코어별 TSS 디스크립터 슬롯)/IST1-4 슬롯
+  배정(#DF/NMI/#MC/#DB)/`Gdt::init()`·`reloadOnThisCore()`·
+  `loadTssForThisCore()` 코어별 초기화 흐름을 `gdt.h`/`gdt.cpp`와
+  대조 - 설계 그대로 구현됨(기존 완료 기록과 일치). 이 문서 후반부의
+  "NMI 활용"(워치독+디버그 강제 정지)/"#MC 상세 설계"/"#DB 상세 설계"
+  세 확장 절(전부 `PN-F443FE73` 귀속)까지 실제 코드와 전수 대조:
+  `Nmi::send`/`Nmi::reasonForThisCore`/`Nmi::stopAllOtherCores`
+  (`nmi.h`/`nmi.cpp`, 설계의 `kSendNmi`/`gNmiReason`를 클래스로 캡슐화한
+  것 - 이름만 다르고 동작은 설계 그대로), `kPanic`의 두 진입점
+  (`panic.cpp`의 `kPanic(const char*)`, `idt.cpp`의
+  `kPanic(InterruptFrame*)`) 둘 다 `Nmi::stopAllOtherCores()`를 실제로
+  호출함을 확인, `Scheduler::onTick()`의 `gHeartbeat[]`/
+  `gHeartbeatLastSeen[]`/`gWatchdogTriggered[]`/
+  `kWatchdogCheckIntervalTicks=100` 워치독 구현도 설계 그대로(
+  `scheduler.cpp:183-197,1539,1562-1584`). `kHandleMachineCheck()`
+  (idt.cpp:408)도 MCG_CAP 뱅크 수 순회+UC/PCC 비트 판정+MCG_STATUS
+  클리어까지 설계 스케치와 일치(`kReadMsr`/`kWriteMsr` 파일-로컬 중복을
+  `arch::kReadMsr64`/`kWriteMsr64`로 통합하라던 "사소한 정리" 권고사항도
+  이미 반영돼 있음). `kHandleDebugException()`(idt.cpp:362)도 DR6 판독
+  +`gDebugCallback` 위임+DR6 클리어까지 설계 그대로, 실제 소비자
+  (`kHandleUserBreakpointHit`, PN-81E49523/PN-EA968DF0)가 이미 이
+  콜백 슬롯에 연결돼 있음도 확인.
+  - **사소한 관찰(갭 아님)**: 설계 스케치의 `kHandleMachineCheck`
+    의사코드는 "MCG_STATUS의 MCIP 비트가 꺼져 있으면(비정상 상황) 안전
+    쪽으로 fatal 취급"이라는 방어적 조건을 포함했으나, 실제
+    `kHandleMachineCheck()`는 MCIP 여부와 무관하게 항상 뱅크를 순회해
+    UC/PCC만으로 fatal을 판정한다 - 이 차이가 실질적 위험으로 이어지는
+    경로가 없어(스퓨리어스 #MC 자체가 극히 드물고, 판정 기준이 더
+    엄격해지는 방향이 아니라 방어 조건 하나가 빠진 것뿐) 별도 PN
+    등록 없이 이 각주로만 남긴다.
+  - **현재 상태**: 완전 갭 없음(사소한 관찰 제외 전부 설계 그대로).
+
+### 1-Q. `SP-71DA77B3`(인터럽트 구독 서브시스템) §6 항목2 - 종료 시
+자동 정리가 `PN-40E976F2` 완료에도 불구하고 실제로는 배선되지 않음
+(코드 갭, 2026-09-21, 추적 `PN-4048116F`)
+
+- **출처**: 이번 스윕에서 아직 이 방법론이 다루지 않았던 approved SP
+  문서(`SP-71DA77B3`)를 처음 대입 - `interrupt_subscription.h/.cpp`와
+  전문 대조.
+- **문제**: §6이 "종료 시 자동 정리는 `PN-40E976F2`가 사망 전파 목록
+  인프라를 구현한 뒤에야 배선 가능"이라고 명시했고, `PN-40E976F2`는
+  이미 completed다 - 그런데 실제로 그 인프라가 구현한 것은 **죽는
+  Task가 제출한 미완료 AsyncTask(pendingSyscalls)를 취소하는 것**뿐,
+  "이 Task가 소유한 임의의 영속 자원을 정리하라"는 범용 후크가
+  아니었다. `InterruptSubscriber` 슬롯은 AsyncTask가 아니라
+  `SubscribeInterrupt` 호출로 만들어져 `Unsubscribe`가 올 때까지
+  독립적으로 남는 영속 상태라 이 메커니즘의 대상이 아니다 - 저장소
+  전체에서 `gSubscriptions[]`를 UserThread/Process 종료 경로에서
+  순회하는 코드가 전무함을 실측 확인(`scheduler.cpp`/`process.cpp`
+  어디에도 없음, `kmain.cpp`의 부팅 시 syscall 등록 호출 외엔
+  `interrupt_subscription.cpp/.h`만 이 상태를 다룸).
+  `WaitInterruptHandler::onCancel`(`PN-BD276A24`로 이미 고친 부분)은
+  그 순간 파킹돼 있던 AsyncTask 하나만 큐에서 빼낼 뿐, 슬롯 자체
+  (`used=true`)는 그대로 남는다.
+- **조치**: `PN-4048116F`로 등록(해결 방식 두 후보 - WeakPtr 지연 GC
+  vs 종료 경로에서 명시적 순회 - 는 CLAUDE.md 규칙4에 따라 착수 세션이
+  설계자 확인 후 결정).
+- **현재 상태**: 갭 등록 완료, 미해소(추적은 `PN-4048116F`로 이관).
+  같은 파일의 별개 결함(`PN-BD276A24`, onCancel 댕글링 포인터)은 이미
+  해소돼 있어 §2에 별도 기록하지 않고 여기서 함께 언급만 한다.
+
+- **[점검 완료, 2026-09-21] `SP-7CC5693A`(VFS 커널 서브시스템,
+  approved)** - 이 문서가 실제로 소유하는 범위(§3+는 이미
+  `SP-2BCE5D60`로 위임됨, 아래 §2 기존 항목 참고)인 §1/§2/§2.1-2.5/
+  §4/§4-A를 `mount_table.h`/`vfs_syscall.h`/`livefs.h/.cpp`와 전문
+  대조. `MountTable`(§2.1, Channel/KernelDriver 두 종류+최장 접두사
+  일치)/`KernelFsDriver`(AsyncTaskHandler 상속 + 9개 op 구조체,
+  §2.1 개정대로)/`Mount`/`Unmount`/`ResolvePath`/
+  `SignalUserlandReady`/`WaitForUserlandReady` syscall 5종(§2.2/§2.5,
+  RM-48E1E610 그룹3)/livefs의 `named`·`initrd.cpio`·`kernel/<name>`
+  세 하위 경로(§2.4, `KernelReservedTable`은 실제로는
+  `kernel_service_ring.h`라는 이름으로 구현돼 있음 - 이름만 다르고
+  설계 그대로) 전부 실제 구현됨을 확인. §4의 "아직 열려 있는 설계
+  영역" 5개 항목도 문서 자신이 이미 openly 미결로 표시해 둔 것과
+  일치(숨겨진 게 아님). 갭 없음 - `vfs_syscall.h`가 스스로 "정직하게
+  기록"이라 표시해 둔 의도적 범위 축소(`MountKind::Channel` 마운트의
+  Open/Read 계열이 아직 `NotSupported`인 것 등)도 전부 §9(SP-2AAD7C8D)
+  가 이미 별도로 추적 중인 열린 범위라 이 문서의 갭이 아니다.
+
+- **[점검 완료, 2026-09-21] `SP-29D652AA`(컴파일러 진짜 thread_local
+  도입, approved)** - §4(커널 TCB/`kSyncFsBase`)/§5(유저랜드 PT_TLS
+  파싱+인스턴스 생성+커널↔유저 전환 FS_BASE 스왑)/§6(부팅 극초반)
+  전부 `PN-22E5E9E7`(completed, 항목1-7 전체 완료)로 실제 구현됨을
+  확인 - `tls.h/.cpp`(`gTlsSlots` 진짜 `thread_local` 배열),
+  `task.h/.cpp`(`Task::kernelFsBase`/`kMakeTaskTlsBlock()`),
+  `scheduler.cpp`(`kSyncFsBase`/`kSyncFsBaseToUser`, 5개 디스패치
+  지점 배선), `process.cpp`(`makeUserTlsInstance`), `idt.cpp`
+  (`kDispatchSyscallVerb`의 FS_BASE 스왑 래퍼) 전부 직접 대조.
+  §7(§4.3 "`ThreadLocal<T>`와의 통합")도 실제로 `gTlsSlots` 하나를
+  공유하는 방식으로 정확히 확정대로 구현됨. §4의 부팅 극초반 코어별
+  TCB(항목4)는 실측 근거로 "불필요"라고 명시적으로 판단해 만들지
+  않았다고 문서화돼 있음(숨겨진 누락이 아니라 조사 후 의도적 생략).
+  갭 없음.
+
+### 1-R. `SP-00CA7175`(커널 ↔ 커널 서비스 통신 채널) - "devmgr/fs/
+net/tty" 4개 예시가 `PN-D6A05E78`(devmgr/fs KernelThread 흡수) 이후
+낡음 (문서만 정정 - 코드 갭 아님, 2026-09-21)
+
+- **출처**: 이 문서는 2026-09-17에 이미 자체 재검증(§4/§6 "전부
+  완료")까지 거쳤으나, 그 재검증 시점(2026-09-17)이 devmgr/fs가
+  KernelThread로 흡수되기(`PN-D6A05E78`, 2026-09-21) **이전**이라
+  그 뒤에 생긴 낡음은 아직 반영이 안 돼 있었다.
+- **문제**: §2.0/§2.1/§4 곳곳이 "devmgr/fs/net/tty" 4개를 이 Tier
+  A/B 메커니즘의 대상 커널서비스로 예시한다 - 그러나 devmgr/fs는
+  이제 Process 없는 순수 커널 `KernelThread`라 `/sys/live/kernel/
+  <name>` 경로로 커널과 IPC할 이유 자체가 없다(커널 자신의 코드이므로
+  직접 함수 호출). 실측: `kmain.cpp`의 `gServiceManifest[]`(411행
+  `reserveForKernelService()` 호출 루프의 실제 대상)는 이미 `net`/
+  `tty`/`pubreg`/`authmgr` 4개로 정확히 갱신돼 있다 - **코드는 이미
+  옳고, 이 문서의 예시 목록만 낡았다.**
+- **조치**: `SP-00CA7175`에 정정 각주 추가(원문 보존, §2.0 앞). 코드
+  쪽 조치 불필요.
+- **현재 상태**: 완전 해소(문서 정정).
+
+- **[점검 완료, 2026-09-21] `SP-68182FBD`(프로세스 모델) §4(SIGCHLD
+  자식 종료 통지, 2026-09-18 확정)** - `parent->raiseSignal(
+  SignalNumber::Chld)` 호출이 §4.2가 지목한 정확한 지점(scheduler.cpp
+  961-978행, `SelfTerminateHandler::onExec`의 좀비화 직후)에 실제로
+  존재함을 확인. §4.3이 "착수 세션이 코드 감사로 확정" 대상으로 남겨
+  둔 열린 질문(Kill로 강제 종료된 자식도 같은 지점을 거치는지)도
+  직접 콜체인을 추적해 확인 완료 - `KillHandler::onExec`(process.cpp)
+  는 `target->raiseSignal(args->signal)`만 호출하고, 그 신호가
+  `kCheckSignalCheckpoint()`(idt.cpp:657)에서 Default(비-Ignore)
+  disposition으로 판정되면 `kTaskOnFallingToEnd()`(scheduler.cpp)를
+  호출해 자기종료 syscall을 제출하고, 그 결과 다시
+  `SelfTerminateHandler::onExec`의 §4.2 지점을 거친다 - 즉 Kill이든
+  자연 종료든 **모든 종료 경로가 결국 하나의 좀비화 지점으로
+  수렴**해 SIGCHLD가 빠짐없이 발신됨을 코드로 확인(별도 경로 없음,
+  §4.3 항목1 우려는 기우였음이 확정). 갭 없음.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
