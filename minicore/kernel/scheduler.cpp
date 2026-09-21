@@ -1383,9 +1383,26 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
     // 못한다 - 그래서 별도의 Task::inRunQueue 플래그를 사용한다. cli로
     // "확인 + 세팅 + push"를 통째로 원자적으로 묶어야 확인 자체가
     // 틱과 경쟁하지 않는다.
-    asm volatile("cli");
+    //
+    // [수정, 2026-09-21, SP-A252E82F 구현 중 실측 확인] 원래 이 임계구역은
+    // 무조건 `cli`+`sti` 페어였다 - pci.cpp의 PciConfigAccessGuard가
+    // 이미 문서화해 둔 바로 그 위험(§ "무조건 cli+sti 페어는 항상
+    // 인터럽트가 켜진 채로 불린다는 전제") 그대로, 이 함수가 이미
+    // `cli`된 컨텍스트(인터럽트 핸들러 - 예: 디바이스 IRQ가
+    // WaitQueue::wakeOne()/AsyncReactor 완료 경로를 거쳐 이 함수를
+    // 부르는 경우, wait_queue.cpp/async_task.cpp 참고)에서 불리면
+    // `sti`가 그 핸들러의 IF=0 불변조건을 실수로 깨뜨렸다 - 실측으로
+    // 확인(SP-A252E82F가 전제하는 "일반 인터럽트는 절대 중첩되지
+    // 않는다"는 이 버그 때문에 실제로는 깨져 있었다: HPET(벡터 0x22)가
+    // LAPIC 스케줄러 틱(0x24) 처리 도중 이 함수의 `sti` 창으로
+    // 끼어들어 일반 벡터 디스패치 스택 위에서 또 다른 InterruptFrame이
+    // 만들어지는 것을 gdb로 직접 확인). PciConfigAccessGuard와 동일한
+    // 기법(진입 시점의 실제 RFLAGS를 저장해 뒀다가 그대로 복원)으로
+    // 바꿔, 이미 cli된 채로 불려도 그 IF=0을 그대로 지킨다.
+    uint64_t savedRflags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(savedRflags) : : "memory");
     if (task->inRunQueue) {
-        asm volatile("sti");
+        asm volatile("push %0; popfq" : : "r"(savedRflags) : "memory", "cc");
         return;  // 이미 어느 큐에 들어 있다 - 다시 넣으면 이중 스케줄링
     }
     task->inRunQueue = true;
@@ -1435,23 +1452,26 @@ void Scheduler::enqueue(uint32_t coreIndex, Task* task) {
             kWakeCoreIfIdle(targetCore);
         }
     }
-    asm volatile("sti");
+    asm volatile("push %0; popfq" : : "r"(savedRflags) : "memory", "cc");
 }
 
 void Scheduler::scheduleImmediate(uint32_t coreIndex, Task* task) {
     if (coreIndex >= gCoreCount) {
         coreIndex = 0;
     }
-    // enqueue()와 같은 이유 - 위 주석 참고.
-    asm volatile("cli");
+    // enqueue()와 같은 이유 - 위 주석 참고(SP-A252E82F 구현 중 실측
+    // 확인한 무조건 cli+sti 페어의 위험, PciConfigAccessGuard와 동일한
+    // RFLAGS 저장/복원 기법으로 교체).
+    uint64_t savedRflags;
+    asm volatile("pushfq; pop %0; cli" : "=r"(savedRflags) : : "memory");
     if (task->inRunQueue) {
-        asm volatile("sti");
+        asm volatile("push %0; popfq" : : "r"(savedRflags) : "memory", "cc");
         return;
     }
     task->inRunQueue = true;
     task->state = TaskState::Ready;
     gImmediateQueues[coreIndex].pushBack(task);
-    asm volatile("sti");
+    asm volatile("push %0; popfq" : : "r"(savedRflags) : "memory", "cc");
 }
 
 Task* Scheduler::pickNext(uint32_t coreIndex) {

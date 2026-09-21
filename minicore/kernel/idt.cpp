@@ -1,5 +1,6 @@
 #include "idt.h"
 
+#include "acpi.h"
 #include "deferred_destruction.h"
 #include "gdt.h"
 #include "interrupt_frame.h"
@@ -68,17 +69,40 @@ constexpr kernel::uint8_t kInterruptGateTypeAttrDpl3 = 0xEE;  // present, DPL3, 
 //   - #DB(1, Debug): 디버그 예외(브레이크포인트/싱글스텝) - 향후
 //     디버깅 지원 시 같은 이유로 안전한 스택이 필요해질 것을 대비해
 //     지금 같이 배정해 둔다.
-// IST1-7 중 4개만 쓰고 나머지(IST5-7)는 향후 다른 벡터가 필요해지면
+//   - #PF(14, Page Fault, SP-A252E82F "인터럽트 컨텍스트 재설계",
+//     2026-09-21): 온디맨드 페이징 구현 이후 유일하게 남아 있던,
+//     "회피 불가능한데도 아직 IST가 없던" 예외 - 일반 인터럽트
+//     핸들러 실행 도중에도(예: 그 핸들러가 새 페이지를 만지다 폴트를
+//     내면) 발생할 수 있어 다른 넷과 같은 성격이다. 전체 저장소
+//     `sti` 전수 조사로 확인한 대로 일반 인터럽트는 절대 서로 중첩될
+//     수 없으므로(IF=0 유지), 회피 불가능한 예외/NMI 다섯 개만
+//     IST로 격리하면 나머지 모든 벡터는 카운터 없이 단일 스택을
+//     공유해도 안전하다(deferred_destruction.h/.cpp의 새 설계).
+// IST1-7 중 5개를 쓰고 나머지(IST6-7)는 향후 다른 벡터가 필요해지면
 // 같은 패턴으로 배정한다(SP-677210E6 참고).
 constexpr kernel::uint32_t kDebugVector = 1;
 constexpr kernel::uint32_t kNmiVector = 2;
 constexpr kernel::uint32_t kDoubleFaultVector = 8;
+constexpr kernel::uint32_t kPageFaultVector = 14;
 constexpr kernel::uint32_t kMachineCheckVector = 18;
 
 constexpr kernel::uint8_t kDoubleFaultIst = 1;
 constexpr kernel::uint8_t kNmiIst = 2;
 constexpr kernel::uint8_t kMachineCheckIst = 3;
 constexpr kernel::uint8_t kDebugIst = 4;
+constexpr kernel::uint8_t kPageFaultIst = 5;
+
+// [신규, 2026-09-21, SP-A252E82F §2] 코어별 "지금 이 코어에서 #PF
+// 핸들러가 실행 중인가" 플래그 - #PF 핸들러(Paging::handlePageFault())
+// 실행 도중 또 #PF가 발생하면(재진입), IST5가 하드웨어적으로 같은
+// 고정 스택 top으로 rsp를 되돌려 버려 진행 중이던 첫 #PF 프레임을
+// 덮어쓴다(IST는 그 자체로 재진입 안전하지 않음 - gdt.h 문서 참고).
+// 설계자 지시(QU-65761CB0 확정)에 따라 이는 "막아야 할 위험"이 아니라
+// "#PF 핸들러 코드 자체의 버그"로 취급한다 - 이 핸들러는 항상
+// 영구 매핑된 커널 구조체만 건드리도록 설계돼 있으므로, 정상 동작
+// 중에는 절대 재귀적으로 폴트를 내지 않아야 한다. 그래서 리커버리를
+// 시도하지 않고 즉시 kPanic()으로 rip/cr2를 로그에 남기고 멈춘다.
+kernel::uint32_t gInPageFaultHandler[kernel::kAcpiMaxCpus] = {};
 
 IdtEntry gIdt[256];
 IdtPointer gIdtPointer;
@@ -166,6 +190,7 @@ void Idt::init() {
     gIdt[kDebugVector].ist = kDebugIst;
     gIdt[kNmiVector].ist = kNmiIst;
     gIdt[kDoubleFaultVector].ist = kDoubleFaultIst;
+    gIdt[kPageFaultVector].ist = kPageFaultIst;
     gIdt[kMachineCheckVector].ist = kMachineCheckIst;
     kSetGate(kTimerVector, isr32);
     kSetGate(0xFF, isr255);
@@ -615,20 +640,20 @@ extern "C" void kThreadOnFallingToEnd(kernel::int32_t exitCode);
 // 폴백한다 - "말없이 무시"보다 "일단 안전하게 종료"가 이 프로젝트의
 // 일관된 선택(SpawnProcess flags 검증 등과 같은 원칙).
 //
-// [수정, 2026-09-21, PN-1DFCB337] 이 함수는 `int 0x80`(진짜
-// InterruptFrame이 있음)과 `syscall` 명령 빠른 경로(syscall_fastpath.cpp,
-// InterruptFrame 자체가 없음 - isr_common_stub을 아예 안 거쳐
-// gInterruptDepth도 증가시키지 않음) 양쪽에서 불린다. 예전엔 두
-// 경로 모두 `sti`+`for(;;) hlt`로 반환하지 않았는데, `int 0x80` 쪽만
-// `kTerminateFaultingUserTask`와 똑같이 이 인터럽트분의
-// `kLeaveInterruptDepth` 짝을 영원히 못 맞추는 결함이 있었다(자세한
-// 근거는 그 함수의 문서 주석/PN-1DFCB337 참고) - `syscall` 빠른
-// 경로는 애초에 그 카운터를 증가시킨 적이 없어 이 결함과 무관하다.
-// `frame`이 있으면(=`int 0x80`) `Scheduler::parkFromISR()`로 카운터
-// 감소까지 함께 마치며 idle로 전환하고, `frame`이 null이면(=`syscall`
-// 빠른 경로) 예전 `sti`+`hlt` 그대로 유지한다(카운터가 애초에
-// 관여하지 않으므로 안전 - 다음 스케줄러 틱이 다른 Task로 전환할
-// 때까지 대기하는 원래 방식 그대로).
+// [수정, 2026-09-21, PN-1DFCB337; 갱신, SP-A252E82F] 이 함수는
+// `int 0x80`(진짜 InterruptFrame이 있음)과 `syscall` 명령 빠른 경로
+// (syscall_fastpath.cpp, InterruptFrame 자체가 없음 - isr_common_stub을
+// 아예 안 거쳐 일반 인터럽트 디스패치 스택으로도 안 옮겨감) 양쪽에서
+// 불린다. 예전엔 두 경로 모두 `sti`+`for(;;) hlt`로 반환하지
+// 않았는데, `int 0x80` 쪽만 `kTerminateFaultingUserTask`와 똑같이
+// 이 인터럽트 호출 프레임을 그냥 버려 원래 스택으로 못 돌아가는
+// 결함이 있었다(자세한 근거는 그 함수의 문서 주석/PN-1DFCB337 참고) -
+// `syscall` 빠른 경로는 애초에 isr_common_stub의 스택 스왑 자체를
+// 거치지 않아 이 결함과 무관하다. `frame`이 있으면(=`int 0x80`)
+// `Scheduler::parkFromISR()`로 원래 스택 복귀까지 함께 마치며 idle로
+// 전환하고, `frame`이 null이면(=`syscall` 빠른 경로) 예전 `sti`+
+// `hlt` 그대로 유지한다(스택 스왑이 애초에 없었으므로 안전 - 다음
+// 스케줄러 틱이 다른 Task로 전환할 때까지 대기하는 원래 방식 그대로).
 bool kCheckSignalCheckpoint(kernel::InterruptFrame* frame) {
     auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
     if (!thread) {
@@ -858,29 +883,30 @@ void kHandleSyscallTrap(kernel::InterruptFrame* frame) {
 // 리액터에 정리 위임)를 부른 뒤 이 함수에서 반환하지 않는다는 큰
 // 그림은 설계자 확인(2026-09-16, "그래 이렇게 해")에서 확정된 그대로다.
 //
-// [수정, 2026-09-21, PN-1DFCB337] 다만 "반환하지 않는" 구체적인
-// 방법은 그 확인 이후(2026-09-20) 이 프로젝트가 더 나은 패턴을 이미
-// 확립했다 - `Scheduler::parkFromISR()`(#DB ISR의 `kHandleUserBreakpointHit`,
-// debug_session.cpp 참고). 원래 이 함수는 `sti` + `for(;;) hlt`로
-// "다음 스케줄러 틱이 다른 Task로 전환할 때까지 대기"했는데, 이
-// 방식은 `isr_common_stub`이 이 #PF/#UD 진입 때 이미 늘려 둔
-// `gInterruptDepth` 카운터의 짝(`kLeaveInterruptDepth`, isr.S/
-// context_switch.S 어느 쪽도)을 **영원히** 못 맞춘다 - 이 hlt 루프의
-// C 콜스택(`kIsrHandler`←`isr_common_stub`) 자체가, 나중에 다른
-// 인터럽트가 이 코어를 다른 Task로 전환하는 순간 통째로 버려지기
+// [수정, 2026-09-21, PN-1DFCB337; 갱신, SP-A252E82F] 다만 "반환하지
+// 않는" 구체적인 방법은 그 확인 이후(2026-09-20) 이 프로젝트가 더
+// 나은 패턴을 이미 확립했다 - `Scheduler::parkFromISR()`(#DB ISR의
+// `kHandleUserBreakpointHit`, debug_session.cpp 참고). 원래 이
+// 함수는 `sti` + `for(;;) hlt`로 "다음 스케줄러 틱이 다른 Task로
+// 전환할 때까지 대기"했는데, 이 방식은 이 #PF/#UD 진입이 `isr_common_stub`
+// 에서 스왑해 둔 일반 디스패치 스택(당시 gInterruptDepth 카운터 기반
+// 설계, 지금은 SP-A252E82F로 카운터 없는 무조건 스왑 설계로
+// 교체됨)을 원래 Task 스택으로 **영원히** 되돌리지 못한다 - 이 hlt
+// 루프의 C 콜스택(`kIsrHandler`←`isr_common_stub`) 자체가, 나중에
+// 다른 인터럽트가 이 코어를 다른 Task로 전환하는 순간 통째로 버려지기
 // 때문이다(그 전환은 그 "다른 인터럽트" 자신의 진입/이탈만 짝을
 // 맞출 뿐, 이 hlt 루프에 갇혀 있던 원래 #PF/#UD 진입의 이탈은 코드상
 // 존재해도 실행될 기회를 영원히 잃는다). PN-D7B66FE4(코어별 전용
-// 인터럽트 디스패치 스택)가 바로 이 카운터의 정확성에 의존하는데,
-// gdb 실측으로 이 함수가 그 카운터를 실제로 크게 어긋나게 만들고
-// 있음을 확인했다(자세한 근거는 PN-1DFCB337). `parkFromISR()`은 이
-// hlt 루프 대신 `kContextSwitchFromISR()`로 **곧장** idle로 전환해
-// 그 호출 하나로 이 진입의 카운터 감소까지 함께 마친다 - "절대
-// ring3로 안 돌아간다"는 원래 확정된 요구사항은 그대로 지키면서(idle
-// 전환도 iretq로 ring3가 아니라 idle의 재개 지점으로 감), 카운터
-// 정확성 문제만 없앤다. 게다가 idle이 곧 `AsyncReactor::drainOnce()`를
-// 도는 자리라, 방금 제출한 self-terminate 비동기 작업도 다음
-// 스케줄러 틱을 기다리지 않고 더 빨리 처리된다.
+// 인터럽트 디스패치 스택)가 바로 이 스택 전환의 정확성에 의존하는데,
+// gdb 실측으로 이 함수가 그 짝을 실제로 못 맞추고 있음을 확인했다
+// (자세한 근거는 PN-1DFCB337). `parkFromISR()`은 이 hlt 루프 대신
+// `kContextSwitchFromISR()`로 **곧장** idle로 전환해 그 호출 하나로
+// 이 진입의 마무리까지 함께 마친다 - "절대 ring3로 안 돌아간다"는
+// 원래 확정된 요구사항은 그대로 지키면서(idle 전환도 iretq로 ring3가
+// 아니라 idle의 재개 지점으로 감), 스택 스왑 불일치 문제만 없앤다.
+// 게다가 idle이 곧 `AsyncReactor::drainOnce()`를 도는 자리라, 방금
+// 제출한 self-terminate 비동기 작업도 다음 스케줄러 틱을 기다리지
+// 않고 더 빨리 처리된다.
 void kTerminateFaultingUserTask(kernel::SignalNumber signal, kernel::InterruptFrame* frame) {
     auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
     // [수정, 2026-09-17, PN-E2A114C1] `thread->process`가 이제
@@ -927,18 +953,30 @@ void kTerminateFaultingUserTask(kernel::SignalNumber signal, kernel::InterruptFr
 // - 그 외(진짜 잘못된 접근, 다른 예외 전부)는 진단 로그를 남기고
 //   멈추다.
 extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
-    // [신규, 2026-09-21, PN-584DB994, 설계자 지시] "인터럽트가 발생하면
-    // 가장 먼저 해야 할 일은 현재 Task의 tcb에 인터럽트 프레임을
-    // 캡처해 진행 상황을 보존하는 것" - 벡터별 분기(EOI, 스케줄링
-    // 결정 등)보다 먼저, 무조건 이 자리에서 한다. 단 이 인터럽트가
-    // 중첩(다른 인터럽트 처리 도중)이 아닐 때만 - 중첩이면 `frame`이
-    // 원래 Task의 진짜 재개 지점이 아니라 "바깥쪽 인터럽트 처리 도중
-    // 어딘가"를 가리켜, 그걸 tcb에 담으면 오히려 커널 내부 지점으로
-    // 오염시킨다(scheduler.h의 `captureCurrentFrame()` 문서 주석
-    // 참고). `kEnterInterruptDepth()`가 isr_common_stub에서 이미 이
-    // 인터럽트분을 반영해 놨으므로, 여기서 읽는 값이 정확히 1이면
-    // "지금 어떤 Task를 직접 인터럽트했다(중첩 아님)"는 뜻이다.
-    if (kCurrentInterruptDepth() == 1) {
+    // [신규, 2026-09-21, PN-584DB994, 설계자 지시; 갱신, SP-A252E82F]
+    // "인터럽트가 발생하면 가장 먼저 해야 할 일은 현재 Task의 tcb에
+    // 인터럽트 프레임을 캡처해 진행 상황을 보존하는 것" - 벡터별
+    // 분기(EOI, 스케줄링 결정 등)보다 먼저, 무조건 이 자리에서 한다.
+    // 단 이 인터럽트가 중첩(다른 인터럽트 처리 도중)이 아닐 때만 -
+    // 중첩이면 `frame`이 원래 Task의 진짜 재개 지점이 아니라 "바깥쪽
+    // 인터럽트 처리 도중 어딘가"를 가리켜, 그걸 tcb에 담으면 오히려
+    // 커널 내부 지점으로 오염시킨다(scheduler.h의 `captureCurrentFrame()`
+    // 문서 주석 참고).
+    //
+    // 일반(마스커블) 벡터는 전체 저장소 `sti` 전수 조사로 확인한 대로
+    // 절대 서로 중첩되지 않으므로(IF=0 유지) 항상 outermost다 - 판단할
+    // 것도 없이 무조건 캡처한다. 회피 불가능한 예외/NMI(#DB/NMI/#DF/
+    // #PF/#MC, 전부 하드웨어 IST로 격리됨)만 진짜 중첩 가능성이 있어,
+    // 이 인터럽트가 트랩한 시점의 rsp(`frame->rspOld`)가 이미 어느
+    // 인터럽트 스택 위였는지를 직접 확인해야 한다 - 그 위였다면 다른
+    // 인터럽트 처리 도중 끼어든 것(중첩), 아니라면 Task를 직접
+    // 인터럽트한 것(outermost)이다.
+    const bool isIstVector = (frame->vector == kDebugVector) || (frame->vector == kNmiVector) ||
+                              (frame->vector == kDoubleFaultVector) || (frame->vector == kPageFaultVector) ||
+                              (frame->vector == kMachineCheckVector);
+    const bool isOutermost =
+        !isIstVector || !kIsAddressOnAnyInterruptStack(frame->rspOld, kernel::Scheduler::currentCoreIndex());
+    if (isOutermost) {
         kernel::Scheduler::captureCurrentFrame(frame);
     }
     if (frame->vector == kernel::kTimerVector) {
@@ -957,9 +995,24 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     if (frame->vector == 0xFF) {
         return;  // spurious - EOI 불필요(스펙상 안 보내도 됨)
     }
-    if (frame->vector == 14) {
+    if (frame->vector == kPageFaultVector) {
+        // [신규, 2026-09-21, SP-A252E82F §2, QU-65761CB0 확정] #PF는
+        // IST5라 항상 유효한 전용 스택에서 실행되지만, IST 자체는
+        // 재진입 안전하지 않다(재진입하면 같은 고정 top으로 rsp가
+        // 되돌아가 진행 중이던 첫 #PF 프레임을 덮어씀 - gdt.h 참고).
+        // handlePageFault()는 항상 영구 매핑된 커널 구조체만 건드리게
+        // 설계돼 있으므로, 이 재진입은 "막아야 할 위험"이 아니라
+        // "그 설계 불변식이 깨졌다는 확정적 버그 신호"다(설계자 지시) -
+        // 복구를 시도하지 않고 즉시 rip/cr2를 남기고 멈춘다.
+        const kernel::uint32_t coreIndex = kernel::Scheduler::currentCoreIndex();
+        if (gInPageFaultHandler[coreIndex]) {
+            kPanic(frame);  // 반환하지 않음 - #PF 핸들러 도중 #PF 재진입은 그 핸들러 코드의 버그
+        }
+        gInPageFaultHandler[coreIndex] = 1;
         const kernel::uint64_t faultAddr = kReadCr2();
-        if (kernel::Paging::handlePageFault(faultAddr, frame->errorCode)) {
+        const bool handled = kernel::Paging::handlePageFault(faultAddr, frame->errorCode);
+        gInPageFaultHandler[coreIndex] = 0;  // 아래 두 미반환 경로 전에 반드시 먼저 내린다
+        if (handled) {
             return;
         }
         // [QU-04C420BF, PN-71E50394 항목3] 온디맨드 매핑으로도 못 고친

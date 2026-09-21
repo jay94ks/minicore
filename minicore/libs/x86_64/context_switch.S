@@ -47,8 +47,6 @@
 .intel_syntax noprefix
 .code64
 
-.extern kLeaveInterruptDepth
-
 .section .text
 
 .global kContextSwitch
@@ -167,18 +165,17 @@ kContextSwitchFromISR:
     mov r9, [rdx+168]
     mov [r8+168], r9
 
-    /* [신규, 2026-09-20, SP-5130284C] 이 인터럽트가 "다른 Task로
-     * 전환하며" 끝나는 경로 - 깊이 카운터를 1 내린다. 반드시 `mov
-     * rsp, rsi` **이전**에 해야 한다 - 그 다음부터는 rsp가 newTcb(다른
-     * Task의 고정 176바이트 TaskTcb 블록) 안을 가리키게 되고, 거기서
-     * `call`을 하면 반환주소 push가 그 블록의 레지스터 필드를
-     * 깨뜨린다. rsi(newTcb)는 System V 콜리세이브 rbx에 잠깐 옮겨
-     * 이 call을 넘겨(kLeaveInterruptDepth는 rbx를 보존) 그대로 다시
-     * 쓴다 - isr.S의 자연 복귀 경로(같은 Task로 복귀)와 합쳐
-     * "인터럽트 진입 하나당 정확히 한 번의 감소"를 이룬다. */
-    mov rbx, rsi
-    call kLeaveInterruptDepth
-    mov rsp, rbx
+    /* [갱신, 2026-09-21, SP-A252E82F] 이 인터럽트가 "다른 Task로
+     * 전환하며" 끝나는 경로 - 예전엔 여기서 gInterruptDepth 카운터를
+     * 내리는 kLeaveInterruptDepth를 호출했지만, 새 설계엔 카운터
+     * 자체가 없다. 이 함수는 이 코어가 지금 쓰던 일반 인터럽트
+     * 디스패치 스택을 그냥 버리고 다른 Task로 완전히 전환하며 이
+     * 인터럽트를 끝낸다 - "정리해서 돌려줄" 대상이 없으므로(이
+     * 디스패치 스택은 이 코어 전용이라 다른 코어가 쓸 일이 없고,
+     * 이 코어의 다음 일반 인터럽트 진입이 kEnterInterruptStack()으로
+     * gSavedTaskRsp[idx]를 스스로 새로 채울 뿐이다) 그냥 rsp를
+     * newTcb로 바꿔치기하면 끝난다. */
+    mov rsp, rsi
     jmp isr_common_epilogue
 
 /* Task::init()이 이 Task 전용 고정 TaskTcb 블록(Slab 할당, task.cpp

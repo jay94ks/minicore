@@ -88,14 +88,19 @@ kernel::uint64_t kMmconfigVirtAddress(kernel::uint8_t device, kernel::uint8_t fu
 // 참고). `Scheduler::PreemptionGuard`는 스케줄러의 태스크 전환
 // 결정만 미룰 뿐 인터럽트 전달 자체는 막지 않아(gPreemptDisableCount
 // 확인은 `Scheduler::onTick()` 자신만 함) 이 레이스엔 안 맞는다 -
-// 진짜 인터럽트 차단이 필요하다. 무조건 `cli`+`sti` 페어(scheduler.cpp의
-// enqueue() 등)는 "항상 인터럽트가 켜진 채로 불린다"는 전제라 이미
-// cli된 컨텍스트(예: 어떤 인터럽트 핸들러가 진단/상태확인차 PCI
-// config를 읽는 경우)에서 불리면 그 핸들러의 IF=0 불변조건을 실수로
-// 깨뜨릴 위험이 있다 - 그래서 여기서는 진입 시점의 실제 RFLAGS를
-// 저장해 뒀다가 그대로 복원한다(enterIdleLoop()의 rflags 보존과 같은
-// 이유/기법). MMCONFIG(ECAM) 경로는 단일 MMIO 접근이라 이 레이스
-// 자체가 없어 감쌀 필요 없다.
+// 진짜 인터럽트 차단이 필요하다. 무조건 `cli`+`sti` 페어는 "항상
+// 인터럽트가 켜진 채로 불린다"는 전제라 이미 cli된 컨텍스트(예: 어떤
+// 인터럽트 핸들러가 진단/상태확인차 PCI config를 읽는 경우)에서
+// 불리면 그 핸들러의 IF=0 불변조건을 실수로 깨뜨릴 위험이 있다 -
+// 그래서 여기서는 진입 시점의 실제 RFLAGS를 저장해 뒀다가 그대로
+// 복원한다(enterIdleLoop()의 rflags 보존과 같은 이유/기법).
+// [갱신, 2026-09-21, SP-A252E82F 구현 중 실측 확인] `scheduler.cpp`의
+// `enqueue()`/`scheduleImmediate()`가 실제로 이 무조건 cli+sti 페어
+// 버그를 갖고 있었다(인터럽트 핸들러 경유 wakeOne() 호출 시 그 핸들러의
+// IF=0을 깨뜨림 - HPET이 LAPIC 스케줄러 틱 처리 도중 끼어드는 것으로
+// 실측 확인) - 이 파일과 동일한 RFLAGS 저장/복원 기법으로 이미
+// 고쳤다. MMCONFIG(ECAM) 경로는 단일 MMIO 접근이라 이 레이스 자체가
+// 없어 감쌀 필요 없다.
 class PciConfigAccessGuard {
 public:
     PciConfigAccessGuard() {

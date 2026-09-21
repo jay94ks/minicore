@@ -29,8 +29,11 @@ constexpr uint16_t kGdtUserCodeSelector = 0x20 | 3;
 //   1. IST(Interrupt Stack Table) - 지금 스택이 고장나 있어도(예:
 //      Task 커널 스택 오버플로우가 가드 페이지에 부딪힌 경우) CPU가
 //      특정 예외 벡터에 한해 항상 유효한 별도 스택으로 강제 전환하게
-//      한다. 지금은 IST1(#DF 전용)만 쓴다 - 나머지 IST2-7은 향후
-//      다른 벡터(NMI/#MC 등)가 필요해지면 같은 방식으로 확장한다.
+//      한다. 지금은 IST1-5(#DF/NMI/#MC/#DB/#PF - 전부 IF 마스킹과
+//      무관하게 강제로 발생할 수 있는 회피 불가능한 예외/NMI,
+//      SP-A252E82F "인터럽트 컨텍스트 재설계")를 쓴다 - 나머지
+//      IST6-7은 향후 또 다른 벡터가 필요해지면 같은 방식으로
+//      확장한다.
 //   2. RSP0 - 향후 유저랜드가 생기면 ring3->ring0 전환(syscall 진입
 //      등) 시 커널 스택 포인터로 재사용할 자리(아직 안 씀, 필드만
 //      존재).
@@ -85,6 +88,13 @@ public:
     // 디스패치마다 갱신하는 일반화가 필요하다(후속 과제,
     // PN-16CA347D 진행하며 실측).
     static void setRsp0ForThisCore(uint64_t rsp0);
+
+    // [신규, 2026-09-21, SP-A252E82F] 주어진 주소가 이 코어의 IST
+    // 스택(#DF/NMI/#MC/#DB/#PF) 중 어느 하나의 범위 안에 있는지
+    // 확인한다 - gIstStacks가 이 번역 단위(gdt.cpp)의 익명
+    // 네임스페이스에 있어 다른 파일(deferred_destruction.cpp)이
+    // 직접 볼 수 없으므로 이 accessor를 통해서만 물어볼 수 있다.
+    static bool isAddressOnAnyIstStack(uint64_t addr, uint32_t coreIndex);
 };
 
 }  // namespace kernel

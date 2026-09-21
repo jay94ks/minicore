@@ -34,13 +34,15 @@ static_assert((kernel::kGdtUserCodeSelector & ~0x3) == 0x20,
 constexpr kernel::uint32_t kMaxCores = kernel::kAcpiMaxCpus;
 constexpr kernel::uint64_t kIstStackSize = 8192;  // Task 기본 커널 스택(8KiB)과 동일 크기
 
-// IST1-4를 이 순서로 쓴다(idt.cpp의 kDoubleFaultIst/kNmiIst/
-// kMachineCheckIst/kDebugIst와 정확히 대응) - #DF/NMI/#MC/#DB 넷 다
-// "현재 RSP가 뭐든 무관하게 항상 유효한 스택이 필요한" 벡터라
-// 코어마다 각자의 전용 스택을 하나씩 받는다(DC-3D3212A4/QU-4E00C118
-// 후속 지시, 2026-09-14). IST5-7은 아직 안 쓴다 - 필요해지면 이
-// 배열을 늘리고 idt.cpp에 같은 패턴으로 추가한다.
-constexpr kernel::uint32_t kIstSlotCount = 4;
+// IST1-5를 이 순서로 쓴다(idt.cpp의 kDoubleFaultIst/kNmiIst/
+// kMachineCheckIst/kDebugIst/kPageFaultIst와 정확히 대응) - #DF/NMI/
+// #MC/#DB/#PF 다섯 다 "현재 RSP가 뭐든 무관하게 항상 유효한 스택이
+// 필요한" 벡터라 코어마다 각자의 전용 스택을 하나씩 받는다
+// (DC-3D3212A4/QU-4E00C118 후속 지시, 2026-09-14; #PF는 SP-A252E82F
+// "인터럽트 컨텍스트 재설계"로 2026-09-21 추가 - 회피 불가능한
+// 예외 중 유일하게 IST가 없던 벡터였다). IST6-7은 아직 안 쓴다 -
+// 필요해지면 이 배열을 늘리고 idt.cpp에 같은 패턴으로 추가한다.
+constexpr kernel::uint32_t kIstSlotCount = 5;
 
 // GDT 배치: [0]=null, [1]=code64(ring0), [2]=data64(ring0),
 // [3]=data(ring3, 0x18), [4]=code64(ring3, 0x20)(각 8바이트) - 유저
@@ -85,11 +87,15 @@ static_assert(sizeof(Tss) == 104, "x86_64 TSS 레이아웃이 SDM Vol.3 Figure 8
 Tss gTssPerCore[kMaxCores];
 
 // gIstStacks[slot][coreIndex]가 IST(slot+1)용 스택이다(슬롯 0=IST1
-// #DF, 1=IST2 NMI, 2=IST3 #MC, 3=IST4 #DB - 위 주석 참고).
+// #DF, 1=IST2 NMI, 2=IST3 #MC, 3=IST4 #DB, 4=IST5 #PF - 위 주석 참고).
 alignas(16) kernel::uint8_t gIstStacks[kIstSlotCount][kMaxCores][kIstStackSize];
 
 kernel::uint64_t kIstStackTop(kernel::uint32_t slot, kernel::uint32_t coreIndex) {
     return reinterpret_cast<kernel::uint64_t>(&gIstStacks[slot][coreIndex][kIstStackSize]);
+}
+
+kernel::uint64_t kIstStackBase(kernel::uint32_t slot, kernel::uint32_t coreIndex) {
+    return reinterpret_cast<kernel::uint64_t>(&gIstStacks[slot][coreIndex][0]);
 }
 
 struct TssDescriptorPair {
@@ -187,6 +193,7 @@ void Gdt::loadTssForThisCore() {
     tss.ist2 = kIstStackTop(1, coreIndex);  // NMI
     tss.ist3 = kIstStackTop(2, coreIndex);  // #MC
     tss.ist4 = kIstStackTop(3, coreIndex);  // #DB
+    tss.ist5 = kIstStackTop(4, coreIndex);  // #PF (SP-A252E82F)
     tss.ioMapBase = sizeof(Tss);  // IOPB 없음 - 세그먼트 한계를 벗어나게 해 비활성화
 
     const uint16_t selector = Gdt::tssSelectorForCore(coreIndex);
@@ -195,6 +202,17 @@ void Gdt::loadTssForThisCore() {
 
 void Gdt::setRsp0ForThisCore(uint64_t rsp0) {
     gTssPerCore[kCoreIndexForTss()].rsp0 = rsp0;
+}
+
+bool Gdt::isAddressOnAnyIstStack(uint64_t addr, uint32_t coreIndex) {
+    for (uint32_t slot = 0; slot < kIstSlotCount; ++slot) {
+        const uint64_t base = kIstStackBase(slot, coreIndex);
+        const uint64_t top = base + kIstStackSize;
+        if (addr >= base && addr < top) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace kernel

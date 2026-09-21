@@ -97,8 +97,8 @@ isr_table_entry %dyn_vec
 .section .text
 
 .extern kIsrHandler
-.extern kEnterInterruptDepth
-.extern kLeaveInterruptDepth
+.extern kEnterInterruptStack
+.extern kLeaveInterruptStack
 isr_common_stub:
     push r15
     push r14
@@ -116,58 +116,62 @@ isr_common_stub:
     push rbx
     push rax
 
-    /* [신규, 2026-09-20, SP-5130284C / 갱신, 2026-09-21, PN-D7B66FE4]
-     * 이 코어의 인터럽트 깊이 카운터를 1 올린다 - 반드시 위 15개
-     * 레지스터 push가 전부 끝난 뒤라야 한다(그래야 진짜 인터럽트당한
-     * 값들이 이미 스택/메모리에 안전하게 있고, 이 call이 clobber하는
-     * 스크래치 레지스터는 더 이상 "살아 있는" 값이 아니다).
-     *
-     * rdi = 지금 rsp(= InterruptFrame 시작 주소, 아직 스왑 전) - 이
-     * 값을 kEnterInterruptDepth의 인자(가장 바깥쪽일 때 저장해 둘 원래
-     * rsp)로도, 잠시 뒤 kIsrHandler에 넘길 frame 포인터로도 그대로
-     * 쓴다. call 이후 rdi는 caller-saved라 보존을 보장할 수 없으므로
-     * (SysV ABI), call 직후 rsp에서 다시 계산한다 - balanced call/ret
-     * 이라 이 시점 rsp는 스왑 전 그대로다.
-     *
-     * rax(반환값) == 0이면 중첩 - 이미 전용 인터럽트 디스패치 스택
-     * 위에 있으므로 rsp를 그대로 둔다(하드웨어 IST처럼 고정 top으로
-     * 되감으면 바깥쪽 인터럽트가 아직 쓰고 있는 스택 내용을 덮어써
-     * 버린다 - 그래서 이 되감기는 반드시 "가장 바깥쪽일 때만"이어야
-     * 진짜 재진입에 안전하다). rax != 0이면 가장 바깥쪽 - 그 값(전용
-     * 스택 top)으로 rsp를 스왑해, kIsrHandler(및 그 안의 onTick/
-     * onForcedMigration 등 전체 C++ 호출 사슬)가 Task 자신의 커널
-     * 스택이 아니라 이 넉넉한 전용 버퍼 위에서 실행되게 한다. */
+    /* [갱신, 2026-09-21, SP-A252E82F "인터럽트 컨텍스트 재설계"] 벡터
+     * 번호(InterruptFrame::vector, 위 15개 push 직후 [rsp+120] - 구조체
+     * 레이아웃과 정확히 일치해야 함)로 두 경로 중 하나를 고른다. 전체
+     * 저장소 `sti` 전수 조사로 확인한 대로 일반(마스커블) 인터럽트는
+     * 절대 서로 중첩되지 않으므로, 회피 불가능한 예외/NMI 다섯 개
+     * (#DB=1, NMI=2, #DF=8, #PF=14, #MC=18 - gdt.cpp가 이 다섯 벡터의
+     * TSS.ISTn을 채워 둠)만 하드웨어가 이미 전용 IST 스택으로 rsp를
+     * 강제 전환해 뒀고, 나머지 전 벡터는 절대 중첩될 수 없으므로
+     * 카운터 없이 매번 무조건 소프트웨어 스왑하면 충분하다. */
+    mov eax, dword ptr [rsp + 120]
+    cmp eax, 1
+    je .Lisr_ist_vector
+    cmp eax, 2
+    je .Lisr_ist_vector
+    cmp eax, 8
+    je .Lisr_ist_vector
+    cmp eax, 14
+    je .Lisr_ist_vector
+    cmp eax, 18
+    je .Lisr_ist_vector
+
+    /* [일반 벡터 경로] rdi = 지금 rsp(= InterruptFrame 시작 주소,
+     * 아직 스왑 전) - kEnterInterruptStack의 인자(나중에 kLeaveInterruptStack이
+     * 돌려줄 원래 rsp)로도, 잠시 뒤 kIsrHandler에 넘길 frame 포인터로도
+     * 그대로 쓴다. call 이후 rdi는 caller-saved라 보존을 보장할 수
+     * 없으므로(SysV ABI), call 직후 rsp에서 다시 계산한다 - balanced
+     * call/ret이라 이 시점 rsp는 스왑 전 그대로다. 일반 벡터는 절대
+     * 중첩되지 않으므로(위 주석) 조건 분기 없이 항상 스왑한다. */
     mov rdi, rsp
-    call kEnterInterruptDepth
+    call kEnterInterruptStack
     mov rdi, rsp
-    test rax, rax
-    jz 1f
     mov rsp, rax
-1:
     call kIsrHandler
 
-    /* [신규, 2026-09-20, SP-5130284C / 갱신, 2026-09-21, PN-D7B66FE4]
-     * 이 인터럽트가 "자연스럽게"(같은 Task로 그대로 복귀) 끝나는
-     * 경로 - 깊이 카운터를 1 내린다. `kContextSwitch`(FromISR가 아닌
-     * 쪽, 협조적 전환)는 인터럽트 진입 자체가 없었으므로 이 카운터를
-     * 전혀 건드리지 않고, `kContextSwitchFromISR`(다른 Task로 전환하며
-     * 이 인터럽트를 끝내는 경로)는 이 지점을 거치지 않는 대신
-     * context_switch.S 자기 안에서 직접 이 함수를 부른다(반환값은
-     * 무시 - 그 경로는 곧바로 rsp=newTcb로 덮어쓰므로 원래 스택으로
-     * 되돌릴 필요가 없다). 두 경로 모두 "인터럽트 진입 하나당 정확히
-     * 한 번의 감소"를 지킨다.
-     *
-     * rax(반환값) == 0이면 아직 바깥쪽 인터럽트가 진행 중(중첩
-     * 이탈) - rsp를 그대로 둔다(이미 전용 스택 위, 이 프레임 자신의
-     * push와 정확히 짝이 맞는 위치라 아래 pop들이 올바로 읽는다).
-     * rax != 0이면 가장 바깥쪽 이탈 - 원래(Task 자신의) rsp로
-     * 되돌려야 아래 pop들이 이 인터럽트가 실제로 push된 그 자리에서
-     * 정확히 읽는다. */
-    call kLeaveInterruptDepth
-    test rax, rax
-    jz 1f
+    /* 자연 복귀 - 원래(Task 자신의) rsp로 되돌려야 아래 pop들이 이
+     * 인터럽트가 실제로 push된 그 자리에서 정확히 읽는다.
+     * `kContextSwitch`(FromISR가 아닌 쪽, 협조적 전환)는 인터럽트
+     * 진입 자체가 없었으므로 이 스왑을 전혀 건드리지 않고,
+     * `kContextSwitchFromISR`(다른 Task로 전환하며 이 인터럽트를
+     * 끝내는 경로)는 이 지점을 아예 거치지 않는다(다른 Task로 영구
+     * 전환하며 이 진입을 끝내므로, "원래 스택으로 되돌릴" 필요 자체가
+     * 없다 - 카운터가 없으므로 짝을 맞출 것도 없다). */
+    call kLeaveInterruptStack
     mov rsp, rax
-1:
+    jmp isr_common_epilogue
+
+.Lisr_ist_vector:
+    /* [IST 벡터 경로] 하드웨어가 이미 이 벡터 전용 고정 스택으로 rsp를
+     * 전환해 뒀다 - 소프트웨어 스왑이 필요 없다(애초에 카운터도 없어
+     * "중첩인지" 판단할 필요조차 없음 - kIsrHandler 쪽이 frame->rspOld로
+     * 직접 판단한다, idt.cpp 참고). rdi = 지금 rsp가 곧 InterruptFrame
+     * 시작 주소. */
+    mov rdi, rsp
+    call kIsrHandler
+    /* isr_common_epilogue로 그대로 흘러 들어간다(스왑이 없었으므로
+     * rsp를 되돌릴 필요도 없음) - 아래 fork() 재개 경로 주석 참고. */
 
     /* [신규, PN-44C91D6E, fork() 자식 재개 경로] 순수 레이블 추가 -
      * 기존 흐름(위 call 직후 자연히 여기로 떨어짐)은 전혀 안 바뀐다.

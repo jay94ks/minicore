@@ -102,13 +102,14 @@ struct SelfTerminateThreadArgs {
 // 정의는 idt.cpp(기존 int 0x80 핸들러가 있던 자리, kTaskOnFallingToEnd/
 // Syscall::submit·wait 전부 이미 그쪽에서 쓰고 있었음).
 //
-// [수정, 2026-09-21, PN-1DFCB337] `frame` 인자 신설 - int 0x80
-// 경로(idt.cpp의 kHandleSyscallTrap)는 isr_common_stub이 이미
-// gInterruptDepth를 늘려 둔 진짜 InterruptFrame을 그대로 넘기고,
-// `syscall` 빠른 경로(syscall_fastpath.cpp)는 애초에 그 카운터를
-// 안 건드리므로 null을 넘긴다 - self-terminate류 분기가 이 값의
-// 유무로 "카운터를 닫아야 하는지"를 판단한다(kCheckSignalCheckpoint
-// 문서 주석 참고, idt.cpp).
+// [수정, 2026-09-21, PN-1DFCB337; 갱신, SP-A252E82F] `frame` 인자
+// 신설 - int 0x80 경로(idt.cpp의 kHandleSyscallTrap)는
+// isr_common_stub이 이미 일반 디스패치 스택으로 스왑해 둔 진짜
+// InterruptFrame을 그대로 넘기고, `syscall` 빠른 경로
+// (syscall_fastpath.cpp)는 애초에 isr_common_stub 자체를 안 거치므로
+// null을 넘긴다 - self-terminate류 분기가 이 값의 유무로 "원래 스택
+// 복귀를 마무리해야 하는지"를 판단한다(kCheckSignalCheckpoint 문서
+// 주석 참고, idt.cpp).
 uint64_t kDispatchSyscallVerb(uint64_t verb, uint64_t arg0, uint64_t arg1, InterruptFrame* frame);
 
 // [신규, 2026-09-18, SP-76250478 §2.1, PN-0EB2FABF] 프로세스 안에서만

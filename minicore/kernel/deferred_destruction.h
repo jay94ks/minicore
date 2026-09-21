@@ -35,53 +35,58 @@ void kDrainDeferredDestructions();
 
 }  // namespace kernel
 
-// isr.S/context_switch.S가 직접 호출하는 C 링키지 리프 함수 - 반드시
+// isr.S/context_switch.S가 직접 호출하는 C 링키지 리프 함수들 - 반드시
 // 아주 가볍고, 자기 자신의 balanced call/ret 외에는 스택을 건드리지
 // 않아야 한다(InterruptFrame 구성 도중/직후, 또는 TaskTcb 블록을 막
 // 새 스택으로 삼기 직전처럼 rsp가 민감한 지점에서 불리므로 - 정확한
 // 삽입 위치의 근거는 각 .S 파일의 주석 참고).
 //
-// [갱신, 2026-09-21, PN-D7B66FE4, DC-53B93BFF (B) "IST 기반 전용
-// 인터럽트 스택" 확정 반영] 단순 카운터 증감만 하지 않는다 - 이
-// 진입이 가장 바깥쪽(중첩 아님, 증가 후 값==1)이면 이 코어 전용의
-// 넉넉한 인터럽트 디스패치 스택 top 주소를 반환해 isr.S가 실제로
-// rsp를 그 값으로 바꾸게 한다(중첩이면 0 반환 - 이미 그 전용 스택
-// 위에서 실행 중이므로 다시 top으로 되감지 않는다). **이 방식은
-// SP-677210E6의 하드웨어 IST(게이트를 탈 때마다 무조건 고정 top으로
-// 되감음 - 진짜 재진입에는 안전하지 않다, 그래서 #DF/NMI/#MC/#DB
-// 처럼 재진입 시나리오 자체가 없거나 무의미한 벡터에만 적합)와
-// 다르다 - Linux 등 성숙한 커널의 percpu IRQ 스택과 동일한 원칙으로,
-// "가장 바깥쪽일 때만 top으로 스왑, 중첩이면 현재 위치에서 그대로
-// 이어 쓴다"를 소프트웨어(이 카운터)로 직접 구현해 진짜 재진입에도
-// 안전하다. PN-584DB994이 gdb로 확정한 "중첩 인터럽트 3-4단계가
-// Task의 고정 8KiB 커널 스택(kTaskDefaultKernelStackSize, task.h)을
-// 실제로 넘긴다"는 근본 원인을 없앤다 - kIsrHandler(및 그 안의 전체
-// C++ 호출 사슬: onTick/onForcedMigration/pickNext/enqueue/Logger 등)가
-// 이제 Task 자신의 스택이 아니라 이 전용 버퍼 위에서 실행된다.
+// [갱신, 2026-09-21, SP-A252E82F "인터럽트 컨텍스트 재설계"] 예전
+// `gInterruptDepth` 카운터 기반 설계(임의 깊이 중첩을 소프트웨어로
+// 지원)를 완전히 폐기했다 - 전체 저장소 `sti` 전수 조사로 확인한
+// 대로, 일반(마스커블) 인터럽트끼리는 애초에 절대 중첩되지 않는다
+// (`kIsrHandler` 실행 구간 내내 IF=0으로 유지됨). 유일하게 실재하는
+// "중첩"은 IF와 무관하게 강제로 발생하는 회피 불가능한 예외(#PF/
+// NMI/#DF/#MC/#DB)뿐이고, 이들은 전부 하드웨어 IST로 격리된다
+// (gdt.cpp, `#PF`는 이번 갱신으로 IST5 추가) - 그래서 **일반 벡터의
+// isr_common_stub만** 이 두 함수를 쓴다(IST 벡터는 하드웨어가 이미
+// 전용 스택으로 전환해 뒀으므로 이 소프트웨어 스왑 자체가 필요
+// 없다 - isr.S가 벡터 번호로 분기해 IST 벡터는 아예 이 호출을
+// 건너뛴다). 일반 벡터끼리는 절대 중첩되지 않으므로 카운터 없이
+// "매번 무조건 스왑"하면 충분하다 - `PN-9326B06F`가 추적해 온 카운터
+// 누수/오작동 계열 버그 전체가 이 설계에서는 애초에 존재할 수 없다.
 //
-// currentRsp는 이 진입 시점의(아직 스왑 전) rsp - 가장 바깥쪽일 때만
-// kLeaveInterruptDepth()가 나중에 되돌려줄 수 있게 코어별로 잠깐
-// 맡아 둔다(그 코어에서 대응하는 이탈이 원래 스택으로 돌아갈 때만
-// 읽음 - 중첩된 안쪽 진입/이탈은 이 저장소를 전혀 건드리지 않는다).
-extern "C" kernel::uint64_t kEnterInterruptDepth(kernel::uint64_t currentRsp);
+// currentRsp는 이 진입 시점의(아직 스왑 전) rsp - 대응하는
+// `kLeaveInterruptStack()`이 나중에 돌려줄 수 있게 코어별로 잠깐
+// 맡아 둔다. 일반 벡터끼리는 절대 중첩되지 않으므로 이 저장소를
+// 서로 다른 두 진입이 동시에 쓸 위험이 없다.
+extern "C" kernel::uint64_t kEnterInterruptStack(kernel::uint64_t currentRsp);
 
-// 깊이 카운터를 내리고, 이 이탈이 가장 바깥쪽(내린 후 값==0)이면 위
-// 진입 때 맡아 둔 원래 rsp를 반환한다(중첩 이탈이면 0). isr.S의
-// "같은 Task로 자연 복귀" 경로만 이 반환값을 실제로 적용(0이 아니면
-// rsp를 그 값으로 되돌려 이후 pop들이 이 인터럽트가 실제로 push된
-// 그 자리에서 정확히 읽게 한다) - context_switch.S의
-// kContextSwitchFromISR 경로는 이 반환값을 그대로 무시해도 안전하다
-// (어차피 이 호출 직후 곧바로 rsp=newTcb로 덮어쓰므로, 기존 코드
-// 변경 없음).
-extern "C" kernel::uint64_t kLeaveInterruptDepth();
+// 위에서 맡아 둔 원래 rsp를 그대로 돌려준다. isr.S의 일반 벡터
+// "자연 복귀" 경로만 이 반환값을 실제로 적용한다(원래 rsp로 되돌려
+// 이후 pop들이 이 인터럽트가 실제로 push된 자리에서 정확히 읽게
+// 함) - `context_switch.S`의 `kContextSwitchFromISR` 경로는 이제
+// 이 함수를 아예 부르지 않는다(다른 Task로 영구히 전환하며 이
+// 인터럽트를 끝내므로, 이 코어의 다음 일반 인터럽트 진입이
+// `kEnterInterruptStack()`으로 스스로 새 값을 저장할 뿐이지 이전
+// 값을 "짝 맞춰 돌려받을" 필요 자체가 없다 - 카운터가 없으므로
+// 균형을 맞출 것도 없다).
+extern "C" kernel::uint64_t kLeaveInterruptStack();
 
-// [신규, 2026-09-21, PN-584DB994, 설계자 지시] `kEnterInterruptDepth()`가
-// 이미 이 인터럽트분을 반영해 증가시킨 뒤의 값 - `kIsrHandler`(idt.cpp)
-// 가 호출 시점에 이 값이 정확히 1이면 "지금 이 인터럽트가 어떤
-// Task를 직접 인터럽트했다(중첩 아님)"는 뜻이라, 그 경우에만
-// `Scheduler::captureCurrentFrame()`을 불러 그 Task의 tcb를 즉시
-// 갱신한다(중첩이면 `frame`이 원래 Task의 진짜 재개 지점이 아니라
-// "바깥쪽 인터럽트 처리 도중 어딘가"라 오히려 tcb를 오염시킨다).
-extern "C" unsigned int kCurrentInterruptDepth();
+// [신규, 2026-09-21, SP-A252E82F] 주어진 주소(`addr`)가 이 코어
+// (`coreIndex`)의 일반 디스패치 스택 또는 IST 스택(#DF/NMI/#MC/#DB/
+// #PF) 중 어느 하나의 범위 안에 있는지 확인한다. 두 가지 용도로
+// 쓰인다:
+//   1. `kIsInInterruptContext()`(이 파일, SharedPtr 소멸 지연 판단) -
+//      현재 rsp를 넘겨 "지금 이 코드가 인터럽트 스택 위에서 실행
+//      중인가"를 직접 확인한다(카운터 없이, 있는 그대로의 사실을
+//      본다 - 어떤 경로가 이 값을 "깜빡 안 내려도" 절대 어긋날 수
+//      없다).
+//   2. `kIsrHandler`(idt.cpp)가 IST 벡터(#PF 등)에 대해 "이게 정말
+//      Task를 직접 인터럽트했는지, 아니면 다른 인터럽트 처리 도중
+//      끼어든 것인지"를 판단할 때 - 그 인터럽트가 트랩한 시점의
+//      rsp(`InterruptFrame::rspOld`)를 넘긴다. 일반 벡터는 이 확인이
+//      필요 없다(절대 중첩되지 않으므로 항상 outermost).
+extern "C" bool kIsAddressOnAnyInterruptStack(kernel::uint64_t addr, kernel::uint32_t coreIndex);
 
 #endif  // MINICORE_KERNEL_DEFERRED_DESTRUCTION_H
