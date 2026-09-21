@@ -59,6 +59,59 @@ void kFillMmioBases(const Pci::Device& dev, uint64_t (&mmioBases)[6]) {
     }
 }
 
+// [신규, 2026-09-21, PN-7528A406 항목2, 설계자 opinion "표준 PCI BAR
+// sizing 먼저 고려해서 설계안에 반영해봐" 반영] 표준 PCI Local Bus
+// Spec sizing 절차 그대로 - 원본 저장 -> 0xFFFFFFFF 씀 -> 다시 읽음
+// -> 즉시 원본 복원 -> 읽은 값을 반전+1로 크기 계산. 이 4단계 각각의
+// `Pci::readConfig32`/`writeConfig32` 호출 자체는 `PciConfigAccessGuard`
+// (pci.cpp, PN-B87A5BBA로 이미 수정됨)로 CONFIG_ADDRESS/CONFIG_DATA
+// 2단계 접근이 원자적이나, 이 네 호출에 걸친 "BAR가 일시적으로
+// 0xFFFFFFFF(무효)인 창" 자체를 없애 주지는 않는다 - 다만
+// `RequestIoPermission`은 통상 드라이버 초기화 시점 1회만 불리고
+// 그 순간 같은 BAR에 동시 접근하는 다른 코드가 없다는 게 이 계획의
+// 판단(PN-7528A406 "이 함수 자체를 직렬화해야 하는지" 열린 질문에
+// 대한 v1 결론)이라 추가 직렬화는 하지 않는다.
+uint64_t kSizeMmioBar(uint32_t bus, uint32_t device, uint32_t function, uint32_t barIndex) {
+    const auto b = static_cast<uint8_t>(bus);
+    const auto d = static_cast<uint8_t>(device);
+    const auto f = static_cast<uint8_t>(function);
+    const auto barOffset = static_cast<uint8_t>(0x10 + barIndex * 4);
+
+    const uint32_t original = Pci::readConfig32(b, d, f, barOffset);
+    if (original & 0x1) {
+        // IO BAR(bit0=1) - 하위 2비트만 플래그, 나머지가 크기 정보.
+        Pci::writeConfig32(b, d, f, barOffset, 0xFFFFFFFFu);
+        const uint32_t sized = Pci::readConfig32(b, d, f, barOffset);
+        Pci::writeConfig32(b, d, f, barOffset, original);
+        const uint32_t masked = sized & ~0x3u;
+        return masked == 0 ? 0 : static_cast<uint64_t>(~masked + 1);
+    }
+
+    const uint32_t type = (original >> 1) & 0x3u;
+    if (type == 0x2 && barIndex + 1 < 6) {
+        // 64비트 메모리 BAR - 다음 슬롯(상위 32비트)도 함께 사이징해
+        // 64비트 값으로 합친 뒤 계산해야 한다(하위 32비트만 봐서는
+        // 4GiB짜리 BAR인지 상위 워드가 0인 훨씬 작은 BAR인지 구분 불가).
+        const auto highOffset = static_cast<uint8_t>(barOffset + 4);
+        const uint32_t originalHigh = Pci::readConfig32(b, d, f, highOffset);
+        Pci::writeConfig32(b, d, f, barOffset, 0xFFFFFFFFu);
+        Pci::writeConfig32(b, d, f, highOffset, 0xFFFFFFFFu);
+        const uint32_t sizedLow = Pci::readConfig32(b, d, f, barOffset);
+        const uint32_t sizedHigh = Pci::readConfig32(b, d, f, highOffset);
+        Pci::writeConfig32(b, d, f, barOffset, original);
+        Pci::writeConfig32(b, d, f, highOffset, originalHigh);
+        const uint64_t combined = (static_cast<uint64_t>(sizedHigh) << 32) | (sizedLow & ~0xFu);
+        return combined == 0 ? 0 : (~combined + 1);
+    }
+
+    // 32비트 메모리 BAR(bit[2:1]==00) - 하위 4비트가 플래그.
+    Pci::writeConfig32(b, d, f, barOffset, 0xFFFFFFFFu);
+    const uint32_t sized = Pci::readConfig32(b, d, f, barOffset);
+    Pci::writeConfig32(b, d, f, barOffset, original);
+    const uint32_t masked = sized & ~0xFu;
+    return masked == 0 ? 0 : static_cast<uint64_t>(~masked + 1);
+}
+
 void kCollectPciDevice(const Pci::Device& dev) {
     if (gDeviceCacheCount >= kMaxCachedPciDevices) {
         return;  // 실측 후 상한 조정 여지(RM-23F4B687 §4) - 지금은 조용히 버림
@@ -135,7 +188,17 @@ bool kMapMmioForCaller(Task* caller, uint64_t physAddr, uint64_t length, uint64_
                                                 VmaBacking::FixedPhysical, physAddr, outVirtAddr);
     }
     if (caller->isKernelMode) {
-        Paging::mapPage(kKernelDriverMmioScratchVirtBase, physAddr, PAGE_WRITABLE | PAGE_CACHE_DISABLE);
+        // [갱신, 2026-09-21, PN-7528A406 항목2] 매핑 크기가 더 이상
+        // 고정 4KiB가 아니게 되면서(kSizeMmioBar), 이 고정 스크래치
+        // 슬롯도 필요한 만큼 페이지 단위로 이어 매핑해야 한다 - 예전
+        // 코드는 첫 4KiB만 매핑해 그보다 큰 BAR는 나머지가 조용히
+        // 미매핑 상태로 남았을 것이다(이 분기 자체가 아직 실사용
+        // 경로가 없어 지금까지 드러나지 않았을 뿐).
+        const uint64_t pageCount = (length + 4095UL) / 4096UL;
+        for (uint64_t i = 0; i < pageCount; ++i) {
+            Paging::mapPage(kKernelDriverMmioScratchVirtBase + i * 4096UL, physAddr + i * 4096UL,
+                             PAGE_WRITABLE | PAGE_CACHE_DISABLE);
+        }
         *outVirtAddr = kKernelDriverMmioScratchVirtBase;
         return true;
     }
@@ -348,9 +411,11 @@ void kRequestIoPermissionSync(const SharedPtr<Task>& caller, uint32_t bus, uint3
     // 값은 임의 물리주소 접근 시도(보안 검증, RequestIoPermissionArgs
     // 문서 주석 참고).
     bool validBar = false;
-    for (uint64_t base : dev->mmioBases) {
-        if (base != 0 && base == mmioBase) {
+    uint32_t barIndex = 0;
+    for (uint32_t i = 0; i < 6; ++i) {
+        if (dev->mmioBases[i] != 0 && dev->mmioBases[i] == mmioBase) {
             validBar = true;
+            barIndex = i;
             break;
         }
     }
@@ -364,17 +429,20 @@ void kRequestIoPermissionSync(const SharedPtr<Task>& caller, uint32_t bus, uint3
         return;
     }
 
-    // v1 고정 4KiB - RequestIoPermissionArgs 문서 주석의 "v1 축소
-    // 범위" 참고(실제 BAR 크기 조회 절차 미구현).
-    constexpr uint64_t kMappingSize = 4096;
+    // [갱신, 2026-09-21, PN-7528A406 항목2] 표준 PCI BAR sizing 절차로
+    // 실제 크기를 구한다 - 4KiB 미만이면 4KiB로 올림(page-align),
+    // sizing이 0을 돌려주면(구현 안 된 BAR - 이론상 mmioBases에 이미
+    // 걸러졌어야 하지만 방어적으로) 최소 4KiB로 대체한다.
+    const uint64_t rawSize = kSizeMmioBar(bus, device, function, barIndex);
+    const uint64_t mappingSize = ((rawSize == 0 ? 4096 : rawSize) + 4095UL) & ~4095UL;
     uint64_t mappedAddr = 0;
-    if (!kMapMmioForCaller(caller.get(), mmioBase, kMappingSize, &mappedAddr)) {
+    if (!kMapMmioForCaller(caller.get(), mmioBase, mappingSize, &mappedAddr)) {
         *outError = ChannelError::ResourceExhausted;
         return;
     }
 
     if (!kClaimBar(bus, device, function, mmioBase, caller)) {
-        kUnmapMmioForCaller(caller.get(), mappedAddr, kMappingSize);
+        kUnmapMmioForCaller(caller.get(), mappedAddr, mappingSize);
         *outError = ChannelError::ResourceExhausted;
         return;
     }
