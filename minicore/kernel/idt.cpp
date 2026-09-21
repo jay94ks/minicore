@@ -321,6 +321,20 @@ void kPrintFrameDiagnostics(kernel::InterruptFrame* frame, const char* header) {
         pos = kAppendDiagHex(buf, kBufSize, pos, kReadCr2());
         pos = kAppendDiagStr(buf, kBufSize, pos, "\n");
     }
+    // [신규, 2026-09-21, PN-AD3B2D5B] #DF(Double Fault)는 SDM 6.15상
+    // 원래 폴트의 컨텍스트를 되살릴 수 없어(레지스터가 이미 #DF
+    // 자신의 진입 상태로 덮인 뒤) 이 함수가 찍는 rip/cs/rflags 등은
+    // 전부 "#DF 자신이 진입한 시점" 값일 뿐 원래 예외의 값이 아니다 -
+    // 다만 CR2(마지막 페이지 폴트 주소)는 #DF 진입 자체로는 갱신되지
+    // 않으므로, #PF가 다른 예외 전달 중 재폴트해 #DF로 격상된
+    // 흔한 경로(idt.cpp의 kDoubleFaultVector 주석 참고)라면 CR2에
+    // 그 원래 폴트 주소가 여전히 남아 있어 단서가 된다 - 값이 없거나
+    // 무관하면(#DF가 #PF 경유가 아니었으면) 그냥 무시하면 된다.
+    if (frame->vector == kDoubleFaultVector) {
+        pos = kAppendDiagStr(buf, kBufSize, pos, "  cr2(최근 페이지폴트 주소, #DF 진입으로 안 지워짐)=");
+        pos = kAppendDiagHex(buf, kBufSize, pos, kReadCr2());
+        pos = kAppendDiagStr(buf, kBufSize, pos, "\n");
+    }
 
     // PN-63BCFE45 진단 강화 - rip/cs/rflags/cr2만으로는 이번 멀티
     // 프로세스 크래시(특히 #DB/TF처럼 보이는 증상)가 진짜 레지스터
