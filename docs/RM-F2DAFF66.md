@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-21T12:15:50.850Z
+  updatedAt: 2026-09-21T14:05:22.657Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1839,6 +1839,50 @@ net/tty" 4개 예시가 `PN-D6A05E78`(devmgr/fs KernelThread 흡수) 이후
   전부 direct map(`kPhysToVirt`)과 정적 커널 구조체만 거침을 확인
   완료. 갭 없음.
 
+- **[점검 완료, 2026-09-21] `SP-DE19BB1C`(커널 영역 TLB 샷다운,
+  approved)** - `tlb_shootdown.h/.cpp`를 §2(기본 IPI-ISR-ACK 골격)/
+  §5-1(유저 영역 확장, PN-D132A1E9가 이미 완료 기록)과 전문 대조.
+  `Lapic::sendFixedIpi`/`TlbShootdown::broadcast()`/
+  `kTlbShootdownHandler` 전부 구현 확인 - 특히 §5-1이 확정한 후기
+  설계(요청자 코어별 전용 슬롯 `gRequests[kAcpiMaxCpus]` + 수신자별
+  Target Pending Mask `gPendingMask[]`, 락 불필요 구조)가 실제
+  코드이고, 문서 본문이 §2에 스케치해 둔 초기 "슬롯 1개" 버전은
+  이미 폐기된 설계로 문서 자신이 §5-1에서 명시적으로 대체해 뒀음을
+  재확인(코드가 최신 설계와 일치, 갭 아님). 벡터 `0xE0`도 §5-1/
+  RM-28225668과 정확히 일치. 부팅 초기 AP 미기동 구간의 실측 버그
+  수정(`Smp::startedCount()` 상한, PN-012E8C1A 발견)까지 코드 주석에
+  근거와 함께 남아 있음 - 갭 없음.
+
+- **[점검 완료, 2026-09-21, 신규 승인 문서] `SP-A252E82F`(인터럽트
+  컨텍스트 재설계 - #PF만 IST5 격리, 일반 인터럽트 무조건 단일 스택
+  스왑, `gInterruptDepth` 폐기, approved)** - `PN-160AC313`(completed)
+  구현분을 코드로 직접 대조(규칙14, 새로 승인된 SP라 즉시 점검).
+  `idt.cpp`(`kPageFaultIst = 5`, `gIdt[kPageFaultVector].ist` 배정)/
+  `isr.S`(`isr_common_stub`이 vector 1/2/8/14/18 다섯 개만 IST 경로로
+  분기하고 나머지 전부 `kEnterInterruptStack`/`kLeaveInterruptStack`
+  무조건 호출로 통일 - §3 설계 그대로)/`deferred_destruction.h/.cpp`
+  (`gInterruptDepth`/`kEnterInterruptDepth`/`kLeaveInterruptDepth`
+  실제 삭제 확인 - 남은 문자열은 전부 "예전엔 ~했지만"류 역사적
+  주석뿐, 코드 자체엔 없음)까지 설계 그대로 구현됨을 확인. 갭 없음
+  - 이 세션이 처음부터 추적해 온 `PN-9326B06F`/`PN-1DFCB337`/
+  `PN-584DB994` 계열 조사의 최종 산출물이 실제로 코드에 반영된
+  것까지 직접 검증 완료.
+
+## §2-추가. [점검 완료, 2026-09-21] `SP-43331889`(devmgr/fs 커널 흡수 + 유저모드 드라이버 지원, review)
+
+§8의 두 승인 요청(§6 (a)/(b) 중 (a) 선택, §1 Process 껍데기 제거)
+모두 각주로 해소 표시돼 있고, §7 단계별 착수 순서도 §7-1-a/§7-1-b가
+"1/2/3/5/6/8번을 devmgr/fs 둘 다에 대해 전부 완료"라고 명시 -
+`PN-615C48D5`(completed)로 실제 구현까지 끝났음을 확인. 남은 항목
+(kSpawnUserModeDriver/PN-A0F72A3A 교체/AllocDmaBuffer 커널 모드
+매핑)은 전부 `PN-A8BE8BED`(scheduled)로 이관돼 누락 없이 추적 중.
+**갭 없음** - 이 문서 자체가 `review` 상태로 남아 있는 것은 설계
+공백이 아니라 순수 행정 절차(문서 상태 전이는 이 세션 권한 정책상
+AI가 스스로 승인 처리할 수 없어 보류 - `SP-A21DD889`에서도 동일한
+제약 확인) - 설계자가 직접 `approved`로 전이하면 될 항목.
+`DC-91ABD922`(이 설계를 촉발한 결정 문서, 역시 review)도 §8의 답변
+전부 받아 내용상 종결됐다는 점에서 동일한 상태.
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
@@ -1855,6 +1899,17 @@ net/tty" 4개 예시가 `PN-D6A05E78`(devmgr/fs KernelThread 흡수) 이후
 (`PN-C4611402`의 "실제 취소 레이스" 재검증 - `PN-B5C2845A`가 열어
 준 뒤 이 세션이 실제로 QEMU에서 재현/확정했다. 아래 §2로 이동.)
 (`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
+
+**[2026-09-21] approved SP/DC 문서 후보 풀 재소진 확인** - 이번 세션이
+`SP-677210E6`/`SP-7CC5693A`/`SP-29D652AA`/`SP-00CA7175`/`SP-71DA77B3`/
+`SP-68182FBD`/`SP-DE19BB1C`/`SP-D7013B26`(마지막 항목은 §2에 이미
+있던 기존 점검과 중복 발견 - 새로 추가하지 않고 원복)까지 마저
+대조한 결과, `document_list(status=approved)` 전수(~70건)에서 이
+방법론을 아직 안 적용해 본 SP/DC가 더 이상 없음을 확인했다 - 새
+SP/DC가 approved로 전환될 때마다(규칙 14) 이 절에 다시 채워질
+것이다. 다음 틱들은 `document_list`로 새로 approved된 문서가
+있는지부터 확인하고, 없으면 이 §3 스윕은 건너뛰고 §0-2(메시지/
+계획) 루틴에 집중한다.
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을
 미리 체크리스트에 못박아 둔 것)

@@ -42,7 +42,7 @@
 | [PL-D65F49CC](./PL-D65F49CC.md) | x2APIC 지원 | archived | 2026-09-15T05:53:16.645Z |
 | [PL-E68894CD](./PL-E68894CD.md) | HPET 지원 | approved | 2026-09-14T11:59:06.061Z |
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved | 2026-09-17T14:48:43.312Z |
-| [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-21T10:59:40.422Z |
+| [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-21T14:15:10.089Z |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-15T17:44:39.178Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-20T02:36:52.596Z |
@@ -53,7 +53,7 @@
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-18T19:00:35.209Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-20T19:46:59.756Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-21T12:15:50.850Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-21T14:05:22.657Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-21T10:00:28.036Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-19T01:32:40.139Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-19T02:22:21.248Z |
@@ -78,8 +78,8 @@
 | [SP-68182FBD](./SP-68182FBD.md) | 프로세스 모델(Process/AddressSpace) — 설계 제안 및 1차 구현 | approved | 2026-09-18T10:28:09.946Z |
 | [SP-6A563A8F](./SP-6A563A8F.md) | ResourceGroup CPU 쿼터 스로틀(cpu.max류) — 설계 제안 | approved | 2026-09-18T16:35:59.548Z |
 | [SP-6BEAE0C1](./SP-6BEAE0C1.md) | 일반 프로세스 생성 syscall(fork/exec류) — 설계 제안 | approved | 2026-09-16T13:25:41.847Z |
-| [SP-6CEFBE9B](./SP-6CEFBE9B.md) | Minicore 물리 페이지 프레임 메타데이터 — PageFrame 구조체 | approved | 2026-09-18T10:05:32.137Z |
-| [SP-71DA77B3](./SP-71DA77B3.md) | 인터럽트 구독(Interrupt Subscription) 서브시스템 — 설계 제안 | approved | 2026-09-17T12:12:44.604Z |
+| [SP-6CEFBE9B](./SP-6CEFBE9B.md) | Minicore 물리 페이지 프레임 메타데이터 — PageFrame 구조체 | approved | 2026-09-21T14:11:14.210Z |
+| [SP-71DA77B3](./SP-71DA77B3.md) | 인터럽트 구독(Interrupt Subscription) 서브시스템 — 설계 제안 | approved | 2026-09-21T14:18:10.380Z |
 | [SP-76250478](./SP-76250478.md) | Minicore 멀티스레드 유저 프로세스 지원 — 설계 제안 | approved | 2026-09-18T10:43:07.564Z |
 | [SP-7CC5693A](./SP-7CC5693A.md) | VFS 커널 서브시스템 — 설계 제안 | approved | 2026-09-18T02:32:30.770Z |
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved | 2026-09-21T00:40:04.653Z |
@@ -90,7 +90,7 @@
 | [SP-9CB55C5B](./SP-9CB55C5B.md) | Kill 대상 확장 — 안전한 ProcessId 해석 메커니즘 설계 제안 | approved | 2026-09-20T08:07:00.446Z |
 | [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved | 2026-09-19T19:01:04.294Z |
 | [SP-9F1DB1D8](./SP-9F1DB1D8.md) | gCurrentTask 크로스코어 접근 보호 — RwSpinlock 설계 스케치 (QU-68D76FC4) | approved | 2026-09-17T02:18:05.726Z |
-| [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | review | 2026-09-20T08:23:45.220Z |
+| [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | review | 2026-09-21T13:55:00.424Z |
 | [SP-A252E82F](./SP-A252E82F.md) | 인터럽트 컨텍스트 재설계 - 회피 불가능한 예외만 IST로 격리, 일반 인터럽트는 단일 스택 통일, gInterruptDepth 폐기 | approved | 2026-09-21T11:19:13.571Z |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-17T20:01:50.983Z |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |
