@@ -4,6 +4,10 @@
 #include "block_device.h"
 #include "libkenv/types.h"
 
+namespace kernel {
+struct AsyncTask;
+}  // namespace kernel
+
 // SP-C2670F69 §3.1-§3.5 - AHCI(SATA 스토리지 컨트롤러) 드라이버.
 // **[뒤집힘, 2026-09-20, QU-1FB6A7A4 답변 - "블록 디바이스는 그냥
 // 아예 fs한테 던져버려. 인식/인식 해제까지 전부."]** 원래 devmgr이
@@ -38,10 +42,14 @@ struct PortProbeResult {
 };
 
 // [SP-C2670F69 §3.1] 포트 하나 - 커맨드 리스트(1페이지)/FIS 수신
-// 버퍼(1페이지)를 자신의 DMA 버퍼로 소유한다. v1은 슬롯 0 하나만
-// 실제로 쓴다(§3.5 NCQ 확정 설계는 있으나, 이번 증분은 비-NCQ
-// 커맨드까지가 스코프 - free-list 필드 자체는 §3.1이 요구한 대로
-// slotCount만큼 둔다).
+// 버퍼(1페이지)를 자신의 DMA 버퍼로 소유한다.
+// **[갱신, 2026-09-22, PN-A401DDF9] §3.5 NCQ 실제 구현** - 슬롯
+// free-list(`_slotUsed`)로 여러 커맨드를 동시에 in-flight로 관리한다.
+// 장치가 NCQ를 지원하면(`configureNcq()`가 IDENTIFY 워드76/75로 판별)
+// READ/WRITE FPDMA QUEUED(0x60/0x61)를 여러 슬롯에 동시 발급하고,
+// 미지원이면 기존과 동일하게 슬롯 1개(0번)로 자연히 좁혀진다(ATA
+// 프로토콜 자체가 비-NCQ 커맨드의 동시 실행을 허용하지 않으므로 -
+// 별도 분기가 아니라 `_usableSlotCount=1`로 표현).
 class AhciPort {
 public:
     // hbaVirtAddr: 이 포트가 속한 HBA MMIO 영역의 가상주소 시작점.
@@ -54,35 +62,78 @@ public:
     bool init(kernel::uint64_t hbaVirtAddr, kernel::uint32_t portIndex, kernel::uint32_t slotCount, bool use32BitDma);
 
     // §3.1 "최소한의 실제 I/O" 검증 지점 - 비-NCQ IDENTIFY DEVICE(0xEC)
-    // 를 슬롯 0 하나만 써서 발급하고 완료까지 폴링한다(인터럽트 미배선,
-    // §3.3은 후속). 장치가 없거나(DET!=3) 발급/완료에 실패하면 false.
+    // 를 슬롯 free-list에서 하나 빌려 발급하고 완료까지 폴링한다(인터럽트
+    // 미배선, §3.3은 후속). 장치가 없거나(DET!=3) 발급/완료에 실패하면
+    // false. 이 시점엔 아직 `configureNcq()`가 안 불려 슬롯은 항상
+    // 1개(0번)뿐이다.
     bool probeWithIdentify(PortProbeResult* outResult);
 
-    // LBA48 READ DMA EXT(0x25)/WRITE DMA EXT(0x35) - probeWithIdentify()
-    // 와 동일한 슬롯0/폴링 골격을 공유한다(내부 issueAtaCommand()).
-    // count는 섹터 수(512바이트 단위), outBuf/buf는 이 프로세스 자신의
-    // 힙/스택 등 아무 버퍼나 가능(내부에서 DMA 가능 버퍼로 왕복 복사) -
-    // 최대 전송량은 PRDT 엔트리 1개의 상한(버디 할당자 kMaxOrder=10과
-    // 일치하는 4MiB-1)을 넘지 않아야 한다. 장치가 없거나 발급/완료에
-    // 실패하면 false.
-    bool readSectors(kernel::uint64_t lba, kernel::uint32_t count, void* outBuf);
-    bool writeSectors(kernel::uint64_t lba, kernel::uint32_t count, const void* buf);
+    // [PN-A401DDF9, SP-C2670F69 §3.5] IDENTIFY DEVICE 응답(워드76
+    // bit8=NCQ 지원, 워드75 bits4:0+1=장치 큐 깊이)으로 NCQ 지원 여부와
+    // 실제 사용 가능 슬롯 수(`min(CAP.NCS+1, 장치 큐 깊이)`)를 확정한다 -
+    // `AhciBlockDevice::init()`이 identifyData를 받은 직후 한 번 호출.
+    void configureNcq(const kernel::uint16_t* identifyData);
+
+    // [PN-A401DDF9] LBA48 READ/WRITE(장치가 NCQ를 지원하면 FPDMA
+    // QUEUED(0x60/0x61), 아니면 기존과 동일한 DMA EXT(0x25/0x35))를
+    // 슬롯 free-list에서 하나 빌려 제출하고 즉시 kernel::AsyncTask*를
+    // 반환한다(autoFree=false - fs::BlockDevice 문서 주석과 동일한
+    // "완료까지 outResult 유효, 반납은 호출부 책임" 계약). outBuf/buf는
+    // 이 프로세스 자신의 힙/스택 등 아무 버퍼나 가능(완료 시 내부
+    // DMA 버퍼와 왕복 복사) - 최대 전송량은 PRDT 엔트리 1개의 상한
+    // (버디 할당자 kMaxOrder=10과 일치하는 4MiB-1)을 넘지 않아야 한다.
+    // 장치가 없거나, 사용 가능한 슬롯이 모두 이미 in-flight거나, DMA
+    // 버퍼 확보에 실패하면 nullptr.
+    kernel::AsyncTask* submitReadSectors(kernel::uint64_t lba, kernel::uint32_t count, void* outBuf,
+                                          fs::BlockIoResult* outResult);
+    kernel::AsyncTask* submitWriteSectors(kernel::uint64_t lba, kernel::uint32_t count, const void* buf,
+                                           fs::BlockIoResult* outResult);
 
     // FLUSH CACHE EXT(0xEA) - 데이터 전송이 없는 커맨드(PRDT 없음).
-    // BlockDevice::flush()가 그대로 위임한다.
+    // BlockDevice::flush()가 그대로 위임한다(드물게 불리는 경로라
+    // 당분간 동기 유지 - block_device.h QU-47203076 참고).
     bool flushCache();
 
+    // [PN-A401DDF9] 슬롯 free-list 반납 - 익명 네임스페이스의
+    // `AhciCommandHandler`(ahci.cpp, submitReadSectors/submitWriteSectors
+    // 가 제출한 커맨드의 완료/취소를 처리)가 유일한 실제 호출부다 -
+    // AhciPort 멤버 함수가 아니라 그 처리기의 `onExec`/`onCancel`에서
+    // 불러야 해서 공개해야 한다.
+    void releaseSlot(kernel::uint32_t slotIndex);
+
 private:
-    // probeWithIdentify/readSectors/writeSectors/flushCache가 공유하는
-    // 실제 발급+폴링 로직 - command/lba/sectorCount로 Register H2D
-    // FIS를 채우고(IDENTIFY처럼 lba/count가 무의미한 커맨드는 0으로
-    // 넘기면 됨), dataBytes>0이면 dataPhysAddr를 가리키는 PRDT 엔트리
-    // 1개를 구성해 슬롯 0으로 발급한다 - dataBytes==0이면 데이터
-    // 전송이 없는 커맨드(FLUSH 등)로 간주해 PRDT 자체를 생략한다.
-    // isWrite는 커맨드 헤더 W 비트(전송 방향)에만 반영 - 실제 데이터를
-    // 그 방향으로 복사하는 책임은 호출부에 있다.
+    // probeWithIdentify/issueAtaCommand(동기, 슬롯 free-list에서 하나
+    // 빌려 완료까지 폴링)와 submitAtaCommand(비동기, 슬롯만 빌려 즉시
+    // 반환)가 공유하는 실제 "FIS+PRDT+커맨드헤더 구성 및 발급" 로직 -
+    // command/lba/sectorCount로 Register H2D FIS를 채우고(IDENTIFY처럼
+    // lba/count가 무의미한 커맨드는 0으로 넘기면 됨), dataBytes>0이면
+    // dataPhysAddr를 가리키는 PRDT 엔트리 1개를 구성해 발급한다 -
+    // dataBytes==0이면 데이터 전송이 없는 커맨드(FLUSH 등)로 간주해
+    // PRDT 자체를 생략한다. isWrite는 커맨드 헤더 W 비트(전송 방향)에만
+    // 반영 - 실제 데이터를 그 방향으로 복사하는 책임은 호출부에 있다.
     bool issueAtaCommand(kernel::uint8_t command, kernel::uint64_t lba, kernel::uint32_t sectorCount, bool isWrite,
                           kernel::uint64_t dataPhysAddr, kernel::uint32_t dataBytes);
+
+    // [PN-A401DDF9] submitReadSectors/submitWriteSectors가 공유하는
+    // 실제 비동기 발급 로직 - 슬롯을 빌리고 DMA 버퍼(커맨드 테이블 +
+    // 데이터, 후자는 dataBytes>0일 때만)를 확보해 레지스터까지 세팅한
+    // 뒤(동기, 빠름) 완료 폴링은 AsyncTaskHandler(ahci.cpp의
+    // AhciCommandHandler)에게 넘기고 즉시 반환한다. isRead=true면
+    // 완료 시 데이터 버퍼를 callerBuf로 복사(READ), false면 이미
+    // 발급 전에 callerBuf(실제로는 const 소스)를 데이터 버퍼로
+    // 복사해 둔다(WRITE) - 두 방향을 하나의 시그니처로 표현하기 위해
+    // callerBuf는 항상 `void*`로 받고 WRITE 방향 복사는 이 함수
+    // 자신이 그 자리에서 처리한다(호출부가 const 포인터를 넘겨도
+    // 안전 - WRITE 시엔 이 함수가 읽기만 한다).
+    kernel::AsyncTask* submitAtaCommand(kernel::uint8_t command, kernel::uint64_t lba, kernel::uint32_t sectorCount,
+                                         bool isWrite, bool isRead, void* callerBuf, kernel::uint32_t dataBytes,
+                                         fs::BlockIoResult* outResult);
+
+    // [PN-A401DDF9, SP-C2670F69 §3.5] 슬롯 free-list - `_usableSlotCount`
+    // (NCQ 미지원/미확인 시 1, 지원 시 `min(CAP.NCS+1, 장치 큐 깊이)`)
+    // 범위 안에서만 빌려준다. 사용 가능한 슬롯이 없으면
+    // `kAhciInvalidSlot`(ahci.cpp).
+    kernel::uint32_t acquireSlot();
 
     kernel::uint64_t _portRegBase = 0;   // 이 포트의 레지스터 블록 시작 가상주소
     kernel::uint64_t _clbVirtAddr = 0;   // 커맨드 리스트 가상주소(1페이지)
@@ -91,6 +142,12 @@ private:
     kernel::uint32_t _fbDmaHandle = 0;
     kernel::uint32_t _slotCount = 0;
     bool _use32BitDma = false;  // CAP.S64A==0이면 커맨드 구조체도 하위 4GiB 이내로 강제(§5-A)
+
+    // [PN-A401DDF9] configureNcq() 전까지는 항상 1(기존 "슬롯 0 전용"과
+    // 동일 동작) - IDENTIFY 응답으로 NCQ 지원이 확인되면 그때 늘어난다.
+    kernel::uint32_t _usableSlotCount = 1;
+    bool _ncqSupported = false;
+    bool _slotUsed[kMaxCommandSlots] = {};
 };
 
 // [SP-C2670F69 §3.1] HBA 초기화 - GHC.AE 설정, CAP으로 포트/슬롯 수
@@ -126,8 +183,10 @@ public:
 
     kernel::uint32_t blockSize() const override { return _blockSize; }
     kernel::uint64_t blockCount() const override { return _blockCount; }
-    bool readBlocks(kernel::uint64_t lba, kernel::uint32_t count, void* buf) override;
-    bool writeBlocks(kernel::uint64_t lba, kernel::uint32_t count, const void* buf) override;
+    kernel::AsyncTask* submitReadBlocks(kernel::uint64_t lba, void* buf, kernel::uint32_t count,
+                                         fs::BlockIoResult* outResult) override;
+    kernel::AsyncTask* submitWriteBlocks(kernel::uint64_t lba, const void* buf, kernel::uint32_t count,
+                                          fs::BlockIoResult* outResult) override;
     bool flush() override;
     // [v1] TRIM(DATA SET MANAGEMENT) 미구현 - BlockDevice 문서 주석이
     // 명시한 대로 미지원 장치는 그냥 true(성공)를 반환해도 데이터

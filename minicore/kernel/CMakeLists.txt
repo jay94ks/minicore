@@ -45,6 +45,7 @@ add_library(minicore_kernel OBJECT
     user_sync.cpp
     devmgr.cpp
     fs.cpp
+    block_device.cpp
     ahci.cpp
 )
 

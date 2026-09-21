@@ -1,7 +1,9 @@
 #include "ahci.h"
 
+#include "async_task.h"
 #include "dma_buffer.h"
 #include "libkenv/mem.h"
+#include "libkmm/slab.h"
 #include "pnp.h"
 #include "scheduler.h"
 #include "task.h"
@@ -32,7 +34,11 @@ constexpr uint64_t kPortCmd = 0x18;
 constexpr uint64_t kPortTfd = 0x20;
 constexpr uint64_t kPortSsts = 0x28;
 constexpr uint64_t kPortSerr = 0x30;
+constexpr uint64_t kPortSact = 0x34;  // [PN-A401DDF9] Serial ATA Active - NCQ 커맨드 전용(§3.3.10 인접)
 constexpr uint64_t kPortCi = 0x38;
+
+// [PN-A401DDF9] acquireSlot()이 사용 가능한 슬롯을 못 찾았을 때.
+constexpr uint32_t kAhciInvalidSlot = 0xFFFFFFFFu;
 
 // CAP 비트(§3.1.1)
 constexpr uint32_t kCapNpMask = 0x1F;    // bits4:0 - Number of Ports - 1
@@ -119,6 +125,11 @@ constexpr uint8_t kAtaCommandIdentifyDevice = 0xEC;
 constexpr uint8_t kAtaCommandReadDmaExt = 0x25;
 constexpr uint8_t kAtaCommandWriteDmaExt = 0x35;
 constexpr uint8_t kAtaCommandFlushCacheExt = 0xEA;
+// [PN-A401DDF9, ATA8-ACS] READ/WRITE FPDMA QUEUED - NCQ 전용 커맨드.
+// Register H2D FIS 필드 배치가 DMA EXT류와 다르다(아래 submitAtaCommand
+// 참고 - Sector Count는 Features 필드로, Count 필드는 커맨드 태그로).
+constexpr uint8_t kAtaCommandReadFpdmaQueued = 0x60;
+constexpr uint8_t kAtaCommandWriteFpdmaQueued = 0x61;
 
 // AllocDmaBuffer 왕복 하나를 묶어 둔 헬퍼 - virt/phys/handle 세 값을
 // 전부 호출부에 돌려준다(PxCLB류 레지스터에는 물리주소, 실제 메모리
@@ -152,6 +163,91 @@ bool kAllocDma(uint64_t sizeBytes, bool use32Bit, DmaAlloc* out) {
 void kFreeDma(uint32_t handle) {
     kernel::ChannelError error = kernel::ChannelError::None;
     kernel::kFreeDmaBufferSync(kCurrentFsTask(), handle, &error);
+}
+
+// [PN-A401DDF9, SP-C2670F69 §3.5] AhciPort::submitAtaCommand()가 슬롯
+// 배정과 실제 발급(레지스터 세팅)까지 전부 동기적으로 끝낸 뒤, 이 args를
+// 채워 AsyncTask로 제출한다 - 아래 AhciCommandHandler::onExec은 오직
+// "언제 끝나는지"만 폴링하고(WaitInterruptHandler와 동일한 for(;;){...;
+// AsyncTask::yield();} 관례), 완료되면 데이터 복사/DMA 반납/슬롯 반납까지
+// 마무리한다. 이 구조체 자체는 submitAtaCommand(생산자)가 GenericSlabAllocator
+// 로 힙 할당하고 AhciCommandHandler(소비자, onExec/onCancel 양쪽)가 해제한다
+// - "생성/해제 전부 처리기 책임"(async_task.h) 원칙을 이 드라이버 전체를
+// 하나의 처리기로 보고 그대로 지킨다.
+struct AhciCommandArgs {
+    AhciPort* port = nullptr;
+    uint64_t portRegBase = 0;
+    uint32_t slotIndex = 0;
+    bool useNcq = false;
+    bool isRead = false;    // true=READ(완료 후 dataVirtAddr->callerBuf로 복사)
+    bool hasData = false;
+    uint64_t dataVirtAddr = 0;
+    uint32_t dataHandle = 0;
+    uint32_t cmdTableHandle = 0;
+    void* callerBuf = nullptr;  // READ일 때만 사용
+    uint64_t byteCount = 0;
+    fs::BlockIoResult* outResult = nullptr;
+};
+
+class AhciCommandHandler : public kernel::AsyncTaskHandler {
+public:
+    kernel::AsyncExecCoro onExec(kernel::AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<AhciCommandArgs*>(argsRaw);
+        const uint32_t slotBit = 1u << args->slotIndex;
+        bool ioError = false;
+        for (;;) {
+            const uint32_t pending = args->useNcq ? (*kReg32(args->portRegBase, kPortSact) & slotBit)
+                                                   : (*kReg32(args->portRegBase, kPortCi) & slotBit);
+            if (!pending) {
+                break;
+            }
+            const uint32_t tfd = *kReg32(args->portRegBase, kPortTfd);
+            if (tfd & kPortTfdErr) {
+                ioError = true;
+                break;
+            }
+            kernel::AsyncTask::yield();
+        }
+
+        if (!ioError && args->isRead && args->hasData) {
+            memcpy(args->callerBuf, reinterpret_cast<const void*>(args->dataVirtAddr), args->byteCount);
+        }
+        if (args->hasData) {
+            kFreeDma(args->dataHandle);
+        }
+        kFreeDma(args->cmdTableHandle);
+        args->port->releaseSlot(args->slotIndex);
+        args->outResult->ok = !ioError;
+        kernel::GenericSlabAllocator::free(args, sizeof(AhciCommandArgs));
+        co_return;
+    }
+    void onFailure(kernel::AsyncTask*) override {}
+    // [PN-A401DDF9] 소유 Task(사실상 fs 자신, essential KernelService라
+    // Kill로 죽지 않음 - kFinalizeProcessTermination 문서 참고)가 완료
+    // 전에 취소되는 극단적 경로 대비 - 진행 중인 하드웨어 커맨드 자체를
+    // 어보트할 표준 절차는 이번 증분 범위 밖이라(§3.4 핫플러그/에러
+    // 복구와 함께 후속) 최소한 자원 누수만 막는다. outResult는 호출부가
+    // 이미 사라졌을 수 있어 건드리지 않는다.
+    void onCancel(kernel::AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<AhciCommandArgs*>(argsRaw);
+        if (args->hasData) {
+            kFreeDma(args->dataHandle);
+        }
+        kFreeDma(args->cmdTableHandle);
+        args->port->releaseSlot(args->slotIndex);
+        kernel::GenericSlabAllocator::free(args, sizeof(AhciCommandArgs));
+    }
+};
+
+AhciCommandHandler gAhciCommandHandler;
+kernel::AsyncTaskSubjectCode gAhciCommandSubjectCode = 0;
+bool gAhciCommandHandlerRegistered = false;
+
+void kEnsureAhciCommandHandlerRegistered() {
+    if (!gAhciCommandHandlerRegistered) {
+        gAhciCommandSubjectCode = kernel::AsyncCallbackRegistry::registerHandler(&gAhciCommandHandler);
+        gAhciCommandHandlerRegistered = true;
+    }
 }
 
 }  // namespace
@@ -219,18 +315,28 @@ bool AhciPort::init(uint64_t hbaVirtAddr, uint32_t portIndex, uint32_t slotCount
 }
 
 // [SP-C2670F69 §3.1] Register H2D FIS + (dataBytes>0이면) PRDT 엔트리
-// 1개 + 커맨드 헤더(슬롯 0)를 구성해 발급하고 완료까지 폴링한다 -
-// IDENTIFY DEVICE/READ DMA EXT/WRITE DMA EXT/FLUSH CACHE EXT 전부 이
-// 골격 하나로 표현된다(ATA 사양 §7 각 커맨드가 공통으로 쓰는 Register
-// H2D FIS 포맷 덕분). lba/sectorCount가 무의미한 커맨드(IDENTIFY/
-// FLUSH 등)는 0으로 넘기면 된다. dataBytes==0이면 데이터 전송이 없는
-// 커맨드(FLUSH)로 간주해 PRDT 자체를 생략한다(PRDTL=0).
+// 1개 + 커맨드 헤더(슬롯 free-list에서 빌린 슬롯 하나)를 구성해 발급하고
+// 완료까지 폴링한다 - IDENTIFY DEVICE/READ DMA EXT/WRITE DMA EXT/FLUSH
+// CACHE EXT 전부 이 골격 하나로 표현된다(ATA 사양 §7 각 커맨드가 공통으로
+// 쓰는 Register H2D FIS 포맷 덕분). lba/sectorCount가 무의미한 커맨드
+// (IDENTIFY/FLUSH 등)는 0으로 넘기면 된다. dataBytes==0이면 데이터 전송이
+// 없는 커맨드(FLUSH)로 간주해 PRDT 자체를 생략한다(PRDTL=0).
+// [갱신, 2026-09-22, PN-A401DDF9] 이 함수는 항상 슬롯 0을 하드코딩했으나,
+// submitAtaCommand()가 도입한 슬롯 free-list와 같은 하드웨어 자원(커맨드
+// 리스트/PxCI)을 공유하므로 - 이 함수(동기 경로: probeWithIdentify/
+// flushCache)도 acquireSlot()/releaseSlot()으로 슬롯을 빌려야 한다.
+// 안 그러면 flushCache()가 진행 중인 비동기 READ/WRITE와 같은 슬롯을
+// 동시에 덮어쓸 수 있다.
 bool AhciPort::issueAtaCommand(uint8_t command, uint64_t lba, uint32_t sectorCount, bool isWrite,
                                 uint64_t dataPhysAddr, uint32_t dataBytes) {
-    // 커맨드 테이블(슬롯 0 전용, CFIS + PRDT 1개) - 페이지 하나면
-    // CFIS(0x80 예약 영역) + PRDT 엔트리 1개(16바이트)를 넉넉히 담는다.
+    const uint32_t slotIndex = acquireSlot();
+    if (slotIndex == kAhciInvalidSlot) {
+        return false;  // 모든 슬롯이 진행 중인 비동기 커맨드로 사용 중
+    }
+
     DmaAlloc cmdTable;
     if (!kAllocDma(kDmaPageSize, _use32BitDma, &cmdTable)) {
+        releaseSlot(slotIndex);
         return false;
     }
     memset(reinterpret_cast<void*>(cmdTable.virtAddr), 0, kDmaPageSize);
@@ -264,35 +370,37 @@ bool AhciPort::issueAtaCommand(uint8_t command, uint64_t lba, uint32_t sectorCou
         prdt[0].dw3 = dataBytes - 1;  // 인터럽트 비트(I)는 안 씀(폴링 방식)
     }
 
-    // 커맨드 헤더(슬롯 0) - CFL은 DWORD 단위 FIS 길이(20바이트/4=5),
-    // PRDTL은 데이터 전송이 있을 때만 1, W는 전송 방향(호스트->장치면 1).
-    auto* header = reinterpret_cast<CommandHeader*>(_clbVirtAddr);
-    header[0] = CommandHeader{};
-    header[0].dw0 = 5u;  // CFL=5
+    // 커맨드 헤더(위에서 빌린 슬롯) - CFL은 DWORD 단위 FIS 길이(20바이트/
+    // 4=5), PRDTL은 데이터 전송이 있을 때만 1, W는 전송 방향(호스트->
+    // 장치면 1).
+    auto* header = reinterpret_cast<CommandHeader*>(_clbVirtAddr) + slotIndex;
+    *header = CommandHeader{};
+    header->dw0 = 5u;  // CFL=5
     if (isWrite) {
-        header[0].dw0 |= (1u << 6);  // W
+        header->dw0 |= (1u << 6);  // W
     }
     if (hasData) {
-        header[0].dw0 |= (1u << 16);  // PRDTL=1
+        header->dw0 |= (1u << 16);  // PRDTL=1
     }
-    header[0].ctbaLow = static_cast<uint32_t>(cmdTable.physAddr & 0xFFFFFFFFu);
-    header[0].ctbaHigh = static_cast<uint32_t>(cmdTable.physAddr >> 32);
+    header->ctbaLow = static_cast<uint32_t>(cmdTable.physAddr & 0xFFFFFFFFu);
+    header->ctbaHigh = static_cast<uint32_t>(cmdTable.physAddr >> 32);
 
-    // 슬롯 0의 이전 오류 상태를 비우고(PxSERR write-1-to-clear) 발급한다
-    // (PxCI 비트0 세팅, 사양 §5.5).
+    // 이 슬롯의 이전 오류 상태를 비우고(PxSERR write-1-to-clear) 발급한다
+    // (해당 슬롯의 PxCI 비트 세팅, 사양 §5.5).
+    const uint32_t slotBit = 1u << slotIndex;
     *kReg32(_portRegBase, kPortSerr) = 0xFFFFFFFFu;
-    *kReg32(_portRegBase, kPortCi) |= 1u;
+    *kReg32(_portRegBase, kPortCi) |= slotBit;
 
-    // 완료 폴링 - PxCI 비트0이 하드웨어에 의해 클리어되면 발급된
-    // 커맨드가 완료된 것이다(§5.5, 인터럽트 미배선이라 스핀 폴링).
-    // 그 사이 PxTFD.ERR/BSY로 오류를 함께 감시한다(§3.4의 "포트 오류는
-    // TFD로 감지" 원칙 그대로 - COMRESET 등 전체 오류 복구 절차는
-    // 이 v1 최소 검증 범위 밖).
+    // 완료 폴링 - 이 슬롯의 PxCI 비트가 하드웨어에 의해 클리어되면
+    // 발급된 커맨드가 완료된 것이다(§5.5, 인터럽트 미배선이라 스핀
+    // 폴링). 그 사이 PxTFD.ERR/BSY로 오류를 함께 감시한다(§3.4의
+    // "포트 오류는 TFD로 감지" 원칙 그대로 - COMRESET 등 전체 오류
+    // 복구 절차는 이 v1 최소 검증 범위 밖).
     bool completed = false;
     bool ioError = false;
     for (uint32_t i = 0; i < kPollIterations; ++i) {
         const uint32_t ci = *kReg32(_portRegBase, kPortCi);
-        if (!(ci & 1u)) {
+        if (!(ci & slotBit)) {
             completed = true;
             break;
         }
@@ -304,6 +412,7 @@ bool AhciPort::issueAtaCommand(uint8_t command, uint64_t lba, uint32_t sectorCou
     }
 
     kFreeDma(cmdTable.handle);
+    releaseSlot(slotIndex);
     return completed && !ioError;
 }
 
@@ -336,48 +445,195 @@ bool AhciPort::probeWithIdentify(PortProbeResult* outResult) {
     return outResult->identifySucceeded;
 }
 
-bool AhciPort::readSectors(uint64_t lba, uint32_t count, void* outBuf) {
-    volatile uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
-    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent || count == 0) {
-        return false;
-    }
+// [PN-A401DDF9, SP-C2670F69 §3.5] IDENTIFY 워드76 bit8(NCQ 지원)/워드75
+// bits4:0(장치 큐 깊이-1)로 이 포트가 실제로 몇 개의 슬롯을 동시에 쓸 수
+// 있는지 확정한다. 미지원이면 기존과 동일하게 1개(슬롯 0)로 유지된다 -
+// ATA 프로토콜 자체가 비-NCQ 커맨드의 동시 실행을 허용하지 않기 때문에
+// (여러 슬롯에 동시에 비-NCQ 커맨드를 발급해도 장치가 하나씩만 처리한다는
+// 보장이 없음) 별도 분기가 아니라 이 값 하나로 자연스럽게 좁힌다.
+void AhciPort::configureNcq(const uint16_t* identifyData) {
+    constexpr uint32_t kIdWordQueueDepth = 75;        // bits4:0 = 큐 깊이 - 1
+    constexpr uint32_t kIdWordSataCapabilities = 76;  // bit8 = NCQ 지원
 
-    const uint64_t bytes = static_cast<uint64_t>(count) * 512u;
-    DmaAlloc dataBuf;
-    if (!kAllocDma(bytes, _use32BitDma, &dataBuf)) {
-        return false;
+    _ncqSupported = (identifyData[kIdWordSataCapabilities] & (1u << 8)) != 0;
+    if (!_ncqSupported) {
+        _usableSlotCount = 1;
+        return;
     }
-
-    // READ DMA EXT(0x25, LBA48) - 장치->호스트 전송이라 W=0.
-    const bool ok =
-        issueAtaCommand(kAtaCommandReadDmaExt, lba, count, false, dataBuf.physAddr, static_cast<uint32_t>(bytes));
-    if (ok) {
-        memcpy(outBuf, reinterpret_cast<const void*>(dataBuf.virtAddr), bytes);
+    const uint32_t deviceDepth = (identifyData[kIdWordQueueDepth] & 0x1Fu) + 1u;
+    uint32_t usable = deviceDepth < _slotCount ? deviceDepth : _slotCount;
+    if (usable == 0) {
+        usable = 1;  // 방어적 - IDENTIFY가 이상값을 준 경우도 슬롯 0은 항상 쓸 수 있어야 함
     }
-
-    kFreeDma(dataBuf.handle);
-    return ok;
+    if (usable > kMaxCommandSlots) {
+        usable = kMaxCommandSlots;
+    }
+    _usableSlotCount = usable;
 }
 
-bool AhciPort::writeSectors(uint64_t lba, uint32_t count, const void* buf) {
+uint32_t AhciPort::acquireSlot() {
+    for (uint32_t i = 0; i < _usableSlotCount; ++i) {
+        if (!_slotUsed[i]) {
+            _slotUsed[i] = true;
+            return i;
+        }
+    }
+    return kAhciInvalidSlot;
+}
+
+void AhciPort::releaseSlot(uint32_t slotIndex) {
+    if (slotIndex < kMaxCommandSlots) {
+        _slotUsed[slotIndex] = false;
+    }
+}
+
+// [PN-A401DDF9, SP-C2670F69 §3.5] submitReadSectors/submitWriteSectors가
+// 공유하는 실제 비동기 발급 로직 - issueAtaCommand()와 "FIS/PRDT/커맨드
+// 헤더 구성" 자체는 겹치지만, NCQ 커맨드(FPDMA QUEUED)는 필드 배치가
+// 달라(Sector Count가 Features로, Count 필드는 태그로) 별도로 구현한다.
+// 슬롯을 빌리고 DMA 버퍼를 확보해 레지스터까지 세팅한 뒤(전부 동기,
+// MMIO 왕복 몇 번뿐이라 빠름) 완료 폴링만 AhciCommandHandler(위 익명
+// 네임스페이스)에게 넘기고 즉시 반환한다.
+kernel::AsyncTask* AhciPort::submitAtaCommand(uint8_t command, uint64_t lba, uint32_t sectorCount, bool isWrite,
+                                               bool isRead, void* callerBuf, uint32_t dataBytes,
+                                               fs::BlockIoResult* outResult) {
     volatile uint32_t* ssts = kReg32(_portRegBase, kPortSsts);
-    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent || count == 0) {
-        return false;
+    if ((*ssts & kPortSstsDetMask) != kPortSstsDetPresent) {
+        return nullptr;
+    }
+    const uint32_t slotIndex = acquireSlot();
+    if (slotIndex == kAhciInvalidSlot) {
+        return nullptr;  // 동시 발급 상한 도달 - 호출부가 나중에 재시도
     }
 
-    const uint64_t bytes = static_cast<uint64_t>(count) * 512u;
+    DmaAlloc cmdTable;
+    if (!kAllocDma(kDmaPageSize, _use32BitDma, &cmdTable)) {
+        releaseSlot(slotIndex);
+        return nullptr;
+    }
+    memset(reinterpret_cast<void*>(cmdTable.virtAddr), 0, kDmaPageSize);
+
+    const bool hasData = dataBytes > 0;
     DmaAlloc dataBuf;
-    if (!kAllocDma(bytes, _use32BitDma, &dataBuf)) {
-        return false;
+    if (hasData) {
+        if (!kAllocDma(dataBytes, _use32BitDma, &dataBuf)) {
+            kFreeDma(cmdTable.handle);
+            releaseSlot(slotIndex);
+            return nullptr;
+        }
+        if (isWrite) {
+            memcpy(reinterpret_cast<void*>(dataBuf.virtAddr), callerBuf, dataBytes);
+        }
     }
-    memcpy(reinterpret_cast<void*>(dataBuf.virtAddr), buf, bytes);
 
-    // WRITE DMA EXT(0x35, LBA48) - 호스트->장치 전송이라 W=1.
-    const bool ok =
-        issueAtaCommand(kAtaCommandWriteDmaExt, lba, count, true, dataBuf.physAddr, static_cast<uint32_t>(bytes));
+    const bool useNcq =
+        command == kAtaCommandReadFpdmaQueued || command == kAtaCommandWriteFpdmaQueued;
 
-    kFreeDma(dataBuf.handle);
-    return ok;
+    auto* fis = reinterpret_cast<RegH2dFis*>(cmdTable.virtAddr);
+    *fis = RegH2dFis{};
+    fis->fisType = kFisTypeRegH2d;
+    fis->pmportAndC = 0x80;
+    fis->command = command;
+    fis->lba0 = static_cast<uint8_t>(lba & 0xFF);
+    fis->lba1 = static_cast<uint8_t>((lba >> 8) & 0xFF);
+    fis->lba2 = static_cast<uint8_t>((lba >> 16) & 0xFF);
+    fis->lba3 = static_cast<uint8_t>((lba >> 24) & 0xFF);
+    fis->lba4 = static_cast<uint8_t>((lba >> 32) & 0xFF);
+    fis->lba5 = static_cast<uint8_t>((lba >> 40) & 0xFF);
+    if (useNcq) {
+        // [ATA8-ACS READ/WRITE FPDMA QUEUED] Sector Count는 Features
+        // 필드(0/1)로, Count 필드는 대신 커맨드 태그(이 슬롯 번호,
+        // bits7:3)를 나른다 - device 레지스터 bit6(LBA)도 명시적으로
+        // 세운다(비-NCQ 경로는 기존 관례대로 0 유지, 실기기 재현 불가라
+        // 굳이 건드리지 않음).
+        fis->device = 0x40;
+        fis->features0 = static_cast<uint8_t>(sectorCount & 0xFF);
+        fis->features1 = static_cast<uint8_t>((sectorCount >> 8) & 0xFF);
+        fis->countLow = static_cast<uint8_t>((slotIndex << 3) & 0xF8u);
+        fis->countHigh = 0;
+    } else {
+        fis->device = 0;
+        fis->countLow = static_cast<uint8_t>(sectorCount & 0xFF);
+        fis->countHigh = static_cast<uint8_t>((sectorCount >> 8) & 0xFF);
+    }
+
+    if (hasData) {
+        auto* prdt = reinterpret_cast<PrdtEntry*>(cmdTable.virtAddr + kCmdTablePrdtOffset);
+        prdt[0] = PrdtEntry{};
+        prdt[0].dbaLow = static_cast<uint32_t>(dataBuf.physAddr & 0xFFFFFFFFu);
+        prdt[0].dbaHigh = static_cast<uint32_t>(dataBuf.physAddr >> 32);
+        prdt[0].dw3 = dataBytes - 1;
+    }
+
+    auto* header = reinterpret_cast<CommandHeader*>(_clbVirtAddr) + slotIndex;
+    *header = CommandHeader{};
+    header->dw0 = 5u;
+    if (isWrite) {
+        header->dw0 |= (1u << 6);
+    }
+    if (hasData) {
+        header->dw0 |= (1u << 16);
+    }
+    header->ctbaLow = static_cast<uint32_t>(cmdTable.physAddr & 0xFFFFFFFFu);
+    header->ctbaHigh = static_cast<uint32_t>(cmdTable.physAddr >> 32);
+
+    *kReg32(_portRegBase, kPortSerr) = 0xFFFFFFFFu;
+    const uint32_t slotBit = 1u << slotIndex;
+    if (useNcq) {
+        // 사양 순서 - PxSACT를 PxCI보다 먼저 세운다.
+        *kReg32(_portRegBase, kPortSact) |= slotBit;
+    }
+    *kReg32(_portRegBase, kPortCi) |= slotBit;
+
+    auto* args = static_cast<AhciCommandArgs*>(kernel::GenericSlabAllocator::alloc(sizeof(AhciCommandArgs)));
+    if (!args) {
+        // 슬랩 고갈 - 이미 하드웨어에 발급된 커맨드를 되돌릴 표준 절차가
+        // 없어(어보트는 이번 증분 범위 밖) 이 슬롯은 안전을 위해 반납하지
+        // 않고 그냥 잃는다(release하면 다음 acquireSlot()이 아직 진행
+        // 중인 이 커맨드와 같은 슬롯을 다른 요청에 내줘 커맨드 리스트를
+        // 덮어쓰는 훨씬 심각한 손상으로 이어질 수 있음) - 극히 드문
+        // 경로(GenericSlabAllocator 완전 고갈)라 v1은 이 손실을 감수한다.
+        return nullptr;
+    }
+    args->port = this;
+    args->portRegBase = _portRegBase;
+    args->slotIndex = slotIndex;
+    args->useNcq = useNcq;
+    args->isRead = isRead;
+    args->hasData = hasData;
+    args->dataVirtAddr = dataBuf.virtAddr;
+    args->dataHandle = dataBuf.handle;
+    args->cmdTableHandle = cmdTable.handle;
+    args->callerBuf = callerBuf;
+    args->byteCount = dataBytes;
+    args->outResult = outResult;
+
+    kEnsureAhciCommandHandlerRegistered();
+    return kernel::AsyncTask::submit(gAhciCommandSubjectCode, 0, args, /*autoFree=*/false);
+}
+
+kernel::AsyncTask* AhciPort::submitReadSectors(uint64_t lba, uint32_t count, void* outBuf,
+                                                fs::BlockIoResult* outResult) {
+    if (count == 0) {
+        return nullptr;
+    }
+    const uint64_t bytes = static_cast<uint64_t>(count) * 512u;
+    const uint8_t command = _ncqSupported ? kAtaCommandReadFpdmaQueued : kAtaCommandReadDmaExt;
+    return submitAtaCommand(command, lba, count, /*isWrite=*/false, /*isRead=*/true, outBuf,
+                             static_cast<uint32_t>(bytes), outResult);
+}
+
+kernel::AsyncTask* AhciPort::submitWriteSectors(uint64_t lba, uint32_t count, const void* buf,
+                                                 fs::BlockIoResult* outResult) {
+    if (count == 0) {
+        return nullptr;
+    }
+    const uint64_t bytes = static_cast<uint64_t>(count) * 512u;
+    const uint8_t command = _ncqSupported ? kAtaCommandWriteFpdmaQueued : kAtaCommandWriteDmaExt;
+    // submitAtaCommand의 callerBuf는 WRITE일 때 그 자리에서 읽기만
+    // 하므로(발급 전 데이터 버퍼로 복사) const_cast가 안전하다.
+    return submitAtaCommand(command, lba, count, /*isWrite=*/true, /*isRead=*/false, const_cast<void*>(buf),
+                             static_cast<uint32_t>(bytes), outResult);
 }
 
 bool AhciPort::flushCache() {
@@ -466,14 +722,20 @@ void AhciBlockDevice::init(AhciPort* port, const uint16_t* identifyData) {
         _blockCount = static_cast<uint64_t>(identifyData[kIdWordLba28Low]) |
                       (static_cast<uint64_t>(identifyData[kIdWordLba28High]) << 16);
     }
+
+    // [PN-A401DDF9, SP-C2670F69 §3.5] blockSize/blockCount와 같은
+    // IDENTIFY 응답에서 NCQ 지원 여부/큐 깊이도 이 시점에 확정한다.
+    _port->configureNcq(identifyData);
 }
 
-bool AhciBlockDevice::readBlocks(uint64_t lba, uint32_t count, void* buf) {
-    return _port->readSectors(lba, count, buf);
+kernel::AsyncTask* AhciBlockDevice::submitReadBlocks(uint64_t lba, void* buf, uint32_t count,
+                                                      fs::BlockIoResult* outResult) {
+    return _port->submitReadSectors(lba, count, buf, outResult);
 }
 
-bool AhciBlockDevice::writeBlocks(uint64_t lba, uint32_t count, const void* buf) {
-    return _port->writeSectors(lba, count, buf);
+kernel::AsyncTask* AhciBlockDevice::submitWriteBlocks(uint64_t lba, const void* buf, uint32_t count,
+                                                       fs::BlockIoResult* outResult) {
+    return _port->submitWriteSectors(lba, count, buf, outResult);
 }
 
 bool AhciBlockDevice::flush() { return _port->flushCache(); }
