@@ -1902,29 +1902,34 @@ void Scheduler::onForcedMigration(InterruptFrame* frame) {
     // FPU 강제 반납(§4) - kContextSwitch 전에 반드시 먼저.
     kEvictFpuBeforeMigration(current, coreIndex);
 
-    // [알려진 갭, 2026-09-17] 이 재삽입 결정은 onTick()과 달리
-    // kCheckAndMarkFrozen()/kIsPausedByDebugger()를 확인하지 않는다 -
-    // ResourceGroup freeze(SP-245D130B §4)/디버그 정지(SP-9A6D579F
-    // §3.5) 둘 다 이 문서 작성 시점엔 onTick()의 재스케줄 결정
-    // 지점만 명시적으로 지목했다. `requestForcedMigration()`이
-    // "호출부가 하나뿐인 수동/진단 API"(이 파일 위쪽 문서 주석)라
-    // 지금 당장 자동으로 트리거될 경로가 없어 실질적 위험은 낮지만,
-    // 이론적으로는 group-frozen/디버그 정지된 Task를 강제 이관하면서
-    // 실수로 재큐잉(=재개)할 수 있다 - 별도 세션이 onTick()과
-    // 동일한 체크를 여기도 추가할지 판단.
+    // [수정, 2026-09-21, PN-6CE4DD35] onTick()과 동일하게
+    // kCheckAndMarkFrozen()/kIsPausedByDebugger()를 확인한다 - 둘 중
+    // 하나라도 참이면 재삽입(enqueue) 대신 Blocked로 남긴다(재삽입하면
+    // 그룹 freeze/디버그 정지 중인 Task를 실수로 재개시킬 수 있음).
+    // `kDrainAndCheckBlockedOn()`은 onTick()에만 있고 여기엔 추가하지
+    // 않는다 - 이 함수(강제 이관)의 대상은 항상 "지금 이 코어에서
+    // 실행 중이던 current"이므로 이미 WaitQueue에 파킹돼 blockedOn이
+    // 채워져 있을 수 없다(onTick() 쪽 문서 주석과 동일한 전제).
     if (current->state != TaskState::Zombie && current != &gIdleTask[coreIndex]) {
-        enqueue(targetCore, current);  // <- onTick()과 유일하게 다른 한
-                                        // 줄: 같은 코어가 아니라 targetCore에 재삽입.
-                                        // [갱신, 2026-09-19, PN-D47FBB8D]
-                                        // idle 자신은(이론상 이 API의
-                                        // 대상이 될 일이 거의 없지만)
-                                        // 큐에 절대 안 들어가야 하므로
-                                        // onTick()과 동일하게 제외한다.
+        const bool frozenByGroup = kCheckAndMarkFrozen(current);
+        const bool pausedByDebugger = kIsPausedByDebugger(current);
+        if (frozenByGroup || pausedByDebugger) {
+            current->state = TaskState::Blocked;
+            if (pausedByDebugger) {
+                kSaveDebugRegistersSnapshot(current, frame);
+            }
+        } else {
+            enqueue(targetCore, current);  // <- onTick()과 유일하게 다른 한
+                                            // 줄: 같은 코어가 아니라 targetCore에
+                                            // 재삽입. [갱신, 2026-09-19,
+                                            // PN-D47FBB8D] idle 자신은(이론상
+                                            // 이 API의 대상이 될 일이 거의
+                                            // 없지만) 큐에 절대 안 들어가야
+                                            // 하므로 onTick()과 동일하게 제외.
+        }
     }
     // [갱신, 2026-09-19, PN-D47FBB8D] onTick()과 동일한 idle 폴백 -
-    // 자세한 이유는 그쪽 문서 주석 참고. 이 함수는 여전히 의도적으로
-    // kCheckAndMarkFrozen()/kIsPausedByDebugger()를 확인하지 않는다(위
-    // "알려진 갭" 문단 그대로 - 이 계획의 범위 밖).
+    // 자세한 이유는 그쪽 문서 주석 참고.
     if (!next) {
         next = &gIdleTask[coreIndex];
     }
