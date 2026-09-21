@@ -11,6 +11,7 @@
 //
 // GOP(그래픽 출력 프로토콜) 조회와 ExitBootServices() 핸드오프(체크
 // 리스트 4번 나머지 + 5번)는 여전히 다음 증분 몫이다.
+#include "efi/elf.h"
 #include "efi/file.h"
 #include "efi/memory.h"
 #include "efi/system_table.h"
@@ -229,6 +230,56 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                                 kPrint(conOut, u" magicOk=");
                                 kPrintUint64(conOut, isElf ? 1 : 0);
                                 kPrint(conOut, u"\r\n");
+                            }
+
+                            // [신규, PN-7FBF255A 체크리스트 5번 - 커널 ELF 로더
+                            // 2단계: 헤더 파싱만, AllocatePages 세그먼트 복사는
+                            // 다음 증분] ELF64 헤더 + PT_LOAD 프로그램 헤더를
+                            // 읽어 각 세그먼트의 물리 적재 주소(p_paddr)를 로그로
+                            // 확인한다 - 아직 실제로 그 주소에 복사하지는 않는다
+                            // (지금 그 물리 범위가 UEFI 자신의 usable 메모리와
+                            // 겹치지 않는지조차 확인 전이라, 쓰기 전에 먼저 값만
+                            // 읽어 검증).
+                            if (isElf && readSize >= sizeof(Elf64Ehdr)) {
+                                const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(gKernelElfBuffer);
+                                const bool headerOk = ehdr->eIdent[4] == kElfClass64 &&
+                                                       ehdr->eMachine == kElfMachineX86_64 && ehdr->ePhoff > 0 &&
+                                                       ehdr->ePhnum > 0 &&
+                                                       ehdr->ePhoff + static_cast<unsigned long long>(ehdr->ePhnum) *
+                                                                          ehdr->ePhentsize <=
+                                                           readSize;
+                                if (conOut) {
+                                    kPrint(conOut, u"minicore: ELF header class64=");
+                                    kPrintUint64(conOut, ehdr->eIdent[4] == kElfClass64 ? 1 : 0);
+                                    kPrint(conOut, u" machineOk=");
+                                    kPrintUint64(conOut, ehdr->eMachine == kElfMachineX86_64 ? 1 : 0);
+                                    kPrint(conOut, u" entry=");
+                                    kPrintUint64(conOut, ehdr->eEntry);
+                                    kPrint(conOut, u" phnum=");
+                                    kPrintUint64(conOut, ehdr->ePhnum);
+                                    kPrint(conOut, u"\r\n");
+                                }
+                                if (headerOk) {
+                                    for (unsigned short i = 0; i < ehdr->ePhnum; ++i) {
+                                        const auto* phdr = reinterpret_cast<const Elf64Phdr*>(
+                                            gKernelElfBuffer + ehdr->ePhoff +
+                                            static_cast<unsigned long long>(i) * ehdr->ePhentsize);
+                                        if (phdr->pType != kElfProgramTypeLoad) {
+                                            continue;
+                                        }
+                                        if (conOut) {
+                                            kPrint(conOut, u"minicore: PT_LOAD paddr=");
+                                            kPrintUint64(conOut, phdr->pPaddr);
+                                            kPrint(conOut, u" vaddr=");
+                                            kPrintUint64(conOut, phdr->pVaddr);
+                                            kPrint(conOut, u" filesz=");
+                                            kPrintUint64(conOut, phdr->pFilesz);
+                                            kPrint(conOut, u" memsz=");
+                                            kPrintUint64(conOut, phdr->pMemsz);
+                                            kPrint(conOut, u"\r\n");
+                                        }
+                                    }
+                                }
                             }
                         } else if (conOut) {
                             kPrint(conOut, u"minicore: kernel ELF read failed, status=");
