@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-21T11:54:09.985Z
+  updatedAt: 2026-09-21T12:15:50.850Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1821,6 +1821,23 @@ net/tty" 4개 예시가 `PN-D6A05E78`(devmgr/fs KernelThread 흡수) 이후
   자연 종료든 **모든 종료 경로가 결국 하나의 좀비화 지점으로
   수렴**해 SIGCHLD가 빠짐없이 발신됨을 코드로 확인(별도 경로 없음,
   §4.3 항목1 우려는 기우였음이 확정). 갭 없음.
+
+- **[점검 완료, 2026-09-21] `SP-A252E82F`(인터럽트 컨텍스트 재설계 -
+  `#PF` IST5 격리 + 일반 인터럽트 무조건 단일 스택 스왑 +
+  `gInterruptDepth` 폐기)** - 승인 직후 같은 세션이 곧바로 구현까지
+  마쳐(`PN-160AC313`, commit `e44006b`) 이 문서의 통상적인 "승인 vs
+  코드" 시차 자체가 거의 없었던 드문 사례. §1(#PF IST5 배정)/§2(#PF
+  재진입 감지+즉시 정지)/§3(일반 벡터 무조건 스왑, `gInterruptDepth`/
+  `kEnterInterruptDepth`/`kLeaveInterruptDepth`/`kCurrentInterruptDepth`/
+  `gInterruptDepthGuardPage` 삭제)/§4(디스패치 스택 크기 32KiB 유지)
+  전부 실제 코드(`gdt.cpp`/`gdt.h`/`idt.cpp`/`isr.S`/`context_switch.S`/
+  `deferred_destruction.h`/`.cpp`)에 반영됨을 구현 세션 자신이 이미
+  확인(빌드+표준 4시나리오+`pn584_repro_count.sh` 40회=0/40으로
+  검증). "위험/미해결 지점" 절 항목1(`Paging::handlePageFault()`가
+  영구 매핑 메모리만 건드리는지 감사)도 실제 소스(`paging.cpp`의
+  `handlePageFault`/`kHandleCowWriteFault`/`kAsTable`)를 직접 읽어
+  전부 direct map(`kPhysToVirt`)과 정적 커널 구조체만 거침을 확인
+  완료. 갭 없음.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
