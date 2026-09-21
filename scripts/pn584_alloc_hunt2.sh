@@ -20,7 +20,30 @@ for i in $(seq 1 "${MAX_TRIES}"); do
     LOG="/tmp/pn584_alloc2_qemu_${i}.log"
     bash scripts/run-grub-gdb.sh >"${LOG}" 2>&1 &
     QEMU_SHELL_PID=$!
-    sleep 1.5
+
+    # [수정, 2026-09-21, PN-1DFCB337] 고정 `sleep 1.5`는 근본적으로
+    # 틀렸다 - `run-grub-gdb.sh`는 gdb 대기 전에 매번 cmake 재구성/
+    # ninja 빌드/grub-mkrescue(xorriso)를 새로 돌리고, 이 파이프라인
+    # 전체가(특히 /mnt/c류 DrvFs 위에서) 35-40초 이상 걸릴 수 있다 -
+    # `gdb`의 `target remote`는 실패해도 재시도하지 않고 그 자리에서
+    # 바로 "Connection refused"로 끝나므로, 1.5초 뒤 포트가 아직
+    # 안 열려 있으면 이 시도 전체가 조용히 허탕이 된다(크래시가 없어서
+    # "no hit"가 아니라 애초에 접속도 못 해 본 것 - 실측으로 확인,
+    # PN-1DFCB337 세션 노트 참고). 고정 대기 대신 포트가 실제로 열릴
+    # 때까지(최대 60초) 폴링한다.
+    PORT_WAIT_S=0
+    while ! ss -tln 2>/dev/null | grep -q ':1234[[:space:]]'; do
+        sleep 1
+        PORT_WAIT_S=$((PORT_WAIT_S + 1))
+        if [ "${PORT_WAIT_S}" -ge 60 ]; then
+            echo "attempt ${i}: gdbstub 포트(1234)가 60초 안에 안 열림 - 이 시도 포기"
+            break
+        fi
+        if ! kill -0 "${QEMU_SHELL_PID}" 2>/dev/null; then
+            echo "attempt ${i}: run-grub-gdb.sh 자체가 먼저 끝나버림(빌드 실패?) - 이 시도 포기"
+            break
+        fi
+    done
 
     GDB_LOG="/tmp/pn584_alloc2_gdb_${i}.log"
     timeout "${TIMEOUT_S}" gdb -batch -x scripts/pn584_alloc_connect.gdb >"${GDB_LOG}" 2>&1
