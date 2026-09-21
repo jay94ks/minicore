@@ -2005,6 +2005,28 @@ void Scheduler::enterIdleLoop() {
     gIdleTask[coreIndex].tcb = tcb;
     gIdleTask[coreIndex].taskClass = TaskClass::Idle;
     gIdleTask[coreIndex].state = TaskState::Running;
+    // [신규, 2026-09-21, PN-1DFCB337 실측 확정] `gCurrentTask[coreIndex]`를
+    // 여기서 세팅하는 순간부터 `kContextSwitch()`가 실제로 이 스택을
+    // 떠나기 전까지, CPU는 여전히 지금 이 함수가 서 있는 **부팅
+    // 스택**(boot.S의 `boot_stack_bottom` 근방, 영구 페이지테이블
+    // 완성 후엔 더 이상 매핑되지 않음) 위에서 실행 중이다 - 이 좁은
+    // 창에 스케줄러 틱이 끼어들면(BSP는 이 함수 진입 전에 이미 sti된
+    // 상태라 실제로 가능) `onTick()`이 `current==&gIdleTask[coreIndex]`
+    // 로 보고 어떤 실제 Task로 전환을 시도하며, 그 순간의 진짜
+    // `frame`(부팅 스택 위 주소)을 `gIdleTask[coreIndex].tcb`로
+    // 캡처하려다 이미 매핑 해제된 부팅 스택 주소를 읽어 즉시 #PF가
+    // 난다 - `runLoop()`이 자기 자신의 동일 지점(줄 2098 부근)에
+    // 이미 `cli`로 막아 둔 것과 똑같은 레이스인데, 이 함수만 그
+    // 보호가 빠져 있었다(실측: rdx=frame이 정확히
+    // `boot_stack_bottom`의 물리주소로 재현됨, PN-1DFCB337 갱신35
+    // 참고). `kContextSwitch()`가 도착하는 `gIdleTask[coreIndex].tcb`
+    // 자신의 `rflags`는 이미 위에서 `currentRflags`(이 cli 이전
+    // 시점의 진짜 IF)로 채워 놨으므로, 여기 새로 추가한 `cli`는
+    // 이 Task가 나중에 iretq로 착지할 때의 IF 값에 전혀 영향을 주지
+    // 않는다 - 오직 "이 좁은 창 동안만" 인터럽트를 막는다(별도 `sti`가
+    // 필요 없음 - `kContextSwitch()`가 절대 반환하지 않고 그대로
+    // idle 자신의 착지 지점으로 넘어가기 때문).
+    asm volatile("cli");
     {
         RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
         gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
