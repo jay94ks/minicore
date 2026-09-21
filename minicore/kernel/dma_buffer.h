@@ -44,20 +44,16 @@ constexpr SyscallEndpointId kSyscallEndpointFreeDmaBuffer = kMakeSyscallEndpoint
 // [신규, 2026-09-20, SP-43331889 §7(fs 전환), 설계자 지시(QU-5FC58B06
 // 답변 - "전부 옮긴 후에 맵핑을 후순위로 미뤄")] `AllocDmaBufferHandler`/
 // `FreeDmaBufferHandler` 본문(dma_buffer.cpp) - `kEnumerateDevicesSync`
-// 와 같은 이유로 익명 네임스페이스 밖으로 뺐다. **KernelThread
-// 호출자(devmgr/fs)를 위한 실제 커널 모드 DMA 버퍼 매핑 설계는 아직
-// 미정** - `physAddrLimit`(4GiB 미만 강제)까지 감안하면 devmgr의
+// 와 같은 이유로 익명 네임스페이스 밖으로 뺐다.
+//
+// [구현, 2026-09-22, PN-A8BE8BED 항목3, QU-0C2CB097 답변] KernelThread
+// 호출자(devmgr/fs)를 위한 커널 모드 DMA 버퍼 매핑을 실제로 구현했다 -
+// `physAddrLimit`(4GiB 미만 강제)까지 감안하면 devmgr의
 // RequestIoPermission처럼 "고정 슬롯 하나"로는 부족하고(AHCI가 명령
-// 마다 커맨드 테이블+데이터 버퍼를 새로 할당), physmap 직접 재사용
-// (캐시 일관성 우려)/예약 슬롯 풀(검증된 선례 없음) 둘 다 추측으로
-// 정하지 않기로 했다(PN-584DB994의 disproven 가설들이 그 근거) -
-// 그래서 설계자 지시대로 fs 전체를 지금 옮기되 이 두 함수의 커널
-// 모드 분기만 `ChannelError::NotSupported`로 명시적으로 미룬다
-// (PN-615C48D5 참고). 이 때문에 fs의 AHCI 실제 I/O(ahci.cpp의
-// `issueAtaCommand`/`probeWithIdentify` 등)는 이 설계가 결정되기
-// 전까지 전부 실패로 우아하게 되돌아간다(크래시 아님 - RM-23F4B687
-// §4 "장치 하나 실패가 서비스 전체를 막으면 안 된다" 원칙 그대로) -
-// VFS 마운트 지점 라우팅 자체(fs의 나머지 책임)는 영향받지 않는다.
+// 마다 커맨드 테이블+데이터 버퍼를 새로 할당) physmap 직접 재사용도
+// 캐시 일관성 문제가 있어(둘 다 dma_buffer.cpp 파일 서두 주석 참고),
+// 유저모드 경로와 구조적으로 대응하는 전용 가상주소 스크래치 할당자
+// (`kKernelDmaScratchVirtBase`, dma_buffer.cpp)로 구현했다.
 void kAllocDmaBufferSync(const SharedPtr<Task>& caller, uint64_t sizeBytes, uint32_t physAddrLimit,
                           uint64_t* outVirtualAddr, uint64_t* outPhysicalAddr, uint32_t* outHandle,
                           ChannelError* outError);
