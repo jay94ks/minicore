@@ -115,6 +115,38 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE /*imageHandle*/, EFI_SYSTEM_TABLE* sys
                     kPrintUint64(conOut, conventionalPages);
                     kPrint(conOut, u"\r\n");
                 }
+
+                // [신규, PN-7FBF255A 체크리스트 5번 착수 조건] 이 코드
+                // 자신의 물리 로드 주소(&efi_main, 코드 섹션 안의 실제
+                // 주소)가 낮은 1GiB(boot.S가 커널 이미지를 배치하는
+                // identity map 범위)에 들어오는지 실측 확인 - ExitBootServices
+                // 이후 우리 자신의 페이지 테이블로 CR3를 전환하는 순간,
+                // 그 전환을 수행 중인 바로 이 코드 자신이 새 테이블에서도
+                // 계속 인출 가능해야 하므로(같은 물리 프레임을 가리키는
+                // 매핑이 새 테이블에도 존재해야 함) 이 위치를 미리 알아야
+                // 페이지 테이블 설계를 정할 수 있다.
+                const auto imageAddr = reinterpret_cast<unsigned long long>(&efi_main);
+                for (unsigned long long i = 0; i < entryCount; ++i) {
+                    const auto* region =
+                        reinterpret_cast<const EFI_MEMORY_DESCRIPTOR*>(gMemoryMapBuffer + i * descriptorSize);
+                    const unsigned long long regionEnd = region->PhysicalStart + region->NumberOfPages * 4096ULL;
+                    if (imageAddr >= region->PhysicalStart && imageAddr < regionEnd) {
+                        if (conOut) {
+                            kPrint(conOut, u"minicore: image phys~");
+                            kPrintUint64(conOut, imageAddr);
+                            kPrint(conOut, u" regionType=");
+                            kPrintUint64(conOut, region->Type);
+                            kPrint(conOut, u" regionBase=");
+                            kPrintUint64(conOut, region->PhysicalStart);
+                            kPrint(conOut, u" regionPages=");
+                            kPrintUint64(conOut, region->NumberOfPages);
+                            kPrint(conOut, u" belowOneGiB=");
+                            kPrintUint64(conOut, imageAddr < (1ULL << 30) ? 1 : 0);
+                            kPrint(conOut, u"\r\n");
+                        }
+                        break;
+                    }
+                }
             } else if (conOut) {
                 kPrint(conOut, u"minicore: GetMemoryMap data-mode call unexpected status\r\n");
             }
