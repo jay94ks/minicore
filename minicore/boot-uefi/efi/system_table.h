@@ -59,13 +59,32 @@ struct EFI_BOOT_SERVICES {
     // (DeviceHandle)을 얻는 데 실제로 쓴다 - 둘 다 특정 핸들이 이미
     // 손에 있는 경우라 LocateProtocol이 아니라 이 함수로 충분하다.
     EFI_STATUS(EFIAPI* HandleProtocol)(EFI_HANDLE Handle, EFI_GUID* Protocol, void** Interface);
-    // Reserved 이후(RegisterProtocolNotify ~ LocateHandleBuffer, 그
-    // 사이의 LoadImage/StartImage/Exit/UnloadImage/ExitBootServices/
-    // GetNextMonotonicCount/Stall/SetWatchdogTimer/ConnectController/
-    // DisconnectController/OpenProtocol/CloseProtocol/
-    // OpenProtocolInformation/ProtocolsPerHandle 포함)는 아직 안 씀 -
-    // 선언하지 않는다(LocateProtocol/ExitBootServices/AllocatePages의
-    // 실제 시그니처는 그 함수들을 실제로 쓰는 다음 증분에서 추가).
+    // [신규, PN-7FBF255A 체크리스트 5번 - ExitBootServices 핸드오프]
+    // UEFI 명세의 실제 순서 그대로 HandleProtocol과 ExitBootServices
+    // 사이(Reserved/RegisterProtocolNotify/LocateHandle/
+    // LocateDevicePath/InstallConfigurationTable/LoadImage/StartImage/
+    // Exit/UnloadImage - 9개)는 여전히 안 씀 - 자리만 차지.
+    void* Reserved;
+    void* RegisterProtocolNotify;
+    void* LocateHandle;
+    void* LocateDevicePath;
+    void* InstallConfigurationTable;
+    void* LoadImage;
+    void* StartImage;
+    void* Exit;
+    void* UnloadImage;
+    // efi_main이 커널 ELF 파일 읽기/파싱을 끝낸 뒤 더 이상 Boot
+    // Services가 필요 없어지는 시점에 실제로 부른다 - 성공하면 그
+    // 순간부터 이 테이블의 다른 함수는 전부 호출 금지(명세), 대신
+    // 물리 메모리 전체를 직접 쓸 수 있게 된다(PN-7FBF255A 최신 갱신
+    // 절 - AllocatePages 기반 선예약이 틀렸다는 실측 결론 참고).
+    EFI_STATUS(EFIAPI* ExitBootServices)(EFI_HANDLE ImageHandle, unsigned long long MapKey);
+    // GetNextMonotonicCount 이후(Stall/SetWatchdogTimer/
+    // ConnectController/DisconnectController/OpenProtocol/
+    // CloseProtocol/OpenProtocolInformation/ProtocolsPerHandle/
+    // LocateHandleBuffer 포함)는 아직 안 씀 - 선언하지 않는다
+    // (LocateProtocol/AllocatePages의 실제 시그니처는 그 함수들을
+    // 실제로 쓰는 다음 증분에서 추가).
 };
 
 struct EFI_SYSTEM_TABLE {

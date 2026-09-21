@@ -291,6 +291,63 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                 }
             }
         }
+
+        // [신규, PN-7FBF255A 체크리스트 5번 - ExitBootServices 핸드오프]
+        // 커널 ELF 로더(파일 읽기+헤더 파싱)가 끝나 더 이상 Boot
+        // Services가 필요 없어지는 지점 - 이제 ExitBootServices를
+        // 실제로 호출한다. UEFI 명세 권장 패턴대로 바로 직전에
+        // GetMemoryMap을 다시 불러 최신 MapKey를 확보한다(파일
+        // Read() 등 그 사이 호출들이 내부적으로 메모리를 재배치해
+        // 앞서 구한 MapKey가 이미 낡았을 수 있음) - 실패하면(다른
+        // 뭔가가 그 사이 또 MapKey를 무효화한 경우) 재조회 후
+        // 재시도한다(최대 3회, 명세 권장 패턴).
+        if (conOut) {
+            kPrint(conOut, u"minicore: exiting boot services\r\n");
+        }
+        bool exitedBootServices = false;
+        for (unsigned int attempt = 0; attempt < 3 && !exitedBootServices; ++attempt) {
+            unsigned long long finalMapSize = kMemoryMapBufferCapacity;
+            unsigned long long finalMapKey = 0;
+            unsigned long long finalDescriptorSize = 0;
+            unsigned int finalDescriptorVersion = 0;
+            EFI_STATUS mapStatus = systemTable->BootServices->GetMemoryMap(
+                &finalMapSize, gMemoryMapBuffer, &finalMapKey, &finalDescriptorSize, &finalDescriptorVersion);
+            if (mapStatus != kEfiSuccess) {
+                if (conOut) {
+                    kPrint(conOut, u"minicore: final GetMemoryMap failed, status=");
+                    kPrintUint64(conOut, mapStatus);
+                    kPrint(conOut, u"\r\n");
+                }
+                break;
+            }
+            EFI_STATUS exitStatus = systemTable->BootServices->ExitBootServices(imageHandle, finalMapKey);
+            if (exitStatus == kEfiSuccess) {
+                exitedBootServices = true;
+                break;
+            }
+            if (conOut) {
+                kPrint(conOut, u"minicore: ExitBootServices failed, status=");
+                kPrintUint64(conOut, exitStatus);
+                kPrint(conOut, u" attempt=");
+                kPrintUint64(conOut, attempt);
+                kPrint(conOut, u"\r\n");
+            }
+        }
+
+        if (exitedBootServices) {
+            // Boot Services는 이 시점부터 전부 호출 금지(명세) - ConOut
+            // 도 더 이상 유효하다는 보장이 없어 여기서부터는 아무것도
+            // 찍지 않는다. PT_LOAD 세그먼트 물리 배치 + GDT/CR3 전환
+            // (체크리스트 5번 나머지)은 다음 증분 몫 - 지금은
+            // "ExitBootServices 호출 자체가 성공하는가"만 검증하는
+            // 단계라, 성공하면 그냥 여기서 영원히 멈춘다(더 이상 할
+            // 일이 없는데 firmware로 되돌아가면 명세 위반이라 hlt
+            // 루프로 대기 - 다음 증분이 이 자리를 세그먼트 복사 +
+            // GDT/CR3 전환 + 커널 진입점 jmp로 대체한다).
+            for (;;) {
+                asm volatile("cli; hlt");
+            }
+        }
     }
 
     return kEfiSuccess;

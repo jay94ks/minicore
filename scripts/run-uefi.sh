@@ -77,10 +77,17 @@ set -e
 echo "--- OVMF 시리얼 로그 (${BUILD_DIR}/ovmf-serial.log) ---"
 cat "${BUILD_DIR}/ovmf-serial.log" 2>/dev/null | tr -d '\r' | grep -a 'BdsDxe:' || echo "(BdsDxe 로그 없음 - 부팅 실패 가능성)"
 
-# timeout이 죽였을 때(124)는 OVMF가 부팅 메뉴 등에서 대기 중이라는
-# 뜻이라 정상이다(이 스텁은 즉시 반환하므로 다음 부팅 옵션이나 셸로
-# 넘어가 계속 대기하는 게 예상 동작 - run-grub.sh의 "no-reboot" hlt
-# 대기와 같은 원칙).
+# timeout이 죽였을 때(124)는 정상이다 - 두 가지 경우 모두 여기 해당:
+# (1) ExitBootServices 핸드오프 이전 실패 경로라면 OVMF가 부팅 메뉴
+#     등에서 대기 중(이 스텁이 즉시 반환해 다음 부팅 옵션/셸로 넘어감),
+# (2) [신규, PN-7FBF255A 체크리스트 5번] ExitBootServices가 실제로
+#     성공하면 이 스텁이 그 순간부터 영원히 hlt 루프에 머무른다(더
+#     이상 firmware로 돌아가면 명세 위반이라 의도적으로 안 돌아감) -
+#     이 경우 시리얼 로그에 "minicore: exiting boot services"까지만
+#     찍히고 그 이후 firmware BdsDxe 로그가 전혀 이어지지 않는 것으로
+#     성공 여부를 구분한다(run-grub.sh의 "no-reboot" hlt 대기와 같은
+#     원칙 - 다음 증분이 세그먼트 복사+GDT/CR3+커널 진입 jmp로 이
+#     hlt 루프를 대체한다).
 if [[ "${status}" -ne 0 && "${status}" -ne 124 ]]; then
     echo "QEMU가 비정상 종료했습니다(exit ${status})" >&2
     exit "${status}"
