@@ -18,6 +18,24 @@ namespace {
 
 uint32_t gInterruptDepth[kAcpiMaxCpus] = {};
 
+// [신규, 2026-09-21, PN-9326B06F 실측 확인] `nm`으로 확인한 실제
+// 링크 결과 - `gInterruptDepth`(32*4=128바이트)가 바로 다음
+// `gInterruptDispatchStacks` 시작 주소 바로 앞에 여백 없이 딱
+// 붙어 있었다(0xffffffff808a6840 / 0xffffffff808a68c0, 정확히
+// 0x80바이트 = 128바이트 차이). `gInterruptDispatchStacks[0]`은
+// 스택이라 아래로(주소가 줄어드는 방향으로) 자라는데, 그 바닥
+// (`gInterruptDispatchStacks[0][0]`)을 넘치면 **주소상 바로 앞에
+// 있는 이 `gInterruptDepth` 배열을 직격으로 덮어쓴다** - 실측으로
+// `gInterruptDepth[0]`가 깊은 음수(-5241류)로 이미 새고 있다는 게
+// 확인된 상태에서, 이 인접 자체가 "카운터가 어긋나 스왑이
+// 실패하고 -> 스택이 넘치고 -> 그 넘침이 카운터를 더 깊이 손상시켜
+// 다음 판단을 더 틀리게 만드는" 자기강화형 피드백 루프를 만들 수
+// 있다는 뜻이다. 진짜 누수 근원(아직 미확정)과 별개로, 이 인접
+// 자체는 순수 방어 조치로 없앨 수 있다 - 두 전역 변수 사이에
+// 아무도 안 쓰는 여백을 둬서, 디스패치 스택이 바닥을 넘쳐도 최소한
+// 이 카운터만큼은 즉시 덮어쓰이지 않게 한다.
+[[maybe_unused]] alignas(16) uint8_t gInterruptDepthGuardPage[16 * 1024];
+
 // [신규, 2026-09-21, PN-D7B66FE4, DC-53B93BFF (B)] 코어별 전용
 // 인터럽트 디스패치 스택 - deferred_destruction.h의 kEnterInterruptDepth/
 // kLeaveInterruptDepth 문서 주석 참고(Linux percpu irq stack과 동일한
