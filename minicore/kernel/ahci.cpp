@@ -168,11 +168,15 @@ void kFreeDma(uint32_t handle) {
 // [PN-A401DDF9, SP-C2670F69 §3.5] AhciPort::submitAtaCommand()가 슬롯
 // 배정과 실제 발급(레지스터 세팅)까지 전부 동기적으로 끝낸 뒤, 이 args를
 // 채워 AsyncTask로 제출한다 - 아래 AhciCommandHandler::onExec은 오직
-// "언제 끝나는지"만 폴링하고(WaitInterruptHandler와 동일한 for(;;){...;
-// AsyncTask::yield();} 관례), 완료되면 데이터 복사/DMA 반납/슬롯 반납까지
-// 마무리한다. 이 구조체 자체는 submitAtaCommand(생산자)가 GenericSlabAllocator
-// 로 힙 할당하고 AhciCommandHandler(소비자, onExec/onCancel 양쪽)가 해제한다
-// - "생성/해제 전부 처리기 책임"(async_task.h) 원칙을 이 드라이버 전체를
+// "언제 끝나는지"만 폴링하고(매 반복 co_await kernel::AsyncTaskCoroYield{}
+// 로 리액터에 한 턴 양보 - **[정정, 2026-09-22, PN-A0CEF82D 실측 발견]**
+// 원래 여기 raw kernel::AsyncTask::yield()를 썼었는데, 이 onExec은 진짜
+// 코루틴이라 그 스택풀 전용 프리미티브를 쓰면 무한 대기가 났다 - 자세한
+// 원인/정정은 async_task.h의 AsyncTaskCoroYield 문서 주석 참고),
+// 완료되면 데이터 복사/DMA 반납/슬롯 반납까지 마무리한다. 이 구조체
+// 자체는 submitAtaCommand(생산자)가 GenericSlabAllocator로 힙 할당하고
+// AhciCommandHandler(소비자, onExec/onCancel 양쪽)가 해제한다 -
+// "생성/해제 전부 처리기 책임"(async_task.h) 원칙을 이 드라이버 전체를
 // 하나의 처리기로 보고 그대로 지킨다.
 struct AhciCommandArgs {
     AhciPort* port = nullptr;
@@ -206,7 +210,14 @@ public:
                 ioError = true;
                 break;
             }
-            kernel::AsyncTask::yield();
+            // [수정, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6] 이 onExec은
+            // 진짜 코루틴이라(co_return이 있어 컴파일러가 코루틴으로
+            // 변환) raw AsyncTask::yield()(kContextSwitch 기반, 전용
+            // 스택 필요)를 여기서 호출하면 실측으로 확인된 무한
+            // 대기가 발생했다 - 코루틴 전용 짝인 AsyncTaskCoroYield로
+            // 교체(async_task.h 문서 주석 참고, 매 반복 레지스터를
+            // 다시 읽어야 하는 이 패턴에 정확히 맞는 프리미티브).
+            co_await kernel::AsyncTaskCoroYield{};
         }
 
         if (!ioError && args->isRead && args->hasData) {

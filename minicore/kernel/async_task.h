@@ -691,6 +691,61 @@ private:
     AsyncTask* _target;
 };
 
+// [신규, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6 설계자 답변("제안대로
+// 진행")] `AsyncTask::yield()`의 코루틴 버전 - 코루틴 `onExec()`
+// 자신이 "다른 AsyncTask의 완료"가 아니라 하드웨어 레지스터 등
+// **자기 완결적으로 반복 재확인해야 하는 조건**을 폴링할 때
+// `co_await AsyncTaskCoroYield{}`로 쓴다(예: `ahci.cpp`의
+// `AhciCommandHandler::onExec` - 매 반복 레지스터를 다시 읽어야
+// 하는 패턴).
+//
+// **실측으로 확정된 근본 원인**: `AhciCommandHandler`/
+// `WaitInterruptHandler`(`interrupt_subscription.cpp`)가 원래
+// raw `kernel::AsyncTask::yield()`를 코루틴 `onExec()` 안에서 직접
+// 호출하고 있었다 - `AsyncTask::yield()`는 무조건 `kContextSwitch`로
+// 자기 전용 스택으로/에서 되돌아가는 방식이라, 코루틴 모드
+// `onExec()`(전용 스택이 없음, `drainOnce()` 자신의 C++ 호출 스택
+// 위에서 직접 실행)에는 애초에 안전하지 않다(async_task.h
+// `AsyncTaskAwaiter` 문서 주석의 코루틴 버전 - PN-6EDED542가 이미
+// "다른 AsyncTask 기다리기" 경우에 대해 확립한 것과 완전히 같은
+// 제약, 이번엔 "자기 자신을 반복 재확인" 경우).
+//
+// **`AsyncTaskCoroAwaiter`와의 차이 - 왜 별도 프리미티브가 필요한가**:
+// `AsyncTaskCoroAwaiter`는 "다른 구체적인 AsyncTask 하나의 완료"를
+// 기다리며, 그 대상이 끝날 때 `drainOnce()`의 Completed/Failed 경로가
+// `kWakeWaitingAsyncTask()`로 명시적으로 깨워 준다. 이 클래스는
+// 기다릴 다른 AsyncTask가 없다 - `drainOnce()`는 코루틴이 `co_await`로
+// 정지하면(`!coroHandle.done()`) 그 AsyncTask를 그냥 `Suspended`
+// 상태로 남기고 **다시 큐에 넣지 않는다**(async_task.cpp의
+// `drainOnce()` 문서 주석 "Suspended면 아무 것도 안 함 - 나중에
+// submitCompletion으로 다시 큐에 들어와야 재개된다" 그대로) - 그래서
+// 이 awaiter 자신이 `await_suspend()` 안에서 스스로를
+// `AsyncReactor::submitCompletion()`으로 다시 큐에 넣어야 다음
+// 드레인에서 이어서 재개된다(정의는 async_task.cpp - `AsyncReactor`
+// 가 이 시점엔 아직 전방 선언조차 없어 인라인 정의 불가).
+//
+// **`WaitInterruptHandler`는 이 클래스를 쓰지 않는다**(중요, 착수
+// 세션 실수 방지) - `AsyncTaskCoroYield`는 매 리액터 패스마다
+// 무조건 다시 깨어나 재확인하는 "자기 폴링" 프리미티브라, 이미
+// 인터럽트 ISR의 `popFront()`+`submitCompletion()`으로 외부에서
+// 정확히 깨워 주는 `WaitInterruptHandler`에 기계적으로 적용하면
+// 이벤트가 아직 없는데도 매번 깨어나 `waiters`에 같은 노드를 또
+// pushBack해 침습적 리스트를 깨뜨린다(minicore-3c 세션이 QU-CC8A31F6
+// 검토 중 발견) - 그쪽은 대신 `kernel::SuspendAlways`(libkenv/
+// coroutine.h, `std::suspend_always`에 대응 - 자기 재큐잉 없이
+// 순수하게 정지만 하고, 외부의 `popFront()`+`submitCompletion()`이
+// 실제로 깨울 때까지 가만히 있음)를 쓴다.
+// preemptive=true로 제출한다 - `AsyncTask::submit()` 문서의
+// PN-4FA5F13B 굶주림 버그와 동일한 이유(이 코어에 계속 Ready인 다른
+// Task가 있으면 idle 분기 자체에 못 도달해 폴링이 무기한 지연될 수
+// 있음).
+class AsyncTaskCoroYield {
+public:
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<>) noexcept;
+    void await_resume() const noexcept {}
+};
+
 // 커널 전용 비동기 프레임워크의 디스패치 계층(SP-F682B889 §3.4/§4,
 // 2026-09-16 재구조 - QU-96BBB769/QU-4034561A/QU-3BDEE348 답변,
 // PN-FEAAF154) - **더 이상 코어당 전용 kernel::Task가 아니다.** 예전

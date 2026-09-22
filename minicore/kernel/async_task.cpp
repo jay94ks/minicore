@@ -908,4 +908,19 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
     }
 }
 
+// [신규, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6] async_task.h의
+// AsyncTaskCoroYield 문서 주석 참고 - AsyncReactor가 이 시점(async_task.h
+// 안의 선언 위치)엔 아직 전방 선언조차 없어 여기(AsyncReactor가 이미
+// 완전한 타입인 지점)에 정의한다. self가 null이면(코루틴 onExec
+// 밖에서 잘못 호출된 경우 - 계약 위반) 정지는 되지만 아무도 다시
+// 깨우지 않아 사실상 멈춘다 - 방어 이상의 조치는 하지 않는다(호출부
+// 책임, AsyncTaskCoroAwaiter::await_suspend()의 동일한 null 처리와
+// 같은 관례).
+void AsyncTaskCoroYield::await_suspend(std::coroutine_handle<>) noexcept {
+    AsyncTask* self = AsyncTask::current();
+    if (self) {
+        AsyncReactor::submitCompletion(self, /*preemptive=*/true);
+    }
+}
+
 }  // namespace kernel

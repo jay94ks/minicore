@@ -265,7 +265,28 @@ public:
             if (done) {
                 co_return;
             }
-            AsyncTask::yield();
+            // [수정, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6, minicore-3c
+            // 세션이 발견] 원래 raw AsyncTask::yield()(스택풀 전용
+            // kContextSwitch 기반)를 썼는데, 이 onExec은 진짜
+            // 코루틴이라 무한 대기가 났다(async_task.h의
+            // AsyncTaskCoroYield 문서 주석 참고). 다만 여기는 그
+            // 코루틴 전용 짝(AsyncTaskCoroYield - 매 리액터 패스마다
+            // 무조건 재확인하는 "자기 폴링")을 그대로 쓰면 안 된다 -
+            // 이벤트가 아직 없는데도 매번 깨어나 위 else 분기가
+            // `slot->waiters`에 같은 `task` 노드를 또 pushBack해
+            // 침습적 리스트를 깨뜨린다(이 루프의 pushBack은 딱 한
+            // 번만 일어나야 함). 대신 표준 `std::suspend_always{}`
+            // (자기 재큐잉 없이 순수 정지만) 를 쓴다 - 위에서 이미
+            // `waiters`에 등록해 뒀으므로, 실제 깨우기는 인터럽트
+            // ISR의 `kDispatchInterruptEvent`가 `waiters.popFront()`
+            // (이 task를 리스트에서 제거하며 꺼냄) 후 직접
+            // `AsyncReactor::submitCompletion(task)`를 호출하는 기존
+            // 경로가 그대로 담당한다 - 깨어난 시점엔 이미 이벤트가
+            // 준비돼 있다는 뜻이라, 다음 반복이 곧장 위 count>0
+            // 분기로 소비한다. (`kernel::SuspendAlways` -
+            // `std::suspend_always`에 대응하는 이 프로젝트 이름,
+            // libkenv/coroutine.h - freestanding이라 표준 타입이 없음.)
+            co_await kernel::SuspendAlways{};
         }
     }
     void onFailure(AsyncTask*) override {}
