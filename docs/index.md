@@ -49,7 +49,7 @@
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-17T00:15:27.234Z |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-22T01:56:00.686Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-21T18:13:33.560Z |
-| [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-22T06:40:41.684Z |
+| [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-22T07:16:38.438Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-18T19:00:35.209Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-21T18:40:51.656Z |
