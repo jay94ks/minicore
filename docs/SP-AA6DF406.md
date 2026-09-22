@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-AA6DF406
   status: approved
-  updatedAt: 2026-09-22T04:56:09.894Z
+  updatedAt: 2026-09-22T05:59:13.661Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -321,6 +321,23 @@ struct NtfsIndexEntry {
 패턴. 1차 증분이 읽기 전용이라는 점은 그대로 유효 - `onExec`이
 `Write`/`Mkdir`/`Rmdir`/`Unlink` op를 받으면 해당 `KernelFsXxxArgs::
 error`에 명시적으로 실패를 채워 반환한다(크래시 아님).
+
+**[추가, 2026-09-22, `PN-9AE5BFE4`/`PN-6EDED542` 실측 발견 - 착수 시 필독]**
+`onExec()`는 진짜 C++20 코루틴(`AsyncExecCoro` 반환)으로 구현해야
+하며, 그 안에서 `device_->readBlocks()` 같은 동기 래퍼
+(`AsyncTaskWaitGroup::waitAll()` 기반)를 직접 호출하면 실제로 무한
+대기한다(코루틴 모드 `onExec()`이 `AsyncReactor::drainOnce()`의 C++
+호출 스택 위에서 직접 실행되기 때문 - 자세한 원인은 `SP-F682B889`
+§9.5 항목3). 읽기 전용이라도 §3의 MFT 레코드/`$DATA`/`$INDEX_ROOT`
+탐색 자체가 실제 블록 I/O이므로 예외가 아니다 - I/O가 필요한 지점은
+반드시 `co_await kernel::AsyncTaskCoroAwaiter(device_->submitReadBlocks(...))`
+패턴(같은 절에 정확한 코드 있음)을 써야 한다. **추가 제약**:
+`AsyncExecCoro` 자신은 `co_await`할 수 없어(awaiter 프로토콜 미구현)
+I/O 헬퍼 함수를 별도 코루틴으로 factoring할 수 없다 - §4.1/4.2의
+헬퍼(MFT 레코드 파싱/데이터 런 순회 등)는 전부 평범한 비-코루틴
+함수로 두고, 실제 `co_await` 지점은 `onExec()` 자신의 코루틴 프레임
+안에만 두는 "평탄화" 구조로 구현할 것(`PN-9AE5BFE4`의 Ext4Driver가
+이미 같은 패턴을 적용 중이니 참고 가능).
 
 ```cpp
 // minicore/libs/libntfs/ntfs.h

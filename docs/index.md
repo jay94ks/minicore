@@ -49,7 +49,7 @@
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-17T00:15:27.234Z |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-22T01:56:00.686Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-21T18:13:33.560Z |
-| [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-22T05:03:33.312Z |
+| [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-22T06:15:24.850Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-18T19:00:35.209Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-21T18:40:51.656Z |
@@ -64,7 +64,7 @@
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-22T01:15:53.326Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-17T08:01:20.217Z |
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved | 2026-09-16T14:29:59.188Z |
-| [SP-2BCE5D60](./SP-2BCE5D60.md) | fs 커널 서비스(파일시스템 드라이버: ext4/swapfs/FAT32-16) — 설계 제안 | approved | 2026-09-22T04:53:27.453Z |
+| [SP-2BCE5D60](./SP-2BCE5D60.md) | fs 커널 서비스(파일시스템 드라이버: ext4/swapfs/FAT32-16) — 설계 제안 | approved | 2026-09-22T05:24:17.169Z |
 | [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | approved | 2026-09-22T02:14:40.657Z |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-19T17:48:08.056Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
@@ -93,8 +93,8 @@
 | [SP-9F1DB1D8](./SP-9F1DB1D8.md) | gCurrentTask 크로스코어 접근 보호 — RwSpinlock 설계 스케치 (QU-68D76FC4) | approved | 2026-09-17T02:18:05.726Z |
 | [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | review | 2026-09-21T13:55:00.424Z |
 | [SP-A252E82F](./SP-A252E82F.md) | 인터럽트 컨텍스트 재설계 - 회피 불가능한 예외만 IST로 격리, 일반 인터럽트는 단일 스택 통일, gInterruptDepth 폐기 | approved | 2026-09-21T23:03:58.039Z |
-| [SP-A658A124](./SP-A658A124.md) | libvfat — FAT32/16 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-22T04:55:09.316Z |
-| [SP-AA6DF406](./SP-AA6DF406.md) | libntfs — NTFS 온디스크 포맷 읽기 라이브러리 설계 (1차 증분: 읽기 전용) | approved | 2026-09-22T04:56:09.894Z |
+| [SP-A658A124](./SP-A658A124.md) | libvfat — FAT32/16 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-22T05:59:07.051Z |
+| [SP-AA6DF406](./SP-AA6DF406.md) | libntfs — NTFS 온디스크 포맷 읽기 라이브러리 설계 (1차 증분: 읽기 전용) | approved | 2026-09-22T05:59:13.661Z |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-17T20:01:50.983Z |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |
 | [SP-B26CDBDD](./SP-B26CDBDD.md) | CPU 가중치 스케줄링(vruntime) 및 프로세스 자원 사용량 계정 체계 — 설계 제안 | approved | 2026-09-17T12:44:21.601Z |
@@ -113,6 +113,6 @@
 | [SP-ECC59BAE](./SP-ECC59BAE.md) | Running Task 강제 이관(선점형 로드밸런싱) — 설계 제안 | approved | 2026-09-16T02:55:51.632Z |
 | [SP-F146B7F8](./SP-F146B7F8.md) | Minicore Thread-Local/Per-CPU 변수 인프라(TLS/PerCpu) — 설계 제안 | approved | 2026-09-17T07:57:08.800Z |
 | [SP-F15B4A63](./SP-F15B4A63.md) | 지연 실행(타이머/알람) 인프라 — 설계 제안 | approved | 2026-09-16T02:36:33.487Z |
-| [SP-F1987EF8](./SP-F1987EF8.md) | libexfat — exFAT 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-22T04:55:39.951Z |
-| [SP-F682B889](./SP-F682B889.md) | 커널 전용 비동기 프레임워크(Task 기반) — 설계 제안 | approved | 2026-09-18T17:36:32.930Z |
+| [SP-F1987EF8](./SP-F1987EF8.md) | libexfat — exFAT 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-22T05:58:40.085Z |
+| [SP-F682B889](./SP-F682B889.md) | 커널 전용 비동기 프레임워크(Task 기반) — 설계 제안 | approved | 2026-09-22T05:51:35.582Z |
 | [SP-FAF768AB](./SP-FAF768AB.md) | Minicore 제네릭 컨테이너 템플릿(Node/List/Vector/Rbtree/Map/OrderedList) — 설계 제안 | approved | 2026-09-17T08:31:49.844Z |

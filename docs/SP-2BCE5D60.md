@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2BCE5D60
   status: approved
-  updatedAt: 2026-09-22T04:53:27.453Z
+  updatedAt: 2026-09-22T05:24:17.169Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -189,6 +189,21 @@ class Fat32Driver : public FileSystemDriver { /* SP-A658A124 참고, 동일 패�
 `SP-F1987EF8`/`SP-AA6DF406`)의 §4가 이 새 패턴에 맞춰 갱신 필요** -
 개별 문서에서 처리(CLAUDE.md 규칙11, "같은 설명이 다른 문서에도
 복제돼 있는지 의심한다").
+
+**[추가, 2026-09-22, `QU-FF7044DA` 설계자 답변 + `PN-9AE5BFE4` 실측
+발견]** `onExec()` 안에서 블록 장치 I/O를 기다릴 때 `BlockDevice::
+readBlocks()`/`writeBlocks()`(동기 편의 래퍼, `AsyncTaskWaitGroup::
+waitAll()` 기반)를 부르면 **실제로 무한 대기한다** - 코루틴 모드
+`onExec()`은 전용 스택이 아니라 `drainOnce()`의 C++ 호출 스택
+위에서 직접 실행되는데, 그 래퍼들은 `kContextSwitch` 기반 스택풀
+재개(`AsyncTask::yield()`)에 의존하기 때문이다(QEMU 실측 확인,
+`SP-F682B889` §9.5 항목3에 근본 원인/수정 상세). **반드시
+`BlockDevice::submitReadBlocks`/`submitWriteBlocks`(진짜 비동기
+제출, `AsyncTask*` 반환) + 새 `kernel::AsyncTaskCoroAwaiter`
+(`SP-F682B889` §9.5 항목3, 이 문서가 방금 확정)를 `co_await`로
+써야 한다** - `mount()`/`remount()`(진짜 `kernel::Task` 컨텍스트에서
+한 번 호출되는 준비 단계)는 예외로, 거기서는 동기 래퍼가 여전히
+안전하다.
 
 `fs` 서비스는 `SP-7CC5693A` §2.2의 `Mount` syscall로 커널에 마운트를
 등록하면서, 동시에 내부적으로 해당 마운트 경로에 어떤
