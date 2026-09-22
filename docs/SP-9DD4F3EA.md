@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-19T19:01:04.294Z
+  updatedAt: 2026-09-21T19:33:26.563Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -32,7 +32,10 @@ SP-8B6B8D25 §2 "커널이 담당하는 범위" 4번("인터럽트를 적절한 
 서비스들에게 라우팅")과 5번("커널 서비스들에게 요청받은 IO 권한
 부여")이 이 프레임워크의 커널 쪽 전제조건이다. §2-A 원칙("커널이
 모든 통제권을 쥔 유저랜드 서비스")에 따라, 이 PnP 프레임워크 자체는
-**devmgr(유저랜드) 안에서 구동**되고 커널은 다음만 제공한다:
+**devmgr 안에서 구동**되고(devmgr은 2026-09-21부로 `PN-615C48D5`로
+커널 `KernelThread`에 흡수됐다 - `SP-8B6B8D25` §2-A 정정 각주 참고,
+단 아래 커널 제공 항목들과의 분담 구조 자체는 실행 특권과 무관하게
+그대로 유효) 커널은 다음만 제공한다:
 
 - 부팅 시 이미 확보한 하드웨어 토폴로지 정보(PCI 장치 목록 -
   `Pci::enumerate()`, 이미 구현됨) 조회 경로.

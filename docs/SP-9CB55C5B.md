@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9CB55C5B
   status: approved
-  updatedAt: 2026-09-20T08:07:00.446Z
+  updatedAt: 2026-09-22T00:48:55.792Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -112,7 +112,9 @@ PermissionDenied"). `Kill`도 같은 계층 분리를 따른다:
 KillHandler::onExec:
   1. target = kResolveProcessId(args->targetProcessId)
      -> 실패 시 NotFound (지금과 동일 에러 코드)
-  2. [권한 판정 - §4가 미해결로 남기는 부분]
+  2. [권한 판정 - §4가 당시 미해결로 남겼던 부분, 2026-09-18
+     `PN-88E62419`로 `kCanSendSignal()` 구현 완료 - 아래 §4 말미
+     각주 참고]
   3. target->raiseSignal(args->signal)  (기존 로직 그대로)
 ```
 
@@ -138,6 +140,20 @@ uid/gid + RWX 권한 비트 + root" 류)로 분리해 설계해야 한다 - 이
 문서는 §2/§3(안전한 pid 해석 메커니즘)만 확정하고, §4(권한 판정
 자체)는 그 새 문서가 나올 때까지 `kCheckProcessControlPermission`
 자리만 남겨 둔 채 미착수로 유지한다.
+
+**[해소, 2026-09-18, `PN-88E62419`]** 그 새 문서가 바로
+`SP-30FCC8AE`(승인 완료)다 - `kCheckPermission()`(libkenv/permission.h)
++ `Process::uid/gid/signalPermission` + `kCanSendSignal(caller,
+target)`(process.cpp, 아래 (A)안대로 "커널/KernelService 예외 →
+직계 부모 예외 → kCheckPermission() 최종 판정" 순서)까지 전부
+구현·QEMU 검증 완료됐다 - `KillHandler::onExec`도
+`kResolveProcessId()`+`kCanSendSignal()`로 실제 교체됨
+(`RM-48E1E610` 그룹0 call1 참고). 아래 (A)/(B)/(C) 선택지 중
+**(A)(직계 부모만, SP-9A6D579F §3.2의 `DebugAttach`와 동일 모델
+재사용)로 확정**됐다 - 단 uid를 바꾸는 수단(`kSetuid`)이 아직 없어
+모든 프로세스가 root로 남으므로, uid/gid RWX 3분기 자체가 실전에서
+관찰 가능한 차이를 아직 못 만든다(SP-30FCC8AE 자신이 설계한 단계적
+도입 순서, `kSetuid`/authmgr 완료 후 실측 예정 - 결함 아님).
 
 **[확정] `kMaxProcessTableSlots`**: `4096` → **`UINT16_MAX`(65535)**
 로 수정(§2/§5의 열린 파라미터도 함께 해소).
