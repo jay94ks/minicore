@@ -133,9 +133,9 @@ struct InodeCore {
     uint16_t gid;
     uint16_t linksCount;
     uint32_t blocksLo;   // 512바이트 섹터 단위 - 주의, 블록 단위 아님
-    uint32_t flags;      // kExtentsFl이 반드시 서 있어야 함(레거시 간접 블록은 §2.2 후속)
+    uint32_t flags;      // kExtentsFl 유무로 block[60]의 해석이 갈림(PN-E3629BE9로 둘 다 지원)
     uint32_t osd1;
-    uint8_t  block[60];  // kExtentsFl 켜짐 - ExtentHeader+엔트리 인라인
+    uint8_t  block[60];  // kExtentsFl 켜짐: ExtentHeader+엔트리 인라인. 꺼짐: uint32_t[15] 레거시 간접 블록 포인터(direct 12 + single/double/triple)
     uint32_t generation;
     uint32_t fileAclLo;
     uint32_t sizeHigh;

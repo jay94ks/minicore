@@ -61,9 +61,16 @@ bool Ext4Volume::mount(fs::BlockDevice* device) {
     if (sb_.revLevel != 1) {
         return false;  // EXT4_DYNAMIC_REV 미만 - firstIno/inodeSize 등 확장 필드 무효, v1 미지원
     }
-    constexpr uint32_t kRequiredIncompat = kIncompatExtents | kIncompatFiletype;
+    // [갱신, 2026-09-23, PN-E3629BE9] §2.1은 익스텐트도 볼륨 레벨에서
+    // 필수로 요구했으나(레거시 간접 블록 이미지는 이 필드 주석이 이미
+    // "§2.2 후속"으로 예고해 둔 대로), 이제 Ext4Driver::onExec()이
+    // inode 개별 EXTENTS_FL 유무를 그때그때 판별해 두 형식을 모두
+    // 읽을 수 있으므로 볼륨 레벨에서는 파일타입만 필수로 남긴다 -
+    // 순수 ext2/ext3 이미지(INCOMPAT_EXTENTS 비트 자체가 없는 볼륨)
+    // 도 이제 마운트 가능.
+    constexpr uint32_t kRequiredIncompat = kIncompatFiletype;
     if ((sb_.featureIncompat & kRequiredIncompat) != kRequiredIncompat) {
-        return false;  // 익스텐트/파일타입 필수(§2.1) - 레거시 간접 블록 이미지는 §2.2 후속
+        return false;  // 파일타입(dirent 안의 fileType 바이트) 필수(§2.1)
     }
     if ((sb_.featureIncompat & ~kSupportedIncompatMask) != 0) {
         return false;  // 이 v1이 모르는 incompat 비트 - 안전하게 마운트 거부

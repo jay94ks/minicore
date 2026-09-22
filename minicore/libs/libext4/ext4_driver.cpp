@@ -133,6 +133,50 @@ ExtentLookup kLookupExtent(const uint8_t* nodeBytes, uint32_t logicalBlock, uint
     return ExtentLookup::NeedChild;
 }
 
+// [신규, 2026-09-23, PN-E3629BE9, SP-7A9CED3E §2.2 항목1] 레거시
+// 간접 블록 매핑(EXTENTS_FL 꺼진 inode - ext2/ext3 표준 레이아웃,
+// 이 프로젝트가 새로 고안한 게 아니다) - 순수 계산(I/O 없음)만
+// 담당한다. i_block[0..11]=direct, [12]=singly/[13]=doubly/
+// [14]=triply indirect - 각 간접 블록은 blockSize/4개의 uint32_t
+// 포인터 배열. kLookupExtent와 나란한 역할이지만, 익스텐트 트리와
+// 달리 깊이가 logicalBlock 값만으로 정확히 결정되므로(트리를 실제로
+// 안 읽어봐도 몇 단계인지 안다) NeedChild 루프 대신 필요한 hop 수를
+// 미리 계산해 돌려준다 - 실제 간접 블록 읽기(1~3회)는 호출부(onExec)
+// 의 몫(파일 상단 문서 주석의 합성 불가 제약과 동일한 이유).
+enum class IndirectLevel { Direct, Single, Double, Triple, OutOfRange };
+
+struct IndirectResolution {
+    IndirectLevel level;
+    uint32_t index0;  // Direct: i_block 인덱스. 그 외: 최상위 간접 블록 안의 인덱스(다음 hop 대상 선택)
+    uint32_t index1;  // Double/Triple: 두 번째 단계 인덱스
+    uint32_t index2;  // Triple: 세 번째(최종) 단계 인덱스
+};
+
+IndirectResolution kResolveIndirect(uint32_t logicalBlock, uint32_t pointersPerBlock) {
+    if (logicalBlock < 12) {
+        return IndirectResolution{IndirectLevel::Direct, logicalBlock, 0, 0};
+    }
+    uint64_t rem = static_cast<uint64_t>(logicalBlock) - 12;
+    if (rem < pointersPerBlock) {
+        return IndirectResolution{IndirectLevel::Single, static_cast<uint32_t>(rem), 0, 0};
+    }
+    rem -= pointersPerBlock;
+    const uint64_t doubleCapacity = static_cast<uint64_t>(pointersPerBlock) * pointersPerBlock;
+    if (rem < doubleCapacity) {
+        return IndirectResolution{IndirectLevel::Double, static_cast<uint32_t>(rem / pointersPerBlock),
+                                   static_cast<uint32_t>(rem % pointersPerBlock), 0};
+    }
+    rem -= doubleCapacity;
+    const uint64_t tripleCapacity = doubleCapacity * pointersPerBlock;
+    if (rem < tripleCapacity) {
+        const uint32_t idx0 = static_cast<uint32_t>(rem / doubleCapacity);
+        const uint64_t rem2 = rem % doubleCapacity;
+        return IndirectResolution{IndirectLevel::Triple, idx0, static_cast<uint32_t>(rem2 / pointersPerBlock),
+                                   static_cast<uint32_t>(rem2 % pointersPerBlock)};
+    }
+    return IndirectResolution{IndirectLevel::OutOfRange, 0, 0, 0};
+}
+
 // 디렉터리 데이터 블록 하나 안에서 name과 일치하는 엔트리를 찾는다
 // (ext4.cpp의 forEachDirEntryInBlock + findDirEntry의 콜백을 합친
 // 순수 버전, I/O 없음).
@@ -276,7 +320,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 }
                 InodeCore dirInode;
                 memcpy(&dirInode, inodeBuf.get() + inodeByteOffset, sizeof(dirInode));
-                if (!kIsDirMode(dirInode.mode) || (dirInode.flags & kExtentsFl) == 0) {
+                if (!kIsDirMode(dirInode.mode)) {
                     failed = true;
                     break;
                 }
@@ -288,30 +332,97 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
                 for (uint32_t logicalBlock = 0; logicalBlock < dirBlockCount && !foundInThisDir; ++logicalBlock) {
                     uint64_t nodeValue = 0;
-                    ExtentLookup lookup = kLookupExtent(dirInode.block, logicalBlock, &nodeValue);
-                    uint32_t depthGuard = 5;
-                    SlabBuf extentNodeBuf(blockSize);
-                    const uint8_t* activeNode = dirInode.block;
-                    while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
-                        if (!extentNodeBuf) {
-                            lookup = ExtentLookup::Invalid;
-                            break;
+                    ExtentLookup lookup;
+                    if (dirInode.flags & kExtentsFl) {
+                        lookup = kLookupExtent(dirInode.block, logicalBlock, &nodeValue);
+                        uint32_t depthGuard = 5;
+                        SlabBuf extentNodeBuf(blockSize);
+                        while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                            if (!extentNodeBuf) {
+                                lookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult ioResult;
+                            kernel::AsyncTask* ioTask =
+                                kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
+                            if (!ioTask) {
+                                lookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                            if (!ioResult.ok) {
+                                lookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                            --depthGuard;
                         }
-                        fs::BlockIoResult ioResult;
-                        kernel::AsyncTask* ioTask =
-                            kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
-                        if (!ioTask) {
-                            lookup = ExtentLookup::Invalid;
-                            break;
+                    } else {
+                        // [신규, PN-E3629BE9] 레거시 간접 블록(ext2/ext3 호환).
+                        const uint32_t pointersPerBlock = blockSize / sizeof(uint32_t);
+                        const auto* rootBlocks = reinterpret_cast<const uint32_t*>(dirInode.block);
+                        const IndirectResolution res = kResolveIndirect(logicalBlock, pointersPerBlock);
+                        if (res.level == IndirectLevel::OutOfRange) {
+                            lookup = ExtentLookup::Hole;
+                        } else if (res.level == IndirectLevel::Direct) {
+                            nodeValue = rootBlocks[res.index0];
+                            lookup = nodeValue == 0 ? ExtentLookup::Hole : ExtentLookup::Found;
+                        } else {
+                            uint32_t indices[3];
+                            uint32_t hops;
+                            uint32_t currentBlockNum;
+                            if (res.level == IndirectLevel::Single) {
+                                indices[0] = res.index0;
+                                hops = 1;
+                                currentBlockNum = rootBlocks[12];
+                            } else if (res.level == IndirectLevel::Double) {
+                                indices[0] = res.index0;
+                                indices[1] = res.index1;
+                                hops = 2;
+                                currentBlockNum = rootBlocks[13];
+                            } else {
+                                indices[0] = res.index0;
+                                indices[1] = res.index1;
+                                indices[2] = res.index2;
+                                hops = 3;
+                                currentBlockNum = rootBlocks[14];
+                            }
+                            if (currentBlockNum == 0) {
+                                lookup = ExtentLookup::Hole;
+                            } else {
+                                lookup = ExtentLookup::Found;  // hop 루프가 끝까지 가면 Found로 남김
+                                for (uint32_t h = 0; h < hops; ++h) {
+                                    SlabBuf indBuf(blockSize);
+                                    if (!indBuf) {
+                                        lookup = ExtentLookup::Invalid;
+                                        break;
+                                    }
+                                    fs::BlockIoResult ioResult;
+                                    kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(
+                                        device, blockSize, currentBlockNum, 1, indBuf.get(), &ioResult);
+                                    if (!ioTask) {
+                                        lookup = ExtentLookup::Invalid;
+                                        break;
+                                    }
+                                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                                    if (!ioResult.ok) {
+                                        lookup = ExtentLookup::Invalid;
+                                        break;
+                                    }
+                                    const uint32_t nextPtr =
+                                        reinterpret_cast<const uint32_t*>(indBuf.get())[indices[h]];
+                                    if (nextPtr == 0) {
+                                        lookup = ExtentLookup::Hole;
+                                        break;
+                                    }
+                                    if (h + 1 == hops) {
+                                        nodeValue = nextPtr;
+                                    } else {
+                                        currentBlockNum = nextPtr;
+                                    }
+                                }
+                            }
                         }
-                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
-                        if (!ioResult.ok) {
-                            lookup = ExtentLookup::Invalid;
-                            break;
-                        }
-                        activeNode = extentNodeBuf.get();
-                        lookup = kLookupExtent(activeNode, logicalBlock, &nodeValue);
-                        --depthGuard;
                     }
                     if (lookup != ExtentLookup::Found) {
                         continue;  // 구멍(hole)이거나 손상 - 이 논리 블록은 건너뜀(디렉터리엔 정상적으로 안 생김)
@@ -424,36 +535,97 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                                                                    ? remaining
                                                                    : (blockSize - offsetInBlock));
 
-                if ((inode.flags & kExtentsFl) == 0) {
-                    memset(out + totalCopied, 0, chunk);  // 레거시 간접 블록 - §2.2 후속, v1은 0으로 채움
-                    totalCopied += chunk;
-                    remaining -= chunk;
-                    continue;
-                }
-
                 uint64_t nodeValue = 0;
-                ExtentLookup lookup = kLookupExtent(inode.block, logicalBlock, &nodeValue);
-                uint32_t depthGuard = 5;
-                SlabBuf extentNodeBuf(blockSize);
-                while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
-                    if (!extentNodeBuf) {
-                        lookup = ExtentLookup::Invalid;
-                        break;
+                ExtentLookup lookup;
+                if (inode.flags & kExtentsFl) {
+                    lookup = kLookupExtent(inode.block, logicalBlock, &nodeValue);
+                    uint32_t depthGuard = 5;
+                    SlabBuf extentNodeBuf(blockSize);
+                    while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                        if (!extentNodeBuf) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                        --depthGuard;
                     }
-                    fs::BlockIoResult ioResult;
-                    kernel::AsyncTask* ioTask =
-                        kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
-                    if (!ioTask) {
-                        lookup = ExtentLookup::Invalid;
-                        break;
+                } else {
+                    // [신규, PN-E3629BE9] 레거시 간접 블록(ext2/ext3 호환).
+                    const uint32_t pointersPerBlock = blockSize / sizeof(uint32_t);
+                    const auto* rootBlocks = reinterpret_cast<const uint32_t*>(inode.block);
+                    const IndirectResolution res = kResolveIndirect(logicalBlock, pointersPerBlock);
+                    if (res.level == IndirectLevel::OutOfRange) {
+                        lookup = ExtentLookup::Hole;
+                    } else if (res.level == IndirectLevel::Direct) {
+                        nodeValue = rootBlocks[res.index0];
+                        lookup = nodeValue == 0 ? ExtentLookup::Hole : ExtentLookup::Found;
+                    } else {
+                        uint32_t indices[3];
+                        uint32_t hops;
+                        uint32_t currentBlockNum;
+                        if (res.level == IndirectLevel::Single) {
+                            indices[0] = res.index0;
+                            hops = 1;
+                            currentBlockNum = rootBlocks[12];
+                        } else if (res.level == IndirectLevel::Double) {
+                            indices[0] = res.index0;
+                            indices[1] = res.index1;
+                            hops = 2;
+                            currentBlockNum = rootBlocks[13];
+                        } else {
+                            indices[0] = res.index0;
+                            indices[1] = res.index1;
+                            indices[2] = res.index2;
+                            hops = 3;
+                            currentBlockNum = rootBlocks[14];
+                        }
+                        if (currentBlockNum == 0) {
+                            lookup = ExtentLookup::Hole;
+                        } else {
+                            lookup = ExtentLookup::Found;
+                            for (uint32_t h = 0; h < hops; ++h) {
+                                SlabBuf indBuf(blockSize);
+                                if (!indBuf) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                fs::BlockIoResult ioResult;
+                                kernel::AsyncTask* ioTask =
+                                    kSubmitReadExtBlocks(device, blockSize, currentBlockNum, 1, indBuf.get(), &ioResult);
+                                if (!ioTask) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                                if (!ioResult.ok) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                const uint32_t nextPtr = reinterpret_cast<const uint32_t*>(indBuf.get())[indices[h]];
+                                if (nextPtr == 0) {
+                                    lookup = ExtentLookup::Hole;
+                                    break;
+                                }
+                                if (h + 1 == hops) {
+                                    nodeValue = nextPtr;
+                                } else {
+                                    currentBlockNum = nextPtr;
+                                }
+                            }
+                        }
                     }
-                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
-                    if (!ioResult.ok) {
-                        lookup = ExtentLookup::Invalid;
-                        break;
-                    }
-                    lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
-                    --depthGuard;
                 }
 
                 if (lookup == ExtentLookup::Found) {
@@ -547,7 +719,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 }
                 InodeCore dirInode;
                 memcpy(&dirInode, inodeBuf.get() + inodeByteOffset, sizeof(dirInode));
-                if (!kIsDirMode(dirInode.mode) || (dirInode.flags & kExtentsFl) == 0) {
+                if (!kIsDirMode(dirInode.mode)) {
                     failed = true;
                     break;
                 }
@@ -558,28 +730,97 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
                 for (uint32_t logicalBlock = 0; logicalBlock < dirBlockCount && !foundInThisDir; ++logicalBlock) {
                     uint64_t nodeValue = 0;
-                    ExtentLookup lookup = kLookupExtent(dirInode.block, logicalBlock, &nodeValue);
-                    uint32_t depthGuard = 5;
-                    SlabBuf extentNodeBuf(blockSize);
-                    while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
-                        if (!extentNodeBuf) {
-                            lookup = ExtentLookup::Invalid;
-                            break;
+                    ExtentLookup lookup;
+                    if (dirInode.flags & kExtentsFl) {
+                        lookup = kLookupExtent(dirInode.block, logicalBlock, &nodeValue);
+                        uint32_t depthGuard = 5;
+                        SlabBuf extentNodeBuf(blockSize);
+                        while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                            if (!extentNodeBuf) {
+                                lookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult ioResult;
+                            kernel::AsyncTask* ioTask =
+                                kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
+                            if (!ioTask) {
+                                lookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                            if (!ioResult.ok) {
+                                lookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                            --depthGuard;
                         }
-                        fs::BlockIoResult ioResult;
-                        kernel::AsyncTask* ioTask =
-                            kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
-                        if (!ioTask) {
-                            lookup = ExtentLookup::Invalid;
-                            break;
+                    } else {
+                        // [신규, PN-E3629BE9] 레거시 간접 블록(ext2/ext3 호환).
+                        const uint32_t pointersPerBlock = blockSize / sizeof(uint32_t);
+                        const auto* rootBlocks = reinterpret_cast<const uint32_t*>(dirInode.block);
+                        const IndirectResolution res = kResolveIndirect(logicalBlock, pointersPerBlock);
+                        if (res.level == IndirectLevel::OutOfRange) {
+                            lookup = ExtentLookup::Hole;
+                        } else if (res.level == IndirectLevel::Direct) {
+                            nodeValue = rootBlocks[res.index0];
+                            lookup = nodeValue == 0 ? ExtentLookup::Hole : ExtentLookup::Found;
+                        } else {
+                            uint32_t indices[3];
+                            uint32_t hops;
+                            uint32_t currentBlockNum;
+                            if (res.level == IndirectLevel::Single) {
+                                indices[0] = res.index0;
+                                hops = 1;
+                                currentBlockNum = rootBlocks[12];
+                            } else if (res.level == IndirectLevel::Double) {
+                                indices[0] = res.index0;
+                                indices[1] = res.index1;
+                                hops = 2;
+                                currentBlockNum = rootBlocks[13];
+                            } else {
+                                indices[0] = res.index0;
+                                indices[1] = res.index1;
+                                indices[2] = res.index2;
+                                hops = 3;
+                                currentBlockNum = rootBlocks[14];
+                            }
+                            if (currentBlockNum == 0) {
+                                lookup = ExtentLookup::Hole;
+                            } else {
+                                lookup = ExtentLookup::Found;
+                                for (uint32_t h = 0; h < hops; ++h) {
+                                    SlabBuf indBuf(blockSize);
+                                    if (!indBuf) {
+                                        lookup = ExtentLookup::Invalid;
+                                        break;
+                                    }
+                                    fs::BlockIoResult ioResult;
+                                    kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(
+                                        device, blockSize, currentBlockNum, 1, indBuf.get(), &ioResult);
+                                    if (!ioTask) {
+                                        lookup = ExtentLookup::Invalid;
+                                        break;
+                                    }
+                                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                                    if (!ioResult.ok) {
+                                        lookup = ExtentLookup::Invalid;
+                                        break;
+                                    }
+                                    const uint32_t nextPtr =
+                                        reinterpret_cast<const uint32_t*>(indBuf.get())[indices[h]];
+                                    if (nextPtr == 0) {
+                                        lookup = ExtentLookup::Hole;
+                                        break;
+                                    }
+                                    if (h + 1 == hops) {
+                                        nodeValue = nextPtr;
+                                    } else {
+                                        currentBlockNum = nextPtr;
+                                    }
+                                }
+                            }
                         }
-                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
-                        if (!ioResult.ok) {
-                            lookup = ExtentLookup::Invalid;
-                            break;
-                        }
-                        lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
-                        --depthGuard;
                     }
                     if (lookup != ExtentLookup::Found) {
                         continue;
@@ -705,7 +946,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             }
             InodeCore dirInode;
             memcpy(&dirInode, inodeBuf.get() + inodeByteOffset, sizeof(dirInode));
-            if (!kIsDirMode(dirInode.mode) || (dirInode.flags & kExtentsFl) == 0) {
+            if (!kIsDirMode(dirInode.mode)) {
                 args->hasMore = false;
                 args->error = kernel::VfsError::InvalidHandle;
                 break;
@@ -719,28 +960,96 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
             for (uint32_t logicalBlock = 0; logicalBlock < dirBlockCount && !found && !ioFailed; ++logicalBlock) {
                 uint64_t nodeValue = 0;
-                ExtentLookup lookup = kLookupExtent(dirInode.block, logicalBlock, &nodeValue);
-                uint32_t depthGuard = 5;
-                SlabBuf extentNodeBuf(blockSize);
-                while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
-                    if (!extentNodeBuf) {
-                        lookup = ExtentLookup::Invalid;
-                        break;
+                ExtentLookup lookup;
+                if (dirInode.flags & kExtentsFl) {
+                    lookup = kLookupExtent(dirInode.block, logicalBlock, &nodeValue);
+                    uint32_t depthGuard = 5;
+                    SlabBuf extentNodeBuf(blockSize);
+                    while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                        if (!extentNodeBuf) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                        --depthGuard;
                     }
-                    fs::BlockIoResult ioResult;
-                    kernel::AsyncTask* ioTask =
-                        kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &ioResult);
-                    if (!ioTask) {
-                        lookup = ExtentLookup::Invalid;
-                        break;
+                } else {
+                    // [신규, PN-E3629BE9] 레거시 간접 블록(ext2/ext3 호환).
+                    const uint32_t pointersPerBlock = blockSize / sizeof(uint32_t);
+                    const auto* rootBlocks = reinterpret_cast<const uint32_t*>(dirInode.block);
+                    const IndirectResolution res = kResolveIndirect(logicalBlock, pointersPerBlock);
+                    if (res.level == IndirectLevel::OutOfRange) {
+                        lookup = ExtentLookup::Hole;
+                    } else if (res.level == IndirectLevel::Direct) {
+                        nodeValue = rootBlocks[res.index0];
+                        lookup = nodeValue == 0 ? ExtentLookup::Hole : ExtentLookup::Found;
+                    } else {
+                        uint32_t indices[3];
+                        uint32_t hops;
+                        uint32_t currentBlockNum;
+                        if (res.level == IndirectLevel::Single) {
+                            indices[0] = res.index0;
+                            hops = 1;
+                            currentBlockNum = rootBlocks[12];
+                        } else if (res.level == IndirectLevel::Double) {
+                            indices[0] = res.index0;
+                            indices[1] = res.index1;
+                            hops = 2;
+                            currentBlockNum = rootBlocks[13];
+                        } else {
+                            indices[0] = res.index0;
+                            indices[1] = res.index1;
+                            indices[2] = res.index2;
+                            hops = 3;
+                            currentBlockNum = rootBlocks[14];
+                        }
+                        if (currentBlockNum == 0) {
+                            lookup = ExtentLookup::Hole;
+                        } else {
+                            lookup = ExtentLookup::Found;
+                            for (uint32_t h = 0; h < hops; ++h) {
+                                SlabBuf indBuf(blockSize);
+                                if (!indBuf) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                fs::BlockIoResult ioResult;
+                                kernel::AsyncTask* ioTask =
+                                    kSubmitReadExtBlocks(device, blockSize, currentBlockNum, 1, indBuf.get(), &ioResult);
+                                if (!ioTask) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                                if (!ioResult.ok) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                const uint32_t nextPtr = reinterpret_cast<const uint32_t*>(indBuf.get())[indices[h]];
+                                if (nextPtr == 0) {
+                                    lookup = ExtentLookup::Hole;
+                                    break;
+                                }
+                                if (h + 1 == hops) {
+                                    nodeValue = nextPtr;
+                                } else {
+                                    currentBlockNum = nextPtr;
+                                }
+                            }
+                        }
                     }
-                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
-                    if (!ioResult.ok) {
-                        lookup = ExtentLookup::Invalid;
-                        break;
-                    }
-                    lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
-                    --depthGuard;
                 }
                 if (lookup != ExtentLookup::Found) {
                     continue;
