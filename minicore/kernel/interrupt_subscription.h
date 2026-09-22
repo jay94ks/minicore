@@ -198,16 +198,6 @@ public:
     // scheduler.cpp의 kFinalizeProcessTermination()/SelfTerminateThreadHandler
     // (이미 존재하는 프로세스·스레드 종료 지점)가 이 함수를 호출한다.
     static void releaseAllForTask(Task* task);
-
-    // [신규, 2026-09-22, PN-FFFE892E] 커널 내부(트랩 아님) 호출자를
-    // 위한 subjectCode - `AsyncTask::submit(subjectCode, ...)`로
-    // Subscribe/WaitInterrupt를 직접 부를 수 있게 한다(`ahci.cpp`의
-    // `AhciCommandHandler`가 이 벡터를 기다리는 용도). 최초 호출 시
-    // 1회 지연 등록(`AhciCommandHandler`의 `kEnsureAhciCommandHandlerRegistered`와
-    // 동일한 패턴) - syscall 등록(위 registerSyscallEndpoints)과
-    // 독립적으로 병행된다.
-    static AsyncTaskSubjectCode subscribeSubjectCode();
-    static AsyncTaskSubjectCode waitSubjectCode();
 };
 
 }  // namespace kernel

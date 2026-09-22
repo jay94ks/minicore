@@ -2,6 +2,7 @@
 
 #include "async_task.h"
 #include "dma_buffer.h"
+#include "interrupt_subscription.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "pnp.h"
@@ -30,6 +31,7 @@ constexpr uint64_t kPortClbu = 0x04;
 constexpr uint64_t kPortFb = 0x08;
 constexpr uint64_t kPortFbu = 0x0C;
 constexpr uint64_t kPortIs = 0x10;
+constexpr uint64_t kPortIe = 0x14;  // [PN-FFFE892E, §3.3.3] Interrupt Enable
 constexpr uint64_t kPortCmd = 0x18;
 constexpr uint64_t kPortTfd = 0x20;
 constexpr uint64_t kPortSsts = 0x28;
@@ -48,6 +50,17 @@ constexpr uint32_t kCapS64a = 1u << 31;  // 64비트 주소 지정 지원
 
 // GHC 비트(§3.1.2)
 constexpr uint32_t kGhcAe = 1u << 31;  // AHCI Enable
+constexpr uint32_t kGhcIe = 1u << 1;   // [PN-FFFE892E] Interrupt Enable(전역)
+
+// PxIE 비트(§3.3.3) - [PN-FFFE892E] 정상 완료(DHRS - Device to Host
+// Register FIS, READ/WRITE DMA EXT류의 일반적 완료 신호)/NCQ 완료
+// (SDBS - Set Device Bits FIS, FPDMA QUEUED류)/주요 에러 셋만 켠다 -
+// 이 드라이버가 실제로 관심 있는 이벤트만(불필요한 인터럽트 폭주 방지).
+constexpr uint32_t kPortIeDhre = 1u << 0;   // Device to Host Register FIS Interrupt
+constexpr uint32_t kPortIeSdbe = 1u << 3;   // Set Device Bits FIS Interrupt(NCQ 완료)
+constexpr uint32_t kPortIeTfee = 1u << 30;  // Task File Error
+constexpr uint32_t kPortIeHbfe = 1u << 29;  // Host Bus Fatal Error
+constexpr uint32_t kPortIeIfe = 1u << 27;   // Interface Fatal Error
 
 // PxCMD 비트(§3.3.7)
 constexpr uint32_t kPortCmdSt = 1u << 0;   // Start
@@ -191,7 +204,61 @@ struct AhciCommandArgs {
     void* callerBuf = nullptr;  // READ일 때만 사용
     uint64_t byteCount = 0;
     fs::BlockIoResult* outResult = nullptr;
+    // [신규, 2026-09-22, PN-FFFE892E] 0=미배정(폴링 폴백), 그 외=
+    // WaitInterrupt로 완료를 기다릴 벡터(AhciPort::_irqVector 그대로).
+    uint32_t irqVector = 0;
 };
+
+// [신규, 2026-09-22, PN-FFFE892E] fs KernelThread 자신을 그 벡터의
+// 구독자로 한 번 등록한다 - `fs.cpp`의 `kAcceptFromChannelDirect`와
+// 완전히 동일한 패턴(SyscallRegistry::resolveSubjectCode로 이미
+// 등록된 syscall 핸들러의 subjectCode를 재사용 + PreemptionGuard로
+// "제출→submitterTask 캡처" 원자성 확보 + AsyncTaskWaitGroup::waitAll()
+// 로 실제 완료까지 블로킹) - 별도 AsyncCallbackRegistry 등록을 새로
+// 하지 않는다(SubscribeInterruptHandler는 이미 registerSyscallEndpoints()
+// 로 subjectCode를 받아 뒀으므로 그걸 그대로 재사용하는 게 맞다).
+// exclusive=false로 구독한다 - AHCI가 배정받은 MSI 벡터는 그 장치
+// 전용이라 다른 구독자와 경합할 일이 없고, exclusive=true 분기는
+// KernelThread 제출자에게 UB라 애초에 피해야 한다(SubscribeInterruptHandler
+// 문서 주석 참고).
+bool kSubscribeAhciInterrupt(uint32_t irqVector) {
+    kernel::AsyncTaskSubjectCode subjectCode = 0;
+    if (!kernel::SyscallRegistry::resolveSubjectCode(kernel::kSyscallEndpointSubscribeInterrupt, &subjectCode)) {
+        return false;
+    }
+    kernel::SubscribeInterruptArgs args;
+    args.vector = irqVector;
+    args.exclusive = false;
+
+    kernel::SharedPtr<kernel::Task> self = kCurrentFsTask();
+    kernel::AsyncTask* task = nullptr;
+    {
+        kernel::PreemptionGuard guard;
+        // [실측으로 발견, 2026-09-22, PN-FFFE892E] preemptive=true는
+        // AsyncReactor::submitCompletion() 내부에서 이 코어로 즉시
+        // self-IPI(kAsyncDrainVector)를 보낸다 - PreemptionGuard(순수
+        // 카운터, cli/sti 아님)는 그 인터럽트 전달 자체를 막지 못해
+        // (`gPreemptDisableCount`는 스케줄러 틱의 "선점할지" 결정에만
+        // 참고되지 IPI 전달과 무관, pci.cpp의 관련 주석 참고), IF가
+        // 이미 켜져 있는 일반 실행 흐름에서는 이 self-IPI가 곧바로
+        // 전달돼 `submitterTask`를 아직 채우기 전에 onExec이 실행돼
+        // 버리는 걸 실측으로 확인했다(`kAcceptFromChannelDirect`가
+        // 문서 주석에서 주장한 "PreemptionGuard로 원자적 구간을
+        // 만든다"는 이 경로엔 성립하지 않는다 - 별도 기록 필요).
+        // Subscribe는 즉시 실행될 필요가 없으므로(곧바로
+        // AsyncTaskWaitGroup::waitAll()로 블로킹 대기할 뿐) preemptive=
+        // false로 제출해 이 race 자체를 피한다.
+        task = kernel::AsyncTask::submit(subjectCode, 0, &args, /*autoFree=*/false, /*preemptive=*/false);
+        if (!task) {
+            return false;
+        }
+        task->submitterTask = kernel::TaskOwnerRef::capture(kernel::WeakPtr<kernel::Task>(self));
+    }
+    kernel::AsyncTaskWaitGroup group;
+    group.add(task);
+    group.waitAll();
+    return args.error == kernel::InterruptSubscriptionError::None;
+}
 
 class AhciCommandHandler : public kernel::AsyncTaskHandler {
 public:
@@ -199,6 +266,17 @@ public:
         auto* args = static_cast<AhciCommandArgs*>(argsRaw);
         const uint32_t slotBit = 1u << args->slotIndex;
         bool ioError = false;
+        // [신규, 2026-09-22, PN-FFFE892E] 인터럽트 기반 완료 대기 -
+        // args->irqVector가 배정돼 있으면(fs.cpp가 이미 Subscribe도
+        // 마쳐 뒀다는 전제, AhciController::init 참고) WaitInterrupt로
+        // 실제 인터럽트가 올 때까지 SuspendAlways로 정지한다(더 이상
+        // 같은 코어의 drainOnce() 재진입에 의존하지 않음 -
+        // QU-41F78A3E가 발견한 데드락 고리 자체가 사라짐). 벡터가
+        // 미배정이면(MSI capability 없음/실패) 기존 폴링으로 폴백.
+        kernel::AsyncTaskSubjectCode waitSubjectCode = 0;
+        const bool canWaitForInterrupt =
+            args->irqVector != 0 &&
+            kernel::SyscallRegistry::resolveSubjectCode(kernel::kSyscallEndpointWaitInterrupt, &waitSubjectCode);
         for (;;) {
             const uint32_t pending = args->useNcq ? (*kReg32(args->portRegBase, kPortSact) & slotBit)
                                                    : (*kReg32(args->portRegBase, kPortCi) & slotBit);
@@ -210,13 +288,38 @@ public:
                 ioError = true;
                 break;
             }
+            if (canWaitForInterrupt) {
+                // [PN-FFFE892E] outEvent/hasMore는 쓰지 않는다 - 이
+                // 벡터를 여러 in-flight 커맨드가 공유할 수 있어(NCQ),
+                // 깨어난 이유가 내 슬롯 완료라는 보장이 없다(브로드캐스트
+                // 웨이크 전제, interrupt_subscription.cpp 참고) - 항상
+                // 위 레지스터 재확인으로 돌아간다.
+                kernel::WaitInterruptArgs waitArgs;
+                waitArgs.vector = args->irqVector;
+                kernel::AsyncTask* waitTask = nullptr;
+                {
+                    kernel::PreemptionGuard guard;
+                    waitTask =
+                        kernel::AsyncTask::submit(waitSubjectCode, 0, &waitArgs, /*autoFree=*/false, /*preemptive=*/true);
+                    if (waitTask) {
+                        waitTask->submitterTask =
+                            kernel::TaskOwnerRef::capture(kernel::WeakPtr<kernel::Task>(kCurrentFsTask()));
+                    }
+                }
+                if (waitTask) {
+                    co_await kernel::AsyncTaskCoroAwaiter(waitTask);
+                    continue;
+                }
+                // AsyncTask::submit 실패(자원 고갈) - 아래 폴링 폴백으로 진행.
+            }
             // [수정, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6] 이 onExec은
             // 진짜 코루틴이라(co_return이 있어 컴파일러가 코루틴으로
             // 변환) raw AsyncTask::yield()(kContextSwitch 기반, 전용
             // 스택 필요)를 여기서 호출하면 실측으로 확인된 무한
             // 대기가 발생했다 - 코루틴 전용 짝인 AsyncTaskCoroYield로
             // 교체(async_task.h 문서 주석 참고, 매 반복 레지스터를
-            // 다시 읽어야 하는 이 패턴에 정확히 맞는 프리미티브).
+            // 다시 읽어야 하는 이 패턴에 정확히 맞는 프리미티브). 인터럽트
+            // 미배정 시의 폴백 경로로도 그대로 쓰인다.
             co_await kernel::AsyncTaskCoroYield{};
         }
 
@@ -263,10 +366,12 @@ void kEnsureAhciCommandHandlerRegistered() {
 
 }  // namespace
 
-bool AhciPort::init(uint64_t hbaVirtAddr, uint32_t portIndex, uint32_t slotCount, bool use32BitDma) {
+bool AhciPort::init(uint64_t hbaVirtAddr, uint32_t portIndex, uint32_t slotCount, bool use32BitDma,
+                     uint32_t irqVector) {
     _portRegBase = hbaVirtAddr + kPortRegionBase + static_cast<uint64_t>(portIndex) * kPortRegionStride;
     _slotCount = slotCount;
     _use32BitDma = use32BitDma;
+    _irqVector = irqVector;
 
     // §3.3.7 포트 시작 절차(사양) - PxCLB/PxFB를 새로 채우기 전에 이미
     // 실행 중이면 먼저 정지시킨다(부팅 직후라 보통 이미 꺼져 있지만
@@ -314,6 +419,16 @@ bool AhciPort::init(uint64_t hbaVirtAddr, uint32_t portIndex, uint32_t slotCount
     // 초기화 절차) - PxSERR/PxIS는 write-1-to-clear.
     *kReg32(_portRegBase, kPortSerr) = 0xFFFFFFFFu;
     *kReg32(_portRegBase, kPortIs) = 0xFFFFFFFFu;
+
+    // [신규, 2026-09-22, PN-FFFE892E] irqVector가 배정돼 있으면(MSI
+    // capability 있음+enableMsi 성공) 이 포트의 정상 완료(DHRS)/NCQ
+    // 완료(SDBS)/주요 에러 인터럽트를 켠다 - GHC.IE(전역)는
+    // AhciController::init()이 별도로 켠다. 미배정이면(irqVector==0)
+    // 이 비트들을 켜지 않아 AhciCommandHandler가 자동으로 폴링
+    // 폴백을 쓴다(§3.3.3, 켜지지 않은 인터럽트는 절대 발생하지 않음).
+    if (irqVector != 0) {
+        *kReg32(_portRegBase, kPortIe) = kPortIeDhre | kPortIeSdbe | kPortIeTfee | kPortIeHbfe | kPortIeIfe;
+    }
 
     // FIS 수신 엔진을 먼저 켠 뒤(FRE) 커맨드 리스트 처리도 켠다(ST) -
     // 사양이 요구하는 순서(§10.1.2) 그대로. 장치가 실제로 붙어 있는지
@@ -618,6 +733,7 @@ kernel::AsyncTask* AhciPort::submitAtaCommand(uint8_t command, uint64_t lba, uin
     args->callerBuf = callerBuf;
     args->byteCount = dataBytes;
     args->outResult = outResult;
+    args->irqVector = _irqVector;
 
     kEnsureAhciCommandHandlerRegistered();
     return kernel::AsyncTask::submit(gAhciCommandSubjectCode, 0, args, /*autoFree=*/false);
@@ -656,11 +772,25 @@ bool AhciPort::flushCache() {
     return issueAtaCommand(kAtaCommandFlushCacheExt, 0, 0, false, 0, 0);
 }
 
-bool AhciController::init(uint64_t mmioVirtAddr) {
+bool AhciController::init(uint64_t mmioVirtAddr, uint32_t irqVector) {
     _mmioVirtAddr = mmioVirtAddr;
+
+    // [신규, 2026-09-22, PN-FFFE892E] irqVector가 배정돼 있으면(fs.cpp의
+    // kRequestIoPermissionSync가 이미 Pci::enableMsi+InterruptDelegation::allow
+    // 까지 끝내 둔 상태) fs 자신을 먼저 그 벡터의 구독자로 등록한 뒤에만
+    // GHC.IE/PxIE를 켠다 - 구독보다 먼저 인터럽트를 켜면 그 사이에 온
+    // 인터럽트를 아무도 못 받는 채로 유실될 수 있다(구독 실패 시 폴링
+    // 폴백으로 안전하게 후퇴 - irqVector를 0으로 되돌려 하위 포트
+    // 초기화가 인터럽트를 켜지 않게 한다).
+    if (irqVector != 0 && !kSubscribeAhciInterrupt(irqVector)) {
+        irqVector = 0;
+    }
 
     volatile uint32_t* ghc = kReg32(mmioVirtAddr, kRegGhc);
     *ghc |= kGhcAe;
+    if (irqVector != 0) {
+        *ghc |= kGhcIe;
+    }
 
     const uint32_t cap = *kReg32(mmioVirtAddr, kRegCap);
     const uint32_t numPorts = (cap & kCapNpMask) + 1;
@@ -673,7 +803,7 @@ bool AhciController::init(uint64_t mmioVirtAddr) {
         if (!(_portsImplemented & (1u << i))) {
             continue;
         }
-        _portInitialized[i] = _ports[i].init(mmioVirtAddr, i, _slotCount, use32BitDma);
+        _portInitialized[i] = _ports[i].init(mmioVirtAddr, i, _slotCount, use32BitDma, irqVector);
     }
     return true;
 }

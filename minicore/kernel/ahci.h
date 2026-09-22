@@ -59,7 +59,12 @@ public:
     // 64비트 물리주소를 못 받음)이면 true - AllocDmaBuffer 호출마다
     // physAddrLimit=32로 강제한다(SP-39F18E30 §5-A, 레거시 대비용이지만
     // AHCI 컨트롤러도 이론상 S64A=0일 수 있어 그대로 존중).
-    bool init(kernel::uint64_t hbaVirtAddr, kernel::uint32_t portIndex, kernel::uint32_t slotCount, bool use32BitDma);
+    // [갱신, 2026-09-22, PN-FFFE892E] irqVector - fs.cpp의
+    // `kRequestIoPermissionSync()`가 배정한 MSI 벡터(0이면 미배정 -
+    // MSI capability가 없거나 실패, 폴링만 가능). AhciCommandHandler가
+    // 완료 대기에 이 벡터로 WaitInterrupt를 건다.
+    bool init(kernel::uint64_t hbaVirtAddr, kernel::uint32_t portIndex, kernel::uint32_t slotCount, bool use32BitDma,
+              kernel::uint32_t irqVector);
 
     // §3.1 "최소한의 실제 I/O" 검증 지점 - 비-NCQ IDENTIFY DEVICE(0xEC)
     // 를 슬롯 free-list에서 하나 빌려 발급하고 완료까지 폴링한다(인터럽트
@@ -148,13 +153,19 @@ private:
     kernel::uint32_t _usableSlotCount = 1;
     bool _ncqSupported = false;
     bool _slotUsed[kMaxCommandSlots] = {};
+    // [신규, 2026-09-22, PN-FFFE892E] 0=미배정(폴링), 그 외=이 포트가
+    // 속한 컨트롤러가 배정받은 MSI 벡터 - submitAtaCommand()가 발급하는
+    // AhciCommandArgs에 그대로 실어 보낸다.
+    kernel::uint32_t _irqVector = 0;
 };
 
 // [SP-C2670F69 §3.1] HBA 초기화 - GHC.AE 설정, CAP으로 포트/슬롯 수
 // 확인, PI 비트마스크로 실제 존재하는 포트만 AhciPort로 구성한다.
 class AhciController {
 public:
-    bool init(kernel::uint64_t mmioVirtAddr);
+    // [갱신, 2026-09-22, PN-FFFE892E] irqVector - AhciPort::init()으로
+    // 그대로 전달한다(문서 주석 참고).
+    bool init(kernel::uint64_t mmioVirtAddr, kernel::uint32_t irqVector);
 
     // 초기화된 포트 중 실제로 장치가 붙어 있는(DET==3) 첫 번째 포트를
     // 찾아 IDENTIFY DEVICE까지 실행한다. 성공하면 outPort에 그 포트를

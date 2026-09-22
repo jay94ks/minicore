@@ -365,23 +365,6 @@ UnsubscribeInterruptHandler gUnsubscribeInterruptHandler;
 WaitInterruptHandler gWaitInterruptHandler;
 GetInterruptDumpHandler gGetInterruptDumpHandler;
 
-// [신규, 2026-09-22, PN-FFFE892E] 커널 내부(트랩 아님) 호출자를 위한
-// subjectCode - `ahci.cpp`의 `AhciCommandHandler`처럼 순수 커널
-// 드라이버가 `AsyncTask::submit(subjectCode, ...)`로 Subscribe/Wait를
-// 직접 부를 수 있게 한다(`vfs_syscall.cpp`가 `KernelFsDriver`를 부르는
-// 것과 동일한 패턴 - syscall 등록은 그대로 유지, 이건 추가 경로).
-AsyncTaskSubjectCode gSubscribeInterruptSubjectCode = 0;
-AsyncTaskSubjectCode gWaitInterruptSubjectCode = 0;
-bool gInternalSubjectCodesRegistered = false;
-
-void kEnsureInternalSubjectCodesRegistered() {
-    if (!gInternalSubjectCodesRegistered) {
-        gSubscribeInterruptSubjectCode = AsyncCallbackRegistry::registerHandler(&gSubscribeInterruptHandler);
-        gWaitInterruptSubjectCode = AsyncCallbackRegistry::registerHandler(&gWaitInterruptHandler);
-        gInternalSubjectCodesRegistered = true;
-    }
-}
-
 }  // namespace
 
 // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] UnsubscribeInterruptHandler와
@@ -426,16 +409,6 @@ void InterruptSubscriptionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointWaitInterrupt, &gWaitInterruptHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointUnsubscribeInterrupt, &gUnsubscribeInterruptHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointGetInterruptDump, &gGetInterruptDumpHandler);
-}
-
-AsyncTaskSubjectCode InterruptSubscriptionService::subscribeSubjectCode() {
-    kEnsureInternalSubjectCodesRegistered();
-    return gSubscribeInterruptSubjectCode;
-}
-
-AsyncTaskSubjectCode InterruptSubscriptionService::waitSubjectCode() {
-    kEnsureInternalSubjectCodesRegistered();
-    return gWaitInterruptSubjectCode;
 }
 
 }  // namespace kernel

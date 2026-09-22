@@ -22,10 +22,13 @@
 // `Fat32Driver::mount()`를 시도해 슈퍼블록을 판별하고, 성공하면 4개
 // 마운트 지점 중 `/sys/mnt`의 Channel 등록을 해제하고 그 자리에 실제
 // `KernelDriver`로 다시 마운트한다 - 이때부터 `/sys/mnt`는 실제 디스크
-// 내용을 서비스한다(단, 이 파일 자신은 §9 Open/Read syscall 프로토콜이
-// 아직 없어 그 경로를 유저 프로세스에게 실제로 열어 주지는 못한다 -
-// `KernelFsDriver` 디스패치 자체는 `AsyncTask::submit()`으로 이미
-// 검증됨, `PN-9AE5BFE4`/`PN-EBAEA67B`). 알려진 포맷을 못 찾으면(장치
+// 내용을 서비스한다. **[정정, 2026-09-22, PN-452FF696 참고]** 이 절이
+// 원래 "§9 Open/Read syscall 프로토콜이 아직 없다"고 적어 뒀던 건
+// 착오였다 - `vfs_syscall.cpp`의 9개 syscall 핸들러(Open/Close/Read/
+// Write/Lseek/Stat/Readdir/Mkdir/Unlink)는 이미 5일 전에 완료돼
+// 있었다(`PN-EA4EE935` 등). 유저 프로세스는 실제로 `/sys/mnt`의
+// `KernelDriver` 경로를 통해 파일을 열고 읽을 수 있다. 알려진 포맷을
+// 못 찾으면(장치
 // 없음/미지원 포맷) `/sys/mnt`는 그대로 기존 Channel 라우팅으로
 // 남는다 - 나머지 세 지점(`/sys/etc`/`/sys/bin`/`/sys/tmp`)의 accept
 // 왕복 검증(accept 즉시 close, pubreg 항목3과 동일 패턴)은 이번
@@ -148,7 +151,11 @@ void kProbeAndInitAhci(const SharedPtr<Task>& self) {
             continue;  // 이 장치 실패 - 다음 후보로(RM-23F4B687 §4, 장치 하나 실패가 서비스 전체를 막으면 안 됨)
         }
 
-        if (!gAhciController.init(mappedAddr)) {
+        // [갱신, 2026-09-22, PN-FFFE892E] irqVector를 더 이상 버리지
+        // 않는다 - AhciController::init()이 이 벡터로 fs 자신을
+        // 구독시키고 GHC.IE/PxIE를 켜 인터럽트 기반 완료 대기로
+        // 전환한다(0이면 기존 폴링 그대로).
+        if (!gAhciController.init(mappedAddr, irqVector)) {
             continue;
         }
 
