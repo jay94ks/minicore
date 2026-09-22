@@ -1,6 +1,8 @@
 #include "pnp.h"
 
 #include "address_space.h"
+#include "interrupt_subscription.h"
+#include "lapic.h"
 #include "libkenv/spinlock.h"
 #include "paging.h"
 #include "pci.h"
@@ -384,6 +386,30 @@ void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescri
     *capacity = filled;
 }
 
+// [신규, 2026-09-22, PN-4FF8CCBE] MSI/MSI-X 동적 인터럽트 벡터 배정
+// 정책 - `Idt`(idt.h)가 33-254를 IOAPIC/MSI 라우팅용 범용 벡터로 비워
+// 둔 것 중 다음 미사용 번호를 순서대로 배정하는 v1 최소 방식(코어별
+// 분산 배정은 채택하지 않음 - 실제 인터럽트 기반 드라이버가 여럿
+// 생겨 부하가 실측되면 그때 확장, RM-23F4B687 §4). 순수 단조 증가
+// 카운터만으로는 wraparound 시 이미 배정된 번호와 부딪힐 수 있어,
+// `InterruptDelegation::isAllowed()`로 이미 위임된 벡터는 건너뛰는
+// 최소한의 방어를 둔다(그래도 33-254 전체가 소진되면 실패로 처리).
+constexpr uint32_t kMsiVectorRangeStart = 33;
+constexpr uint32_t kMsiVectorRangeEnd = 254;  // inclusive
+uint32_t gNextMsiVector = kMsiVectorRangeStart;
+
+uint32_t kAllocateMsiVector() {
+    constexpr uint32_t kRangeCount = kMsiVectorRangeEnd - kMsiVectorRangeStart + 1;
+    for (uint32_t attempts = 0; attempts < kRangeCount; ++attempts) {
+        const uint32_t candidate = gNextMsiVector;
+        gNextMsiVector = (gNextMsiVector >= kMsiVectorRangeEnd) ? kMsiVectorRangeStart : gNextMsiVector + 1;
+        if (!InterruptDelegation::isAllowed(candidate)) {
+            return candidate;
+        }
+    }
+    return 0;  // 33-254 전체 소진 - 호출부가 실패로 처리(0=미배정, RequestIoPermissionArgs 문서 주석과 동일한 관례)
+}
+
 // [신규, 2026-09-20, SP-43331889 §7(fs 전환)] `RequestIoPermissionHandler::
 // onExec()` 본문 - pnp.h 선언 참고. `caller`가 트랩 경로에선 이미
 // `task->submitterTask.lock()`로 해석된 뒤 넘어오지만(null 가드는
@@ -447,8 +473,29 @@ void kRequestIoPermissionSync(const SharedPtr<Task>& caller, uint32_t bus, uint3
         return;
     }
 
+    // [신규, 2026-09-22, PN-4FF8CCBE] MSI 벡터 배정 - capability가 없는
+    // 장치(대다수 legacy PCI, 레거시 INTx만 지원)는 enableMsi()가
+    // false를 반환하므로 assignedIrqVector는 0으로 남는다(§3.1 "0=
+    // 아직 미배정"과 동일한 관례 - 호출부가 INTx 폴백 여부를 판단).
+    // 벡터 풀 소진(kAllocateMsiVector()==0)도 같은 방식으로 처리한다.
+    // enableMsi()를 먼저 시도한다(capability 없는 장치엔 아무 상태도
+    // 안 바꾸고 false만 반환) - 성공했을 때만 InterruptDelegation::allow()
+    // 로 벡터를 "사용 중"으로 확정한다. 순서를 반대로 하면 MSI
+    // capability가 없는 장치를 만날 때마다 벡터 하나씩을 영구히
+    // 허비하게 된다(kAllocateMsiVector()가 isAllowed()로 스킵).
+    uint32_t assignedVector = 0;
+    const uint32_t candidateVector = kAllocateMsiVector();
+    if (candidateVector != 0) {
+        const uint32_t destApicId = Lapic::id();
+        if (Pci::enableMsi(static_cast<uint8_t>(bus), static_cast<uint8_t>(device), static_cast<uint8_t>(function),
+                            candidateVector, destApicId) &&
+            InterruptDelegation::allow(candidateVector)) {
+            assignedVector = candidateVector;
+        }
+    }
+
     *outMappedVirtualAddr = mappedAddr;
-    *outAssignedIrqVector = 0;  // v1: MSI/MSI-X 배정 미구현(문서 주석 참고)
+    *outAssignedIrqVector = assignedVector;
     *outError = ChannelError::None;
 }
 
