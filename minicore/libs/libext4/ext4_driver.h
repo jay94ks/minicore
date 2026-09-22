@@ -11,22 +11,22 @@
 // 어댑터 - `LiveFs`/`ProcFs`와 동일한 관례로 args의 `KernelFsOpCode`
 // 태그를 분기한다.
 //
-// **[범위, 2026-09-22, PN-9AE5BFE4 실측 발견]** `mount()`/`remount()`
-// 만 `Ext4Volume`을 실제로 호출한다(진짜 `kernel::Task` 컨텍스트에서
-// 한 번 동기 호출되는 준비 단계라 안전, 실측 검증 완료) - `onExec`은
-// I/O가 필요한 5개 op(Open/Read/Stat/Readdir/Write) 전부에서
-// `Ext4Volume`을 호출하지 않고 명시적 실패만 반환한다. 이유는
-// ext4_driver.cpp의 `onExec` 문서 주석 참고 - `Ext4Volume`의 I/O가
-// Task 레벨 블로킹(`BlockDevice::readBlocks()`)에 의존하는데,
-// `onExec`은 코루틴(`AsyncReactor::drainOnce()` 안에서 실행)이라
-// 그 안에서 호출하면 실측으로 확인된 무한 대기가 발생한다
-// (`QU-FF7044DA`로 설계자 확인 요청 등록, CLAUDE.md 규칙4 - 임의로
-// 정하지 않음).
+// **[갱신, 2026-09-22, PN-9AE5BFE4 완료]** `mount()`/`remount()`만
+// `Ext4Volume`을 직접 호출한다(진짜 `kernel::Task` 컨텍스트에서 한
+// 번 동기 호출되는 준비 단계라 안전, 실측 검증 완료). `onExec`은
+// I/O가 필요한 Open/Read/Stat/Readdir을 `Ext4Volume`의 (이미 제거된)
+// 동기 헬퍼로 재사용하지 않고, `co_await kernel::AsyncTaskCoroAwaiter
+// (...)`를 `onExec` 자신의 코루틴 몸체 안에 직접 박아 넣는 평탄화
+// (flatten)된 버전으로 실제로 I/O까지 수행한다(QEMU 실측 검증
+// 완료) - `Ext4Volume`의 동기 래퍼를 그대로 썼다가 실측으로 확인된
+// 무한 대기(`QU-FF7044DA`)를 피하기 위함. 자세한 이유/메커니즘은
+// ext4_driver.cpp 상단 문서 주석 참고. `Write`/`Mkdir`/`Rmdir`/
+// `Unlink`만 libext4 1차 증분 자체의 쓰기 경로 미구현으로 여전히
+// 명시적 실패(PermissionDenied)를 반환한다.
 //
-// FileHandle 인코딩(설계만 - 위 이유로 아직 실제로 안 씀): ext4는
-// inode 번호 자체가 재조회 가능한 단일 정수 식별자라(FAT류와 달리)
-// `FileHandle::value`에 inode 번호를 그대로 담을 수 있다 - 별도
-// open-handle 테이블이 필요 없다(무상태).
+// FileHandle 인코딩: ext4는 inode 번호 자체가 재조회 가능한 단일
+// 정수 식별자라(FAT류와 달리) `FileHandle::value`에 inode 번호를
+// 그대로 담는다 - 별도 open-handle 테이블이 필요 없다(무상태).
 //
 // `Write`/`Mkdir`/`Rmdir`/`Unlink` op는 위 코루틴 문제와 별개로도
 // `libext4` 1차 증분 자체가 아직 쓰기 경로를 구현하지 않아

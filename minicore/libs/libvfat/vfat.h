@@ -119,10 +119,10 @@ inline uint32_t kFatFirstCluster(const DirEntry& e) {
     return (static_cast<uint32_t>(e.fstClusHi) << 16) | e.fstClusLo;
 }
 
-// resolvePath()/findDirEntry()가 돌려주는, 디렉터리 엔트리 하나의
-// 요약 - FAT엔 ext4의 inode 같은 별도 메타데이터 테이블이 없어서
-// (크기/디렉터리 여부가 전부 부모 디렉터리 엔트리 자신에 있음) 매번
-// 이 세 값을 통째로 들고 다닌다.
+// Fat32Driver::onExec()이 `FileHandle::value`에 인코딩해 들고
+// 다니는, 디렉터리 엔트리 하나의 요약 - FAT엔 ext4의 inode 같은 별도
+// 메타데이터 테이블이 없어서(크기/디렉터리 여부가 전부 부모 디렉터리
+// 엔트리 자신에 있음) 이 세 값을 통째로 들고 다녀야 한다.
 struct ResolvedEntry {
     uint32_t firstCluster = 0;
     uint64_t fileSize = 0;   // 디렉터리는 항상 0(스펙 - 크기는 클러스터 체인 길이로만 앎)
@@ -130,52 +130,46 @@ struct ResolvedEntry {
 };
 
 // ---------------------------------------------------------------------
-// 4. Fat32Volume - 읽기 전용 마운트/경로 탐색/읽기/디렉터리 열거.
+// 4. Fat32Volume - 읽기 전용 마운트 + 온디스크 레이아웃 상수 접근자.
 //
-// [범위, 2026-09-22, PN-F32F55A8] SP-A658A124 §4는 이 클래스를
-// `FileSystemDriver`(SP-2BCE5D60 §3.1)를 구현하는 `Fat32Driver`로
-// 스케치했다 - `PN-22784AD4`(libext4)에서 이미 발견한 것과 동일한
-// 이유(`QU-08ACD701`, 그 인터페이스가 실제 코드에 없고 fs가
-// `KernelFsDriver` 패턴으로 옮겨간 것과 어긋남)로 이번 증분은 §3
-// (온디스크 포맷)과 무상태 읽기 API만 구현하고 §4(VFS 통합 계층)는
-// 만들지 않는다 - `QU-08ACD701` 답변을 기다린다. 쓰기 경로(mkdir/
-// unlink/write)도 이번 증분에 포함하지 않는다(libext4와 동일한
-// "작은 단위로 쪼개 순서대로 완성" 원칙).
+// [범위 변경, 2026-09-22, PN-EBAEA67B, PN-9AE5BFE4(Ext4Driver)가 먼저
+// 겪은 것과 동일한 실측 제약] 원래 있던 무상태 동기 메서드
+// (resolvePath/readData/readdirAt + private 헬퍼 clusterToSector/
+// nextCluster/findDirEntry)는 전부 제거했다 - 전부 내부적으로
+// `fs::BlockDevice::readBlocks()`(Task 레벨 블로킹 동기 래퍼)를
+// 쓰는데, 이건 `kernel::KernelFsDriver::onExec()`(코루틴,
+// `AsyncReactor::drainOnce()` 안에서 실행)에서 호출하면 실측 확인된
+// 무한 대기가 난다(`QU-FF7044DA` 설계자 답변 - "커널 내의 모든 동작은
+// 비동기 프레임워크 기반으로"). `Fat32Driver`(vfat_driver.h/.cpp)가
+// `kernel::AsyncTaskCoroAwaiter`(PN-6EDED542) 기반으로 `onExec` 자신의
+// 코루틴 몸체 안에 이 로직을 평탄화해 다시 구현한다
+// (`minicore/libs/libext4/ext4_driver.cpp`와 동일한 패턴 - 자세한
+// 이유는 그 파일 상단 문서 주석 참고). 이 클래스엔 `mount()`와, 그
+// 평탄화된 onExec가 스스로 I/O를 조립하는 데 필요한 읽기 전용
+// 접근자만 남긴다.
 // ---------------------------------------------------------------------
 class Fat32Volume {
 public:
     // 부트 섹터(LBA 0)를 읽어 시그니처/BPB를 확인하고, §3.2 클러스터
     // 수 계산으로 실제 FAT32인지 재확인한다(fileSystemType 문자열은
-    // 신뢰하지 않는다 - 스펙 원문의 경고 그대로).
+    // 신뢰하지 않는다 - 스펙 원문의 경고 그대로). 진짜 kernel::Task
+    // 컨텍스트(Fat32Driver::mount(), MountTable::mountKernel() 등록
+    // 이전 1회 준비 단계)에서만 호출하는 게 안전 - onExec 코루틴
+    // 안에서는 호출하지 않는다(위 클래스 문서 주석).
     bool mount(fs::BlockDevice* device);
 
     // 이 볼륨의 루트 디렉터리 첫 클러스터(BPB의 rootCluster) - 최상위
     // 탐색의 시작점.
     uint32_t rootFirstCluster() const { return ext32_.rootCluster; }
 
-    // "/a/b/c" 형태의 절대 경로를 루트부터 세그먼트별로 탐색한다 -
-    // 각 세그먼트를 8.3 형식으로 정규화해 비교(대소문자 무시, 스펙
-    // 자체가 8.3 이름을 항상 대문자로 저장).
-    bool resolvePath(const char* path, uint32_t pathLen, ResolvedEntry* out);
-
-    // 논리 오프셋 기준 읽기(POSIX pread 스타일, 상태 없음) - FAT엔
-    // 재조회 가능한 inode 번호가 없어 firstCluster/fileSize를 호출부가
-    // (resolvePath 결과 그대로) 매번 넘긴다.
-    uint32_t readData(uint32_t firstCluster, uint64_t fileSize, uint64_t offset, void* buf, uint32_t len,
-                       bool* outOk);
-
-    // 디렉터리(첫 클러스터로 식별)의 0-based 인덱스 순회 - LFN(0x0F)/
-    // 삭제됨(0xE5)/볼륨 라벨(VOLUME_ID) 엔트리는 자동으로 건너뛴다.
-    bool readdirAt(uint32_t dirFirstCluster, uint64_t index, char* nameOut, uint32_t nameOutCap,
-                   uint32_t* outNameLen, bool* outIsDir, uint32_t* outFirstCluster);
+    fs::BlockDevice* device() const { return device_; }
+    uint32_t bytesPerSectorValue() const { return bpb_.bytesPerSector; }
+    uint32_t sectorsPerClusterValue() const { return bpb_.sectorsPerCluster; }
+    uint32_t bytesPerClusterValue() const { return bytesPerCluster_; }
+    uint32_t fatStartSectorValue() const { return fatStartSector_; }
+    uint32_t dataStartSectorValue() const { return dataStartSector_; }
 
 private:
-    bool clusterToSector(uint32_t cluster, uint32_t* outSector) const;
-    // FAT 테이블에서 cluster의 다음 클러스터를 읽는다 - EOC/BAD/손상은
-    // false(호출부가 "체인 끝"으로 처리).
-    bool nextCluster(uint32_t cluster, uint32_t* outNext);
-    bool findDirEntry(uint32_t dirFirstCluster, const char* name, uint32_t nameLen, ResolvedEntry* out);
-
     fs::BlockDevice* device_ = nullptr;
     BpbCommon bpb_{};
     Fat32Extended ext32_{};
