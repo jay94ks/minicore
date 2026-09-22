@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-22T22:03:56.851Z
+  updatedAt: 2026-09-22T22:34:09.687Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -489,6 +489,30 @@ QEMU 회귀 무회귀. **쓰기 시 재계산**은 exFAT 쓰기 경로 자체가
   둔 "폴트를 pendingSyscalls 항목으로 모델링" 흐름 재사용)까지 같은
   단위로 함께 구현해야 한다 - 쓰기만 만들고 읽기를 미루면 그 자체가
   새로운 실제 갭이 된다.
+
+  **[추가 조사, 2026-09-23, 같은 세션 다음 틱]** 착수를 실제로
+  시도해보니 예상보다 한 겹 더 있었다 - `kReclaimScanCallback()`
+  (page_frame_allocator.cpp, §7.2 5단계 자리가 이미 주석으로 표시돼
+  있음)은 `DelayedExecutionQueue::pump()`가 `AsyncReactor::
+  drainOnce()` 안에서 중첩 호출하는 평범한 함수 포인터 콜백이라
+  코루틴이 아니다(`co_await` 불가) - 반면 `SwapfsBackend::writeSlot`/
+  `readSlot`(libswapfs)은 순수 동기 함수(`device_->writeBlocks()`
+  블로킹 래퍼)뿐이다. 즉 "이제 AHCI가 인터럽트 기반이니 그냥
+  writeSlot을 부르면 된다"가 아니라, **스캔 콜백이 직접 I/O를
+  못 하므로 별도의 코루틴 기반 `AsyncTaskHandler`(ext4/vfat/exfat
+  드라이버의 onExec와 동일한 "평탄화 co_await" 패턴)를 새로 만들어
+  스캔은 그 핸들러를 non-blocking `AsyncTask::submit()`으로 제출만
+  하고, 그 핸들러의 `onExec` 코루틴 안에서
+  `co_await kernel::AsyncTaskCoroAwaiter(device_->submitWriteBlocks(...))`
+  로 실제 쓰기를 완료한 뒤(이 완료는 나중에 drainOnce()가 정상적으로
+  재진입할 때 자연스럽게 처리됨 - 스캔 콜백 자신은 블로킹 대기 없이
+  즉시 반환) 물리 프레임을 반납해야 한다**. 안전 최우선 판단으로
+  이 세션에서는 구현을 시작하지 않았다(메모리 회수/페이지 폴트는
+  이 세션에서 이미 여러 차례 미묘한 재진입/데드락 버그가 나온
+  영역 - `QU-41F78A3E`/`PN-A0CEF82D` 등 - 서두르지 않는 편이 안전
+  하다고 판단) - 다음 착수 세션은 이 3개 조각(async 쓰기 핸들러 +
+  스캔의 non-blocking 제출 배선 + swap-in 폴트 핸들러)을 전부 하나의
+  검증 단위로 준비하고 들어갈 것.
 
 - **[점검 완료, 2026-09-21] `SP-E9B44929`(Syscall Group+Call 2단계
   인코딩, approved)** - §7 요약 절이 §6의 세 미결 질문(슬롯 저장
