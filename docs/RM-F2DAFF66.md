@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-22T21:28:53.080Z
+  updatedAt: 2026-09-22T22:03:56.851Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -464,6 +464,31 @@ QEMU 회귀 무회귀. **쓰기 시 재계산**은 exFAT 쓰기 경로 자체가
 없어 이번 범위 밖(쓰기 경로 착수 시 함께 구현 예정).
 
 ## §2. 점검 완료 - 갭 없음 확인
+
+- **[점검 완료, 2026-09-23] `SP-D02C4A73`(libswapfs, approved
+  2026-09-22) §4 - 스왑 PTE 인코딩/폴트-인 경로 미구현은 "실제 갭"이
+  아니라 이미 정직하게 문서화된 의도적 범위 결정** - §4.2(폴트-인
+  경로, `Paging::handlePageFault()`의 `PAGE_SWAP_MARKER` 분기)와
+  §4.1(스왑아웃 경로 배선)이 `PAGE_SWAP_MARKER`/`kMakeSwapPte`/
+  `kSwapSlotFromPte`(paging.h)가 정의만 되고 코드 어디서도 호출되지
+  않는 상태임을 확인해 처음엔 §1급 발견으로 의심했으나, 원 구현
+  계획 `PN-6D9A5DAE`(completed) 본문이 "이번 범위에서 하지 않은 것"
+  절에서 이미 정확히 같은 사실을 스스로 밝히고 있었다(`SP-6CEFBE9B`
+  §6/§7의 rmap/reclaim 스캐너 자체가 그때 아직 없어 붙일 자리가
+  없었다는 근거와 함께) - CLAUDE.md 규칙4를 지킨 정직한 스코프 컷.
+  후속 의존 사슬(`PN-6D9A5DAE`→`PN-4859FDE9`§7.2 5단계→`PN-FFFE892E`)
+  도 전부 정확히 추적돼 있었다. **새로 확인한 사실**: `PN-FFFE892E`
+  (AHCI 인터럽트 기반 완료 전환, §7.2 5단계의 데드락 위험을 없애는
+  진짜 선행 조건)가 이제 완료(commit 30cc142)돼 있어, `PN-4859FDE9`
+  §7.2 5단계(실제 회수+스왑 쓰기)가 착수 가능 상태다 - `PN-4859FDE9`
+  본문이 이미 "다음 틱 후보"로 스스로 기록해 둔 그대로라 새 계획
+  등록은 불필요. **남은 주의점**: 쓰기(swap-out) 경로를 먼저 완성해도
+  §4.2(swap-in) 없이는 스왑된 페이지가 영원히 복구 불가능하므로,
+  `PN-4859FDE9` §7.2 5단계 착수 세션은 반드시 `SP-D02C4A73` §4.2
+  (`Paging::handlePageFault()` 확장, `SP-0666DB3C` §7이 이미 확정해
+  둔 "폴트를 pendingSyscalls 항목으로 모델링" 흐름 재사용)까지 같은
+  단위로 함께 구현해야 한다 - 쓰기만 만들고 읽기를 미루면 그 자체가
+  새로운 실제 갭이 된다.
 
 - **[점검 완료, 2026-09-21] `SP-E9B44929`(Syscall Group+Call 2단계
   인코딩, approved)** - §7 요약 절이 §6의 세 미결 질문(슬롯 저장
