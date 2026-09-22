@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-22T22:34:09.687Z
+  updatedAt: 2026-09-22T22:37:56.583Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -513,6 +513,17 @@ QEMU 회귀 무회귀. **쓰기 시 재계산**은 exFAT 쓰기 경로 자체가
   하다고 판단) - 다음 착수 세션은 이 3개 조각(async 쓰기 핸들러 +
   스캔의 non-blocking 제출 배선 + swap-in 폴트 핸들러)을 전부 하나의
   검증 단위로 준비하고 들어갈 것.
+
+- **[점검 완료, 2026-09-23] `SP-AA6DF406`(libntfs, approved
+  2026-09-22) §3.2 - MFT 레코드 fixup(Update Sequence Array) 검증/
+  복원, 문서 자신이 "이 단계를 빠뜨리면 모든 파싱이 조용히 틀어진다"
+  고 명시적으로 경고해 둔 항목이라 최우선으로 대조** - `PN-52C577F3`
+  (NtfsDriver, completed)의 `kApplyFixup()`(ntfs_driver.cpp)이 정확히
+  구현돼 있음을 확인: magic=="FILE" 확인, USA 배열 경계 검사, **각
+  섹터 끝 2바이트가 저장된 USN과 실제로 일치하는지 검증**(불일치 시
+  거부 - 맹목적 복원이 아니라 진짜 무결성 검사)까지 전부 설계
+  그대로. 4개 레코드 읽기 호출부(Open/Stat/Readdir 등) 전부 이
+  함수를 거치는지도 grep으로 확인. **갭 없음.**
 
 - **[점검 완료, 2026-09-21] `SP-E9B44929`(Syscall Group+Call 2단계
   인코딩, approved)** - §7 요약 절이 §6의 세 미결 질문(슬롯 저장
@@ -1975,6 +1986,15 @@ AI가 스스로 승인 처리할 수 없어 보류 - `SP-A21DD889`에서도 동�
 (`PN-C4611402`의 "실제 취소 레이스" 재검증 - `PN-B5C2845A`가 열어
 준 뒤 이 세션이 실제로 QEMU에서 재현/확정했다. 아래 §2로 이동.)
 (`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
+
+**[2026-09-23] 2026-09-22 승인분 5개 SP 문서 재소진 확인 완료** -
+`SP-D02C4A73`(libswapfs)/`SP-A658A124`(libvfat)/`SP-7A9CED3E`
+(libext4)/`SP-F1987EF8`(libexfat)/`SP-AA6DF406`(libntfs) 전부 이
+방법론으로 대조 완료(libvfat/libext4는 이번 세션 직접 구현 작업
+중 자연스럽게 대조됨, 나머지 3개는 이 §3 스윕으로 별도 확인) -
+발견 1건(libexfat 체크섬, 아래 §1-S)+블로커 갱신 1건(libswapfs,
+§2)+갭 없음 확인 2건(libext4/libntfs). 다음 approved 전환 시까지
+이 §3 스윕은 다시 건너뛴다(2026-09-21 절과 동일한 재소진 패턴).
 
 **[2026-09-23] `SP-F1987EF8`(libexfat) 점검 완료 - 갭 발견/해소**
 (`PN-831A3998`, commit `863113f`) - §3.5가 "setChecksum은 읽기 시
