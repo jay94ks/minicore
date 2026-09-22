@@ -41,6 +41,41 @@ constexpr uint64_t PAGE_PAT = 1UL << 7;
 // 지금 준비해 둔다"는 원칙 그대로).
 constexpr uint64_t PAGE_COW = 1UL << 9;
 
+// [신규, 2026-09-22, SP-D02C4A73 §4, PN-6D9A5DAE] 스왑 PTE 인코딩 -
+// 이 커널 자신의 설계(외부 표준 없음, libswapfs의 온디스크 포맷과는
+// 별개 문제). x86_64 PTE는 `Present`(bit0)가 0이면 하드웨어가 나머지
+// 63비트를 완전히 무시한다(Intel SDM Vol.3A §4.5, "Not-Present"
+// 엔트리는 포맷이 소프트웨어 자유) - `PAGE_COW`(위, bit9)는 항상
+// `Present=1`인 leaf 엔트리에만 쓰이므로 이 인코딩과 절대 충돌하지
+// 않는다.
+//
+// Present=0인 PTE에서만 의미를 가진다: 이 비트가 1이면 "스왑아웃된
+// 페이지"(슬롯 번호가 비트 12-63에 인코딩돼 있음)라는 뜻이고, 0이면
+// 기존 그대로 "진짜 미매핑"(예: 아직 손대지 않은 anonymous VMA 영역,
+// 요구 페이징 이전)이다. bit1은 Present=1일 때 `PAGE_WRITABLE`이지만
+// Present=0에서는 하드웨어가 안 보므로 재사용에 아무 문제 없다.
+constexpr uint64_t PAGE_SWAP_MARKER = 1UL << 1;
+
+// 슬롯 번호는 비트 12~63(52비트) - libswapfs의 `SwapHeaderInfo::lastPage`
+// (32비트 상한)와 무관하게 넓게 잡아 둔다(SP-D02C4A73 §3.3 - lastPage는
+// "이 스왑 영역 하나의 크기" 제약일 뿐 PTE 인코딩 능력을 좁힐 이유가
+// 아님).
+constexpr uint64_t kSwapSlotShift = 12;
+
+// [SP-D02C4A73 §4] Present=0으로(PAGE_PRESENT 없이) 슬롯 번호를 인코딩한
+// PTE 값을 만든다 - 스왑아웃 경로(rmap 무효화 지점, SP-6CEFBE9B §6.2/
+// §7.2)가 present=0으로 바꾸는 그 순간 이 값을 쓴다.
+inline uint64_t kMakeSwapPte(uint64_t slot) {
+    return (slot << kSwapSlotShift) | PAGE_SWAP_MARKER;
+}
+
+// 호출 전 반드시 `(pte & PAGE_SWAP_MARKER) != 0`을 확인해야 한다 -
+// 이 함수 자신은 그 확인을 하지 않는다(마커가 꺼진 PTE는 "진짜
+// 미매핑"이라 슬롯 번호로 해석하면 안 됨).
+inline uint64_t kSwapSlotFromPte(uint64_t pte) {
+    return pte >> kSwapSlotShift;
+}
+
 // 커널이 임의 물리 프레임을 한 번에 볼 수 있게 만드는 direct physical
 // map(가상 kDirectMapBase + 물리주소 = 그 물리 프레임)의 시작 주소.
 // 실제 설치된 usable 메모리를 전부 덮도록 1GiB 페이지로 동적으로
