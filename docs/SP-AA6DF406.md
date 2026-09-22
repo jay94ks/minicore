@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-AA6DF406
   status: approved
-  updatedAt: 2026-09-22T04:43:50.443Z
+  updatedAt: 2026-09-22T04:56:09.894Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -309,11 +309,22 @@ struct NtfsIndexEntry {
 "아직 지원 안 함" - `SP-7A9CED3E` §2가 이미 확립한 관례와 동일한
 정직한 에러 처리).
 
-## 4. `NtfsDriver` 구현 — `FileSystemDriver` 인터페이스(1차 증분은 읽기 전용)
+## 4. `NtfsDriver` 구현 — `FileSystemDriver`(`kernel::KernelFsDriver` 확장) 인터페이스(1차 증분은 읽기 전용)
+
+**[해소, 2026-09-22, `QU-08ACD701` 설계자 답변("양쪽 모두를 수정하면서
+구현해")]** `SP-2BCE5D60` §3.1이 전면 재작성됐다 - `FileSystemDriver`는
+`kernel::KernelFsDriver`(`minicore/kernel/mount_table.h`,
+`AsyncTaskHandler` 상속)를 확장하는 것으로 재정의됐다. 새 타입을
+정의하지 않고 `mount_table.h`가 이미 가진 `VfsError`/`FileHandle`/
+`OpenResult`/`ReadResult`/`VfsDirEntry` + `KernelFsOpCode` 9종 Args
+구조체를 그대로 재사용한다 - `libext4`(`SP-7A9CED3E` §4)와 동일한
+패턴. 1차 증분이 읽기 전용이라는 점은 그대로 유효 - `onExec`이
+`Write`/`Mkdir`/`Rmdir`/`Unlink` op를 받으면 해당 `KernelFsXxxArgs::
+error`에 명시적으로 실패를 채워 반환한다(크래시 아님).
 
 ```cpp
 // minicore/libs/libntfs/ntfs.h
-class NtfsDriver : public FileSystemDriver {
+class NtfsDriver : public FileSystemDriver {  // FileSystemDriver : kernel::KernelFsDriver
 public:
     bool mount(BlockDevice* device, bool readOnly) override;  // 1차 증분은
                                                                  // readOnly=false로
@@ -321,15 +332,12 @@ public:
                                                                  // 반환(쓰기 미지원
                                                                  // 명시)
     bool remount(bool writable) override;   // 1차 증분은 writable=true 거부
-    OpenResult open(const char* relPath, uint32_t relPathLen, uint32_t flags) override;
-    void close(FileHandle handle) override;
-    ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) override;
-    WriteResult write(FileHandle handle, uint64_t offset, const void* buf, uint32_t len) override;  // 항상 실패(§2 후속1)
-    bool stat(const char* relPath, uint32_t relPathLen, StatBuf* out) override;
-    bool mkdir(const char* relPath, uint32_t relPathLen) override;   // 항상 실패(§2 후속1)
-    bool rmdir(const char* relPath, uint32_t relPathLen) override;   // 항상 실패(§2 후속1)
-    bool unlink(const char* relPath, uint32_t relPathLen) override;  // 항상 실패(§2 후속1)
-    bool readdir(FileHandle dirHandle, DirEntry* out) override;
+    // 파일 op 9종은 onExec 하나로 - args의 KernelFsOpCode 태그로 분기.
+    // Open/Read/Stat/Readdir은 §4.1/4.2의 무상태 함수를 호출, Write/
+    // Mkdir/Rmdir/Unlink는 항상 명시적 실패(위 참고).
+    void onExec(AsyncTask* task, void* args) override;
+    void onFailure(AsyncTask* task) override;
+    void onCancel(AsyncTask* task, void* args) override;
 
 private:
     BlockDevice* device_ = nullptr;
@@ -340,11 +348,11 @@ private:
 };
 ```
 
-`FileSystemDriver` 인터페이스 자체는 쓰기 메서드도 요구하지만(§4
-서명 그대로 유지 - 인터페이스를 쪼개지 않음, `SwapBackend`가 읽기
-전용 마운트 개념 자체를 아예 안 가진 것과 달리 이쪽은 인터페이스
-차원에서 "거부"로 표현 가능하므로 새 인터페이스가 필요 없음)
-쓰기 계열 메서드는 1차 증분에서 전부 명시적으로 실패를 반환한다.
+`mount()`/`remount()`는 `AsyncTaskHandler` 프로토콜과 별개로
+`MountTable::mountKernel()` 등록 전/후 한 번만 동기 호출되는 준비
+단계라 일반 가상함수로 남는다 - `FileSystemDriver`를 쪼개지 않고
+쓰기 계열 op를 `onExec` 내부에서 "거부"로 표현하는 것으로 1차 증분의
+읽기 전용 제약을 그대로 만족한다.
 
 ### 4.1 경로 해석
 

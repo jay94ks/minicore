@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-2BCE5D60
   status: approved
-  updatedAt: 2026-09-18T07:31:00.445Z
+  updatedAt: 2026-09-22T04:53:27.453Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -70,6 +70,21 @@ v1은 `libelf`처럼 매크로로 컴파일 모드만 구분해 두면 되고, �
 
 ## 3. 공통 드라이버 인터페이스 - `FileSystemDriver`
 
+**[전면 정정, 2026-09-22, `QU-08ACD701` 설계자 답변("양쪽 모두를
+수정하면서 구현해")]** §3.1 원안은 평범한 동기 가상함수 인터페이스
+(open/close/read/write/stat/mkdir/rmdir/unlink/readdir 9개)였으나,
+`PN-22784AD4`(libext4 구현)가 실제 코드와 대조하며 이게 한 번도
+코드로 존재한 적이 없다는 걸 발견했다 - fs가 `SP-43331889`로 순수
+커널 `KernelThread`로 흡수된 뒤 `LiveFs`/`ProcFs`/`ResourceGroupFs`
+전부 이미 `minicore/kernel/mount_table.h`의 `kernel::KernelFsDriver`
+(`AsyncTaskHandler` 상속, `KernelFsOpCode` 태그 기반 비동기 op 제출)
+패턴으로 구현돼 있었다. 설계자가 "양쪽 모두 수정"(`FileSystemDriver`
+쪽도, 각 드라이버 쪽도)을 지시해 아래로 전면 재작성한다 - **`FileSystemDriver`는
+독자적인 인터페이스가 아니라 `kernel::KernelFsDriver`를 확장하는
+것으로 재정의되고**, `Ext4Driver`/`Fat32Driver`/`ExfatDriver`/
+`NtfsDriver`는 옛 동기 시그니처 대신 `onExec`/`onFailure`/`onCancel`
+(`AsyncTaskHandler` 프로토콜)을 구현한다.
+
 ### 3.0 공통 블록 장치 인터페이스 - `BlockDevice` — [확정, 2026-09-18, 설계자 지시]
 
 `FileSystemDriver::mount`이 받는 `BlockDevice*`가 실제로 무엇을
@@ -109,61 +124,71 @@ class AhciBlockDevice : public BlockDevice { /* SP-C2670F69 §3.1 참고, 후속
 이 인터페이스를 받는다 - 파일시스템 드라이버/swapfs 백엔드 어느 쪽도
 device가 AHCI인지 USB인지 알 필요가 없다.
 
-### 3.1 파일시스템 드라이버 인터페이스
+### 3.1 파일시스템 드라이버 인터페이스 — `kernel::KernelFsDriver` 확장
 
-`SP-9DD4F3EA` §3.2(PnP `DeviceManager`/드라이버 매칭 패턴)와 같은
-결 - `fs` 서비스 내부에 드라이버 종류와 무관한 인터페이스를 둔다.
-설계자 지시("표준 파일 API들도 모두 설계에 포함시켜")에 따라 open/
-read/write 세 개뿐이던 초안을 표준 파일 API 전체(`SP-2AAD7C8D` §9)가
-요구하는 수준까지 확장한 상태:
+**타입/오퍼레이션은 새로 정의하지 않는다** - `minicore/kernel/
+mount_table.h`가 이미 실제 코드로 확정해 둔 `kernel::VfsError`/
+`FileHandle`/`OpenResult`/`ReadResult`/`VfsDirEntry`와, `KernelFsOpCode`
+(Open/Close/Read/Write/Stat/Mkdir/Rmdir/Unlink/Readdir) + 그 9개에
+대응하는 `KernelFsOpenArgs`/`KernelFsCloseArgs`/`KernelFsReadArgs`/
+`KernelFsWriteArgs`/`KernelFsStatArgs`/`KernelFsMkdirArgs`/
+`KernelFsRmdirArgs`/`KernelFsUnlinkArgs`/`KernelFsReaddirArgs`를
+그대로 재사용한다(각 Args 구조체의 첫 필드가 `op`라 `onExec()`가
+그 태그만으로 실제 타입을 재캐스팅해 분기 - `LiveFs`/`ProcFs`/
+`ResourceGroupFs`와 완전히 동일한 관례).
+
+`kernel::KernelFsDriver` 자신은 `mount(BlockDevice*)`가 없다(그
+드라이버들은 블록 장치가 필요 없는 순수 인메모리 뷰라서) - 이
+문서가 다루는 ext4/FAT류는 블록 장치가 반드시 필요하므로,
+`KernelFsDriver`를 그대로 확장하는 별도 서브타입으로 그 차이를
+표현한다:
 
 ```cpp
-// fs 서비스 내부(유저랜드), 파일시스템 종류와 무관한 공통 인터페이스
-struct StatBuf {
-    uint64_t size;
-    bool isDirectory;
-    // 생성/수정 시각 등은 각 드라이버 착수 시점에 확장(후속)
-};
-
-struct DirEntry {
-    char name[kMaxNameLen];
-    uint32_t nameLen;
-    bool isDirectory;
-};
-
-class FileSystemDriver {
+// minicore/kernel/mount_table.h의 kernel::KernelFsDriver를 그대로
+// 확장 - 새 인터페이스가 아니라 기존 인터페이스에 "마운트" 개념 하나만
+// 얹는다. mount()/remount()는 AsyncTaskHandler 프로토콜(onExec 등)과
+// 별개로, 그 드라이버가 MountTable::mountKernel()에 등록되기 전/후에
+// 동기적으로 한 번 호출되는 준비 단계일 뿐이다(파일 op 하나하나처럼
+// 매번 제출되는 요청이 아님 - 그래서 일반 가상함수로 남겨 둔다).
+class FileSystemDriver : public kernel::KernelFsDriver {
 public:
-    // readOnly: 부팅 초기 임시 읽기전용 마운트를 지원하기 위한 것 -
-    // §5.1의 부팅 필수 마운트(루트/`/sys` - 스왑은 대상 아님, §5.1
-    // 정정 참고) 단계가 true로 호출한다.
+    // readOnly: 부팅 초기 임시 읽기전용 마운트 지원(§5.1).
     virtual bool mount(BlockDevice* device, bool readOnly) = 0;   // BlockDevice 정의는 위 §3.0 참고
-    // [신규, 2026-09-18, 설계자 지시] readOnly=true로 마운트된 대상을
-    // 쓰기 가능으로 전환한다(§5 - init이 /sys/etc/mtab을 읽은 뒤 호출) -
-    // 이미 writable 상태에서 호출하면 아무 효과 없이 true.
+    // readOnly=true로 마운트된 대상을 쓰기 가능으로 전환(§5 - init이
+    // /sys/etc/mtab을 읽은 뒤 호출) - 이미 writable이면 아무 효과 없이 true.
     virtual bool remount(bool writable) = 0;
-    virtual OpenResult open(const char* relPath, uint32_t relPathLen, uint32_t flags) = 0;
-    virtual void close(FileHandle handle) = 0;
-    virtual ReadResult read(FileHandle handle, uint64_t offset, void* buf, uint32_t len) = 0;
-    virtual WriteResult write(FileHandle handle, uint64_t offset, const void* buf, uint32_t len) = 0;
-    virtual bool stat(const char* relPath, uint32_t relPathLen, StatBuf* out) = 0;
-    virtual bool mkdir(const char* relPath, uint32_t relPathLen) = 0;
-    virtual bool rmdir(const char* relPath, uint32_t relPathLen) = 0;
-    virtual bool unlink(const char* relPath, uint32_t relPathLen) = 0;
-    // 디렉터리 열거: open()으로 얻은 디렉터리 핸들에 대해 순차 호출 -
-    // 호출마다 다음 엔트리 하나씩(끝나면 false) - 커서는 드라이버가
-    // FileHandle에 매달아 관리.
-    virtual bool readdir(FileHandle dirHandle, DirEntry* out) = 0;
+
+    // onExec/onFailure/onCancel(AsyncTaskHandler, kernel::KernelFsDriver
+    // 경유)를 각 드라이버가 구현 - args의 KernelFsOpCode 태그로 9개
+    // 오퍼레이션에 분기한다(mount_table.h 관례 그대로). 이 클래스
+    // 자신은 새 가상함수를 추가하지 않는다 - mount/remount 둘뿐.
 };
 
-class Ext4Driver : public FileSystemDriver { /* 후속 */ };
+class Ext4Driver : public FileSystemDriver {
+public:
+    bool mount(BlockDevice* device, bool readOnly) override;
+    bool remount(bool writable) override;
+    void onExec(AsyncTask* task, void* args) override;   // KernelFsOpCode 분기
+    void onFailure(AsyncTask* task) override;
+    void onCancel(AsyncTask* task, void* args) override;
+    /* 내부 상태는 각 라이브러리 문서(SP-7A9CED3E 등) 참고 */
+};
 // swapfs는 이 인터페이스를 구현하지 않는다 - §4의 별도 SwapBackend 참고.
-class Fat32Driver : public FileSystemDriver { /* 후속 */ };
+class Fat32Driver : public FileSystemDriver { /* SP-A658A124 참고, 동일 패턴 */ };
 ```
 
-`read`/`write`가 명시적 `offset`을 받는 것(POSIX `pread`/`pwrite`
-스타일)은 의도적이다 - "현재 커서 위치"라는 상태는 이 인터페이스가
-아니라 **커널의 파일 디스크립터 테이블**(`SP-2AAD7C8D` §9.2)이
-갖는다, 드라이버 자신은 무상태(stateless) 오퍼레이션만 구현한다.
+**`read`/`write`가 명시적 `offset`을 받는 것**(POSIX `pread`/`pwrite`
+스타일, `KernelFsReadArgs::offset`/`KernelFsWriteArgs::offset`)은
+그대로 유효하다 - "현재 커서 위치"라는 상태는 이 인터페이스가 아니라
+**커널의 파일 디스크립터 테이블**(`SP-2AAD7C8D` §9.2)이 갖는다,
+드라이버 자신은 무상태(stateless) 오퍼레이션만 구현한다(이 원칙은
+바뀌지 않음 - 호출 규약만 동기 반환값에서 `AsyncTask`의 out 필드로
+바뀌었을 뿐).
+
+**각 라이브러리 문서(`SP-D02C4A73`/`SP-7A9CED3E`/`SP-A658A124`/
+`SP-F1987EF8`/`SP-AA6DF406`)의 §4가 이 새 패턴에 맞춰 갱신 필요** -
+개별 문서에서 처리(CLAUDE.md 규칙11, "같은 설명이 다른 문서에도
+복제돼 있는지 의심한다").
 
 `fs` 서비스는 `SP-7CC5693A` §2.2의 `Mount` syscall로 커널에 마운트를
 등록하면서, 동시에 내부적으로 해당 마운트 경로에 어떤

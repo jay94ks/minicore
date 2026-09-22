@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-7A9CED3E
   status: approved
-  updatedAt: 2026-09-22T04:05:42.974Z
+  updatedAt: 2026-09-22T04:54:08.559Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -182,6 +182,14 @@ kExt4Magic` 확인(불일치 시 "이 포맷 아님", 다음 드라이버 시도
 배치. v1(64bit 미지원, §2)은 32바이트 디스크립터:
 
 ```cpp
+// [정정, 2026-09-22, PN-22784AD4 구현 중 실측(리눅스 소스 1바이트
+// 대조)으로 발견] 원안은 reserved[3](uint32_t 3개=12바이트) 뒤에
+// itableUnusedLo/checksum을 별도 필드로 추가해 struct 전체가
+// 36바이트가 됐다 - 실제로는 excludeBitmapLo(4)+두 csum(2+2)+
+// itableUnusedLo(2)+checksum(2) = 정확히 12바이트가 reserved 영역
+// 전체(20~31 오프셋)를 채운다. 36바이트로 읽으면 다음 그룹
+// 디스크립터를 4바이트 밀려서 잘못 읽는 실제 버그였다 - v1은 이
+// 값들 중 아무것도 안 읽으므로 uint8_t reserved[12] 하나로 묶는다.
 #pragma pack(push, 1)
 struct Ext4GroupDesc32 {
     uint32_t blockBitmapLo;
@@ -191,12 +199,10 @@ struct Ext4GroupDesc32 {
     uint16_t freeInodesCountLo;
     uint16_t usedDirsCountLo;
     uint16_t flags;
-    uint32_t reserved[3];
-    uint16_t itableUnusedLo;
-    uint16_t checksum;             // v1은 metadata_csum 미지원(§2)이라
-                                    // 검증하지 않음 - 필드만 무시
+    uint8_t  reserved[12];  // excludeBitmapLo+두 csum+itableUnusedLo+
+                             // checksum, v1 미사용
 };
-static_assert(sizeof(Ext4GroupDesc32) == 32);
+static_assert(sizeof(Ext4GroupDesc32) == 32, "정확히 32바이트여야 함");
 #pragma pack(pop)
 ```
 
@@ -317,10 +323,49 @@ constexpr uint8_t kExt4FtDir = 2;
 블록의 엔트리들은 `recLen`을 누적해 블록 끝까지 순회(htree
 디렉터리도 각 리프 블록 내부는 이 포맷 그대로 - §2 참고).
 
-## 4. `Ext4Driver` 구현 — `FileSystemDriver` 인터페이스
+## 4. `Ext4Driver` 구현 — `FileSystemDriver`(`kernel::KernelFsDriver` 확장) 인터페이스
 
-`SP-2BCE5D60` §3.1 인터페이스를 그대로 상속(mount/remount/open/
-close/read/write/stat/mkdir/rmdir/unlink/readdir).
+**[해소, 2026-09-22, `QU-08ACD701` 설계자 답변("양쪽 모두를 수정하면서
+구현해")]** `SP-2BCE5D60` §3.1이 전면 재작성됐다 - `FileSystemDriver`는
+이제 `kernel::KernelFsDriver`(`minicore/kernel/mount_table.h`,
+`AsyncTaskHandler` 상속)를 그대로 확장하는 것으로 재정의됐다. 새
+타입을 정의하지 않고 `mount_table.h`가 이미 가진 `VfsError`/
+`FileHandle`/`OpenResult`/`ReadResult`/`VfsDirEntry` + `KernelFsOpCode`
+9종 Args 구조체(`KernelFsOpenArgs` 등)를 그대로 재사용한다.
+
+```cpp
+// minicore/libs/libext4/ext4.h
+class Ext4Driver : public FileSystemDriver {  // FileSystemDriver : kernel::KernelFsDriver
+public:
+    bool mount(BlockDevice* device, bool readOnly) override;
+    bool remount(bool writable) override;
+    // 파일 op 9종은 개별 가상함수가 아니라 onExec 하나로 - args의
+    // KernelFsOpCode 태그로 분기(mount_table.h의 LiveFs/ProcFs와
+    // 동일 관례). §3의 mount()/resolvePath()/readInode()/statInode()/
+    // readdirAt()(1차 증분이 이미 구현·검증한 무상태 읽기 API)를
+    // 각 case 안에서 그대로 호출하면 된다 - 그 함수들 자체는 재작성
+    // 불필요.
+    void onExec(AsyncTask* task, void* args) override;
+    void onFailure(AsyncTask* task) override;
+    void onCancel(AsyncTask* task, void* args) override;
+
+private:
+    // §4.1(기존) 필드는 그대로 유지 - device_/header_/groupDescs_ 등.
+};
+```
+
+`mount()`/`remount()`는 `AsyncTaskHandler` 프로토콜과 별개로,
+`MountTable::mountKernel()` 등록 전/후 한 번만 동기 호출되는 준비
+단계다(파일 op처럼 매번 제출되는 요청이 아님) - 일반 가상함수로
+남는다. **1차 증분(`PN-22784AD4`)이 이미 구현·검증한 §3의 무상태
+읽기 API(mount/resolvePath/readInode/statInode/readdirAt)는 재작성
+대상이 아니다** - `onExec`이 그 함수들을 `KernelFsOpCode`별로 그대로
+호출하는 얇은 어댑터 계층만 새로 필요하다(예: `Open` → `resolvePath`
++ 결과를 `KernelFsOpenArgs::result`에 채움, `Read` → `readInode`
+결과를 `KernelFsReadArgs`에 채움 등). 이 어댑터 구현 자체는 후속
+증분(§2.3에 이미 등록된 여섯 개와는 별개 - `Ext4Driver` VFS 통합
+계층 자체를 아직 후속으로 등록 안 했다면 지금 등록 필요, 구현
+세션이 확인).
 
 ```cpp
 // minicore/libs/libext4/ext4.h
