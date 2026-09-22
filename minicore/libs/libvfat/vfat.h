@@ -115,6 +115,16 @@ constexpr uint8_t kNameFreeRestMarker = 0x00;   // 이 엔트리부터 디렉터
 constexpr uint8_t kNameDeletedMarker = 0xE5;
 constexpr uint8_t kNameEscapedE5 = 0x05;        // 실제 파일명 첫 글자가 0xE5인 경우의 이스케이프
 
+// [신규, 2026-09-23, PN-8CACD042, SP-A658A124 §2 후속 증분 항목5] NT/VFAT
+// 확장 - `ntReserved` 바이트의 이 두 비트가 서면 온디스크는 대문자로
+// 유지한 채 표시만 소문자로 한다(다른 OS가 만든 이미지와의 표시
+// 호환성). 이 프로젝트가 새로 고안한 값이 아니다 - Linux 커널
+// `include/uapi/linux/msdos_fs.h`의 `CASE_LOWER_BASE`(8)/
+// `CASE_LOWER_EXT`(16)와 동일(libvfat의 다른 모든 상수와 같은 원칙,
+// RM-23F4B687 §4 - 실제 스펙/리눅스 소스와 대조).
+constexpr uint8_t kNtCaseLowerBase = 0x08;  // 8.3 이름의 "이름" 부분이 소문자로 표시돼야 함
+constexpr uint8_t kNtCaseLowerExt = 0x10;   // 8.3 이름의 "확장자" 부분이 소문자로 표시돼야 함
+
 // ---------------------------------------------------------------------
 // 3.6 LFN(Long File Name) 슬롯 - attr==kAttrLongName(0x0F)인 디렉터리
 // 엔트리를 이 레이아웃으로 재해석한다(DirEntry와 크기만 같은 별개

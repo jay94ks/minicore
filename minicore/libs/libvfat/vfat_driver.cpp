@@ -349,6 +349,15 @@ DirScanResult kScanDirClusterForIndex(const uint8_t* clusterBuf, uint32_t bytesP
                     nameOut[written] = longName[k];
                 }
             } else {
+                // [신규, 2026-09-23, PN-8CACD042] NT/VFAT 대소문자 확장 -
+                // 온디스크는 대문자로 유지된 채 ntReserved 비트만으로
+                // "이름"/"확장자" 부분을 각각 독립적으로 소문자 표시할지
+                // 결정한다(vfat.h의 kNtCaseLowerBase/kNtCaseLowerExt
+                // 문서 주석 참고). LFN이 있으면 이 변환은 아예 안 거친다
+                // - 긴 이름은 이미 그 자체로 정확한 대소문자를 담고 있다.
+                auto toLower = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; };
+                const bool lowerBase = (e.ntReserved & kNtCaseLowerBase) != 0;
+                const bool lowerExt = (e.ntReserved & kNtCaseLowerExt) != 0;
                 uint32_t nameLen = 8;
                 while (nameLen > 0 && e.name[nameLen - 1] == ' ') {
                     --nameLen;
@@ -358,14 +367,15 @@ DirScanResult kScanDirClusterForIndex(const uint8_t* clusterBuf, uint32_t bytesP
                     --extLen;
                 }
                 for (uint32_t k = 0; k < nameLen && written < nameOutCap; ++k, ++written) {
-                    nameOut[written] = (static_cast<uint8_t>(e.name[0]) == kNameEscapedE5 && k == 0)
-                                            ? static_cast<char>(kNameDeletedMarker)
-                                            : e.name[k];
+                    const char c = (static_cast<uint8_t>(e.name[0]) == kNameEscapedE5 && k == 0)
+                                       ? static_cast<char>(kNameDeletedMarker)
+                                       : e.name[k];
+                    nameOut[written] = lowerBase ? toLower(c) : c;
                 }
                 if (extLen > 0 && written < nameOutCap) {
                     nameOut[written++] = '.';
                     for (uint32_t k = 0; k < extLen && written < nameOutCap; ++k, ++written) {
-                        nameOut[written] = e.ext[k];
+                        nameOut[written] = lowerExt ? toLower(e.ext[k]) : e.ext[k];
                     }
                 }
             }
