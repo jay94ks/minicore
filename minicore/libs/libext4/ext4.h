@@ -201,35 +201,41 @@ constexpr uint8_t kFtDir = 2;
 constexpr uint32_t kMaxNameLen = 255;   // ext4 NAME_LEN
 
 // ---------------------------------------------------------------------
-// 4. Ext4Volume - 읽기 전용 마운트/경로 탐색/읽기/디렉터리 열거.
+// 4. Ext4Volume - 마운트 + mount()가 캐싱한 슈퍼블록/그룹 디스크립터
+// 상태의 읽기 전용 노출.
 //
-// [범위, 2026-09-22, PN-22784AD4] SP-7A9CED3E §4는 이 클래스를
-// `FileSystemDriver`(SP-2BCE5D60 §3.1, open/close/read/write/stat/
-// mkdir/rmdir/unlink/readdir 9개 가상함수)를 구현하는 `Ext4Driver`로
-// 스케치했다 - 하지만 실제 코드베이스는 이미 그 인터페이스를 쓰지
-// 않는다: `fs`가 SP-43331889로 순수 커널 KernelThread에 흡수된 뒤
-// LiveFs/ProcFs/ResourceGroupFs 전부 `mount_table.h`의
-// `KernelFsDriver`(AsyncTaskHandler 상속, subjectCode 기반 비동기
-// op 제출)로 이미 구현돼 있다 - SP-2BCE5D60 §3.1의 동기 가상함수
-// 인터페이스는 그 문서가 여전히 "fs 서비스(유저랜드)"를 전제하던
-// 시절의 설계라 지금 구조와 어긋난다(libswapfs의 SwapBackend가
-// 겪은 것과 같은 종류의 설계 공백, 다만 그때보다 훨씬 근본적 -
-// 매크로 하나가 아니라 호출 규약 자체가 다르다). 이 불일치는
-// `QU-...`(이 커밋과 함께 등록)로 설계자에게 확인을 요청했다 -
-// Ext4Driver를 KernelFsDriver 패턴으로 새로 만들지, 아니면
-// FileSystemDriver 쪽을 그 패턴에 맞게 재정의할지는 설계자 결정
-// 사항(CLAUDE.md 규칙4 - 임의로 정하지 않음).
+// [범위, 2026-09-22, PN-22784AD4 -> PN-9AE5BFE4로 갱신] 이 클래스는
+// 원래(PN-22784AD4) resolvePath/readInode/statInode/readdirAt(전부
+// 동기, `fs::BlockDevice::readBlocks()` 사용)까지 제공했었다 - 그
+// 무렵엔 §4의 VFS 통합 계층(`FileSystemDriver`/`KernelFsDriver`)이
+// 아직 뭘로 정해질지 몰라(`QU-08ACD701`) 어느 쪽이 오든 얹을 수
+// 있는 무상태 API로 설계했던 것.
 //
-// 그래서 이번 증분은 §3(온디스크 포맷)만 완전히 구현하고, §4의 VFS
-// 통합 계층(FileSystemDriver든 KernelFsDriver든)은 만들지 않는다 -
-// 대신 어느 쪽으로 결정되든 그대로 얹을 수 있는 무상태(stateless)
-// 메서드 집합(mount 이후는 전부 inode 번호로 직접 오퍼레이션)만
-// 제공한다. 쓰기 경로(mkdir/rmdir/unlink/write)도 이번 증분에
-// 포함하지 않는다 - SP-7A9CED3E §5가 이미 "구현 세션이 스펙과
-// 대조해 확정"으로 열어 둔 익스텐트 트리 분할 알고리즘 등 위험도
-// 높은 미결 사항이 남아 있어, 검증 가능한 읽기 경로부터 확정하는
-// 편이 libswapfs와 같은 "작은 단위로 쪼개 순서대로 완성" 원칙에
-// 맞는다.
+// `PN-9AE5BFE4`(Ext4Driver 구현) 단계에서 실측으로 확인된 사실 -
+// `KernelFsDriver::onExec()`은 코루틴인데, 그 안에서 위 동기 메서드
+// (`readBlocks()`의 Task 레벨 블로킹에 의존)를 부르면 무한 대기한다
+// (`QU-FF7044DA`, `PN-6EDED542`로 해소된 코루틴 I/O 대기 메커니즘
+// 문제). `PN-6EDED542`가 도입한 `kernel::AsyncTaskCoroAwaiter`
+// (`co_await` 프로토콜)로 바꿔도, 그 클래스가 `AsyncTask::current()`
+// (항상 최상위 - onExec 자신)를 기준으로 재개 대상을 고르기 때문에,
+// 이 메서드들을 **별도 코루틴 함수**로 감싸 onExec이 다시 그걸
+// `co_await`하는 합성(nested coroutine composition)은 안전하게
+// 재개되지 않는다(중간 코루틴 프레임의 존재를 `AsyncTaskCoroAwaiter`
+// 가 전혀 모름 - 실측 확인, 공유 타입 `kernel::AsyncExecCoro`를
+// 고치지 않는 한 원천적으로 안 됨, 그 타입은 커널 전체 공유라
+// 이 세션이 임의로 고치지 않는다).
+//
+// 그 결과 `Ext4Driver::onExec()`(ext4_driver.cpp)은 이 메서드들을
+// 재사용하지 않고, I/O 지점마다 `co_await
+// kernel::AsyncTaskCoroAwaiter(...)`를 onExec 자신의 몸체 안에 직접
+// 박아 넣는 평탄화된 버전으로 별도 구현했다 - 그래서 옛
+// resolvePath/readInode/statInode/readdirAt(과 그 private 헬퍼
+// readInodeStruct/resolveExtent/resolveExtentNode/findDirEntry)는
+// **더 이상 어디서도 호출되지 않는 죽은 코드**가 돼 제거했다
+// (호출부 감사로 확인, RM-23F4B687 §4 "확실히 안 쓰면 완전히
+// 삭제한다"). `mount()`만 여전히 실제로 쓰인다 - `Ext4Driver::
+// mount()`(진짜 kernel::Task 컨텍스트에서 한 번 호출되는 준비
+// 단계, `SP-2BCE5D60` §3.1)가 그대로 호출한다.
 // ---------------------------------------------------------------------
 class Ext4Volume {
 public:
@@ -238,39 +244,17 @@ public:
     // 볼륨 크기에서 항상 작다는 libswapfs의 badPages와 같은 전제).
     bool mount(fs::BlockDevice* device);
 
-    // "/a/b/c" 형태의 절대 경로를 루트(inode 2)부터 세그먼트별로
-    // 탐색한다. 성공 시 outInode/outIsDir을 채운다.
-    bool resolvePath(const char* path, uint32_t pathLen, uint32_t* outInode, bool* outIsDir);
-
-    // inode 하나의 크기/디렉터리 여부를 읽는다(디스크에서 inode를
-    // 다시 읽음 - v1은 캐싱하지 않는다).
-    bool statInode(uint32_t inodeNum, uint64_t* outSize, bool* outIsDir);
-
-    // 논리 오프셋 기준 읽기(POSIX pread 스타일, 상태 없음) - 파일
-    // 끝을 넘는 길이는 파일 끝까지만 읽고 실제 읽은 바이트 수를
-    // 반환한다. 실패(예: 손상된 익스텐트 트리)는 UINT32_MAX 아님,
-    // outOk로 구분.
-    uint32_t readInode(uint32_t inodeNum, uint64_t offset, void* buf, uint32_t len, bool* outOk);
-
-    // 디렉터리 inode의 0-based 인덱스 순회 - readdir()의 커서는
-    // 호출부(향후 KernelFsDriver의 FileHandle)가 관리, 이 클래스는
-    // 매 호출마다 처음부터 다시 스캔한다(디렉터리 크기가 작다는
-    // 전제 - htree 인덱스를 무시하고 선형 스캔해도 올바른 전체
-    // 목록을 얻는다는 htree 자체의 하위호환 보장, SP-7A9CED3E §2.1).
-    bool readdirAt(uint32_t dirInodeNum, uint64_t index, char* nameOut, uint32_t nameOutCap,
-                   uint32_t* outNameLen, bool* outIsDir, uint32_t* outEntryInode);
+    // [PN-9AE5BFE4] mount()가 이미 파싱/캐싱해 둔 상태를 읽기 전용으로
+    // 노출 - `Ext4Driver::onExec()`(코루틴 컨텍스트, 위 문서 주석
+    // 참고)가 슈퍼블록을 다시 읽어 재파싱하는 대신 이 상태를 그대로
+    // 재사용해 자신만의 평탄화된 순회 로직을 구현하는 데 쓴다.
+    fs::BlockDevice* device() const { return device_; }
+    const SuperblockCore& superblockInfo() const { return sb_; }
+    uint32_t blockSizeValue() const { return blockSize_; }
+    uint32_t groupCountValue() const { return groupCount_; }
+    const GroupDesc32* groupDescsPtr() const { return groupDescs_; }
 
 private:
-    bool readInodeStruct(uint32_t inodeNum, InodeCore* out);
-    // 논리 블록 번호 -> 물리 블록 번호. inode.block[60]을 ExtentHeader로
-    // 해석해 depth==0(리프)/depth>0(내부 노드, 재귀) 양쪽을 처리한다.
-    bool resolveExtent(const InodeCore& inode, uint32_t logicalBlock, uint64_t* outPhysicalBlock);
-    bool resolveExtentNode(const uint8_t* nodeBytes, uint32_t logicalBlock, uint32_t depthLimit,
-                           uint64_t* outPhysicalBlock);
-    // dirInodeNum의 데이터 블록들을 스캔해 name과 일치하는 엔트리를 찾는다.
-    bool findDirEntry(uint32_t dirInodeNum, const char* name, uint32_t nameLen,
-                       uint32_t* outInode, uint8_t* outFileType);
-
     fs::BlockDevice* device_ = nullptr;
     SuperblockCore sb_{};
     uint32_t blockSize_ = 0;
