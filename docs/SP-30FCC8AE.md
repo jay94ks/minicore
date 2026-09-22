@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-30FCC8AE
   status: approved
-  updatedAt: 2026-09-18T06:56:19.330Z
+  updatedAt: 2026-09-22T02:14:40.657Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -451,13 +451,21 @@ bool kCanSendSignal(const Process& caller, const Process& target) {
 }
 ```
 
-**전제 조건**: 이 함수가 실제로 임의 대상에 적용되려면 `target`을
-안전하게 얻는 수단이 먼저 있어야 한다 - `SP-9CB55C5B`의
-`kResolveProcessId()`(`PN-88E62419`, `PN-C39882D0` 답변 대기 중)가
-그 전제다. 이 문서는 권한 판정 로직만 확정하고, 실제로 "임의
-프로세스 대상 Kill"이 풀리는 시점은 그 체인 완료 이후다 - 그 전까지
-`Kill`의 실사용 스코프는 여전히 v1(직계 자식)로 유지된다(순서
-바뀌지 않음, `PN-88E62419`가 이미 이렇게 정리해 둠).
+**전제 조건(원 서술, 작성 시점 기준)**: 이 함수가 실제로 임의 대상에
+적용되려면 `target`을 안전하게 얻는 수단이 먼저 있어야 한다 -
+`SP-9CB55C5B`의 `kResolveProcessId()`(`PN-88E62419`, `PN-C39882D0`
+답변 대기 중)가 그 전제다. 이 문서는 권한 판정 로직만 확정하고,
+실제로 "임의 프로세스 대상 Kill"이 풀리는 시점은 그 체인 완료
+이후다 - 그 전까지 `Kill`의 실사용 스코프는 여전히 v1(직계 자식)로
+유지된다(순서 바뀌지 않음, `PN-88E62419`가 이미 이렇게 정리해 둠).
+
+**[정정, 2026-09-22]** 위 전제 조건은 모두 해소됐다 - `PN-C39882D0`
+(`kResolveProcessId()` 구현, 2026-09-17 완료)에 이어 `PN-88E62419`
+(`kCanSendSignal()`/`kCheckPermission()` 구현 + `KillHandler::onExec`
+재작성, commit cb52904, 2026-09-18 완료)까지 끝나 `Kill`은 더 이상
+"직계 자식만"이 아니라 `kResolveProcessId()`로 얻은 임의 대상에
+`kCanSendSignal()` 권한 판정을 적용한다. "답변 대기 중"/"v1(직계
+자식)로 유지"는 낡은 서술이다.
 
 ## 5. `DebugAttach`도 같은 모델 공유 - 후속 계획으로 분리
 
