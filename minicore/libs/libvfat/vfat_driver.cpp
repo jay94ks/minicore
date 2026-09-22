@@ -108,6 +108,20 @@ kernel::AsyncTask* kSubmitReadSectors(fs::BlockDevice* device, uint32_t sectorSi
                                      outResult);
 }
 
+// [신규, 2026-09-23, PN-9D6FE4B6 준비 작업] kSubmitReadSectors의 쓰기
+// 버전 - §3.4 FAT 엔트리 갱신/§4.2 데이터 클러스터 쓰기에 공용으로
+// 쓴다.
+kernel::AsyncTask* kSubmitWriteSectors(fs::BlockDevice* device, uint32_t sectorSize, uint64_t sectorStart,
+                                        uint32_t sectorCount, const void* buf, fs::BlockIoResult* outResult) {
+    const kernel::uint32_t devBlockSize = device->blockSize();
+    if (devBlockSize == 0 || sectorSize % devBlockSize != 0) {
+        return nullptr;
+    }
+    const kernel::uint32_t devBlocksPerSector = sectorSize / devBlockSize;
+    return device->submitWriteBlocks(sectorStart * devBlocksPerSector, buf, sectorCount * devBlocksPerSector,
+                                      outResult);
+}
+
 // 데이터 클러스터 번호를 장치 섹터 번호로 바꾼다(순수 계산) - vfat.cpp에
 // 있던 옛 Fat32Volume::clusterToSector와 동일한 판별.
 bool kClusterToSector(uint32_t dataStartSector, uint32_t sectorsPerCluster, uint32_t cluster, uint32_t* outSector) {
@@ -142,6 +156,16 @@ ChainStep kInterpretFatEntry(uint32_t raw, uint32_t* outNext) {
     }
     *outNext = entry;
     return ChainStep::Next;
+}
+
+// [신규, 2026-09-23, PN-9D6FE4B6 준비 작업 - §3.4] 새 FAT 엔트리 값을
+// 기존 raw 32비트 값 위에 인코딩한다(순수 계산, I/O 없음) - kFatEntryMask
+// (하위 28비트)만 바꾸고 상위 4예약비트는 원래 값 그대로 보존한다
+// (스펙 관례 - 이 프로젝트가 그 예약 비트를 쓸 일이 없어도 다른
+// 구현이 거기 뭔가 채워 뒀을 가능성을 존중, kInterpretFatEntry의
+// 디코딩과 대칭).
+uint32_t kEncodeFatEntry(uint32_t oldRaw, uint32_t newValue) {
+    return (oldRaw & ~kFatEntryMask) | (newValue & kFatEntryMask);
 }
 
 bool kNamesEqualCi(const char* a, uint32_t aLen, const char* b, uint32_t bLen) {

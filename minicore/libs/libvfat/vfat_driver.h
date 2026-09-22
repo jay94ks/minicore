@@ -48,6 +48,13 @@ private:
     Fat32Volume volume_;
     bool mounted_ = false;
     bool readOnly_ = true;
+    // [신규, 2026-09-23, PN-9D6FE4B6 준비 작업, SP-A658A124 §3.4] free
+    // 클러스터 선형 스캔의 시작 힌트 - 매번 클러스터 2부터 스캔하지
+    // 않고 마지막으로 할당한 자리 다음부터 이어서 찾는다(libswapfs의
+    // allocateSlot과 동일한 방식, §3.4 문서 주석 그대로). Write/Mkdir
+    // 구현 자체는 QU-E4E83A9A(FileHandle이 부모 디렉터리 엔트리 위치를
+    // 못 담는 구조적 문제) 답변 대기 중이라 이 필드는 아직 안 쓰인다.
+    uint32_t nextClusterScanHint_ = 2;
 };
 
 }  // namespace vfat

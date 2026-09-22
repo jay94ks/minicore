@@ -205,6 +205,12 @@ public:
     uint32_t bytesPerClusterValue() const { return bytesPerCluster_; }
     uint32_t fatStartSectorValue() const { return fatStartSector_; }
     uint32_t dataStartSectorValue() const { return dataStartSector_; }
+    // [신규, 2026-09-23, PN-9D6FE4B6 준비 작업 - §3.4] free 클러스터
+    // 스캔의 종료 조건(클러스터 번호는 kFirstDataCluster(2)부터
+    // clusterCount_+1까지 유효)과 다중 FAT 사본 동기화에 필요.
+    uint32_t clusterCountValue() const { return clusterCount_; }
+    uint32_t numFatsValue() const { return numFats_; }
+    uint32_t fatSize32Value() const { return fatSize32_; }
 
 private:
     fs::BlockDevice* device_ = nullptr;
@@ -213,6 +219,9 @@ private:
     uint32_t bytesPerCluster_ = 0;
     uint32_t fatStartSector_ = 0;
     uint32_t dataStartSector_ = 0;
+    uint32_t clusterCount_ = 0;
+    uint32_t numFats_ = 0;
+    uint32_t fatSize32_ = 0;
 };
 
 }  // namespace vfat

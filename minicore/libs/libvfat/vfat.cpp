@@ -83,6 +83,14 @@ bool Fat32Volume::mount(fs::BlockDevice* device) {
     fatStartSector_ = bpb_.reservedSectorCount;
     dataStartSector_ = bpb_.reservedSectorCount + fatSectors;  // FAT32는 고정 루트 영역이 없음(§3.3)
     bytesPerCluster_ = static_cast<uint32_t>(bpb_.sectorsPerCluster) * bpb_.bytesPerSector;
+    // [신규, 2026-09-23, PN-9D6FE4B6 준비 작업] 쓰기 경로(§3.4 free
+    // 클러스터 스캔의 종료 조건 - 클러스터 번호는 2..clusterCount+1
+    // 범위)와 다중 FAT 사본 동기화(§3.4 "numFats가 2 이상이면 모든
+    // FAT 사본에 반영")에 필요해 저장해 둔다 - 위에서 이미 계산해
+    // 뒀던 값들을 그대로 멤버로 옮기는 것뿐, 판별 로직 자체는 그대로.
+    clusterCount_ = clusterCount;
+    numFats_ = bpb_.numFats;
+    fatSize32_ = ext32_.fatSize32;
     device_ = device;
     return true;
 }
