@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-21T14:54:26.181Z
+  updatedAt: 2026-09-22T21:28:53.080Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -439,6 +439,29 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
 계속 "미해결"로 읽히는 상태였다 - 문서에 해소 각주 추가로 정정
 완료. **현재 상태**: 코드 자체는 이미 갭 없음(§2로 이동), 문서만
 낡아 있던 사례.
+
+## §1-S. [발견 및 해소, 2026-09-23] `SP-F1987EF8`(libexfat) §3.5 - exFAT
+디렉터리 엔트리 집합 체크섬 "읽기 시 검증"이 구현에서 빠져 있었음
+
+`SP-F1987EF8`(libexfat, approved 2026-09-22)이 §3.5에서 명시한
+확정된 설계: "**`setChecksum`은 읽기 시 검증, 쓰기 시 반드시
+재계산**(무결성이 이 체크섬에 의존)". `PN-09970F05`(ExfatDriver
+구현, 완료)가 `ExfatFileDirEntry::setChecksum` 필드는 정확히 옮겨
+파싱했지만, 실제로 그 값을 계산/비교하는 코드가 어디에도 없었다 -
+`kParseFileEntrySet()`이 Primary/Stream 엔트리를 읽고 파일명을
+조립하는 로직은 갖췄지만 체크섬 검증 단계 자체가 빠진 채 항상
+`valid=true`로 반환했다. 여러 필드/단계를 목록으로 나열한 §3.5
+섹션에서 "체크섬 검증"이라는 한 단계가 조용히 누락된, 이 문서
+서두가 경고한 패턴(`Task::numaNode` 사례와 동일 계열) 그대로였다.
+
+**해소**: `kExfatEntrySetChecksum()`(Linux 커널 `fs/exfat/exfat_fs.h`
+의 `exfat_calc_chksum16`과 동일 알고리즘) 추가, `kParseFileEntrySet()`
+에서 계산값이 저장된 `setChecksum`과 다르면 무효 처리하도록 수정
+(`PN-831A3998`, commit `863113f`). `mkfs.exfat`+`exfat-fuse`로 만든
+실제 이미지로 정상/손상(setChecksum 1바이트 손상) 양쪽 다 실측
+검증 - 정상은 통과, 손상은 정확히 거부됨을 확인. 표준 4시나리오
+QEMU 회귀 무회귀. **쓰기 시 재계산**은 exFAT 쓰기 경로 자체가 아직
+없어 이번 범위 밖(쓰기 경로 착수 시 함께 구현 예정).
 
 ## §2. 점검 완료 - 갭 없음 확인
 
@@ -1903,6 +1926,14 @@ AI가 스스로 승인 처리할 수 없어 보류 - `SP-A21DD889`에서도 동�
 (`PN-C4611402`의 "실제 취소 레이스" 재검증 - `PN-B5C2845A`가 열어
 준 뒤 이 세션이 실제로 QEMU에서 재현/확정했다. 아래 §2로 이동.)
 (`PN-2008220B` 재검증 완료 - 아래 §2로 이동.)
+
+**[2026-09-23] `SP-F1987EF8`(libexfat) 점검 완료 - 갭 발견/해소**
+(`PN-831A3998`, commit `863113f`) - §3.5가 "setChecksum은 읽기 시
+검증"을 확정된 설계로 명시했으나 `PN-09970F05`(ExfatDriver 구현)가
+필드만 파싱하고 실제 검증을 빠뜨렸었다. `kExfatEntrySetChecksum()`
+추가로 해소, 정상/손상 이미지 양쪽으로 실측 검증(mkfs.exfat+
+exfat-fuse) 완료. **§2(갭 없음)가 아니라 §1(발견)에 해당** - 아래
+새 항목 1-S로 기록.
 
 **[2026-09-21] approved SP/DC 문서 후보 풀 재소진 확인** - 이번 세션이
 `SP-677210E6`/`SP-7CC5693A`/`SP-29D652AA`/`SP-00CA7175`/`SP-71DA77B3`/
