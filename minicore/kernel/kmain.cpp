@@ -743,6 +743,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 시간 기준으로 쓰므로 Timer::init() 이후, 전역 테이블 하나뿐이라
     // BSP에서 한 번만(위 KernelReservedTable::init()과 같은 이유).
     kernel::DelayedExecutionQueue::init();
+    // [신규, 2026-09-22, PN-4859FDE9, SP-6CEFBE9B §8-1] swap 회수 스캔의
+    // 첫 등록 - DelayedExecutionQueue::init() 이후 아무 때나(전용 Task
+    // 없음, 스캔 자신이 매 실행 끝에 스스로 재등록).
+    kernel::PageFrameAllocator::startReclaimScan();
     kernel::Logger::info("minicore: delayed execution queue ready, enabling interrupts");
 
     kernel::Pci::init();

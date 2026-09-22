@@ -233,6 +233,25 @@ public:
     // 조용히 덮어쓰지 않고 그대로 패닉시킨다.
     static bool handlePageFault(uint64_t faultAddr, uint64_t errorCode);
 
+    // [신규, 2026-09-22, SP-6CEFBE9B §7.2 2/3단계, PN-4859FDE9] 4KiB
+    // leaf PTE의 하드웨어 Accessed 비트(bit5)를 읽고, 세팅돼 있었으면
+    // 그 자리에서 지운다(second-chance 판정용) - 이미 PAGE_PRESENT인
+    // 페이지를 다시 읽고 쓰는 것 자체는 x86_64에서 폴트를 전혀
+    // 일으키지 않으므로(CPU가 트랩 없이 조용히 이 비트만 세팅),
+    // 재접근 여부를 관찰하는 유일한 방법은 이렇게 주기적으로 직접
+    // PTE를 확인하는 것뿐이다(swap 회수 스캔의 전제, §7.2 2단계
+    // 문서 주석 참고). 매핑이 없거나(present=0), 2MiB 대형 페이지
+    // (PS 비트 - 이 스캔의 anonymous rmap 매핑은 항상 4KiB 단일
+    // 페이지뿐이라 범위 밖으로 둠, PageFrameAllocator::retain() 문서
+    // 주석과 동일한 전제)면 false. 세팅돼 있던 비트를 지운 뒤에는
+    // 이 코어가 지금 이 pml4Phys를 쓰고 있을 때만 로컬 invlpg한다 -
+    // 다른 코어의 스테일 TLB는 최악의 경우 다음 스캔 주기에 accessed=1을
+    // 한 번 더 관측하게 할 뿐(순수 성능/타이밍 휴리스틱이라 정확성에
+    // 영향 없음 - `unmapPage`의 실제 매핑 제거와 달리 이 연산은 데이터
+    // 가시성 자체를 바꾸지 않으므로 `TlbShootdown::broadcast()`
+    // 같은 크로스 코어 무효화가 필요 없다).
+    static bool testAndClearAccessed(uint64_t virtualAddr, uint64_t pml4Phys = 0);
+
     // 지금 실행 중인 CR3(활성 PML4의 물리 프레임 주소) - 새 주소공간을
     // 만들 때 "커널 상위 절반"을 복사해 올 원본으로 쓴다
     // (createAddressSpace 참고). 진단/장래 재사용 목적으로도 공개.

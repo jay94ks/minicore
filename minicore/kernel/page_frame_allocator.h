@@ -161,6 +161,25 @@ public:
     // (방어적 마지막 안전망), 정상 경로는 이 함수로 먼저 깨끗하게
     // 정리하는 쪽이다.
     static void removeRmap(uint64_t physAddr, Process* owner, uint64_t virtAddr);
+
+    // [신규, 2026-09-22, PN-4859FDE9, SP-6CEFBE9B §8-1] swap 회수
+    // 스캔의 부팅 시 진입점 - 전용 Task/KernelThread를 만들지 않고
+    // (QU-A8C0CC2C 설계자 답변) `DelayedExecutionQueue`(SP-F15B4A63
+    // §3)에 1회성 콜백으로 등록한다. 그 콜백은 실행이 끝날 때마다
+    // 스스로를 다시 등록(self-rearm)해 주기적 동작을 흉내낸다 - 부팅
+    // 중 한 번만 호출(BSP, `PageFrameAllocator::init()`과
+    // `DelayedExecutionQueue::init()` 둘 다 끝난 뒤 아무 때나).
+    //
+    // **[범위, 2026-09-22, QU-41F78A3E 데드락 위험 발견]** 이번 증분은
+    // §7.2 2/3/4단계(PTE Accessed 비트 스캔으로 재접근 감지 →
+    // inactive→active 승격, active 리스트 비대화 시 강등)까지만
+    // 구현한다 - **5단계(실제 회수+스왑 쓰기)는 포함하지 않는다.**
+    // `DelayedExecutionQueue` 콜백이 `AsyncReactor::drainOnce()` 안에서
+    // 중첩 실행되는데(그 시점 재진입 방지 가드가 이미 세팅됨),
+    // `SwapBackend::writeSlot()`의 블로킹 대기가 바로 그 가드에 막혀
+    // 데드락하는 실측 확인된 위험 때문 - 자세한 근거는 `QU-41F78A3E`
+    // (SP-6CEFBE9B 대상)/`PN-4859FDE9` 참고, 설계자 답변 대기 중이다.
+    static void startReclaimScan();
 };
 
 }  // namespace kernel

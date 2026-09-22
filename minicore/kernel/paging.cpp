@@ -638,6 +638,44 @@ uint64_t Paging::translatePage(uint64_t virtualAddr, uint64_t pml4Phys) {
     return pt[kPtIndex(virtualAddr)] & kAddrMask;
 }
 
+bool Paging::testAndClearAccessed(uint64_t virtualAddr, uint64_t pml4Phys) {
+    constexpr uint64_t kAccessedBit = 1UL << 5;
+
+    virtualAddr &= ~(kPageSize4K - 1);
+    if (pml4Phys == 0) {
+        pml4Phys = kCurrentPml4Phys();
+    }
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+
+    uint64_t* pml4 = kAsTable(pml4Phys);
+    if (!(pml4[kPml4Index(virtualAddr)] & PAGE_PRESENT)) {
+        return false;
+    }
+    uint64_t* pdpt = kAsTable(pml4[kPml4Index(virtualAddr)] & kAddrMask);
+    if (!(pdpt[kPdptIndex(virtualAddr)] & PAGE_PRESENT)) {
+        return false;
+    }
+    uint64_t* pd = kAsTable(pdpt[kPdptIndex(virtualAddr)] & kAddrMask);
+    const uint64_t pdEntry = pd[kPdIndex(virtualAddr)];
+    if (!(pdEntry & PAGE_PRESENT) || (pdEntry & kPageSizeBit)) {
+        return false;  // 미매핑 또는 2MiB 대형 페이지 - 이 스캔의 범위 밖(위 문서 주석 참고)
+    }
+    uint64_t* pt = kAsTable(pdEntry & kAddrMask);
+    uint64_t& pte = pt[kPtIndex(virtualAddr)];
+    if (!(pte & PAGE_PRESENT)) {
+        return false;
+    }
+    const bool wasAccessed = (pte & kAccessedBit) != 0;
+    if (wasAccessed) {
+        pte &= ~kAccessedBit;
+        if (pml4Phys == kCurrentPml4Phys()) {
+            kInvalidatePage(virtualAddr);
+        }
+    }
+    return wasAccessed;
+}
+
 bool Paging::isUserRangeValid(uint64_t virtualAddr, uint64_t length, uint64_t pml4Phys) {
     if (length == 0) {
         return true;

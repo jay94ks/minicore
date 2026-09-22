@@ -1,11 +1,13 @@
 #include "page_frame_allocator.h"
 
 #include "acpi.h"
+#include "delayed_exec.h"
 #include "lapic.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 #include "paging.h"
+#include "process.h"
 
 namespace {
 
@@ -23,7 +25,7 @@ struct FreeBlock {
     kernel::uint64_t next;
 };
 
-struct Node {
+struct PfaNode {
     kernel::uint64_t freeListHeads[kMaxOrder + 1];  // 물리주소, 0 = 비어있음
     kernel::uint64_t freePageCount;
     // 이 노드의 free list를 건드리는 공개 API(allocOrderOnNode/
@@ -33,7 +35,7 @@ struct Node {
     kernel::Spinlock lock;
 };
 
-Node gNodes[kernel::kPfaMaxNumaNodes];
+PfaNode gNodes[kernel::kPfaMaxNumaNodes];
 kernel::uint32_t gNodeCount = 1;
 
 // [수정, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §1] 기존 "COW 참조
@@ -57,9 +59,30 @@ kernel::uint64_t gPageFrameCount = 0;
 struct PageFrameList {
     kernel::PageFrame* head = nullptr;
     kernel::PageFrame* tail = nullptr;
+    // [신규, 2026-09-22, PN-4859FDE9] §7.2 4단계(강등) 판정이
+    // "active가 inactive보다 큰가"를 매 스캔마다 물어야 하는데,
+    // 리스트를 매번 끝까지 세면 배치 크기와 무관하게 O(전체 길이)
+    // 비용이 든다 - kLruPushBack/kLruUnlink가 자동으로 유지하는 카운터.
+    kernel::uint32_t count = 0;
 };
 PageFrameList gActiveList;
 PageFrameList gInactiveList;
+
+// [신규, 2026-09-22, PN-4859FDE9] gActiveList/gInactiveList와 그
+// 소속을 뜻하는 PageFrame::flags(PG_ACTIVE/PG_SWAPPABLE/PG_ACCESSED)/
+// rmap 연결 리스트(PageFrame::rmapHead)를 함께 보호한다 - 지금까지
+// (insertRmap/removeRmap/freeOrder) 이 구조들을 건드리는 곳 어디에도
+// 락이 없었다(단일 코어 가정 잔재로 보임) - 이번 증분이 새 동시
+// 접근자(회수 스캔, 매 코어의 idle 루프에서 주기적으로 실행)를
+// 추가하면서 실제로 위험해지는 기존 SMP 공백이라 함께 고친다.
+// **락 순서**: 이 락을 쥔 채로 `Paging::testAndClearAccessed()`(내부적으로
+// 코어별 주소공간 락을 따로 잡음)를 부르는 지점이 있다(아래 스캔
+// 본문) - 반대 방향(주소공간 락을 쥔 채 이 락을 시도)으로 들어오는
+// 호출은 없음을 확인했다(`insertRmap`/`removeRmap`은 `Paging::
+// mapPage`/`unmapPage`가 이미 반환해 그 내부 락을 놓은 뒤에만
+// 호출됨, `address_space.cpp` 호출부 확인) - 그래서 항상 "이 락 →
+// 주소공간 락" 한 방향으로만 중첩되고 교착 위험이 없다.
+kernel::Spinlock gLruLock;
 
 void kLruPushBack(PageFrameList& list, kernel::PageFrame* frame) {
     frame->lruPrev = list.tail;
@@ -70,6 +93,7 @@ void kLruPushBack(PageFrameList& list, kernel::PageFrame* frame) {
         list.head = frame;
     }
     list.tail = frame;
+    ++list.count;
 }
 
 void kLruUnlink(PageFrameList& list, kernel::PageFrame* frame) {
@@ -85,6 +109,7 @@ void kLruUnlink(PageFrameList& list, kernel::PageFrame* frame) {
     }
     frame->lruPrev = nullptr;
     frame->lruNext = nullptr;
+    --list.count;
 }
 
 kernel::uint64_t kAlignUp(kernel::uint64_t value, kernel::uint64_t align) {
@@ -99,12 +124,12 @@ FreeBlock* kAsBlock(kernel::uint64_t physAddr) {
     return reinterpret_cast<FreeBlock*>(kernel::kPhysToVirt(physAddr));
 }
 
-void kInsertBlock(Node& node, kernel::uint64_t addr, kernel::uint32_t order) {
+void kInsertBlock(PfaNode& node, kernel::uint64_t addr, kernel::uint32_t order) {
     kAsBlock(addr)->next = node.freeListHeads[order];
     node.freeListHeads[order] = addr;
 }
 
-bool kTryRemoveBlock(Node& node, kernel::uint64_t addr, kernel::uint32_t order) {
+bool kTryRemoveBlock(PfaNode& node, kernel::uint64_t addr, kernel::uint32_t order) {
     kernel::uint64_t* cur = &node.freeListHeads[order];
     while (*cur) {
         if (*cur == addr) {
@@ -116,7 +141,7 @@ bool kTryRemoveBlock(Node& node, kernel::uint64_t addr, kernel::uint32_t order) 
     return false;
 }
 
-kernel::uint64_t kPopBlock(Node& node, kernel::uint32_t order) {
+kernel::uint64_t kPopBlock(PfaNode& node, kernel::uint32_t order) {
     const kernel::uint64_t addr = node.freeListHeads[order];
     if (!addr) {
         return 0;
@@ -133,7 +158,7 @@ kernel::uint64_t kBuddyAddr(kernel::uint64_t addr, kernel::uint32_t order) {
 // 재귀적으로 얻어 반으로 쪼개고(짝 하나는 그 order 리스트에 도로
 // 넣음), 전체 free 카운트는 여기서 건드리지 않는다(쪼개도 총량은
 // 그대로라서 - 카운트 조정은 공개 API에서 한 번만 한다).
-kernel::uint64_t kObtainBlock(Node& node, kernel::uint32_t order) {
+kernel::uint64_t kObtainBlock(PfaNode& node, kernel::uint32_t order) {
     if (order > kMaxOrder) {
         return 0;
     }
@@ -150,7 +175,7 @@ kernel::uint64_t kObtainBlock(Node& node, kernel::uint32_t order) {
     return bigger;
 }
 
-void kAddRegionToBuddy(Node& node, kernel::uint64_t start, kernel::uint64_t end) {
+void kAddRegionToBuddy(PfaNode& node, kernel::uint64_t start, kernel::uint64_t end) {
     start = kAlignUp(start, kPageSize);
     end = kAlignDown(end, kPageSize);
     while (start < end) {
@@ -330,6 +355,86 @@ void kPartitionRangeByAffinity(kernel::uint64_t rangeStart, kernel::uint64_t ran
     }
 }
 
+// ---------------------------------------------------------------------
+// [신규, 2026-09-22, PN-4859FDE9, SP-6CEFBE9B §7.2 2/3/4단계 + §8-1]
+// swap 회수 스캔 - 5단계(실제 회수+스왑 쓰기)는 QU-41F78A3E 데드락
+// 위험 발견으로 보류(gLruLock 문서 주석 참고) - 이 스캔은 재접근
+// 감지(Accessed 비트 PTE-walk)로 inactive→active 승격과, active
+// 리스트가 비대해지면 강등(aging)만 수행한다. 전부 순수 페이지
+// 테이블 조작(Paging::testAndClearAccessed)뿐이라 블로킹 I/O가
+// 전혀 없다 - drainOnce() 중첩 컨텍스트에서 안전하게 실행 가능.
+// ---------------------------------------------------------------------
+
+// 실측 후 조정 대상(SP-6CEFBE9B §8-1.5, RM-23F4B687 §4) - v1 기본값.
+constexpr kernel::uint64_t kReclaimScanIntervalTicks = 100;  // Timer 100Hz 기준 약 1초
+constexpr kernel::uint32_t kReclaimScanBatchSize = 16;       // 스캔/강등 각각의 1회 상한
+
+// inactive 리스트 head(가장 오래 전에 들어온 쪽 - kLruPushBack이
+// 항상 tail에 넣으므로 head가 가장 오래된 항목이다)부터 최대
+// kReclaimScanBatchSize개를 훑어, 프레임의 rmap 엔트리 전부에 대해
+// Accessed 비트를 확인한다(§7.2 2단계) - 하나라도 세팅돼 있었으면
+// "재접근됨"으로 판정해 inactive에서 빼 active로 승격한다(3단계,
+// second-chance - PG_ACTIVE 세팅, PG_ACCESSED는 지운 상태로 시작).
+// 세팅된 비트는 발견하는 즉시(승격 여부와 무관하게) 전부 지운다 -
+// 다음 스캔에서 정확히 재판정되려면 이번 관찰을 소모해야 한다.
+void kReclaimScanPromotePass() {
+    kernel::PageFrame* cursor = gInactiveList.head;
+    kernel::uint32_t scanned = 0;
+    while (cursor && scanned < kReclaimScanBatchSize) {
+        kernel::PageFrame* next = cursor->lruNext;  // 승격 시 cursor 자신의 링크가 끊기므로 미리 저장
+        bool referenced = false;
+        for (kernel::RmapEntry* rmap = cursor->rmapHead; rmap; rmap = rmap->next) {
+            if (kernel::Paging::testAndClearAccessed(rmap->virtAddr, rmap->owner->pml4Phys)) {
+                referenced = true;  // 계속 순회 - 나머지 rmap 엔트리의 비트도 전부 지워야 함(위 문서 주석)
+            }
+        }
+        if (referenced) {
+            kLruUnlink(gInactiveList, cursor);
+            cursor->flags = static_cast<kernel::uint16_t>((cursor->flags | kernel::kPageFrameFlagActive) &
+                                                            ~kernel::kPageFrameFlagAccessed);
+            kLruPushBack(gActiveList, cursor);
+        }
+        cursor = next;
+        ++scanned;
+    }
+}
+
+// active 리스트가 inactive보다 커지면(§7.2 4단계 - 정확한 목표 비율은
+// §8-1.5가 "실측 후 조정"으로 열어 둠, v1은 "1:1 이하 유지"를 채택)
+// head(가장 오래된 쪽)부터 최대 kReclaimScanBatchSize개를 inactive로
+// 되돌린다(aging) - 되돌아간 프레임은 다시 "의심 대상"이 되어 다음
+// 스캔의 승격 패스에서 재평가된다(§7.2 1단계의 "새 진입" 취급과
+// 동일한 대우).
+void kReclaimScanDemotePass() {
+    kernel::uint32_t demoted = 0;
+    while (demoted < kReclaimScanBatchSize && gActiveList.count > gInactiveList.count) {
+        kernel::PageFrame* oldest = gActiveList.head;
+        if (!oldest) {
+            break;
+        }
+        kLruUnlink(gActiveList, oldest);
+        oldest->flags = static_cast<kernel::uint16_t>(oldest->flags & ~kernel::kPageFrameFlagActive);
+        kLruPushBack(gInactiveList, oldest);
+        ++demoted;
+    }
+}
+
+// `kernel::DelayedExecutionQueue::schedule()`이 요구하는 원시 함수
+// 포인터 시그니처(`void(*)(void*)`) - 매 실행 끝에 스스로를 다시
+// 등록해 주기적 동작을 흉내낸다(전용 Task 없음, SP-F15B4A63 §3).
+// arg는 안 씀(항상 nullptr로 등록).
+void kReclaimScanCallback(void*) {
+    {
+        kernel::SpinlockGuard guard(gLruLock);
+        kReclaimScanPromotePass();
+        kReclaimScanDemotePass();
+        // §7.2 5단계(실제 회수) 자리 - QU-41F78A3E 답변 대기 중이라
+        // 이번 증분은 여기서 멈춘다(gLruLock 문서 주석/page_frame_allocator.h
+        // startReclaimScan() 문서 주석 참고).
+    }
+    kernel::DelayedExecutionQueue::schedule(kReclaimScanIntervalTicks, &kReclaimScanCallback, nullptr);
+}
+
 }  // namespace
 
 namespace kernel {
@@ -429,7 +534,7 @@ uint64_t PageFrameAllocator::allocOrderOnNode(uint32_t node, uint32_t order) {
     if (node >= gNodeCount) {
         return 0;
     }
-    Node& n = gNodes[node];
+    PfaNode& n = gNodes[node];
     SpinlockGuard guard(n.lock);
     const uint64_t addr = kObtainBlock(n, order);
     if (addr) {
@@ -444,7 +549,7 @@ uint64_t PageFrameAllocator::allocOrderBelow(uint64_t physLimit, uint32_t order)
     }
     const uint64_t blockSize = kPageSize << order;
     for (uint32_t node = 0; node < gNodeCount; ++node) {
-        Node& n = gNodes[node];
+        PfaNode& n = gNodes[node];
         SpinlockGuard guard(n.lock);
         uint64_t cur = n.freeListHeads[order];
         while (cur) {
@@ -517,6 +622,8 @@ bool PageFrameAllocator::insertRmap(uint64_t physAddr, Process* owner, uint64_t 
     *entry = RmapEntry{};
     entry->owner = owner;
     entry->virtAddr = virtAddr;
+
+    SpinlockGuard guard(gLruLock);
     entry->next = frame->rmapHead;
     frame->rmapHead = entry;
     frame->mapCount = static_cast<uint16_t>(frame->mapCount + 1);
@@ -536,6 +643,7 @@ void PageFrameAllocator::removeRmap(uint64_t physAddr, Process* owner, uint64_t 
     if (!frame) {
         return;
     }
+    SpinlockGuard guard(gLruLock);
     RmapEntry** cur = &frame->rmapHead;
     while (*cur) {
         if ((*cur)->owner == owner && (*cur)->virtAddr == virtAddr) {
@@ -573,6 +681,7 @@ void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
     // 소유자의 페이지 폴트 처리에서 엉뚱한 프로세스를 가리키게 된다.
     if (order == 0) {
         if (PageFrame* frame = frameFor(physAddr)) {
+            SpinlockGuard guard(gLruLock);
             if (frame->flags & kPageFrameFlagSwappable) {
                 kLruUnlink(frame->flags & kPageFrameFlagActive ? gActiveList : gInactiveList, frame);
             }
@@ -589,7 +698,7 @@ void PageFrameAllocator::freeOrder(uint64_t physAddr, uint32_t order) {
         }
     }
     const uint32_t node = kNodeForAddress(physAddr);
-    Node& n = gNodes[node];
+    PfaNode& n = gNodes[node];
     SpinlockGuard guard(n.lock);
     n.freePageCount += (1UL << order);
     while (order < kMaxOrder) {
@@ -629,6 +738,10 @@ uint32_t PageFrameAllocator::numaNodeCount() {
 
 uint64_t PageFrameAllocator::freePageCountOnNode(uint32_t node) {
     return node < gNodeCount ? gNodes[node].freePageCount : 0;
+}
+
+void PageFrameAllocator::startReclaimScan() {
+    DelayedExecutionQueue::schedule(kReclaimScanIntervalTicks, &kReclaimScanCallback, nullptr);
 }
 
 }  // namespace kernel
