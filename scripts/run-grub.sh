@@ -64,8 +64,17 @@ fi
 
 echo "--- QEMU(-cdrom GRUB ISO) 시리얼 출력 (최대 ${TIMEOUT_SECS}초, SMP=${SMP}, AHCI=${AHCI}) ---"
 set +e
+# [신규, 2026-09-23, PN-1A224EC2 검증 중 발견] -boot order=d로 항상
+# CD-ROM만 부팅 대상으로 강제한다 - 이게 없으면 AHCI 디스크에 실제
+# 부팅 가능해 보이는 볼륨(0xAA55 서명이 있는 FAT32 부트섹터 등)이
+# 붙어 있을 때 SeaBIOS가 그 디스크를 부팅 후보로 탐지/프로브하다
+# 완전히 멈춘다(시리얼 출력이 첫 줄조차 안 찍힘 - 커널 진입 전 단계).
+# ext4/빈 디스크(0xAA55 서명 없음)는 이 문제가 없어 이전엔 발견 안
+# 됐다. CD-ROM만 부팅 대상으로 명시하면 AHCI 디스크 내용과 무관하게
+# 항상 정상 부팅한다.
 timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -cdrom "${ISO_PATH}" \
+    -boot order=d \
     -serial stdio \
     -display none \
     -no-reboot \

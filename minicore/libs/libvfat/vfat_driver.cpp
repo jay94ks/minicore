@@ -144,15 +144,114 @@ ChainStep kInterpretFatEntry(uint32_t raw, uint32_t* outNext) {
     return ChainStep::Next;
 }
 
+bool kNamesEqualCi(const char* a, uint32_t aLen, const char* b, uint32_t bLen) {
+    if (aLen != bLen) {
+        return false;
+    }
+    auto toUpper = [](char c) -> char { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c; };
+    for (uint32_t i = 0; i < aLen; ++i) {
+        if (toUpper(a[i]) != toUpper(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// [신규, 2026-09-23, PN-1A224EC2] LFN 슬롯 하나에서 UTF-16 코드유닛
+// 13개를 뽑아 ASCII 범위(<0x80)만 char로 근사 변환한다 - v1 스코프
+// 컷: BMP 밖 문자/서로게이트 쌍/비-ASCII 문자는 지원 안 함('?'로
+// 대체). 이 커널의 경로 API 전체가 8비트 char* 하나뿐이라(다른 곳
+// 어디에도 유니코드 처리가 없음) 이 범위가 자연스러운 첫 증분이다.
+// 0x0000(이름 끝)/0xFFFF(패딩)를 만나면 그 자리에서 멈춘다.
+uint32_t kLfnSlotChars(const LfnSlot& slot, char out[kLfnCharsPerSlot]) {
+    uint16_t units[kLfnCharsPerSlot];
+    memcpy(units, slot.name0_4, sizeof(slot.name0_4));
+    memcpy(units + 5, slot.name5_10, sizeof(slot.name5_10));
+    memcpy(units + 11, slot.name11_12, sizeof(slot.name11_12));
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < kLfnCharsPerSlot; ++i) {
+        if (units[i] == 0x0000 || units[i] == 0xFFFF) {
+            break;
+        }
+        out[n++] = (units[i] < 0x80) ? static_cast<char>(units[i]) : '?';
+    }
+    return n;
+}
+
+// [신규, 2026-09-23, PN-1A224EC2] 디렉터리 클러스터 하나를 스캔하는
+// 동안의 LFN 누적 상태 - 짧은 이름 엔트리 직전에 역순(높은 시퀀스
+// 번호부터)으로 나열되는 조각들을 순서/체크섬이 맞는 동안만 계속
+// 쌓고, 어긋나면(손상되었거나 잘려나간 체인) 무효화한다. 클러스터
+// 경계를 넘는 LFN 체인은 v1 범위 밖(디렉터리 스캔 루프 자체가
+// 클러스터 단위라 이 구조체도 클러스터마다 새로 초기화된다) -
+// 실제로는 극히 드문 경우(체인 하나가 최대 20개 엔트리=640바이트,
+// 일반적인 4KiB 클러스터의 극히 일부)라 흔한 케이스에 영향 없다.
+struct LfnState {
+    char fragments[kLfnMaxSlots][kLfnCharsPerSlot];
+    uint32_t fragLen[kLfnMaxSlots];
+    uint32_t highestSeq = 0;
+    uint32_t nextExpectedSeq = 0;
+    uint8_t checksum = 0;
+    bool active = false;
+};
+
+void kAccumulateLfn(LfnState* s, const LfnSlot& slot) {
+    const uint8_t seq = slot.id & kLfnSeqMask;
+    if (seq == 0 || seq > kLfnMaxSlots) {
+        s->active = false;
+        return;
+    }
+    if (slot.id & kLfnLastEntryFlag) {
+        s->active = true;
+        s->highestSeq = seq;
+        s->nextExpectedSeq = seq;
+        s->checksum = slot.checksum;
+    } else if (!s->active || seq != s->nextExpectedSeq - 1 || slot.checksum != s->checksum) {
+        s->active = false;
+        return;
+    }
+    s->fragLen[seq - 1] = kLfnSlotChars(slot, s->fragments[seq - 1]);
+    s->nextExpectedSeq = seq;
+}
+
+// 짧은 이름 엔트리에 도달했을 때 누적된 LFN을 조립한다 - 체크섬이
+// 그 짧은 이름과 일치하고 seq 1..highestSeq가 전부 채워졌을 때만
+// 유효(체크섬 불일치는 고아가 된 LFN 조각 뒤에 무관한 짧은 엔트리가
+// 온 경우 - 스펙이 명시한 무결성 검증).
+bool kFinishLfn(const LfnState& s, const DirEntry& shortEntry, char* out, uint32_t outCap, uint32_t* outLen) {
+    if (!s.active || s.highestSeq == 0 || s.nextExpectedSeq != 1) {
+        return false;
+    }
+    char name11[11];
+    memcpy(name11, shortEntry.name, 8);
+    memcpy(name11 + 8, shortEntry.ext, 3);
+    if (kLfnChecksum(name11) != s.checksum) {
+        return false;
+    }
+    uint32_t pos = 0;
+    for (uint32_t seq = 1; seq <= s.highestSeq; ++seq) {
+        for (uint32_t i = 0; i < s.fragLen[seq - 1] && pos < outCap; ++i) {
+            out[pos++] = s.fragments[seq - 1][i];
+        }
+    }
+    *outLen = pos;
+    return true;
+}
+
 enum class DirScanResult { Found, NotFoundContinue, EndOfDir };
 
-// 디렉터리 데이터 클러스터 하나 안에서 8.3 정규화 이름과 일치하는
-// 엔트리를 찾는다(순수 계산, I/O 없음) - vfat.cpp에 있던 옛
-// Fat32Volume::findDirEntry의 블록-스캔 부분만 뽑은 버전.
+// 디렉터리 데이터 클러스터 하나 안에서 8.3 정규화 이름 또는(있다면)
+// LFN 긴 이름과 일치하는 엔트리를 찾는다(순수 계산, I/O 없음) -
+// vfat.cpp에 있던 옛 Fat32Volume::findDirEntry의 블록-스캔 부분만
+// 뽑은 버전. [갱신, 2026-09-23, PN-1A224EC2] origSeg/origSegLen(경로
+// 세그먼트 원문, 정규화 전)이 짧은 엔트리 직전에 조립된 LFN과
+// 대소문자 무시 비교로 일치하면 8.3 이름 여부와 무관하게 매치한다.
 DirScanResult kScanDirClusterForName(const uint8_t* clusterBuf, uint32_t bytesPerCluster,
-                                      const char normalized11[11], ResolvedEntry* out) {
+                                      const char normalized11[11], const char* origSeg, uint32_t origSegLen,
+                                      ResolvedEntry* out) {
     const uint32_t entriesPerCluster = bytesPerCluster / sizeof(DirEntry);
     const auto* entries = reinterpret_cast<const DirEntry*>(clusterBuf);
+    LfnState lfn{};
     for (uint32_t i = 0; i < entriesPerCluster; ++i) {
         const DirEntry& e = entries[i];
         const uint8_t firstByte = static_cast<uint8_t>(e.name[0]);
@@ -160,12 +259,23 @@ DirScanResult kScanDirClusterForName(const uint8_t* clusterBuf, uint32_t bytesPe
             return DirScanResult::EndOfDir;
         }
         if (firstByte == kNameDeletedMarker) {
+            lfn.active = false;
             continue;
         }
-        if (e.attr == kAttrLongName || (e.attr & kAttrVolumeId) != 0) {
-            continue;  // LFN/볼륨 라벨 - §2 스코프 컷(짧은 이름만 지원)
+        if (e.attr == kAttrLongName) {
+            kAccumulateLfn(&lfn, *reinterpret_cast<const LfnSlot*>(&e));
+            continue;
         }
-        if (kNameMatches(e, normalized11)) {
+        if ((e.attr & kAttrVolumeId) != 0) {
+            lfn.active = false;
+            continue;
+        }
+        char longName[kLfnMaxSlots * kLfnCharsPerSlot];
+        uint32_t longNameLen = 0;
+        const bool hasLongName = kFinishLfn(lfn, e, longName, sizeof(longName), &longNameLen);
+        lfn.active = false;
+        if ((hasLongName && kNamesEqualCi(longName, longNameLen, origSeg, origSegLen)) ||
+            kNameMatches(e, normalized11)) {
             out->firstCluster = kFatFirstCluster(e);
             out->isDir = (e.attr & kAttrDirectory) != 0;
             out->fileSize = out->isDir ? 0 : e.fileSize;
@@ -177,12 +287,15 @@ DirScanResult kScanDirClusterForName(const uint8_t* clusterBuf, uint32_t bytesPe
 
 // 디렉터리 데이터 클러스터 하나 안에서 0-based index를 찾는다(순수
 // 계산, I/O 없음) - vfat.cpp에 있던 옛 Fat32Volume::readdirAt의
-// 블록-스캔 부분만 뽑은 버전.
+// 블록-스캔 부분만 뽑은 버전. [갱신, 2026-09-23, PN-1A224EC2] 짧은
+// 엔트리 직전에 LFN이 조립되면(실제 vfat 관례대로) 8.3 대신 그
+// 긴 이름을 돌려준다.
 DirScanResult kScanDirClusterForIndex(const uint8_t* clusterBuf, uint32_t bytesPerCluster, uint64_t target,
                                        uint64_t* seen, char* nameOut, uint32_t nameOutCap, uint32_t* outNameLen,
                                        bool* outIsDir) {
     const uint32_t entriesPerCluster = bytesPerCluster / sizeof(DirEntry);
     const auto* entries = reinterpret_cast<const DirEntry*>(clusterBuf);
+    LfnState lfn{};
     for (uint32_t i = 0; i < entriesPerCluster; ++i) {
         const DirEntry& e = entries[i];
         const uint8_t firstByte = static_cast<uint8_t>(e.name[0]);
@@ -190,30 +303,46 @@ DirScanResult kScanDirClusterForIndex(const uint8_t* clusterBuf, uint32_t bytesP
             return DirScanResult::EndOfDir;
         }
         if (firstByte == kNameDeletedMarker) {
+            lfn.active = false;
             continue;
         }
-        if (e.attr == kAttrLongName || (e.attr & kAttrVolumeId) != 0) {
+        if (e.attr == kAttrLongName) {
+            kAccumulateLfn(&lfn, *reinterpret_cast<const LfnSlot*>(&e));
             continue;
         }
+        if ((e.attr & kAttrVolumeId) != 0) {
+            lfn.active = false;
+            continue;
+        }
+        char longName[kLfnMaxSlots * kLfnCharsPerSlot];
+        uint32_t longNameLen = 0;
+        const bool hasLongName = kFinishLfn(lfn, e, longName, sizeof(longName), &longNameLen);
+        lfn.active = false;
         if (*seen == target) {
-            uint32_t nameLen = 8;
-            while (nameLen > 0 && e.name[nameLen - 1] == ' ') {
-                --nameLen;
-            }
-            uint32_t extLen = 3;
-            while (extLen > 0 && e.ext[extLen - 1] == ' ') {
-                --extLen;
-            }
             uint32_t written = 0;
-            for (uint32_t k = 0; k < nameLen && written < nameOutCap; ++k, ++written) {
-                nameOut[written] = (static_cast<uint8_t>(e.name[0]) == kNameEscapedE5 && k == 0)
-                                        ? static_cast<char>(kNameDeletedMarker)
-                                        : e.name[k];
-            }
-            if (extLen > 0 && written < nameOutCap) {
-                nameOut[written++] = '.';
-                for (uint32_t k = 0; k < extLen && written < nameOutCap; ++k, ++written) {
-                    nameOut[written] = e.ext[k];
+            if (hasLongName) {
+                for (uint32_t k = 0; k < longNameLen && written < nameOutCap; ++k, ++written) {
+                    nameOut[written] = longName[k];
+                }
+            } else {
+                uint32_t nameLen = 8;
+                while (nameLen > 0 && e.name[nameLen - 1] == ' ') {
+                    --nameLen;
+                }
+                uint32_t extLen = 3;
+                while (extLen > 0 && e.ext[extLen - 1] == ' ') {
+                    --extLen;
+                }
+                for (uint32_t k = 0; k < nameLen && written < nameOutCap; ++k, ++written) {
+                    nameOut[written] = (static_cast<uint8_t>(e.name[0]) == kNameEscapedE5 && k == 0)
+                                            ? static_cast<char>(kNameDeletedMarker)
+                                            : e.name[k];
+                }
+                if (extLen > 0 && written < nameOutCap) {
+                    nameOut[written++] = '.';
+                    for (uint32_t k = 0; k < extLen && written < nameOutCap; ++k, ++written) {
+                        nameOut[written] = e.ext[k];
+                    }
                 }
             }
             *outNameLen = written;
@@ -308,8 +437,8 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                         break;
                     }
 
-                    const DirScanResult scanResult =
-                        kScanDirClusterForName(clusterBuf.get(), bytesPerCluster, normalized, &matched);
+                    const DirScanResult scanResult = kScanDirClusterForName(
+                        clusterBuf.get(), bytesPerCluster, normalized, args->relPath + segStart, segLen, &matched);
                     if (scanResult == DirScanResult::Found) {
                         foundInThisDir = true;
                         break;
@@ -569,8 +698,8 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                         break;
                     }
 
-                    const DirScanResult scanResult =
-                        kScanDirClusterForName(clusterBuf.get(), bytesPerCluster, normalized, &matched);
+                    const DirScanResult scanResult = kScanDirClusterForName(
+                        clusterBuf.get(), bytesPerCluster, normalized, args->relPath + segStart, segLen, &matched);
                     if (scanResult == DirScanResult::Found) {
                         foundInThisDir = true;
                         break;

@@ -115,6 +115,43 @@ constexpr uint8_t kNameFreeRestMarker = 0x00;   // 이 엔트리부터 디렉터
 constexpr uint8_t kNameDeletedMarker = 0xE5;
 constexpr uint8_t kNameEscapedE5 = 0x05;        // 실제 파일명 첫 글자가 0xE5인 경우의 이스케이프
 
+// ---------------------------------------------------------------------
+// 3.6 LFN(Long File Name) 슬롯 - attr==kAttrLongName(0x0F)인 디렉터리
+// 엔트리를 이 레이아웃으로 재해석한다(DirEntry와 크기만 같은 별개
+// 오버레이, Linux msdos_fs.h의 struct msdos_dir_slot과 1바이트 단위로
+// 대조). 짧은 이름 엔트리 바로 앞에 시퀀스 번호 역순(높은 번호가 먼저)
+// 으로 나열되고, 최상위 비트(kLfnLastEntryFlag)가 선 그 체인의
+// "마지막 논리 조각"(=이름의 끝부분)임을 표시한다 - PN-1A224EC2.
+// ---------------------------------------------------------------------
+#pragma pack(push, 1)
+struct LfnSlot {
+    uint8_t  id;
+    uint16_t name0_4[5];
+    uint8_t  attr;       // 항상 kAttrLongName(0x0F)
+    uint8_t  slotType;   // 항상 0
+    uint8_t  checksum;   // 뒤따르는 8.3 짧은 이름의 체크섬(kLfnChecksum 참고)
+    uint16_t name5_10[6];
+    uint16_t startCluster;  // 항상 0(레거시 필드, LFN 슬롯엔 의미 없음)
+    uint16_t name11_12[2];
+};
+static_assert(sizeof(LfnSlot) == 32, "LfnSlot은 DirEntry와 같은 32바이트여야 함");
+#pragma pack(pop)
+
+constexpr uint8_t kLfnLastEntryFlag = 0x40;
+constexpr uint8_t kLfnSeqMask = 0x1F;
+constexpr uint32_t kLfnMaxSlots = 20;          // 20*13=260자 >= NAME_MAX(255)
+constexpr uint32_t kLfnCharsPerSlot = 13;       // 5+6+2
+
+// 8.3 짧은 이름(11바이트, 대문자 정규화된 그대로)의 체크섬 - 스펙
+// 알고리즘 그대로(FAT: General Overview of On-Disk Format 문서).
+inline uint8_t kLfnChecksum(const char name11[11]) {
+    uint8_t sum = 0;
+    for (uint32_t i = 0; i < 11; ++i) {
+        sum = static_cast<uint8_t>(((sum & 1) ? 0x80 : 0) + (sum >> 1) + static_cast<uint8_t>(name11[i]));
+    }
+    return sum;
+}
+
 inline uint32_t kFatFirstCluster(const DirEntry& e) {
     return (static_cast<uint32_t>(e.fstClusHi) << 16) | e.fstClusLo;
 }
