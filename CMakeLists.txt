@@ -42,6 +42,7 @@ add_subdirectory(minicore/libs/libswapfs)
 add_subdirectory(minicore/libs/libext4)
 add_subdirectory(minicore/libs/libvfat)
 add_subdirectory(minicore/libs/libexfat)
+add_subdirectory(minicore/libs/libntfs)
 add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
@@ -60,6 +61,7 @@ target_link_libraries(minicore.elf PRIVATE
     libext4
     libvfat
     libexfat
+    libntfs
     minicore_libs_x86_64
 )
 
