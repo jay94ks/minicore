@@ -200,7 +200,21 @@ static_assert(sizeof(NtfsFileNameContent) == 66, "NtfsFileNameContent 고정부�
 
 constexpr uint8_t kNtfsNamespaceWin32 = 1;
 constexpr uint8_t kNtfsNamespaceWin32AndDos = 3;
-constexpr uint32_t kFileAttrDirectory = 0x10;  // FAT류 attr 비트와 값 호환(SP-AA6DF406 §3.5)
+// [정정, 2026-09-22, PN-52C577F3 실측 발견] SP-AA6DF406 §3.5는 이
+// 비트가 "FAT류 attr 비트와 값 호환"이라며 0x10(Win32
+// FILE_ATTRIBUTE_DIRECTORY)으로 명시했으나, 실제 mkfs.ntfs(ntfs-3g)
+// 이미지의 $FILE_NAME 중복 정보를 바이트 단위로 디코딩해 보면 진짜
+// 디렉터리 엔트리의 fileAttributes는 0x10 비트가 전혀 서 있지 않고
+// (예: 파일 hello.txt=0x20/ARCHIVE만, 디렉터리 nested=0x10000020)
+// 대신 0x10000000 비트가 서 있다 - 이건 Win32 GetFileAttributes의
+// FILE_ATTRIBUTE_DIRECTORY가 아니라 NTFS 온디스크 $FILE_NAME 전용
+// 센티널(공개 문헌에서 "FILE_ATTR_DUP_FILENAME_INDEX_PRESENT"로
+// 불리는 값 - 자식 MFT 레코드를 열지 않고도 디렉터리 목록에서
+// 디렉터리 여부를 알 수 있게 부모 인덱스 엔트리에 복제해 두는
+// 필드다). 리눅스 커널 소스 재대조 없이 SP-AA6DF406 원문을 그대로
+// 믿었다면 놓쳤을 실제 기능 결함(Readdir/Open이 모든 하위 디렉터리를
+// 파일로 오판해 그 안으로 못 들어감) - 실측 바이트로 확인 후 정정.
+constexpr uint32_t kFileAttrDirectory = 0x10000000;
 
 inline uint64_t kNtfsMftReferenceRecordNumber(uint64_t ref) { return ref & 0xFFFFFFFFFFFFull; }
 
@@ -241,61 +255,46 @@ static_assert(sizeof(NtfsIndexEntry) == 16, "NtfsIndexEntry는 16바이트여야
 constexpr uint16_t kIndexEntryHasSubnode = 0x1;
 constexpr uint16_t kIndexEntryLast = 0x2;
 
-// resolvePath()/readdirAt()이 돌려주는, 파일 하나의 요약.
-struct ResolvedEntry {
-    uint64_t mftRecordNumber = 0;
-    uint64_t fileSize = 0;
-    bool isDir = false;
-};
-
 // ---------------------------------------------------------------------
-// 4(부분) - NtfsVolume: 읽기 전용 마운트 + 무상태 경로 탐색/읽기/
-// 디렉터리 열거. `NtfsDriver`(VFS 통합 계층)는 이 계획 범위 밖 -
-// libext4/libvfat/libexfat 선례대로 이 클래스의 무상태 메서드는
-// 실제 driver의 onExec 코루틴 안에서는 재사용되지 않고 그 후속
-// 계획이 평탄화해 다시 구현할 것이다.
+// 4(부분) - NtfsVolume: 읽기 전용 마운트 + mount()가 캐싱한 상태의
+// 읽기 전용 노출.
+//
+// [범위 변경, 2026-09-22, PN-49F24FD7 -> PN-52C577F3으로 갱신,
+// libext4/libvfat/libexfat이 먼저 겪은 것과 동일한 실측 제약] 원래
+// 있던 무상태 동기 메서드(resolvePath/readData/readdirAt + private
+// 헬퍼 findAttribute/scanIndexRoot/clusterToSector/readClusters)는
+// 전부 제거했다 - 전부 `fs::BlockDevice::readBlocks()`(Task 레벨
+// 블로킹 동기 래퍼)를 쓰는데, 이건 `kernel::KernelFsDriver::onExec()`
+// (코루틴)에서 호출하면 실측 확인된 무한 대기가 난다. `NtfsDriver`
+// (ntfs_driver.h/.cpp, PN-52C577F3)가 `kernel::AsyncTaskCoroAwaiter`
+// (PN-6EDED542) 기반으로 `onExec` 자신의 코루틴 몸체 안에 이 로직을
+// 평탄화해 다시 구현한다(`ext4_driver.cpp`와 가장 가까운 템플릿 -
+// NTFS도 "레코드를 열고 -> 속성을 찾고 -> 데이터 런을 읽는" 다단계
+// 구조이기 때문). `mount()`만 여전히 실제로 쓰인다 - 진짜
+// `kernel::Task` 컨텍스트(`NtfsDriver::mount()`)에서 한 번 호출되는
+// 준비 단계라 내부적으로 동기 헬퍼(readMftRecord)를 계속 쓰는 게
+// 안전하다(mount() 자신이 루트 레코드가 실제로 열리는지 확인해야
+// 해서 - 이 하나는 mount() 전용 구현 세부로 private에 남긴다).
 // ---------------------------------------------------------------------
 class NtfsVolume {
 public:
     bool mount(fs::BlockDevice* device);
 
-    // "/a/b/c" - 루트(MFT 레코드 5)의 $INDEX_ROOT부터 세그먼트별로
-    // 탐색한다. v1은 ASCII 경로만 지원 + 대소문자 구분 비교(NTFS의
-    // Up-case 콜레이션은 1차 증분 범위 밖 - §5 "이 문서가 확정하지
-    // 않는 것"에 준하는 단순화, 착수 세션 재량).
-    bool resolvePath(const char* path, uint32_t pathLen, ResolvedEntry* out);
-
-    // 논리 오프셋 기준 읽기(POSIX pread 스타일, 상태 없음) - 매번
-    // mftRecordNumber의 레코드를 다시 열어 $DATA를 찾는다(무상태 API
-    // 특성상 재조회, ext4/vfat 1차 증분과 동일한 관례).
-    uint32_t readData(uint64_t mftRecordNumber, uint64_t offset, void* buf, uint32_t len, bool* outOk);
-
-    // 디렉터리(MFT 레코드 번호로 식별)의 0-based 인덱스 순회 -
-    // $INDEX_ROOT만으로 완결되는 작은 디렉터리만 지원, 하위 노드가
-    // 필요한 대용량 디렉터리를 만나면 false(미지원, 크래시 아님).
-    bool readdirAt(uint64_t dirRecordNumber, uint64_t index, char* nameOut, uint32_t nameOutCap,
-                   uint32_t* outNameLen, bool* outIsDir, uint64_t* outChildRecord);
+    // [PN-52C577F3] mount()가 이미 파싱해 둔 상태를 읽기 전용으로
+    // 노출 - `NtfsDriver::onExec()`(코루틴 컨텍스트)가 이 상태를
+    // 그대로 재사용해 자신만의 평탄화된 순회 로직을 구현하는 데 쓴다.
+    fs::BlockDevice* device() const { return device_; }
+    uint32_t bytesPerSectorValue() const { return bs_.bytesPerSector; }
+    uint32_t sectorsPerClusterValue() const { return bs_.sectorsPerCluster; }
+    uint32_t clusterSizeValue() const { return clusterSize_; }
+    uint32_t mftRecordSizeValue() const { return mftRecordSize_; }
+    uint64_t mftStartLcnValue() const { return mftStartLcn_; }
 
 private:
     // recordNumber의 MFT 레코드를 읽어 fixup을 적용하고 magic=="FILE"
     // 인지 확인한다 - outBuf는 mftRecordSize_ 바이트 이상이어야 한다.
+    // mount()가 루트(레코드 5)를 실제로 열어 볼 때만 쓴다.
     bool readMftRecord(uint64_t recordNumber, uint8_t* outBuf);
-    // recordBuf(이미 fixup 적용됨) 안에서 attrType과 일치하는 첫
-    // 속성을 찾는다. matchUnnamedOnly=true면 이름 없는(nameLength==0)
-    // 속성만 매치한다 - `$DATA`(기본 스트림, ADS 제외) 조회용.
-    // `$INDEX_ROOT`/`$INDEX_ALLOCATION`/`$BITMAP`는 항상 "$I30"으로
-    // 이름 붙어 있으므로 false로 호출해 이름 여부와 무관하게 타입만
-    // 매치한다(1차 증분은 디렉터리 인덱스 이름 자체를 구분할 필요가
-    // 없음 - 그 타입의 속성은 레코드당 하나뿐).
-    bool findAttribute(const uint8_t* recordBuf, uint32_t attrType, bool matchUnnamedOnly, const uint8_t** outAttr,
-                        uint32_t* outAttrLen);
-    // 디렉터리 레코드의 $INDEX_ROOT를 훑는다 - nameUtf16/nameLen이
-    // null이 아니면 "이름 일치 탐색", null이면 "index-th 조회".
-    bool scanIndexRoot(uint64_t dirRecordNumber, const uint16_t* nameUtf16, uint32_t nameLen, uint64_t targetIndex,
-                        ResolvedEntry* out, char* nameOut, uint32_t nameOutCap, uint32_t* outNameLen,
-                        uint64_t* outChildRecord);
-    bool clusterToSector(uint64_t lcn, uint64_t* outSector) const;
-    bool readClusters(uint64_t lcn, uint32_t count, void* buf);
 
     fs::BlockDevice* device_ = nullptr;
     NtfsBootSector bs_{};
