@@ -17,12 +17,19 @@
 // 자신이 이미 `mountKernel()`로 직접 마운트, SP-7CC5693A §2.4)는
 // 애초에 이 서비스의 대상이 아니다.
 //
-// **[미착수] 실제 파일시스템 드라이버 연결(§3.1a/§3.2)과 Open/Read
-// 프로토콜(§9, SP-2AAD7C8D)**: 이 네 마운트 지점 뒤에 아직 어떤
-// 실제 파일시스템도 없다(libext4/libswapfs/libvfat 전부 "예정,
-// 미구현") - 이번 증분은 각 지점이 라우팅 테이블에 정확히 등록되고
-// 그 소유 Channel의 accept 왕복이 실제로 동작하는지만 검증한다
-// (accept 즉시 close, pubreg 항목3과 동일 패턴).
+// **[갱신, 2026-09-22, PN-452FF696 항목5 완료]** 아래 `kTryAutoMountBlockDevice()`
+// 가 §3.1 우선순위(ext4 → FAT32)로 실제 `gAhciBlockDevice`에 `Ext4Driver`/
+// `Fat32Driver::mount()`를 시도해 슈퍼블록을 판별하고, 성공하면 4개
+// 마운트 지점 중 `/sys/mnt`의 Channel 등록을 해제하고 그 자리에 실제
+// `KernelDriver`로 다시 마운트한다 - 이때부터 `/sys/mnt`는 실제 디스크
+// 내용을 서비스한다(단, 이 파일 자신은 §9 Open/Read syscall 프로토콜이
+// 아직 없어 그 경로를 유저 프로세스에게 실제로 열어 주지는 못한다 -
+// `KernelFsDriver` 디스패치 자체는 `AsyncTask::submit()`으로 이미
+// 검증됨, `PN-9AE5BFE4`/`PN-EBAEA67B`). 알려진 포맷을 못 찾으면(장치
+// 없음/미지원 포맷) `/sys/mnt`는 그대로 기존 Channel 라우팅으로
+// 남는다 - 나머지 세 지점(`/sys/etc`/`/sys/bin`/`/sys/tmp`)의 accept
+// 왕복 검증(accept 즉시 close, pubreg 항목3과 동일 패턴)은 이번
+// 증분에서 안 건드림.
 //
 // **[신규, 2026-09-20, QU-1FB6A7A4 답변 - "블록 디바이스는 그냥 아예
 // fs한테 던져버려. 인식/인식 해제까지 전부."]** 블록 스토리지 장치
@@ -32,10 +39,7 @@
 // (SP-C2670F69 §3.1이 남겨 둔 설계 공백) 자체가 이 결정으로 사라진다
 // (같은 프로세스 안이므로 핸드오프가 필요 없음). AHCI 실제 하드웨어
 // 코드는 ahci.h/ahci.cpp(PN-4E6EA13D/PN-F60E405A, devmgr.cpp에서 이관) -
-// `AhciBlockDevice`(block_device.h `fs::BlockDevice` 구현)까지 이
-// 증분에서 구성하지만, 그걸 실제 `FileSystemDriver::mount()`(§3.1a,
-// libext4/libvfat 자체가 아직 미구현)에 넘기는 건 여전히 범위 밖 -
-// PN-452FF696 항목5.
+// `AhciBlockDevice`(block_device.h `fs::BlockDevice` 구현).
 //
 // **[전환, 2026-09-20, SP-43331889/QU-5FC58B06 - fs를 유저랜드
 // 프로세스에서 Process 없는 순수 커널 Task로 완전 흡수]** 설계자
@@ -64,6 +68,8 @@
 #include "async_task.h"
 #include "channel.h"
 #include "fs_service.h"
+#include "libext4/ext4_driver.h"
+#include "libvfat/vfat_driver.h"
 #include "mount_table.h"
 #include "pnp.h"
 #include "scheduler.h"
@@ -102,6 +108,18 @@ uint64_t kFirstMmioBase(const DeviceDescriptor& dev) {
 ahci::AhciController gAhciController;
 ahci::AhciBlockDevice gAhciBlockDevice;
 bool gHasAhciBlockDevice = false;
+
+// [구현, 2026-09-22, PN-452FF696 항목5] 실제 감지된 블록 장치에
+// 연결할 후보 FileSystemDriver - §3.1 우선순위(ext4 → FAT32/16)로
+// 차례로 mount()를 시도한다. libswapfs는 이 순위 목록에 있지만
+// FileSystemDriver를 구현하지 않는 별도 인터페이스(SwapBackend, 페이지
+// 폴트 스왑인 전용)라 "일반 파일시스템 자동 마운트" 대상이 아니다 -
+// 스왑 파티션은 애초에 VFS 마운트 지점에 붙는 개념이 없다. exFAT/NTFS
+// 는 §4 통합 계층(ExfatDriver/NtfsDriver, PN-09970F05/PN-52C577F3)이
+// 아직 없어 이번 자동 감지 순서에서 제외 - 그 계획들이 완료되면 이
+// 목록에 추가한다.
+ext4::Ext4Driver gExt4Driver;
+vfat::Fat32Driver gFat32Driver;
 
 // devmgr에서 하던 EnumerateDevices->매칭->RequestIoPermission->HBA
 // 초기화까지 그대로 이 KernelThread 안에서 직접 호출로 수행한다 -
@@ -161,6 +179,35 @@ constexpr MountPointSpec kMountPoints[] = {
     {kMountTmp, sizeof(kMountTmp) - 1},
 };
 constexpr uint32_t kMountPointCount = sizeof(kMountPoints) / sizeof(kMountPoints[0]);
+
+// [구현, 2026-09-22, PN-452FF696 항목5, SP-7CC5693A §6 4-5단계]
+// 실제 감지된 블록 장치(gAhciBlockDevice)에 §3.1 우선순위(위 후보
+// 선언부 문서 주석 참고)로 순서대로 mount()를 시도해 슈퍼블록을
+// 판별하고, 성공한 첫 FileSystemDriver를 실제 마운트 지점에 연결한다.
+// **"어떤 블록 장치를 어떤 마운트 지점에 붙일지"는 SP-7CC5693A §4
+// 항목3이 "각 드라이버 착수 시점의 구현 세부"로 이미 열어 둔 결정이라
+// 여기서 확정한다**: 4개 사전 등록 지점(§4-A) 중 `/sys/mnt`가 "범용
+// 마운트 지점"이라는 UNIX 관례에 가장 부합해 채택했다. 판별에
+// 성공하면 그 경로의 기존 Channel 등록을 해제하고 KernelDriver로
+// 다시 마운트한다(§6 5단계 - "2단계에서 예약해 둔 마운트 지점 중
+// 알맞은 곳에 연결") - 실패하면(장치 없음/알려진 포맷 아님)
+// `/sys/mnt`는 그대로 기존 Channel 라우팅으로 남는다(유저랜드 fs
+// 서비스가 나중에 그 경로를 실제로 서비스할 수 있는 여지를 남겨 둠).
+void kTryAutoMountBlockDevice() {
+    if (!gHasAhciBlockDevice) {
+        return;
+    }
+    if (gExt4Driver.mount(&gAhciBlockDevice, /*readOnly=*/true)) {
+        MountTable::unmount(kMountMnt, sizeof(kMountMnt) - 1);
+        MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gExt4Driver);
+        return;
+    }
+    if (gFat32Driver.mount(&gAhciBlockDevice, /*readOnly=*/true)) {
+        MountTable::unmount(kMountMnt, sizeof(kMountMnt) - 1);
+        MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gFat32Driver);
+        return;
+    }
+}
 
 // [신규, 2026-09-20, SP-43331889 §3-3] fs가 실제로 쓰는 6개 syscall
 // 중 유일하게 블로킹하는 AcceptFromChannel 전용 - 트랩(Syscall::
@@ -235,6 +282,7 @@ void kFsKernelMain(void* /*arg*/) {
     // 이후, accept 루프 진입 전에 한 번(실패해도 이 프로세스는 계속
     // 존재 - kProbeAndInitAhci() 문서 주석 참고).
     kProbeAndInitAhci(selfShared);
+    kTryAutoMountBlockDevice();
 
     for (;;) {
         AcceptFromChannelArgs acceptArgs;
