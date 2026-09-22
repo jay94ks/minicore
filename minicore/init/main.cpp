@@ -33,9 +33,32 @@
 // 스핀이 유일하게 쓸 수 있는 방법이다(예전 자리표시자와 동일한
 // 기법, 이제 그 사이에 실제로 Wait도 부른다는 점만 다르다).
 #include "libmc/process.h"
+#include "libmc/signal.h"
 #include "libmc/syscall.h"
 
 extern "C" void _start() {
+    // [신규, 2026-09-22, PN-012D6310 실측 검증 중 발견] SIGCHLD(Chld)의
+    // 기본 disposition은 "프로세스 종료"다(scheduler.cpp의
+    // raiseSignal(Chld) 호출부 문서 주석 - 이 커널은 POSIX와 달리
+    // Chld를 기본으로 무시하지 않는다). init은 SpawnProcess로 실제
+    // 자식을 만드는 이 코드베이스 최초의 프로세스인데, 이 신호를
+    // 명시적으로 Ignore하지 않으면 **자식이 하나라도 죽는 순간 init
+    // 자신도 essential 종료 정책에 따라 즉시 패닉**한다는 것을 실측으로
+    // 직접 확인했다(자식이 죽자마자 init이 이 checkpoint에서 종료되는
+    // 것을 TEMP 로그로 관찰) - init의 영구 감시 루프(아래)는 애초에
+    // Wait() 폴링만으로 회수하도록 설계돼 있어 이 신호 자체가 필요
+    // 없으므로, 부팅 즉시 Ignore로 설정해 이 자기파괴 경로를 원천
+    // 차단한다.
+    {
+        mc::SignalActionArgs sigArgs;
+        sigArgs.signal = mc::SignalNumber::Chld;
+        sigArgs.disposition = mc::SignalDisposition::Ignore;
+        mc::SyscallToken token = mc::submit(mc::kSyscallEndpointSignalAction, &sigArgs);
+        if (token != 0) {
+            mc::wait(token);
+        }
+    }
+
     // [유지, 2026-09-18, PN-11B3D2BB] `kSpawnInitProcess()`(kmain.cpp)가
     // `ProcessStartFlags::essential = true`로 스폰하는 이 프로젝트의
     // PID 1이라, 이 함수가 반환하거나 `selfTerminate()`를 부르면

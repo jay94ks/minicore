@@ -22,6 +22,7 @@ set(MINICORE_USERLAND_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/linker-use
 
 add_subdirectory(libs/libmc)
 add_subdirectory(libs/libcenv)
+add_subdirectory(libs/libcpio)
 add_subdirectory(tests/userlandtest)
 
 # minicore/init(SP-68182FBD §2.4) - userland/ 밖에 있지만 다른 유저
@@ -60,3 +61,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/authmgr ${CMAKE_CURRENT
 # **부팅 매니페스트(scripts/build-initrd.sh)에는 의도적으로 포함하지
 # 않는다** - minicore/dbgtarget/main.cpp 상단 주석 참고.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/dbgtarget ${CMAKE_CURRENT_BINARY_DIR}/minicore-dbgtarget)
+
+# proctest(PN-012D6310, procfs pid 열람 실측 검증 전용) - dbgtarget과
+# 동일한 이유의 out-of-tree add_subdirectory. **부팅 매니페스트
+# (scripts/build-initrd.sh의 고정 스폰 목록)에는 의도적으로 포함하지
+# 않는다** - minicore/proctest/main.cpp 상단 주석 참고.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/proctest ${CMAKE_CURRENT_BINARY_DIR}/minicore-proctest)

@@ -43,14 +43,22 @@ mkdir -p "${STAGE_DIR}"
 # authmgr(PN-24A2B6F5/PN-CFEAEF40, 2026-09-20) 추가 - v1은 스캐폴딩만
 # (실제 프로토콜은 후속 세션), 부팅 매니페스트 왕복 자체는 pubreg와
 # 동일하게 검증 대상.
+# dbgtarget/proctest(PN-012D6310, 2026-09-22) 추가 - 이 둘은
+# kSpawnServiceProcesses 고정 스폰 목록에는 없다(각자 main.cpp 상단
+# 주석 참고 - 반드시 실제 SpawnProcess syscall로만 스폰돼야 함) - 그냥
+# initrd.cpio 안에 원본 ELF 바이트로만 실려, 유저랜드 스포너가
+# `/sys/live/initrd.cpio`를 직접 읽어(libcpio) 그 바이트를
+# SpawnProcess의 imageBuffer로 넘기는 용도다.
 cp "${BUILD_USERLAND_DIR}/minicore-init/init" "${STAGE_DIR}/init"
 cp "${BUILD_USERLAND_DIR}/minicore-pubreg/pubreg" "${STAGE_DIR}/pubreg"
 cp "${BUILD_USERLAND_DIR}/minicore-authmgr/authmgr" "${STAGE_DIR}/authmgr"
+cp "${BUILD_USERLAND_DIR}/minicore-dbgtarget/dbgtarget" "${STAGE_DIR}/dbgtarget"
+cp "${BUILD_USERLAND_DIR}/minicore-proctest/proctest" "${STAGE_DIR}/proctest"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest)"
