@@ -27,9 +27,18 @@ namespace kernel {
 // 자체가 무엇이든 상관없다. **`ChannelId`는 이제 커널이 발급하는
 // 불투명 핸들이다** - 세대 태그 슬롯 테이블(`gChannelTable`,
 // channel.cpp)의 인덱스+세대를 인코딩한 값으로, `kResolveChannelId()`
-// 를 거쳐야만 실제 `Channel*`로 해석된다(SP-9CB55C5B의 `ProcessId`와
-// 동일한 패턴 - Channel은 SharedPtr이 아니라 슬랩 할당이라 WeakPtr
-// 대신 슬롯의 `ptr==nullptr` 여부로 생존을 판정한다).
+// 를 거쳐야만 실제 `Channel`에 접근할 수 있다(SP-9CB55C5B의
+// `ProcessId`와 동일한 패턴). [갱신, 2026-09-22, PN-260D7D73] 세대
+// 태그는 "같은 슬롯을 나중에 재사용한 다른 Channel"을 걸러내는
+// 역할(슬롯 재사용 ABA)로 계속 남아 있고, `Channel` 자신의 실제
+// 메모리 수명은 이제 `BridgePipe`와 동일하게 `SharedPtr<Channel>`
+// (슬롯이 유일한 강한 소유자)이 관리한다 - `kResolveChannelId()`가
+// `Channel*` 대신 `SharedPtr<Channel>`을 돌려주므로, 이 핸들을 쓰는
+// 동안 다른 코어의 동시 `DestroyChannel` 때문에 그 메모리가 해제되는
+// 경쟁(use-after-free)이 구조적으로 불가능해졌다(예전엔 `kResolveChannelId()`
+// 가 락 없이 순간적으로 읽은 raw 포인터를, `AcceptFromChannelHandler`
+// 의 `AsyncTask::yield()` 대기 루프처럼 나중에 다시 역참조하는 지점이
+// 있어 이론상 실제 UAF 경합이 가능했다).
 using ChannelId = uint64_t;
 using BridgeHandle = uint64_t;
 
@@ -87,7 +96,13 @@ struct BridgePipe;
 // KernelReservedTable::reserveForKernelService(name=nullptr로 호출 -
 // NamedObjectTable에 등록하지 않아야 하는 이유는 livefs.h 참고) 양쪽이
 // 공유한다 - 순수 리팩터링, openChannel의 기존 동작은 무변경.
-Channel* kCreateNamedChannel(const char* name, uint64_t nameLength, ChannelError* outError);
+//
+// [갱신, 2026-09-22, PN-260D7D73] 반환 타입이 `Channel*`에서
+// `SharedPtr<Channel>`로 바뀌었다 - `BridgePipe::createPair()`와
+// 동일한 패턴(`kMakeShared<Channel>(preConstructed)`)으로 전환,
+// `gChannelTable`(channel.cpp)이 이제 이 SharedPtr을 슬롯의 유일한
+// 강한 소유자로 저장한다(아래 `Channel` 클래스 문서 주석 참고).
+SharedPtr<Channel> kCreateNamedChannel(const char* name, uint64_t nameLength, ChannelError* outError);
 
 // [신규, 2026-09-20, SP-43331889 §7(fs 전환)] 이름 없는 채널 하나를
 // 개설하고 소유자를 `caller`로 채운다 - `OpenChannelHandler::onExec()`
@@ -372,6 +387,14 @@ public:
         pendingAccepters.head = nullptr;
         pendingAccepters.tail = nullptr;
     }
+
+    // [신규, 2026-09-22, PN-260D7D73] `kMakeShared<Channel>()`의 기본
+    // 삭제자(`kDestroyAndFree<Channel>`)가 마지막 강한 참조 해제 시
+    // 호출한다(`BridgePipe::destroy()`와 동일한 역할) - 지금은 정리할
+    // 힙 자원이 없어(모든 필드가 값 타입/비소유 raw 포인터) no-op이지만,
+    // `kDestroyAndFree<T>`가 `ptr->destroy()`를 무조건 호출하는 계약이라
+    // 정의 자체는 필수다.
+    void destroy() {}
 
     void pushPendingConnect(PendingConnectRequest* req) {
         req->next = nullptr;

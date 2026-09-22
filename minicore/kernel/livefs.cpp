@@ -78,7 +78,7 @@ bool KernelReservedTable::reserveForKernelService(const char* name, uint32_t nam
     // 아는 것만으로는 connectChannel()할 수 없다(§2.0 안전성 근거 그대로 -
     // 오직 이 표를 거쳐야만 ChannelId를 얻는다).
     ChannelError channelError = ChannelError::None;
-    Channel* channel = kCreateNamedChannel(nullptr, 0, &channelError);
+    SharedPtr<Channel> channel = kCreateNamedChannel(nullptr, 0, &channelError);
     if (!channel) {
         return false;
     }
