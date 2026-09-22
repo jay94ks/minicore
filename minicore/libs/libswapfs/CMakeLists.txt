@@ -6,6 +6,7 @@
 # 그때 확장, RM-23F4B687 §4).
 add_library(libswapfs OBJECT
     swapfs.cpp
+    swapfs_io.cpp
 )
 
 # [갱신, 2026-09-22] minicore/kernel도 PUBLIC이어야 한다 - swapfs.h
