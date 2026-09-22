@@ -388,6 +388,46 @@ DirScanResult kScanDirClusterForIndex(const uint8_t* clusterBuf, uint32_t bytesP
     return DirScanResult::NotFoundContinue;
 }
 
+// [신규, 2026-09-23, PN-547EF839] FAT[1] 예약 엔트리의 clean-shutdown
+// 비트(vfat.h의 kFat32DirtyBitCleanShutdown 문서 주석 참고)를
+// numFats개 FAT 사본 전부에 동일하게 반영한다 - §3.4 "numFats가
+// 2 이상이면 모든 FAT 사본에 반영"과 같은 원칙. `Fat32Driver::mount()`/
+// `remount()`는 `MountTable::mountKernel()` 등록 전/후 한 번만 동기
+// 호출되는 준비 단계라 여기서도 `fs::BlockDevice`의 동기 read/writeBlocks
+// 를 그대로 쓴다(onExec 코루틴 안이 아니므로 안전 - vfat.h의
+// Fat32Volume 클래스 문서 주석과 동일한 근거).
+bool kSetFat32CleanShutdownBit(fs::BlockDevice* device, uint32_t bytesPerSector, uint32_t fatStartSector,
+                                uint32_t numFats, uint32_t fatSize32, bool clean) {
+    const kernel::uint32_t devBlockSize = device->blockSize();
+    if (devBlockSize == 0 || bytesPerSector % devBlockSize != 0) {
+        return false;
+    }
+    const kernel::uint32_t blocksPerSector = bytesPerSector / devBlockSize;
+    SlabBuf buf(bytesPerSector);
+    if (!buf) {
+        return false;
+    }
+    const uint32_t fatEntryByteOffset = kReservedFatEntryIndex * 4;
+    for (uint32_t fatIndex = 0; fatIndex < numFats; ++fatIndex) {
+        const uint32_t sector = fatStartSector + fatIndex * fatSize32;
+        if (!device->readBlocks(sector * blocksPerSector, blocksPerSector, buf.get())) {
+            return false;
+        }
+        uint32_t raw = 0;
+        memcpy(&raw, buf.get() + fatEntryByteOffset, sizeof(raw));
+        if (clean) {
+            raw |= kFat32DirtyBitCleanShutdown;
+        } else {
+            raw &= ~kFat32DirtyBitCleanShutdown;
+        }
+        memcpy(buf.get() + fatEntryByteOffset, &raw, sizeof(raw));
+        if (!device->writeBlocks(sector * blocksPerSector, blocksPerSector, buf.get())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool Fat32Driver::mount(fs::BlockDevice* device, bool readOnly) {
@@ -396,13 +436,30 @@ bool Fat32Driver::mount(fs::BlockDevice* device, bool readOnly) {
     }
     mounted_ = true;
     readOnly_ = readOnly;
+    // [신규, 2026-09-23, PN-547EF839] 쓰기 가능하게 마운트되는 순간
+    // dirty로 표시한다(clean-shutdown 비트 클리어) - 읽기 전용
+    // 마운트는 볼륨을 변경할 수 없으므로 건드리지 않는다. 이 호출이
+    // 실패해도(예: 매체가 실제로 read-only 하드웨어) mount() 자체를
+    // 실패시키지 않는다 - dirty 비트 관리는 부가 기능이지 마운트
+    // 성공의 전제조건이 아니다.
+    if (!readOnly) {
+        kSetFat32CleanShutdownBit(volume_.device(), volume_.bytesPerSectorValue(), volume_.fatStartSectorValue(),
+                                   volume_.numFatsValue(), volume_.fatSize32Value(), /*clean=*/false);
+    }
     return true;
 }
 
 bool Fat32Driver::remount(bool writable) {
-    // libvfat 1차 증분은 쓰기 경로 자체가 없어(§4) writable=true로
-    // 전환해도 실질적 의미는 없다 - Ext4Driver::remount와 동일한 관례.
+    // [갱신, 2026-09-23, PN-547EF839] writable로 처음 전환되는 순간에도
+    // mount()와 동일하게 dirty 표시 - SP-8B6B8D25 §5.1의 "부팅 초기
+    // 임시 읽기전용 마운트 → init이 나중에 remount"라는 흐름 자체가
+    // 바로 "이제부터 실제로 쓰기가 시작된다"는 신호다.
+    const bool wasReadOnly = readOnly_;
     readOnly_ = !writable;
+    if (writable && wasReadOnly) {
+        kSetFat32CleanShutdownBit(volume_.device(), volume_.bytesPerSectorValue(), volume_.fatStartSectorValue(),
+                                   volume_.numFatsValue(), volume_.fatSize32Value(), /*clean=*/false);
+    }
     return true;
 }
 

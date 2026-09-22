@@ -80,6 +80,18 @@ constexpr uint32_t kFatEntryMask = 0x0FFFFFFFu;
 constexpr uint32_t kFatEocMin = 0x0FFFFFF8u;   // 이상이면 체인 끝
 constexpr uint32_t kFatBadCluster = 0x0FFFFFF7u;
 constexpr uint32_t kFirstDataCluster = 2;      // 클러스터 번호는 2부터 시작(0/1 예약)
+constexpr uint32_t kReservedFatEntryIndex = 1; // 클러스터 0/1은 실제 체인이 아니라 예약(볼륨 dirty 비트는 FAT[1]에)
+
+// [신규, 2026-09-23, PN-547EF839, SP-A658A124 §2 후속 증분 항목6] FAT[1]
+// (예약 엔트리) 상위 비트의 볼륨 dirty 관례 - 이 프로젝트가 새로
+// 고안한 값이 아니다. Microsoft "FAT: General Overview of On-Disk
+// Format"(fatgen103) 및 Linux 커널 fs/fat/fat.h의 FAT32 정의와 동일:
+// 비트27=1이면 마지막으로 정상 언마운트됨("clean shutdown"), 비트26=1
+// 이면 마지막 마운트 중 하드웨어 오류 없었음("no hw error"). v1은
+// "정상 언마운트 여부"만 다룬다(SP-A658A124 §2 문구 그대로) - 이
+// 커널이 아직 디스크 I/O 오류를 추적하는 메커니즘이 없어 hw-error
+// 비트는 건드리지 않는다(RM-23F4B687 §4, 실제로 겪어본 뒤 재검토).
+constexpr uint32_t kFat32DirtyBitCleanShutdown = 0x08000000u;  // bit 27
 
 // ---------------------------------------------------------------------
 // 3.5 디렉터리 엔트리(32바이트, 8.3 짧은 이름).
