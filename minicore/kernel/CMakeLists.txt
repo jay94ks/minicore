@@ -21,6 +21,7 @@ add_library(minicore_kernel OBJECT
     scheduler.cpp
     async_task.cpp
     deferred_destruction.cpp
+    diag_ring.cpp
     delayed_exec.cpp
     event_topic.cpp
     wait_queue.cpp

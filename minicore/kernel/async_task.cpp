@@ -3,6 +3,7 @@
 #include "acpi.h"
 #include "deferred_destruction.h"
 #include "delayed_exec.h"
+#include "diag_ring.h"
 #include "idt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
@@ -839,7 +840,15 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             // 재사용 - 인터럽트 자체는 막지 않아 EOI/하드웨어 처리는 정상
             // 진행됨).
             PreemptionGuard guard;
+            // [신규, 2026-09-23, PN-E4C6AF72] 이 kContextSwitch가 물리적으로
+            // 인터럽트 디스패치 스택을 떠나는 정확한 지점 - kAsyncDrainIsr
+            // (인터럽트 컨텍스트)에서 호출된 경우, 이 구간 동안 또 다른
+            // 일반 인터럽트가 이 코어에 들어오면 gSavedTaskRsp[coreIndex]
+            // 단일 슬롯이 덮어써질 수 있다는 게 PN-3DDF2797이 확정한 근본
+            // 원인이다 - 그 가설을 gdb 없이 검증하기 위한 비관측적 기록.
+            kDiagRingLog(DiagRingEvent::StackfulDispatchBegin, coreIndex, 0, 0);
             kContextSwitch(&gReactorSavedRsp[coreIndex], task->tcb);
+            kDiagRingLog(DiagRingEvent::StackfulDispatchEnd, coreIndex, 0, 0);
         }
         // [PN-584DB994] coroHandle 분기와 동일 - 리액터/idle 컨텍스트로
         // 돌아가기 전 CR3를 이 재개/진입 이전 값으로 되돌린다.

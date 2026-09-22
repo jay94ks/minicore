@@ -1,0 +1,39 @@
+#ifndef MINICORE_KERNEL_DIAG_RING_H
+#define MINICORE_KERNEL_DIAG_RING_H
+
+#include "libkenv/types.h"
+
+// [신규, 2026-09-23, PN-E4C6AF72, 설계자 지시(QU-136B918F 답변)]
+// PN-7030D201/PN-3DDF2797 두 계획이 각자 독립적으로 발견한 "이
+// 근처를 건드리는 어떤 개입이든 서로 다른 새 크래시 서명으로
+// 회귀한다"는 패턴의 공통 원인을 추적하기 위한 비관측적(gdb 없이도
+// 동작하는) 진단 도구 - PN-3DDF2797가 이미 확정한 "gdb 부착 자체가
+// 타이밍을 바꿔 경쟁을 숨긴다"(heisenbug)는 교훈을 그대로 적용해,
+// 순수 메모리 쓰기만 하는 코어별 링 버퍼에 의심 지점(일반 인터럽트
+// 디스패치 스택 진입/이탈, `AsyncReactor::drainOnce()`의 스택풀
+// AsyncTask 디스패치 구간)을 기록해 두고, 패닉이 실제로 발생한
+// 순간에만 그 기록을 시리얼로 덤프한다 - gdb 브레이크포인트처럼
+// 실행을 멈추거나 통신 프로토콜을 거치지 않으므로 이 자체가 타이밍을
+// 왜곡할 가능성이 극히 낮다(단순 배열 인덱싱+대입 몇 개, 인터럽트
+// 안팎 어디서 불려도 안전 - 락 없음, 코어별로 자기 슬롯만 쓴다).
+namespace kernel {
+
+enum class DiagRingEvent : uint8_t {
+    EnterInterruptStack = 1,    // 일반 벡터 isr_common_stub이 디스패치 스택으로 스왑하기 직전
+    LeaveInterruptStack = 2,    // 일반 벡터가 원래 스택으로 자연 복귀하기 직전
+    StackfulDispatchBegin = 3,  // AsyncReactor::drainOnce()가 스택풀 AsyncTask로 kContextSwitch하기 직전
+    StackfulDispatchEnd = 4,    // 그 kContextSwitch가 되돌아온 직후
+};
+
+// event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave
+// 계열에서만 의미 있고(StackfulDispatch 계열은 0으로 채움), 코어별로
+// 독립된 슬롯에 기록하므로 락이 필요 없다(자기 코어 외 다른 코어의
+// 슬롯을 쓰는 호출부는 없음).
+void kDiagRingLog(DiagRingEvent event, kernel::uint32_t coreIndex, kernel::uint32_t vector, kernel::uint64_t rsp);
+
+// 패닉 시점에 호출 - coreIndex 하나의 최근 기록을 시리얼로 덤프한다.
+void kDiagRingDump(kernel::uint32_t coreIndex);
+
+}  // namespace kernel
+
+#endif  // MINICORE_KERNEL_DIAG_RING_H

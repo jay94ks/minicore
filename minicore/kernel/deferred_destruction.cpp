@@ -1,6 +1,7 @@
 #include "deferred_destruction.h"
 
 #include "acpi.h"
+#include "diag_ring.h"
 #include "gdt.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
@@ -81,15 +82,18 @@ void kDrainDeferredDestructions() {
 // 단위 안이라 그대로 접근 가능(익명 네임스페이스의 암묵적
 // using-directive). 반환값의 의미는 deferred_destruction.h 문서
 // 주석 참고.
-extern "C" kernel::uint64_t kEnterInterruptStack(kernel::uint64_t currentRsp) {
+extern "C" kernel::uint64_t kEnterInterruptStack(kernel::uint64_t currentRsp, kernel::uint32_t vector) {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
     kernel::gSavedTaskRsp[idx] = currentRsp;
+    kernel::kDiagRingLog(kernel::DiagRingEvent::EnterInterruptStack, idx, vector, currentRsp);
     return kernel::kInterruptDispatchStackTop(idx);
 }
 
 extern "C" kernel::uint64_t kLeaveInterruptStack() {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
-    return kernel::gSavedTaskRsp[idx];
+    const kernel::uint64_t saved = kernel::gSavedTaskRsp[idx];
+    kernel::kDiagRingLog(kernel::DiagRingEvent::LeaveInterruptStack, idx, 0, saved);
+    return saved;
 }
 
 // [신규, 2026-09-21, SP-A252E82F] deferred_destruction.h 문서 주석

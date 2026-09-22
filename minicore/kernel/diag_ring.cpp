@@ -1,0 +1,82 @@
+#include "diag_ring.h"
+
+#include "acpi.h"
+#include "logger.h"
+
+namespace kernel {
+
+namespace {
+
+// [갱신, 2026-09-23, PN-E4C6AF72 실측] 48개는 너무 작았다 - HPET(벡터
+// 22)/LAPIC 타이머(벡터 24) 같은 고빈도 벡터가 아주 짧은 시간에 버퍼
+// 전체를 여러 번 덮어써, 정작 원인 규명에 필요한 StackfulBegin/End나
+// 드문 벡터 진입이 크래시 시점 이전에 이미 밀려나 사라졌다(실측
+// 확인 - core0 크래시 덤프에 벡터22/24 반복만 가득하고 StackfulBegin/
+// End가 전혀 안 보임). 훨씬 더 긴 창을 남기기 위해 크게 늘린다(정적
+// BSS 배열, 코어당 4096*24바이트 ≈ 98KiB - 이 정도 메모리 여유는
+// 이 프로젝트 규모에서 문제 없음).
+constexpr uint32_t kDiagRingCapacity = 4096;
+
+struct DiagRingEntry {
+    uint64_t seq = 0;
+    uint64_t rsp = 0;
+    uint32_t vector = 0;
+    uint8_t event = 0;
+};
+
+struct DiagRingBuffer {
+    DiagRingEntry entries[kDiagRingCapacity];
+    uint64_t nextSeq = 0;
+};
+
+// 코어별 독립 슬롯 - 각 코어는 항상 자기 슬롯만 쓰므로(호출부가 전부
+// Scheduler::currentCoreIndex()로 coreIndex를 정함) 락이 필요 없다.
+DiagRingBuffer gDiagRings[kAcpiMaxCpus];
+
+const char* kEventName(uint8_t event) {
+    switch (static_cast<DiagRingEvent>(event)) {
+        case DiagRingEvent::EnterInterruptStack:
+            return "EnterIsr";
+        case DiagRingEvent::LeaveInterruptStack:
+            return "LeaveIsr";
+        case DiagRingEvent::StackfulDispatchBegin:
+            return "StackfulBegin";
+        case DiagRingEvent::StackfulDispatchEnd:
+            return "StackfulEnd";
+        default:
+            return "?";
+    }
+}
+
+}  // namespace
+
+void kDiagRingLog(DiagRingEvent event, uint32_t coreIndex, uint32_t vector, uint64_t rsp) {
+    if (coreIndex >= kAcpiMaxCpus) {
+        return;
+    }
+    DiagRingBuffer& ring = gDiagRings[coreIndex];
+    const uint64_t seq = ring.nextSeq++;
+    DiagRingEntry& e = ring.entries[seq % kDiagRingCapacity];
+    e.seq = seq;
+    e.rsp = rsp;
+    e.vector = vector;
+    e.event = static_cast<uint8_t>(event);
+}
+
+void kDiagRingDump(uint32_t coreIndex) {
+    if (coreIndex >= kAcpiMaxCpus) {
+        return;
+    }
+    const DiagRingBuffer& ring = gDiagRings[coreIndex];
+    const uint64_t total = ring.nextSeq;
+    const uint64_t count = total < kDiagRingCapacity ? total : kDiagRingCapacity;
+    const uint64_t start = total < kDiagRingCapacity ? 0 : total - kDiagRingCapacity;
+    Logger::info("minicore: diag ring dump (core=%u, total=%llu, showing last %llu)", coreIndex, total, count);
+    for (uint64_t i = 0; i < count; ++i) {
+        const uint64_t seq = start + i;
+        const DiagRingEntry& e = ring.entries[seq % kDiagRingCapacity];
+        Logger::info("  [%llu] %s vector=%x rsp=%llx", e.seq, kEventName(e.event), e.vector, e.rsp);
+    }
+}
+
+}  // namespace kernel

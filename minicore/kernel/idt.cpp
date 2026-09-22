@@ -2,6 +2,7 @@
 
 #include "acpi.h"
 #include "deferred_destruction.h"
+#include "diag_ring.h"
 #include "gdt.h"
 #include "interrupt_frame.h"
 #include "lapic.h"
@@ -559,6 +560,16 @@ void kPanic(kernel::InterruptFrame* frame) {
     headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, "\n");
     headerBuf[headerPos] = '\0';
     kPrintFrameDiagnostics(frame, headerBuf);
+
+    // [신규, 2026-09-23, PN-E4C6AF72] 비관측적 진단 - 모든 온라인
+    // 코어의 최근 인터럽트 디스패치/스택풀 AsyncTask 전환 기록을
+    // 시리얼로 덤프한다(다른 코어는 위에서 이미 stopAllOtherCores()로
+    // 멈춰 있어 그 코어의 링 버퍼 내용이 이 시점 이후로 더 바뀔
+    // 걱정 없이 안전하게 읽을 수 있다).
+    const kernel::uint32_t onlineCores = kernel::Acpi::cpuCount();
+    for (kernel::uint32_t c = 0; c < onlineCores && c < 32; ++c) {
+        kernel::kDiagRingDump(c);
+    }
 
     for (;;) {
         asm volatile("cli; hlt");

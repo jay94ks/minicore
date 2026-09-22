@@ -145,6 +145,7 @@ isr_common_stub:
      * call/ret이라 이 시점 rsp는 스왑 전 그대로다. 일반 벡터는 절대
      * 중첩되지 않으므로(위 주석) 조건 분기 없이 항상 스왑한다. */
     mov rdi, rsp
+    mov esi, eax  /* [PN-E4C6AF72] eax는 위에서 로드해 둔 벡터 번호 - kEnterInterruptStack의 2번째 인자(진단 링 버퍼용) */
     call kEnterInterruptStack
     mov rdi, rsp
     mov rsp, rax

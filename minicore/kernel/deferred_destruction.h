@@ -60,7 +60,11 @@ void kDrainDeferredDestructions();
 // `kLeaveInterruptStack()`이 나중에 돌려줄 수 있게 코어별로 잠깐
 // 맡아 둔다. 일반 벡터끼리는 절대 중첩되지 않으므로 이 저장소를
 // 서로 다른 두 진입이 동시에 쓸 위험이 없다.
-extern "C" kernel::uint64_t kEnterInterruptStack(kernel::uint64_t currentRsp);
+//
+// [갱신, 2026-09-23, PN-E4C6AF72] `vector`(isr.S가 이미 벡터 판별을
+// 위해 eax에 로드해 둔 값을 그대로 esi로 전달 - 추가 메모리 접근
+// 없음)는 `diag_ring.h`의 비관측적 진단 로그에만 쓰인다.
+extern "C" kernel::uint64_t kEnterInterruptStack(kernel::uint64_t currentRsp, kernel::uint32_t vector);
 
 // 위에서 맡아 둔 원래 rsp를 그대로 돌려준다. isr.S의 일반 벡터
 // "자연 복귀" 경로만 이 반환값을 실제로 적용한다(원래 rsp로 되돌려
