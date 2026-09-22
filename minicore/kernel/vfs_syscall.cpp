@@ -5,6 +5,7 @@
 #include "mount_table.h"
 #include "paging.h"
 #include "process.h"
+#include "resource_group.h"
 #include "task.h"
 
 namespace kernel {
@@ -367,6 +368,19 @@ public:
             co_return;
         }
 
+        // [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §3/§5] I/O 대역폭
+        // 쿼터 강제 - 실제 드라이버 전달 직전, 커널이 이미 호출자
+        // Process(따라서 ResourceGroup)를 알고 있는 이 자리에서 처리한다
+        // (CPU 쿼터/메모리 계정과 동일한 원칙 - fs/BlockDevice는
+        // ResourceGroup의 존재를 몰라도 됨). 요청 크기(args->len)로
+        // 선차감 - 그룹이 없거나 무제한이면 kCheckAndConsumeIoQuota가
+        // 항상 true.
+        if (!kCheckAndConsumeIoQuota(process->group, args->len)) {
+            args->bytesRead = 0;
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+
         KernelFsReadArgs kfsArgs;
         kfsArgs.handle = slot->value.fsHandle;
         kfsArgs.offset = slot->value.offset;
@@ -388,6 +402,9 @@ public:
             co_return;
         }
         slot->value.offset += kfsArgs.result.bytesRead;  // §9.2 - 커널(fd 테이블)이 커서를 소유
+        if (process->group) {
+            process->group->accounting.totalIoBytesRead += kfsArgs.result.bytesRead;
+        }
         args->bytesRead = kfsArgs.result.bytesRead;
         args->error = ChannelError::None;
         co_return;
@@ -494,6 +511,14 @@ public:
             co_return;
         }
 
+        // ReadHandler와 동일한 이유(PN-DEC738B8, SP-A21DD889 §3/§5) -
+        // 실제 드라이버 전달 직전 I/O 대역폭 쿼터 강제.
+        if (!kCheckAndConsumeIoQuota(process->group, args->len)) {
+            args->bytesWritten = 0;
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+
         KernelFsWriteArgs kfsArgs;
         kfsArgs.handle = slot->value.fsHandle;
         kfsArgs.offset = slot->value.offset;
@@ -519,6 +544,9 @@ public:
             co_return;
         }
         slot->value.offset += kfsArgs.bytesWritten;
+        if (process->group) {
+            process->group->accounting.totalIoBytesWritten += kfsArgs.bytesWritten;
+        }
         args->bytesWritten = kfsArgs.bytesWritten;
         args->error = ChannelError::None;
         co_return;

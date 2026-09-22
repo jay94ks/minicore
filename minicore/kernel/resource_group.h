@@ -26,6 +26,9 @@ constexpr SyscallEndpointId kSyscallEndpointResourceGroupDestroy = kMakeSyscallE
 constexpr SyscallEndpointId kSyscallEndpointResourceGroupSetCpuQuota = kMakeSyscallEndpointId(9, 3);
 constexpr SyscallEndpointId kSyscallEndpointResourceGroupFreeze = kMakeSyscallEndpointId(9, 4);
 constexpr SyscallEndpointId kSyscallEndpointResourceGroupThaw = kMakeSyscallEndpointId(9, 5);
+// [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §6] RM-48E1E610 그룹9
+// call6 - 이미 예약돼 있던 번호를 이번 증분이 실제로 채운다.
+constexpr SyscallEndpointId kSyscallEndpointResourceGroupSetIoQuota = kMakeSyscallEndpointId(9, 6);
 
 constexpr uint32_t kMaxResourceGroupNameLength = kMaxNamedObjectNameLength;  // 64, named_object.h와 동일 상한
 
@@ -83,12 +86,33 @@ struct ResourceGroupThawArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §4/§6] `ResourceGroupSetCpuQuotaArgs`
+// 와 완전히 동일한 계약 - byte 단위(읽기+쓰기 합산 v1, §7이 분리 과금은
+// 범위 밖으로 명시).
+struct ResourceGroupSetIoQuotaArgs {
+    char name[kMaxResourceGroupNameLength] = {};
+    uint32_t nameLength = 0;
+    uint32_t periodTicks = 0;  // 0 = 무제한(quotaBytes 무시)
+    uint64_t quotaBytes = 0;
+    ChannelError error = ChannelError::None;
+};
+
 // [SP-6A563A8F §2, 변경 없음] SP-245D130B §3가 스케치해 둔 그대로 -
 // PN-158B6B2F가 이미 `usedTicksInPeriod` 증가 배선을 완료해 뒀다.
 struct ResourceGroupCpuControl {
     uint32_t periodTicks = 0;  // 0 = 무제한(기본값)
     uint32_t quotaTicks = 0;
     uint32_t usedTicksInPeriod = 0;
+    uint64_t periodStartTick = 0;
+};
+
+// [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §4] `ResourceGroupCpuControl`
+// 과 나란한 byte 단위 I/O 대역폭 컨트롤 - 읽기+쓰기 합산 v1(§7이 분리
+// 과금은 범위 밖으로 명시).
+struct ResourceGroupIoControl {
+    uint32_t periodTicks = 0;  // 0 = 무제한(기본값)
+    uint64_t quotaBytes = 0;   // 이 주기 동안 허용되는 바이트 수(읽기+쓰기 합산 v1)
+    uint64_t usedBytesInPeriod = 0;
     uint64_t periodStartTick = 0;
 };
 
@@ -102,6 +126,16 @@ struct ResourceGroupAccounting {
     // execImage()`가 가산, `Process::destroy()`가 감산한다(coarse -
     // 정확한 페이지 단위 실시간 추적이 아니라 큰 단위 이벤트에서만).
     uint64_t totalMemoryBytesUsed = 0;
+
+    // [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §4/§5] VFS Read/Write
+    // syscall 디스패치 핸들러(vfs_syscall.cpp)가 실제 완료된 바이트
+    // 수로 가산 - 요청 크기(`args->len`)가 아니라 실제 전송량이라
+    // `io.usedBytesInPeriod`(요청 크기로 선차감, 아래 kCheckAndConsumeIoQuota
+    // 문서 주석 참고)와 값이 미세하게 다를 수 있다(EOF 등으로 실제
+    // 읽힌/쓰인 양이 요청보다 적은 경우) - 이 두 카운터는 서로 다른
+    // 목적(전자는 순수 통계, 후자는 쿼터 강제)이라 의도적으로 분리.
+    uint64_t totalIoBytesRead = 0;
+    uint64_t totalIoBytesWritten = 0;
 };
 
 // [신규, 2026-09-17, SP-245D130B] 자원 그룹 - 프로세스 트리
@@ -140,6 +174,7 @@ public:
     ChunkedList<WeakPtr<Process>, kMaxMemberChunkCapacity> memberProcesses;
 
     ResourceGroupCpuControl cpu;
+    ResourceGroupIoControl io;
     ResourceGroupAccounting accounting;
 
     // [SP-245D130B §4] `TaskState`에 새 상태를 추가하지 않고 기존
@@ -238,6 +273,26 @@ bool kCheckAndResetCpuPeriod(ResourceGroup* group);
 // 대상으로 하는 경우)이면 항상 true(제약 없음).
 bool kValidateChildQuotaAgainstParent(ResourceGroup* parent, ResourceGroup* changingChild, uint32_t newPeriodTicks,
                                        uint32_t newQuotaTicks);
+
+// [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §3/§4] `vfs_syscall.cpp`의
+// Read/Write 핸들러가 실제 드라이버 전달(`AsyncTask::submit(driver->
+// subjectCode(), ...)`) 직전에 부른다(§5) - CPU 쿼터의 `kCheckAndResetCpuPeriod`
+// 와 달리 이 함수 하나가 "주기 롤오버 확인 + 검사 + 소비"를 전부 한
+// 호출에서 처리한다(CPU는 onTick 증가/pickNext 검사 두 호출부로
+// 나뉘지만 I/O는 이 디스패치 지점 하나뿐이라 나눌 필요가 없음).
+// `group`이 nullptr이거나 `periodTicks==0`(무제한)이면 항상 true(허용).
+// 허용되면 `bytes`(v1은 `args->len`, 즉 요청 크기로 선차감 - 실제
+// 전송량이 아니라 - EOF로 실제로는 덜 전송돼도 환불하지 않는다,
+// RM-23F4B687 §4 취지의 v1 단순화)만큼 `usedBytesInPeriod`를 늘리고
+// true, 이미 쿼터를 넘었으면 아무것도 바꾸지 않고 false.
+bool kCheckAndConsumeIoQuota(ResourceGroup* group, uint64_t bytes);
+
+// [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §6] `ResourceGroupSetIoQuota`
+// 핸들러 전용 - `kValidateChildQuotaAgainstParent()`의 byte 버전(계층적
+// 쿼터 강제, 비율 기반 비교 방식까지 동일). 부모가 무제한이거나
+// `parent==nullptr`이면 항상 true.
+bool kValidateChildIoQuotaAgainstParent(ResourceGroup* parent, ResourceGroup* changingChild, uint32_t newPeriodTicks,
+                                         uint64_t newQuotaBytes);
 
 // [신규, 2026-09-19, SP-245D130B §9-2 확정("호출자가 이미 그 그룹의
 // 조상 체인 안에 있을 때만 허용")] `ResourceGroupJoin`/`Create`/

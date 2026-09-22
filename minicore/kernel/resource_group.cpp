@@ -258,6 +258,46 @@ bool kValidateChildQuotaAgainstParent(ResourceGroup* parent, ResourceGroup* chan
     return siblingSumRatio <= parentRatio;
 }
 
+bool kCheckAndConsumeIoQuota(ResourceGroup* group, uint64_t bytes) {
+    if (!group || group->io.periodTicks == 0) {
+        return true;  // 그룹 없음 또는 무제한 - 항상 허용
+    }
+    const uint64_t now = Timer::tickCount();
+    if (now - group->io.periodStartTick >= group->io.periodTicks) {
+        group->io.periodStartTick = now;
+        group->io.usedBytesInPeriod = 0;
+    }
+    if (group->io.usedBytesInPeriod + bytes > group->io.quotaBytes) {
+        return false;
+    }
+    group->io.usedBytesInPeriod += bytes;
+    return true;
+}
+
+bool kValidateChildIoQuotaAgainstParent(ResourceGroup* parent, ResourceGroup* changingChild, uint32_t newPeriodTicks,
+                                         uint64_t newQuotaBytes) {
+    if (!parent || parent->io.periodTicks == 0) {
+        return true;  // 부모 무제한(또는 대상이 루트 자신) - 항상 허용
+    }
+    // kValidateChildQuotaAgainstParent()와 동일한 비율 기반 비교 -
+    // byte/tick 비율로 정규화해 자식마다 다른 periodTicks를 흡수한다.
+    constexpr uint64_t kRatioScale = 1000000;  // ppm 단위
+    auto ratioOf = [](uint64_t quota, uint32_t period) -> uint64_t {
+        return period == 0 ? 0 : (quota * kRatioScale) / period;
+    };
+    uint64_t siblingSumRatio = 0;
+    parent->children.forEach([&](SharedPtr<ResourceGroup>& child, auto*) {
+        ResourceGroup* c = child.get();
+        if (!c || c == changingChild) {
+            return;
+        }
+        siblingSumRatio += ratioOf(c->io.quotaBytes, c->io.periodTicks);
+    });
+    siblingSumRatio += ratioOf(newQuotaBytes, newPeriodTicks);
+    const uint64_t parentRatio = ratioOf(parent->io.quotaBytes, parent->io.periodTicks);
+    return siblingSumRatio <= parentRatio;
+}
+
 bool kCallerInAncestorChain(Process& caller, ResourceGroup& target) {
     ResourceGroup* callerGroup = caller.group;
     if (!callerGroup) {
@@ -690,6 +730,51 @@ public:
 
 ResourceGroupSetCpuQuotaHandler gResourceGroupSetCpuQuotaHandler;
 
+// [신규, 2026-09-22, PN-DEC738B8, SP-A21DD889 §6] ResourceGroupSetCpuQuotaHandler
+// 와 완전히 동일한 골격 - byte 단위 대상만 다르다.
+class ResourceGroupSetIoQuotaHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ResourceGroupSetIoQuotaArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* callerThread = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> caller = callerThread ? callerThread->process.lock() : SharedPtr<Process>();
+        if (!caller) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        ResourceGroup* target = kFindResourceGroupByName(args->name, args->nameLength);
+        if (!target) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (!kCallerInAncestorChain(*caller, *target)) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+        SharedPtr<ResourceGroup> parent = target->parent.lock();
+        if (!kValidateChildIoQuotaAgainstParent(parent.get(), target, args->periodTicks, args->quotaBytes)) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        target->io.periodTicks = args->periodTicks;
+        target->io.quotaBytes = args->quotaBytes;
+        // ResourceGroupSetCpuQuotaHandler와 동일한 이유(QU-8ED9EBD2) -
+        // 설정 시점부터 새 주기가 깨끗하게 시작한다.
+        target->io.usedBytesInPeriod = 0;
+        target->io.periodStartTick = Timer::tickCount();
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ResourceGroupSetIoQuotaHandler gResourceGroupSetIoQuotaHandler;
+
 class ResourceGroupFreezeHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
@@ -761,6 +846,7 @@ void ResourceGroupService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupCreate, &gResourceGroupCreateHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupDestroy, &gResourceGroupDestroyHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupSetCpuQuota, &gResourceGroupSetCpuQuotaHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupSetIoQuota, &gResourceGroupSetIoQuotaHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupFreeze, &gResourceGroupFreezeHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointResourceGroupThaw, &gResourceGroupThawHandler);
 }
