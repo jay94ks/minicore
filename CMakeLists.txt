@@ -39,6 +39,7 @@ add_subdirectory(minicore/libs/libkvdb)
 add_subdirectory(minicore/libs/libutf8)
 add_subdirectory(minicore/libs/libjson)
 add_subdirectory(minicore/libs/libswapfs)
+add_subdirectory(minicore/libs/libext4)
 add_subdirectory(minicore/libs/x86_64)
 add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/kernel)
@@ -54,6 +55,7 @@ target_link_libraries(minicore.elf PRIVATE
     libutf8
     libjson
     libswapfs
+    libext4
     minicore_libs_x86_64
 )
 
