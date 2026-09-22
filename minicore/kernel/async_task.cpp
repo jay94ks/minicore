@@ -376,6 +376,17 @@ void kReleaseAsyncTask(AsyncTask* task) {
         task->weakRef->release();
         task->weakRef = nullptr;
     }
+    // [신규, 2026-09-22, PN-6EDED542] `waitingAsyncTask`는 정상 경로면
+    // drainOnce()가 완료 처리 중에 이미 소비(release())하고 nullptr로
+    // 비웠어야 한다 - 여기 남아 있다는 건 그 소비 지점을 거치지 않고
+    // (예: Cancelled 경로가 훗날 놓치는 경우) 이 함수로 곧장 온
+    // 예외적 상황이라는 뜻이다. `weakRef`와 동일한 이유로 방치하면
+    // 그 대기자 쪽 참조 카운트가 영원히 안 내려간다 - 방어적으로
+    // 여기서도 반드시 정리한다.
+    if (task->waitingAsyncTask) {
+        task->waitingAsyncTask->release();
+        task->waitingAsyncTask = nullptr;
+    }
     // [신규, 2026-09-22, PN-2954EC4D] `waitingTask`(WeakPtr<Task>)/
     // `submitterTask`(TaskOwnerRef, 내부에 WeakPtr<Task> 보유)/
     // `selfWaitable`(SharedPtr<AsyncTaskWaitable>)을 명시적으로
@@ -416,6 +427,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     // 완료 시 엉뚱한(이미 해제됐을 수도 있는) Task를 깨우려 든다.
     waitingTask = WeakPtr<Task>();
     submitterTask = TaskOwnerRef();  // [갱신, PN-C536F352] WeakPtr<Task> -> TaskOwnerRef, 아래 memset(0) 전제는 그대로 유지
+    waitingAsyncTask = nullptr;  // [PN-6EDED542] waitingTask와 동일한 이유(슬랩 재사용 잔여 포인터 방지)
     autoFree = true;
     cancelSource = AsyncTokenSource{};
     homeCoreIndex = Scheduler::currentCoreIndex();
@@ -528,6 +540,27 @@ namespace {
 bool kIsAsyncTaskTerminal(AsyncTaskState state) {
     return state == AsyncTaskState::Completed || state == AsyncTaskState::Failed ||
            state == AsyncTaskState::Cancelled;
+}
+
+// [신규, 2026-09-22, PN-6EDED542] `task`가 막 Completed/Failed/
+// Cancelled에 도달한 시점에 호출 - `waitingTask`(진짜 kernel::Task)
+// 깨우기와 나란히, 코루틴/스택풀 AsyncTask로 `co_await
+// AsyncTaskCoroAwaiter(task)`(또는 `AsyncTaskAwaiter`)로 대기 중인
+// 다른 AsyncTask가 있으면 `AsyncReactor::submitCompletion()`으로
+// 재개시킨다 - 그쪽이 코루틴이면 저장된 coroHandle을 다음 drainOnce()
+// 가 resume()하고, 스택풀이면 기존 kContextSwitch 재개 경로를 그대로
+// 다시 탄다(둘 다 이 함수가 신경 쓸 필요 없음 - drainOnce() 자신의
+// 기존 두 분기가 그 차이를 이미 처리).
+void kWakeWaitingAsyncTask(AsyncTask* task) {
+    AsyncTaskWeakRef* waiterRef = task->waitingAsyncTask;
+    if (!waiterRef) {
+        return;
+    }
+    task->waitingAsyncTask = nullptr;
+    if (AsyncTask* waiter = waiterRef->lock()) {
+        AsyncReactor::submitCompletion(waiter, /*preemptive=*/true);
+    }
+    waiterRef->release();  // AsyncTaskCoroAwaiter::await_suspend()가 심어 둔 "waitingAsyncTask" 몫
 }
 
 }  // namespace
@@ -708,6 +741,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         if (SharedPtr<Task> waiter = task->waitingTask.lock()) {
             Scheduler::scheduleImmediate(coreIndex, waiter.get());
         }
+        kWakeWaitingAsyncTask(task);
         if (task->autoFree) {
             kReleaseAsyncTask(task);
         }
@@ -827,6 +861,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         if (SharedPtr<Task> waiter = task->waitingTask.lock()) {
             Scheduler::scheduleImmediate(coreIndex, waiter.get());
         }
+        kWakeWaitingAsyncTask(task);
         // args의 생성/반납은 처리기 책임(SP-F682B889 §3.1) - 여기서는
         // 프레임워크 소유물(AsyncTask 구조체 자신과 그 전용 스택)만,
         // 그것도 autoFree인 경우에만 반납한다 - false면 결과를 아직

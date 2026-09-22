@@ -312,6 +312,22 @@ struct AsyncTask {
     // 건너뛴다.
     WeakPtr<Task> waitingTask;
 
+    // [신규, 2026-09-22, PN-6EDED542, SP-F682B889 §9.5-3 - QU-FF7044DA가
+    // 실측으로 드러낸 공백 해소] `waitingTask`(진짜 kernel::Task용)의
+    // 코루틴 버전 - 다른 AsyncTask(코루틴이든 스택풀이든)가 `co_await
+    // AsyncTaskCoroAwaiter(this)`로 이 AsyncTask의 완료를 기다리고
+    // 있으면, `AsyncTaskCoroAwaiter::await_suspend()`가 자신의
+    // `ensureWeakRef()`로 얻은 약한 참조를 여기 심어 둔다 - 이
+    // AsyncTask가 Completed/Failed/Cancelled에 도달하면(async_task.cpp의
+    // drainOnce()) `.lock()`으로 그 대기자를 찾아 `AsyncReactor::
+    // submitCompletion()`으로 깨운다(코루틴이면 drainOnce()가 저장된
+    // coroHandle을 재개, 스택풀이면 기존 kContextSwitch 재개 경로
+    // 그대로 - 어느 쪽이든 이미 있는 재개 메커니즘 그대로 재사용).
+    // `waitingTask`와 마찬가지로 대기자가 먼저 죽을 수 있어(스택풀
+    // AsyncTask가 강제 취소되는 경우) 원시 포인터가 아니라 약한
+    // 참조 컨트롤 블록(`AsyncTaskWeakRef`)을 통해서만 참조한다.
+    AsyncTaskWeakRef* waitingAsyncTask = nullptr;
+
     // [신규, 2026-09-17, PN-DB5153B6, DC-21647E46 QU-B9683320 답변("(B)
     // AsyncTask에 제출자 정보를 범용화")] 이 AsyncTask를 실제로 제출한
     // kernel::Task(대개 UserThread) - `onExec()`은 `AsyncReactor`가
@@ -484,6 +500,12 @@ struct AsyncTask {
                              bool autoFree = true, bool preemptive = false);
 };
 
+// [PN-D01B7D07] 이 AsyncTask를 실제로 반납하는 유일한 통로(정의는
+// async_task.cpp) - 아래 `AsyncTaskCoroAwaiter::await_resume()`처럼
+// 헤더에 인라인으로 정의되는 코드(여러 번역 단위에서 쓰이므로 인라인
+// 이어야 함, ODR)도 이 함수를 참조해야 해서 여기 전방 선언한다.
+void kReleaseAsyncTask(AsyncTask* task);
+
 // AsyncTaskWaitable::isCompleted()/cancel() 정의 - struct AsyncTask가
 // 이제 완전한 타입이라 여기서만 task->state/cancelSource에 접근할 수
 // 있다(클래스 선언 자체는 위 AsyncTaskWeakRef 바로 뒤, AsyncTask보다
@@ -600,10 +622,70 @@ private:
 // 돌려주는 방식으로 구현한다(전체 리액터를 블로킹하지 않음). target
 // 도 위 AsyncTaskGroup과 동일하게 autoFree=false로 제출된 것이어야
 // 하며, 완료를 관측한 이 호출이 직접 반납한다.
+//
+// **[정정, 2026-09-22, PN-6EDED542/QU-FF7044DA 실측]** 이 클래스는
+// **스택풀 AsyncTask 컨텍스트 전용**이다 - `AsyncTask::yield()`가
+// `kContextSwitch`로 이 AsyncTask 자신의 전용 스택(`tcb`)으로/에서
+// 되돌아가는 방식이라, `onExec()`이 코루틴(`AsyncExecCoro`, C++
+// `co_await`)으로 구현된 경우엔 애초에 그 전용 스택 위에서 실행되는
+// 게 아니라 `drainOnce()`의 C++ 호출 스택 위에서 직접 실행되므로
+// `kContextSwitch`로 돌아갈 지점 자체가 없다 - 코루틴 `onExec()`
+// 안에서 이 클래스(정확히는 `.await()`)를 부르면 실측으로 확인된
+// 무한 대기가 발생한다(`Ext4Driver` 구현 중 QEMU에서 재현). 코루틴
+// 안에서는 대신 아래 `AsyncTaskCoroAwaiter`를 `co_await`로 쓴다.
 class AsyncTaskAwaiter {
 public:
     explicit AsyncTaskAwaiter(AsyncTask* target) : _target(target) {}
     void await();
+
+private:
+    AsyncTask* _target;
+};
+
+// [신규, 2026-09-22, PN-6EDED542, SP-F682B889 §9.5-3] 위
+// `AsyncTaskAwaiter`의 코루틴 버전 - `process.cpp`의 `JoinAwaiter`
+// (`SP-76250478` §3.1, 이미 실사용 중인 검증된 선례)를 범용화했다.
+// `KernelFsDriver::onExec()`처럼 `AsyncExecCoro`로 구현된 코루틴
+// 안에서 다른 AsyncTask(전형적으로 `BlockDevice::submitReadBlocks()`
+// 가 돌려준 I/O 완료 AsyncTask)의 완료를 기다릴 때 `co_await
+// AsyncTaskCoroAwaiter(target)`로 쓴다 - awaiter 프로토콜(await_ready/
+// await_suspend/await_resume)을 구현해 C++20 코루틴 규격 그대로
+// 동작한다. `target`은 `AsyncTaskGroup`/`AsyncTaskAwaiter`와 동일하게
+// autoFree=false로 제출된 것이어야 하며, `await_resume()`이 직접
+// 반납한다.
+class AsyncTaskCoroAwaiter {
+public:
+    explicit AsyncTaskCoroAwaiter(AsyncTask* target) : _target(target) {}
+
+    bool await_ready() const noexcept {
+        return _target == nullptr || _target->state == AsyncTaskState::Completed ||
+               _target->state == AsyncTaskState::Failed || _target->state == AsyncTaskState::Cancelled;
+    }
+
+    // true를 반환하면 실제로 정지(나중에 target 완료 시 drainOnce()가
+    // 재개), false면 즉시 재개(슬랩 고갈 등 - await_resume()이 그
+    // 시점의 target->state를 그대로 반환하므로 호출부는 여전히 정확한
+    // 상태를 관측한다, 다만 target이 아직 안 끝났는데도 재개된다는
+    // 뜻이라 호출부가 재시도/폴링 여지를 남겨 둬야 한다).
+    bool await_suspend(std::coroutine_handle<>) noexcept {
+        AsyncTask* self = AsyncTask::current();
+        if (!self) {
+            return false;  // 코루틴 onExec 밖에서 잘못 호출된 경우 - 정지하지 않고 곧장 재개
+        }
+        AsyncTaskWeakRef* ref = self->ensureWeakRef();
+        if (!ref) {
+            return false;  // 슬랩 고갈 - JoinAwaiter와 동일 관례(정지 없이 즉시 재개)
+        }
+        ref->addRef();  // "target->waitingAsyncTask" 몫 - drainOnce()가 소비 후 release()
+        _target->waitingAsyncTask = ref;
+        return true;
+    }
+
+    AsyncTaskState await_resume() const noexcept {
+        const AsyncTaskState result = _target->state;
+        kReleaseAsyncTask(_target);
+        return result;
+    }
 
 private:
     AsyncTask* _target;
