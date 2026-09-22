@@ -23,6 +23,16 @@ enum class DiagRingEvent : uint8_t {
     LeaveInterruptStack = 2,    // 일반 벡터가 원래 스택으로 자연 복귀하기 직전
     StackfulDispatchBegin = 3,  // AsyncReactor::drainOnce()가 스택풀 AsyncTask로 kContextSwitch하기 직전
     StackfulDispatchEnd = 4,    // 그 kContextSwitch가 되돌아온 직후
+
+    // [신규, 2026-09-23, PN-E4C6AF72 3차 실측의 "남은 것" 1번] EnterIsr~
+    // StackfulDispatchBegin 사이(kIsrHandler 동적 벡터 디스패치 +
+    // drainOnce() 초입)를 더 좁히기 위한 계측 - vector는 Dynamic 계열만
+    // 의미 있고(frame->vector 그대로), 나머지는 0으로 채운다.
+    DynamicDispatchEnter = 5,    // kIsrHandler가 gDynamicHandlers[vector]를 부르기 직전
+    DynamicDispatchExit = 6,     // 그 핸들러가 정상 반환한 직후(EOI 전)
+    DrainOnceTaskFound = 7,      // drainOnce()가 큐에서 task를 뽑은 직후(vector=task->subjectCode) - Cancelled 분기 이전
+    DrainOnceCoroBranch = 8,     // drainOnce()가 coroHandle(코루틴) 분기를 선택한 시점 - 이 분기는 StackfulDispatchBegin이 절대 안 찍힘(정상)
+    DrainOnceStackfulBranch = 9, // drainOnce()가 스택풀 분기를 선택한 시점(CR3 동기화 이전) - StackfulDispatchBegin보다 한 단계 이른 지점
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

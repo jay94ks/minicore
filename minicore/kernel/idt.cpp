@@ -1080,7 +1080,16 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
     if (frame->vector >= kDynamicVectorBase && frame->vector <= kDynamicVectorEnd) {
         auto* handler = gDynamicHandlers[frame->vector];
         if (handler) {
+            // [신규, 2026-09-23, PN-E4C6AF72 3차 실측의 "남은 것" 1번]
+            // EnterIsr(vector=0xe3, self-IPI)~StackfulDispatchBegin 사이가
+            // 계측 공백이었다 - 이 지점(핸들러 호출 직전/직후)이 그 공백의
+            // 첫 경계다. Exit 로그가 안 찍히면 핸들러(kAsyncDrainIsr) 본문
+            // 안에서, Enter 자체가 안 찍히면 이 지점 이전(캡처/앞선 벡터
+            // 분기 체인)에서 손상이 일어났다는 뜻.
+            const kernel::uint32_t coreIndex = kernel::Scheduler::currentCoreIndex();
+            kernel::kDiagRingLog(kernel::DiagRingEvent::DynamicDispatchEnter, coreIndex, frame->vector, 0);
             handler(frame);
+            kernel::kDiagRingLog(kernel::DiagRingEvent::DynamicDispatchExit, coreIndex, frame->vector, 0);
             kernel::Lapic::sendEoi();
             return;
         }

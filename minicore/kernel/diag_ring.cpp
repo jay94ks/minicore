@@ -43,6 +43,16 @@ const char* kEventName(uint8_t event) {
             return "StackfulBegin";
         case DiagRingEvent::StackfulDispatchEnd:
             return "StackfulEnd";
+        case DiagRingEvent::DynamicDispatchEnter:
+            return "DynDispatchEnter";
+        case DiagRingEvent::DynamicDispatchExit:
+            return "DynDispatchExit";
+        case DiagRingEvent::DrainOnceTaskFound:
+            return "DrainTaskFound";
+        case DiagRingEvent::DrainOnceCoroBranch:
+            return "DrainCoroBranch";
+        case DiagRingEvent::DrainOnceStackfulBranch:
+            return "DrainStackfulBranch";
         default:
             return "?";
     }

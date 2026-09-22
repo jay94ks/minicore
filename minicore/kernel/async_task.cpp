@@ -719,6 +719,13 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
 
     gDraining[coreIndex] = true;
 
+    // [신규, 2026-09-23, PN-E4C6AF72 3차 실측의 "남은 것" 1번] queue
+    // pop이 성공적으로 끝난 직후 - vector 필드에 subjectCode를 실어
+    // 어떤 종류의 AsyncTask였는지 남긴다(self-IPI로 이 함수가 불렸는데
+    // 여기까지도 못 왔다면 popFront() 자체나 그 이전 Rcu/deferred
+    // destruction 드레인 중 손상됐다는 뜻).
+    kDiagRingLog(DiagRingEvent::DrainOnceTaskFound, coreIndex, task->subjectCode, 0);
+
     if (task->state == AsyncTaskState::Cancelled) {
         // [PN-40E976F2] 원래 시나리오 - 이 AsyncTask를 기다리던
         // UserThread가 이미 죽어(scheduler.cpp의 SelfTerminateHandler::
@@ -751,6 +758,12 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
     }
 
     if (task->coroHandle) {
+        // [신규, 2026-09-23, PN-E4C6AF72] 이 분기는 코루틴 재개일 뿐
+        // kContextSwitch를 안 타므로 StackfulDispatchBegin이 절대 안
+        // 찍히는 게 정상이다 - "self-IPI 이후 Begin이 없다"는 관측이
+        // 실제로는 이 무해한 분기였을 가능성을 직접 배제/확인하기 위한
+        // 계측.
+        kDiagRingLog(DiagRingEvent::DrainOnceCoroBranch, coreIndex, 0, 0);
         // [PN-C62F7908 4/5, SP-F682B889 §7.3] 이전에 코루틴이 co_await로
         // suspend된 채 남아 있다 - 이 AsyncTask의 전용 스택(kContextSwitch)
         // 은 kAsyncTaskEntryWrapper가 첫 suspend에서 이미 마지막으로 썼다
@@ -799,6 +812,12 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             task->state = AsyncTaskState::Suspended;
         }
     } else {
+        // [신규, 2026-09-23, PN-E4C6AF72] StackfulDispatchBegin(아래,
+        // CR3 동기화+PreemptionGuard 이후)보다 한 단계 이른 지점 - 이
+        // 로그와 StackfulDispatchBegin 사이에서 사라지면 CR3 동기화
+        // 자체(kSyncCr3ForAsyncExecEntry) 또는 그 직후 상태 갱신이
+        // 의심 구간으로 좁혀진다.
+        kDiagRingLog(DiagRingEvent::DrainOnceStackfulBranch, coreIndex, 0, 0);
         if (task->state == AsyncTaskState::Ready || task->state == AsyncTaskState::Suspended) {
             task->state = AsyncTaskState::Running;
         }
