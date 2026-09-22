@@ -120,6 +120,30 @@ struct ExfatParsedEntry {
     uint32_t nameLen = 0;
 };
 
+// [신규, 2026-09-23, RM-F2DAFF66 §3 점검 중 발견 - SP-F1987EF8 §3.5가
+// "읽기 시 검증"을 확정된 설계로 명시했으나 이번 증분(PN-09970F05)이
+// 놓쳤던 부분] exFAT 디렉터리 엔트리 집합 체크섬 - 이 프로젝트가 새로
+// 고안한 알고리즘이 아니다. Microsoft exFAT 스펙/Linux 커널
+// `fs/exfat/exfat_fs.h`의 `exfat_calc_chksum16` 관례 그대로: 집합
+// 전체(Primary+Secondary, totalEntries*32바이트)를 순서대로 훑으며
+// 매 바이트마다 `((sum&1)?0x8000:0)+(sum>>1)+byte`로 누적하되, **첫
+// 엔트리(Primary) 안의 바이트 2-3(setChecksum 필드 자신)만 건너뛴다**
+// (그 뒤 엔트리들의 바이트 2-3은 건너뛰지 않음 - 스킵은 오직 자기
+// 자신을 참조하는 최초 필드 자리에만 적용).
+uint16_t kExfatEntrySetChecksum(const uint8_t* entrySet, uint32_t totalEntries) {
+    uint16_t sum = 0;
+    for (uint32_t entryIdx = 0; entryIdx < totalEntries; ++entryIdx) {
+        const uint8_t* e = entrySet + entryIdx * 32;
+        for (uint32_t b = 0; b < 32; ++b) {
+            if (entryIdx == 0 && (b == 2 || b == 3)) {
+                continue;
+            }
+            sum = static_cast<uint16_t>(((sum & 1) ? 0x8000 : 0) + (sum >> 1) + e[b]);
+        }
+    }
+    return sum;
+}
+
 ExfatParsedEntry kParseFileEntrySet(const uint8_t* entrySet, uint32_t secondaryCount) {
     ExfatParsedEntry result;
     if (secondaryCount < 1 || entrySet[32] != kExfatEntryTypeStreamExt) {
@@ -127,6 +151,13 @@ ExfatParsedEntry kParseFileEntrySet(const uint8_t* entrySet, uint32_t secondaryC
     }
     ExfatFileDirEntry primary;
     memcpy(&primary, entrySet, sizeof(primary));
+    // [신규, RM-F2DAFF66 §3] §3.5가 명시한 무결성 검증 - 계산값이
+    // 저장된 setChecksum과 다르면 손상된 엔트리 집합으로 취급하고
+    // 거부한다(호출부가 이미 "invalid면 건너뛴다"는 관례를 갖고
+    // 있어 별도 에러 코드 없이 자연스럽게 합류).
+    if (kExfatEntrySetChecksum(entrySet, secondaryCount + 1) != primary.setChecksum) {
+        return result;
+    }
     ExfatStreamExtEntry stream;
     memcpy(&stream, entrySet + 32, sizeof(stream));
     result.isDir = (primary.fileAttributes & kFileAttrDirectory) != 0;
