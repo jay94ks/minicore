@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-AA6DF406
   status: approved
-  updatedAt: 2026-09-22T05:59:13.661Z
+  updatedAt: 2026-09-22T06:19:30.570Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -331,9 +331,13 @@ error`에 명시적으로 실패를 채워 반환한다(크래시 아님).
 §9.5 항목3). 읽기 전용이라도 §3의 MFT 레코드/`$DATA`/`$INDEX_ROOT`
 탐색 자체가 실제 블록 I/O이므로 예외가 아니다 - I/O가 필요한 지점은
 반드시 `co_await kernel::AsyncTaskCoroAwaiter(device_->submitReadBlocks(...))`
-패턴(같은 절에 정확한 코드 있음)을 써야 한다. **추가 제약**:
-`AsyncExecCoro` 자신은 `co_await`할 수 없어(awaiter 프로토콜 미구현)
-I/O 헬퍼 함수를 별도 코루틴으로 factoring할 수 없다 - §4.1/4.2의
+패턴(같은 절에 정확한 코드 있음)을 써야 한다. **추가 제약**(`PN-9AE5BFE4`
+Ext4Driver가 실제 재현으로 확인, `SP-F682B889` §9.5-3 2026-09-22
+정정 문단 참고): I/O 헬퍼를 별도 코루틴 함수로 뽑아 `onExec`이 그걸
+`co_await`하는 합성은 **컴파일은 되지만** `AsyncTaskCoroAwaiter::
+await_suspend()`가 재개 대상을 항상 최상위 `onExec` 자신의
+`AsyncTask`로 고정해 실행 시 그 중간 코루틴 프레임이 영원히 재개되지
+않는다 - 그래서 이런 factoring은 쓸 수 없다. §4.1/4.2의
 헬퍼(MFT 레코드 파싱/데이터 런 순회 등)는 전부 평범한 비-코루틴
 함수로 두고, 실제 `co_await` 지점은 `onExec()` 자신의 코루틴 프레임
 안에만 두는 "평탄화" 구조로 구현할 것(`PN-9AE5BFE4`의 Ext4Driver가
