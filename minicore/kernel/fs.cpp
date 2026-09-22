@@ -234,14 +234,35 @@ void kAcceptFromChannelDirect(const SharedPtr<Task>& self, AcceptFromChannelArgs
     }
     AsyncTask* task = nullptr;
     {
-        // [실측으로 발견, syscall.cpp의 Syscall::submit() 선례 그대로]
-        // AsyncTask::submit()은 내부에서 곧바로 AsyncReactor::
-        // submitCompletion()을 불러 이 코어의 실행 큐에 올린다 - 그
-        // 직후 submitterTask를 채우기 전에 리액터가 먼저 끼어들어
-        // onExec()을 실행해 버리면(예: 이 스레드가 즉시 선점됨) 아직
-        // 비어 있는 submitterTask를 역참조하게 된다. 이 스코프 전체를
-        // 선점 금지로 감싸 "제출 -> submitterTask 캡처"를 원자적
-        // 구간으로 만든다.
+        // [정정, 2026-09-22, PN-7030D201 실측 확인 - 시도했다가 되돌림]
+        // 이전 주석("PreemptionGuard로 원자적 구간을 만든다")은 틀렸다
+        // - `PreemptionGuard`는 코어별 카운터일 뿐 EFLAGS.IF를 건드리지
+        // 않아 `preemptive=true`가 즉시 쏘는 self-IPI(kAsyncDrainVector)
+        // 전달 자체를 막지 못한다. 이 함수를 부르는 지점(kFsKernelMain,
+        // IF가 이미 켜진 일반 실행 흐름)에서는 그 self-IPI가 곧바로
+        // 전달돼 `submitterTask`를 채우기 전에 `AcceptFromChannelHandler::
+        // onExec`이 실행될 수 있다는 것 자체는 실측으로 확인된 사실이다
+        // (`PN-FFFE892E`가 AHCI Subscribe 제출에서 먼저 재현, 자세한
+        // 경위는 PN-7030D201 참고).
+        //
+        // **[중요] 그 race를 피하려고 AHCI Subscribe와 동일하게
+        // `preemptive=false`로 바꿔 봤으나, 표준 GRUB SMP4+AHCI 반복
+        // 실행에서 그 즉시 크래시율이 0%(15회 무결함, 기존 알려진
+        // PN-1DFCB337 신호와도 무관)에서 3/15(20%)로 뛰었다 -
+        // Invalid Opcode/Page Fault, rip/rbp가 `0x53f000ff53f000e2`류
+        // 명백한 스택 손상 패턴으로 이전에 관측된 적 없는 새 크래시
+        // 서명이었다. 근본 원인은 이번 세션에서 규명하지 못했다(추정:
+        // `gExecQueues`로 들어가면 `AsyncTaskWaitGroup::waitAll()`의
+        // 드레인 루프가 이 accept 작업보다 다른 코어/작업을 먼저
+        // 처리하게 돼, 이 함수 특유의 무언가와 겹쳐 노출되는 기존
+        // 잠복 결함으로 보이나 확정하지 못함) - **그래서 이 함수는
+        // `preemptive=true`로 되돌렸다.** 즉 이 함수는 PN-7030D201이
+        // 문서화한 race에 여전히 노출된 상태로 남아 있다 - 정직하게
+        // 미해결로 유지한다(고치려는 시도가 이미 알려진 것보다 더 심각한
+        // 회귀를 만들어, "고치지 않은 채로 알려진 race"가 "고쳤다고
+        // 착각한 채 숨겨진 크래시"보다 낫다고 판단했다). 후속 세션이
+        // 이어받을 때는 `gExecQueues`/`gPreemptiveQueues` 드레인 순서
+        // 차이가 실제로 무엇을 깨뜨리는지부터 먼저 재현/추적할 것.
         PreemptionGuard guard;
         task = AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/false, /*preemptive=*/true);
         if (!task) {
