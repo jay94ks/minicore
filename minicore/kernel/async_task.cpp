@@ -458,6 +458,13 @@ void AsyncTask::yield() {
     // 리액터가 이 AsyncTask를 다시 뽑아 재개하면 이 지점으로 돌아온다.
 }
 
+// [신규, 2026-09-22, PN-4D60D49C] async_task.h 선언 참고 - 기존
+// `gCurrentAsyncTask[coreIndex]`(위 yield() 등이 이미 참조하는 그
+// 배열)를 그대로 노출하는 얇은 접근자.
+AsyncTask* AsyncTask::current() {
+    return gCurrentAsyncTask[Scheduler::currentCoreIndex()];
+}
+
 AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
                               bool autoFree, bool preemptive) {
     void* mem = GenericSlabAllocator::alloc(sizeof(AsyncTask));

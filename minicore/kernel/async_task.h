@@ -438,6 +438,21 @@ struct AsyncTask {
     // 다시 큐에서 뽑아 재개시키면 이 호출 지점부터 이어진다.
     static void yield();
 
+    // [신규, 2026-09-22, PN-4D60D49C, SP-0666DB3C §15.2] "지금 이
+    // 코어에서 실행/재개 중인 AsyncTask" - async_task.cpp의
+    // `gCurrentAsyncTask[coreIndex]`(AsyncReactor::drainOnce()가 코루틴
+    // resume()/kContextSwitch 진입 직전·직후에만 갱신하는 파일-로컬
+    // 배열, PN-622BA93C 이전부터 이미 존재)를 그대로 조회해 반환한다 -
+    // 이 값은 이미 정확히 SP-0666DB3C §15.2/SP-F682B889 §3.4가 확정한
+    // "gCurrentAsyncTask"의 의미와 갱신 지점을 그대로 만족하고 있어
+    // (실측 검증된 기존 코드), 문서가 제안한 `TaskLocal<AsyncTask*>`
+    // 래퍼 타입으로 다시 감싸지 않고 이 접근자 하나만 새로 노출한다
+    // (RM-23F4B687 "검증된 코드는 순수 리팩터링 목적만으로 건드리지
+    // 않는다" 원칙 - 이 §15.2 자신이 §11의 ThreadLocal에 대해 이미
+    // 선언한 것과 동일한 판단). 리액터/idle 컨텍스트 자신에서 부르면
+    // (지금 실행 중인 AsyncTask가 없으므로) nullptr.
+    static AsyncTask* current();
+
     // AsyncTask/AsyncCallbackRegistry가 내부적으로 새 AsyncTask를 만들어
     // 등록하고 이 코어의 리액터에 제출하는 진입점 - 실패 시(구조체
     // 또는 전용 스택 확보 실패) nullptr. autoFree=false로 제출하면

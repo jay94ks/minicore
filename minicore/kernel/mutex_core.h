@@ -5,6 +5,7 @@
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
+#include "scheduler.h"
 #include "wait_queue.h"
 #include "waitable.h"
 
@@ -139,6 +140,125 @@ private:
 
 using Mutex = BasicMutex<ParkingPolicy>;        // §2를 대체(시그니처 동일)
 using AsyncMutex = BasicMutex<YieldingPolicy>;  // §10을 대체(시그니처 동일)
+
+// [신규, 2026-09-22, PN-4D60D49C, SP-0666DB3C §16 확정 설계] 재진입
+// Mutex/AsyncMutex - §13의 Mutex/AsyncMutex(위)와 완전히 별개인 타입
+// (컴파일 타임에 재진입 지원 여부 강제, §16.1). 항상 소유자를
+// 추적한다 - "소유자 없음" 모드 자체가 없다(그건 위 MutexCore/
+// BasicMutex의 몫).
+class ReentrantMutexCore {
+public:
+    void init() {
+        _locked = false;
+        _owner = nullptr;
+        _recursionDepth = 0;
+    }
+
+    // MutexCore::lock()과 동일한 콜백 루프 구조 - _guard를 쥔 채로
+    // onContended를 부르고, onContended가 그 안에서 guard.unlock()까지
+    // 책임진다. owner가 이미 이 락을 쥔 소유자와 같으면(포인터 동일성
+    // 비교) 대기 없이 재귀 깊이만 늘리고 즉시 반환한다.
+    template <typename OnContended>
+    void lock(const void* owner, OnContended&& onContended) {
+        for (;;) {
+            _guard.lock();
+            if (!_locked) {
+                _locked = true;
+                _owner = owner;
+                _recursionDepth = 1;
+                _guard.unlock();
+                return;
+            }
+            if (owner == _owner) {
+                ++_recursionDepth;
+                _guard.unlock();
+                return;
+            }
+            onContended(_guard);
+        }
+    }
+
+    // 재귀 깊이가 0으로 떨어질 때만 실제로 풀고 통지한다 - 그 전까지는
+    // 같은 소유자의 중첩 unlock()일 뿐이라 아무도 깨울 필요가 없다.
+    template <typename NotifyFn>
+    void release(NotifyFn&& notifyOne) {
+        SpinlockGuard guard(_guard);
+        if (--_recursionDepth > 0) {
+            return;
+        }
+        _locked = false;
+        _owner = nullptr;
+        notifyOne();
+    }
+
+private:
+    Spinlock _guard;
+    bool _locked = false;
+    const void* _owner = nullptr;
+    uint32_t _recursionDepth = 0;
+};
+
+// 동기 재진입 뮤텍스 - 소유자는 `Scheduler::currentTask()`(항상 어디서든
+// 조회 가능)로 식별한다. **[정정, 2026-09-22, PN-4D60D49C 구현 세션]**
+// SP-0666DB3C §16.1 원 스케치는 `_waitQueue.parkCurrentAndUnlock(guard)`를
+// 인자 1개로 불렀으나, 실제 `WaitQueue::parkCurrentAndUnlock()`(wait_queue.h)
+// 시그니처는 `(Spinlock&, const WeakPtr<Waitable>&)` 2개를 요구한다 -
+// 위 `Mutex`(`BasicMutex<ParkingPolicy>`)와 동일한 이유(§9.5 강제
+// cancel()이 `Task::blockedOn`으로 이 WaitQueue를 찾으려면 그 자신의
+// 컨트롤 블록을 별칭한 `WeakPtr<Waitable>`이 필요)로 `EnableSharedFromThis`
+// 상속 + 컨트롤 블록 별칭 등록을 그대로 이식했다 - 재진입 판정 로직
+// 자체(위 `ReentrantMutexCore`)는 원 설계 그대로, 순수하게 실제
+// `WaitQueue` API와 맞물리도록 형태만 보강. `Mutex`와 동일하게 반드시
+// `kMakeSharedNew<ReentrantMutex>()`로 만들어야 한다(그래야 `_weakThis`가
+// 채워져 `sharedFromThis()`가 유효한 값을 반환).
+class ReentrantMutex : public EnableSharedFromThis<ReentrantMutex> {
+public:
+    ReentrantMutex() { _core.init(); }
+
+    void lock() {
+        const void* owner = static_cast<const void*>(Scheduler::currentTask());
+        _core.lock(owner, [this](Spinlock& guard) {
+            WeakPtr<Waitable> self(this->sharedFromThis(), static_cast<Waitable*>(&_waitQueue));
+            _waitQueue.parkCurrentAndUnlock(guard, self);
+        });
+    }
+    void unlock() {
+        _core.release([this] { _waitQueue.wakeOne(); });
+    }
+
+private:
+    ReentrantMutexCore _core;
+    WaitQueue _waitQueue;
+};
+
+// 비동기 재진입 뮤텍스 - 소유자는 `AsyncTask::current()`(SP-0666DB3C
+// §15.2/async_task.h, 이 세션이 기존 `gCurrentAsyncTask[coreIndex]`
+// 위에 새로 노출함)로 조회한다. `YieldingPolicy`와 마찬가지로 대기열이
+// 없어(경합 시 바로 yield 후 재시도) `EnableSharedFromThis`/컨트롤
+// 블록 별칭이 필요 없다 - lock()/unlock() 시그니처도 파라미터 없이
+// 유지된다(§16.1 "OwnerId 파라미터 방식은 AsyncTask::current()로
+// 완전히 대체돼 더 이상 필요 없다" 결론 그대로).
+class ReentrantAsyncMutex {
+public:
+    void lock() {
+        const void* owner = static_cast<const void*>(AsyncTask::current());
+        _core.lock(owner, [](Spinlock& guard) {
+            guard.unlock();
+            AsyncTask::yield();
+        });
+    }
+    void unlock() {
+        _core.release([] {});
+    }
+
+private:
+    ReentrantMutexCore _core;
+};
+
+// [SP-0666DB3C §16.2] Semaphore는 재진입 대상에서 제외 - 카운팅
+// 프리미티브라 "소유자가 자기 자신을 다시 획득"이라는 재진입 개념
+// 자체가 성립하지 않는다(설계자 승인, QU-C06793C2). ReentrantSemaphore
+// 류는 만들지 않는다.
 
 }  // namespace kernel
 
