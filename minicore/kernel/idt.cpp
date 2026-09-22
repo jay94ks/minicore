@@ -544,9 +544,15 @@ void kPanic(kernel::InterruptFrame* frame) {
     // 안의 단일 Serial::write()에 함께 담아야 하므로(위 함수 주석
     // 참고), 여기서 먼저 로컬 버퍼에 조립해 둔다 - 예전처럼 여기서
     // 바로 Serial::write하지 않는다.
-    char headerBuf[96];
+    char headerBuf[128];
     kernel::uint32_t headerPos = 0;
-    headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, "\nminicore: PANIC - unhandled exception: ");
+    headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, "\nminicore: PANIC(core=");
+    // [신규, 2026-09-23, PN-E4C6AF72] 어느 코어가 실제로 패닉했는지가
+    // 헤더 자체엔 없어서, 크래시 하나당 4개(코어 수) 나오는
+    // diag_ring dump 중 어느 게 그 코어의 것인지 실측 중 구분할 수
+    // 없었다 - 패닉 헤더에 직접 남긴다.
+    headerPos = kAppendDiagHex(headerBuf, sizeof(headerBuf), headerPos, kernel::Scheduler::currentCoreIndex());
+    headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, ") unhandled exception: ");
     if (frame->vector < 32) {
         headerPos = kAppendDiagStr(headerBuf, sizeof(headerBuf), headerPos, kExceptionNames[frame->vector]);
     } else {
