@@ -376,6 +376,23 @@ void kReleaseAsyncTask(AsyncTask* task) {
         task->weakRef->release();
         task->weakRef = nullptr;
     }
+    // [신규, 2026-09-22, PN-2954EC4D] `waitingTask`(WeakPtr<Task>)/
+    // `submitterTask`(TaskOwnerRef, 내부에 WeakPtr<Task> 보유)/
+    // `selfWaitable`(SharedPtr<AsyncTaskWaitable>)을 명시적으로
+    // 비운다 - 이 프로젝트의 `T::destroy()`류 관례(실제 소멸자를
+    // 절대 안 부름)와 동일한 이유로, 이 대입들(각 operator=가 옛
+    // 컨트롤 블록에 releaseWeak()/release Strong을 호출) 없이 그냥
+    // 슬랩을 반납하면 이 필드들이 가리키던 대상의 컨트롤 블록
+    // 참조 카운트가 영원히 안 내려간다 - `submitterTask`는 사실상
+    // 모든 syscall이 만드는 AsyncTask마다 채워지므로(channel.cpp의
+    // BridgePipe::peer보다 훨씬 넓은 반경) 방치하면 가장 흔하게
+    // 새는 경로가 된다(코드 감사로 발견, 아직 실측 계측 없음).
+    // `AsyncTask::init()`이 재사용 슬롯을 위해 이미 동일한 대입을
+    // 하고 있는 것과 정확히 대칭 - 그쪽은 "다음 사용자를 위한 초기화"
+    // 목적이고 이쪽은 "이번 사용자의 마지막 정리" 목적이다.
+    task->waitingTask = WeakPtr<Task>();
+    task->submitterTask = TaskOwnerRef();
+    task->selfWaitable.reset();
     GenericSlabAllocator::free(reinterpret_cast<void*>(task->stackBase), kAsyncTaskStackSize);
     if (task->tcb) {
         // [신규, 2026-09-20, PN-81E49523 2단계] tcb가 이제 stackBase와

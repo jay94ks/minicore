@@ -227,6 +227,16 @@ void BridgePipe::destroy() {
     // (`kDestroyAndFree<BridgePipe>`)가 이 함수 호출 직후 이어서
     // 처리한다(Process::destroy()와 동일한 역할 분리).
     outbound.data.reset();
+
+    // [신규, 2026-09-22, PN-2954EC4D] `peer`(WeakPtr<BridgePipe>)를
+    // 명시적으로 비운다 - `kDestroyAndFree<T>`가 `destroy()`만 부르고
+    // 실제 `~BridgePipe()`는 절대 안 불러서(이 프로젝트 전역 관례),
+    // 이 대입(operator=가 내부적으로 옛 `_block`에 `releaseWeak()`를
+    // 호출) 없이 그냥 슬랩을 반납하면 `peer`가 가리키던 상대
+    // BridgePipe의 컨트롤 블록이 이 몫의 weakCount를 영원히 못
+    // 내려받아 그 작은 구조체가 매 connect/accept마다 하나씩 샌다
+    // (실측 없이 코드 감사로 발견 - PN-260D7D73 구현 중 확인).
+    peer = WeakPtr<BridgePipe>();
 }
 
 // 이 아래 익명 네임스페이스(핸들러 구현체들) 안에서도 호출해야 하므로
