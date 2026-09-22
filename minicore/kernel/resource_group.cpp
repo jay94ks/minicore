@@ -420,6 +420,41 @@ uint32_t kFormatMemoryStat(ResourceGroup* group, char* buf, uint32_t bufCap) {
     return pos;
 }
 
+// [신규, 2026-09-22, PN-A032862F, SP-A21DD889 §6] kFormatCpuStat과 동일한
+// 관례 - io.stat 전용. PN-DEC738B8이 이미 구현해 둔 ResourceGroupIoControl
+// (쿼터 강제용)/ResourceGroupAccounting(실측 통계용) 필드를 그대로 노출.
+constexpr char kIoStatFileName[] = "io.stat";
+constexpr uint32_t kMaxIoStatLen = 160;  // 4줄(PeriodTicks/QuotaBytes/UsedBytesInPeriod/TotalIoBytesRead/Written)
+
+uint32_t kFormatIoStat(ResourceGroup* group, char* buf, uint32_t bufCap) {
+    uint32_t pos = 0;
+
+    kAppendStr(buf, bufCap, pos, "IoPeriodTicks:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->io.periodTicks));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "IoQuotaBytes:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->io.quotaBytes));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "IoUsedBytesInPeriod:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->io.usedBytesInPeriod));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "TotalIoBytesRead:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->accounting.totalIoBytesRead));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    kAppendStr(buf, bufCap, pos, "TotalIoBytesWritten:\t");
+    kAppendI64(buf, bufCap, pos, static_cast<int64_t>(group->accounting.totalIoBytesWritten));
+    kAppendStr(buf, bufCap, pos, "\n");
+
+    return pos;
+}
+
+constexpr uint32_t kMaxStatLenAB = kMaxMemoryStatLen > kMaxCpuStatLen ? kMaxMemoryStatLen : kMaxCpuStatLen;
+constexpr uint32_t kMaxStatLen = kMaxIoStatLen > kMaxStatLenAB ? kMaxIoStatLen : kMaxStatLenAB;
+
 }  // namespace
 
 OpenResult ResourceGroupFs::open(const char* relPath, uint32_t relPathLen) {
@@ -436,14 +471,17 @@ OpenResult ResourceGroupFs::open(const char* relPath, uint32_t relPathLen) {
     const bool isCpuStat = kNamesEqual(file, fileLen, kCpuStatFileName, sizeof(kCpuStatFileName) - 1);
     const bool isMemoryStat =
         !isCpuStat && kNamesEqual(file, fileLen, kMemoryStatFileName, sizeof(kMemoryStatFileName) - 1);
-    if (!isCpuStat && !isMemoryStat) {
+    const bool isIoStat =
+        !isCpuStat && !isMemoryStat && kNamesEqual(file, fileLen, kIoStatFileName, sizeof(kIoStatFileName) - 1);
+    if (!isCpuStat && !isMemoryStat && !isIoStat) {
         return OpenResult{FileHandle{}, false, VfsError::NotFound};
     }
     ResourceGroup* group = kFindResourceGroupByName(relPath, nameLen);
     if (!group) {
         return OpenResult{FileHandle{}, false, VfsError::NotFound};
     }
-    const uint64_t fileBit = isMemoryStat ? kResourceGroupMemoryStatFileBit : 0;
+    const uint64_t fileBit =
+        isMemoryStat ? kResourceGroupMemoryStatFileBit : (isIoStat ? kResourceGroupIoStatFileBit : 0);
     if (group == &gRootResourceGroup) {
         return OpenResult{FileHandle{kResourceGroupRootCpuStatHandle | fileBit}, false, VfsError::None};
     }
@@ -455,18 +493,22 @@ ReadResult ResourceGroupFs::read(FileHandle handle, uint64_t offset, void* buf, 
     if ((handle.value & kResourceGroupHandleTagBit) == 0 || handle.value == kResourceGroupDirHandleValue) {
         return ReadResult{0, VfsError::InvalidHandle};
     }
-    // [신규, 2026-09-20, PN-A40787C8] 포인터 복원 시 태그 비트(3)뿐
-    // 아니라 memory.stat 구분 비트(2)도 함께 마스크해야 한다 - 안 그러면
-    // memory.stat 핸들의 그룹 포인터가 4바이트 밀린 잘못된 주소가 된다.
-    constexpr uint64_t kMaskBits = kResourceGroupHandleTagBit | kResourceGroupMemoryStatFileBit;
+    // [신규, 2026-09-20, PN-A40787C8; 갱신 2026-09-22, PN-A032862F] 포인터
+    // 복원 시 태그 비트(3)뿐 아니라 memory.stat/io.stat 구분 비트(2/1)도
+    // 함께 마스크해야 한다 - 안 그러면 그룹 포인터가 밀린 잘못된 주소가
+    // 된다.
+    constexpr uint64_t kMaskBits =
+        kResourceGroupHandleTagBit | kResourceGroupMemoryStatFileBit | kResourceGroupIoStatFileBit;
     ResourceGroup* group = (handle.value & kResourceGroupRootHandleBit)
                                ? &gRootResourceGroup
                                : reinterpret_cast<ResourceGroup*>(handle.value & ~kMaskBits);
     const bool isMemoryStat = (handle.value & kResourceGroupMemoryStatFileBit) != 0;
+    const bool isIoStat = (handle.value & kResourceGroupIoStatFileBit) != 0;
 
-    char statText[kMaxMemoryStatLen > kMaxCpuStatLen ? kMaxMemoryStatLen : kMaxCpuStatLen];
-    const uint32_t statLen = isMemoryStat ? kFormatMemoryStat(group, statText, sizeof(statText))
-                                           : kFormatCpuStat(group, statText, sizeof(statText));
+    char statText[kMaxStatLen];
+    const uint32_t statLen = isIoStat        ? kFormatIoStat(group, statText, sizeof(statText))
+                              : isMemoryStat ? kFormatMemoryStat(group, statText, sizeof(statText))
+                                             : kFormatCpuStat(group, statText, sizeof(statText));
 
     if (offset >= statLen) {
         return ReadResult{0, VfsError::None};  // EOF
@@ -495,7 +537,9 @@ void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsSta
     const bool isCpuStat = kNamesEqual(file, fileLen, kCpuStatFileName, sizeof(kCpuStatFileName) - 1);
     const bool isMemoryStat =
         !isCpuStat && kNamesEqual(file, fileLen, kMemoryStatFileName, sizeof(kMemoryStatFileName) - 1);
-    if (!isCpuStat && !isMemoryStat) {
+    const bool isIoStat =
+        !isCpuStat && !isMemoryStat && kNamesEqual(file, fileLen, kIoStatFileName, sizeof(kIoStatFileName) - 1);
+    if (!isCpuStat && !isMemoryStat && !isIoStat) {
         args->error = VfsError::NotFound;
         return;
     }
@@ -504,9 +548,10 @@ void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsSta
         args->error = VfsError::NotFound;
         return;
     }
-    char statText[kMaxMemoryStatLen > kMaxCpuStatLen ? kMaxMemoryStatLen : kMaxCpuStatLen];
-    args->size = isMemoryStat ? kFormatMemoryStat(group, statText, sizeof(statText))
-                              : kFormatCpuStat(group, statText, sizeof(statText));
+    char statText[kMaxStatLen];
+    args->size = isIoStat        ? kFormatIoStat(group, statText, sizeof(statText))
+                 : isMemoryStat  ? kFormatMemoryStat(group, statText, sizeof(statText))
+                                 : kFormatCpuStat(group, statText, sizeof(statText));
     args->isDirectory = false;
     args->error = VfsError::None;
 }

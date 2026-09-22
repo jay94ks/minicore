@@ -347,6 +347,14 @@ constexpr uint64_t kResourceGroupRootCpuStatHandle = kResourceGroupHandleTagBit 
 // 쓸지 고른다(루트/동적 그룹 두 경로 모두 별도 상수 없이 동일하게).
 constexpr uint64_t kResourceGroupMemoryStatFileBit = 1ULL << 2;
 
+// [신규, 2026-09-22, PN-A032862F] `<name>/io.stat` 구분 비트 - 위
+// memory.stat 비트(2)와 같은 이유로 비트1도 안전하게 예약 가능(비트0~4
+// 전부 슬랩 정렬로 0). memory.stat/io.stat은 상호 배타적 파일이라 동시에
+// 서지 않는다 - `ResourceGroupFs::open()`/`read()`/`stat()`가 이 비트와
+// kResourceGroupMemoryStatFileBit 둘 다 확인해 세 가지(cpu/memory/io)
+// 중 하나를 고른다.
+constexpr uint64_t kResourceGroupIoStatFileBit = 1ULL << 1;
+
 // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신(디렉터리
 // 나열 대상) - 위 두 핸들(동적 그룹 포인터|비트3, 루트 cpu.stat)과
 // 겹치지 않도록 비트5를 함께 세운다(LiveFs의 `kLiveFsRootDirHandleValue`
