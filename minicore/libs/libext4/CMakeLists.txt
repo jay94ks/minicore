@@ -5,6 +5,7 @@
 # 대상을 남겨 두지 않는다(실사용처가 생기면 그때 확장, RM-23F4B687 §4).
 add_library(libext4 OBJECT
     ext4.cpp
+    ext4_driver.cpp
 )
 
 # libswapfs와 동일한 이유로 minicore/kernel도 PUBLIC이어야 한다 -
