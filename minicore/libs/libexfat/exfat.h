@@ -169,25 +169,27 @@ constexpr uint8_t kExfatEntryTypeEndOfDirectory = 0x00;  // 더 이상 유효 �
 
 constexpr uint16_t kFileAttrDirectory = 0x10;  // FAT32 attr 비트와 값 호환(SP-F1987EF8 §3.5)
 
-// resolvePath()/readdirAt()이 돌려주는, 파일 하나(0x85+0xC0 엔트리
-// 집합)의 요약 - FAT류와 마찬가지로 재조회 가능한 inode 번호가 없어
-// 이 값들을 통째로 들고 다닌다.
-struct ResolvedEntry {
-    uint32_t firstCluster = 0;
-    uint64_t fileSize = 0;   // 디렉터리는 0x85 엔트리 자체엔 크기가 없음 - 항상 0으로 채움(크기는 클러스터 체인 길이로만 앎)
-    bool isDir = false;
-    bool noFatChain = false;  // true면 firstCluster+fileSize만으로 전체 범위 계산(FAT 미참조, §3.2)
-};
-
 // ---------------------------------------------------------------------
-// 4(부분) - ExfatVolume: 읽기 전용 마운트 + 무상태 경로 탐색/읽기/
-// 디렉터리 열거. `ExfatDriver`(VFS 통합 계층)는 이 계획 범위 밖 -
-// libext4/libvfat 선례대로 이 클래스의 무상태 메서드는 실제 driver의
-// onExec 코루틴 안에서는 재사용되지 않고(코루틴 합성 불가 제약,
-// ext4_driver.cpp 상단 문서 주석 참고) 그 후속 계획이 평탄화해
-// 다시 구현할 것이다 - 그래도 이 증분 자체의 독립적인 정확성 검증
-// 가치가 있어(실제 mkfs.exfat 이미지 대조) libext4/libvfat과 동일한
-// "먼저 무상태로, 나중에 평탄화" 순서를 그대로 따른다.
+// 4(부분) - ExfatVolume: 읽기 전용 마운트 + mount()가 캐싱한 상태의
+// 읽기 전용 노출.
+//
+// [범위 변경, 2026-09-22, PN-C93A4E9E -> PN-09970F05로 갱신,
+// libext4/libvfat이 먼저 겪은 것과 동일한 실측 제약] 원래 있던
+// 무상태 동기 메서드(resolvePath/readdirAt + public readData +
+// private 헬퍼 scanDirectory/DirSlotCursor/upcaseInPlace)는 전부
+// 제거했다 - 전부 `fs::BlockDevice::readBlocks()`(Task 레벨 블로킹
+// 동기 래퍼)를 쓰는데, 이건 `kernel::KernelFsDriver::onExec()`(코루틴,
+// `AsyncReactor::drainOnce()` 안에서 실행)에서 호출하면 실측 확인된
+// 무한 대기가 난다. `ExfatDriver`(exfat_driver.h/.cpp, PN-09970F05)가
+// `kernel::AsyncTaskCoroAwaiter`(PN-6EDED542) 기반으로 `onExec` 자신의
+// 코루틴 몸체 안에 이 로직을 평탄화해 다시 구현한다(`ext4_driver.cpp`/
+// `vfat_driver.cpp`와 동일한 패턴). `mount()`만 여전히 실제로 쓰인다 -
+// 진짜 `kernel::Task` 컨텍스트(`ExfatDriver::mount()`)에서 한 번
+// 호출되는 준비 단계라 내부적으로 동기 헬퍼(clusterToSector/
+// nextCluster/readData)를 계속 쓰는 게 안전하다(루트 디렉터리를 스캔해
+// 할당 비트맵/Up-case 테이블을 로드해야 해서 ext4/FAT32의 mount()보다
+// 스스로 할 일이 많다 - 이 셋은 mount() 전용 구현 세부로 private에
+// 남긴다).
 // ---------------------------------------------------------------------
 class ExfatVolume {
 public:
@@ -196,50 +198,30 @@ public:
     // 찾아 그 내용 전체를 메모리에 캐싱한다.
     bool mount(fs::BlockDevice* device);
 
+    // [PN-09970F05] mount()가 이미 파싱/캐싱해 둔 상태를 읽기 전용으로
+    // 노출 - `ExfatDriver::onExec()`(코루틴 컨텍스트)가 이 상태를 그대로
+    // 재사용해 자신만의 평탄화된 순회 로직을 구현하는 데 쓴다.
     uint32_t rootFirstCluster() const { return bs_.firstClusterOfRootDirectory; }
-
-    // "/a/b/c" 형태의 절대 경로를 루트부터 세그먼트별로 탐색한다 -
-    // 각 세그먼트를 Up-case 테이블로 정규화해 비교(대소문자 무시,
-    // 원래 대소문자는 보존 - §3.6). v1은 ASCII 경로만 지원(세그먼트
-    // 바이트를 그대로 UTF-16 코드유닛으로 폭 확장 후 비교 - 이
-    // 프로젝트의 다른 파일시스템 API와 동일하게 커널 내부 경로가
-    // 전부 ASCII라는 전제, 비ASCII 파일명은 후속).
-    bool resolvePath(const char* path, uint32_t pathLen, ResolvedEntry* out);
-
-    // 논리 오프셋 기준 읽기(POSIX pread 스타일, 상태 없음) - noFatChain
-    // 이면 FAT를 참조하지 않고 firstCluster+오프셋 산술만으로 클러스터를
-    // 찾는다(§3.2 핵심 최적화).
-    uint32_t readData(uint32_t firstCluster, uint64_t fileSize, bool noFatChain, uint64_t offset, void* buf,
-                       uint32_t len, bool* outOk);
-
-    // 디렉터리(첫 클러스터로 식별)의 0-based 인덱스 순회 - 삭제된
-    // 엔트리 집합(InUse 비트 꺼짐)과 0x81/0x82/0x83 특수 엔트리는
-    // 자동으로 건너뛴다.
-    bool readdirAt(uint32_t dirFirstCluster, uint64_t index, char* nameOut, uint32_t nameOutCap, uint32_t* outNameLen,
-                   bool* outIsDir, uint32_t* outFirstCluster, uint64_t* outFileSize, bool* outNoFatChain);
+    fs::BlockDevice* device() const { return device_; }
+    uint32_t sectorSizeValue() const { return sectorSize_; }
+    uint32_t clusterSizeValue() const { return clusterSize_; }
+    uint32_t sectorsPerClusterValue() const { return sectorsPerCluster_; }
+    uint32_t clusterHeapOffsetValue() const { return bs_.clusterHeapOffset; }
+    uint32_t fatOffsetValue() const { return bs_.fatOffset; }
+    const uint16_t* upcaseTablePtr() const { return upcaseTable_; }
+    uint32_t upcaseTableEntriesValue() const { return upcaseTableEntries_; }
 
 private:
-    // 32바이트 슬롯을 클러스터 체인에서 순서대로 읽어 주는 커서 -
-    // 클러스터 경계를 넘어가는 엔트리 집합(0x85+0xC0+0xC1×N)도
-    // 투명하게 처리한다. 중첩 클래스라 ExfatVolume의 private 멤버
-    // (clusterToSector/nextCluster/device_ 등)에 그대로 접근한다 -
-    // 정의는 exfat.cpp.
-    class DirSlotCursor;
-
     bool clusterToSector(uint32_t cluster, uint32_t* outSector) const;
     // FAT 테이블에서 cluster의 다음 클러스터를 읽는다 - EOC/BAD/손상은
     // false(호출부가 "체인 끝"으로 처리). noFatChain 파일에는 호출되지
     // 않는다(호출부가 §3.2 산술로 대체).
     bool nextCluster(uint32_t cluster, uint32_t* outNext);
-    // dirFirstCluster의 클러스터 체인(dirNoFatChain/dirDataLength로
-    // §3.2 순회 방식 결정)을 순회하며 0x85로 시작하는 엔트리 집합을
-    // 하나씩 파싱한다. nameUtf16Upper/nameLen이 null이 아니면 "이름
-    // 일치 탐색"(찾으면 즉시 중단), null이면 "index-th 유효 엔트리
-    // 찾기"(targetIndex 사용) 모드.
-    bool scanDirectory(uint32_t dirFirstCluster, bool dirNoFatChain, uint64_t dirDataLength,
-                        const uint16_t* nameUtf16Upper, uint32_t nameLen, uint64_t targetIndex, ResolvedEntry* out,
-                        char* nameOut, uint32_t nameOutCap, uint32_t* outNameLen);
-    void upcaseInPlace(uint16_t* codeUnits, uint32_t count) const;
+    // 논리 오프셋 기준 읽기(mount()가 할당 비트맵/Up-case 테이블
+    // 본문을 로드하는 데만 쓴다 - onExec은 이 메서드를 재사용하지
+    // 않는다, 위 클래스 문서 주석 참고).
+    uint32_t readData(uint32_t firstCluster, uint64_t fileSize, bool noFatChain, uint64_t offset, void* buf,
+                       uint32_t len, bool* outOk);
 
     fs::BlockDevice* device_ = nullptr;
     ExfatBootSector bs_{};

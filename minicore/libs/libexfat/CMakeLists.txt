@@ -6,6 +6,7 @@
 # 확장, RM-23F4B687 §4).
 add_library(libexfat OBJECT
     exfat.cpp
+    exfat_driver.cpp
 )
 
 # libext4/libvfat/libswapfs와 동일한 이유로 minicore/kernel도
