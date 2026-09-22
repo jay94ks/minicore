@@ -121,7 +121,17 @@ void kInterruptSubscriptionIsr(InterruptFrame* frame) {
         } else {
             ++subscriber.droppedCount;
         }
-        if (AsyncTask* task = subscriber.waiters.popFront()) {
+        // [수정, 2026-09-22, PN-FFFE892E 착수 전 발견] 원래 `if`라 FIFO
+        // 맨 앞 대기자 하나만 깨웠다 - 유저랜드 syscall 전제(구독자
+        // 하나가 한 번에 WaitInterrupt를 딱 하나만 건다)에선 그걸로
+        // 충분했지만, AHCI처럼 같은 owner의 여러 AsyncTask가 동시에
+        // 같은 벡터를 기다리는 소비자(NCQ 다중 in-flight 커맨드)에겐
+        // 인터럽트 하나가 대기자 하나만 깨우고 나머지는 다음 인터럽트가
+        // 안 오면 영원히 안 깨는 결함이 있었다(착수 전 조사로 발견,
+        // PN-FFFE892E 참고). `while`로 그 순간 파킹된 대기자 전부를
+        // 깨우도록 일반화 - 기존 단일 대기자 경우는 한 번 돌고 끝나
+        // 동작이 그대로다(회귀 없음).
+        while (AsyncTask* task = subscriber.waiters.popFront()) {
             AsyncReactor::submitCompletion(task);  // 인터럽트 컨텍스트에서 호출 가능(async_task.h에 명시)
         }
     }
@@ -355,6 +365,23 @@ UnsubscribeInterruptHandler gUnsubscribeInterruptHandler;
 WaitInterruptHandler gWaitInterruptHandler;
 GetInterruptDumpHandler gGetInterruptDumpHandler;
 
+// [신규, 2026-09-22, PN-FFFE892E] 커널 내부(트랩 아님) 호출자를 위한
+// subjectCode - `ahci.cpp`의 `AhciCommandHandler`처럼 순수 커널
+// 드라이버가 `AsyncTask::submit(subjectCode, ...)`로 Subscribe/Wait를
+// 직접 부를 수 있게 한다(`vfs_syscall.cpp`가 `KernelFsDriver`를 부르는
+// 것과 동일한 패턴 - syscall 등록은 그대로 유지, 이건 추가 경로).
+AsyncTaskSubjectCode gSubscribeInterruptSubjectCode = 0;
+AsyncTaskSubjectCode gWaitInterruptSubjectCode = 0;
+bool gInternalSubjectCodesRegistered = false;
+
+void kEnsureInternalSubjectCodesRegistered() {
+    if (!gInternalSubjectCodesRegistered) {
+        gSubscribeInterruptSubjectCode = AsyncCallbackRegistry::registerHandler(&gSubscribeInterruptHandler);
+        gWaitInterruptSubjectCode = AsyncCallbackRegistry::registerHandler(&gWaitInterruptHandler);
+        gInternalSubjectCodesRegistered = true;
+    }
+}
+
 }  // namespace
 
 // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] UnsubscribeInterruptHandler와
@@ -399,6 +426,16 @@ void InterruptSubscriptionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointWaitInterrupt, &gWaitInterruptHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointUnsubscribeInterrupt, &gUnsubscribeInterruptHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointGetInterruptDump, &gGetInterruptDumpHandler);
+}
+
+AsyncTaskSubjectCode InterruptSubscriptionService::subscribeSubjectCode() {
+    kEnsureInternalSubjectCodesRegistered();
+    return gSubscribeInterruptSubjectCode;
+}
+
+AsyncTaskSubjectCode InterruptSubscriptionService::waitSubjectCode() {
+    kEnsureInternalSubjectCodesRegistered();
+    return gWaitInterruptSubjectCode;
 }
 
 }  // namespace kernel
