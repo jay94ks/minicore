@@ -82,6 +82,45 @@ constexpr uint32_t kFatBadCluster = 0x0FFFFFF7u;
 constexpr uint32_t kFirstDataCluster = 2;      // 클러스터 번호는 2부터 시작(0/1 예약)
 constexpr uint32_t kReservedFatEntryIndex = 1; // 클러스터 0/1은 실제 체인이 아니라 예약(볼륨 dirty 비트는 FAT[1]에)
 
+// ---------------------------------------------------------------------
+// [신규, 2026-09-23, PN-5481287C 준비 작업] FAT12 엔트리 - 12비트씩
+// 패킹돼(1.5바이트/엔트리) 바이트 경계와 어긋난다. 이 프로젝트가 새로
+// 고안한 값이 아니다 - Linux 커널 `fs/fat/fatent.c`의
+// `fat12_ent_get`/`fat12_ent_put`과 동일한 알고리즘(fatgen103 문서
+// 관례 그대로). 순수 계산 함수만 여기 있고, 아직 어디서도 호출되지
+// 않는다 - 실제 마운트/읽기 경로(§3.3의 FAT12/16 전용 고정 루트
+// 디렉터리 영역 처리 포함)는 훨씬 큰 후속 작업(별도 Volume/Driver
+// 클래스 필요)으로 남아 있다. 순수 pack/unpack 로직만 먼저 호스트
+// 사이드 단위 테스트로 검증해 둔 것(8개 케이스: 짝/홀 클러스터
+// get, round-trip set 후 이웃 엔트리 훼손 여부까지 확인 - 전부
+// 통과).
+// ---------------------------------------------------------------------
+// cluster번째 FAT12 엔트리가 시작하는 바이트 오프셋 - floor(cluster*1.5).
+// 엔트리 하나가 이 오프셋과 그 다음 바이트에 걸쳐 있다(짝수 클러스터는
+// 하위 12비트, 홀수 클러스터는 상위 12비트).
+inline uint32_t kFat12EntryByteOffset(uint32_t cluster) {
+    return cluster + cluster / 2;
+}
+
+inline uint16_t kFat12EntryGet(const uint8_t* fat, uint32_t cluster) {
+    const uint32_t off = kFat12EntryByteOffset(cluster);
+    if (cluster & 1) {
+        return static_cast<uint16_t>((fat[off] >> 4) | (fat[off + 1] << 4));
+    }
+    return static_cast<uint16_t>(fat[off] | ((fat[off + 1] & 0x0F) << 8));
+}
+
+inline void kFat12EntryPut(uint8_t* fat, uint32_t cluster, uint16_t value) {
+    const uint32_t off = kFat12EntryByteOffset(cluster);
+    if (cluster & 1) {
+        fat[off] = static_cast<uint8_t>((value << 4) | (fat[off] & 0x0F));
+        fat[off + 1] = static_cast<uint8_t>(value >> 4);
+    } else {
+        fat[off] = static_cast<uint8_t>(value & 0xFF);
+        fat[off + 1] = static_cast<uint8_t>((fat[off + 1] & 0xF0) | (value >> 8));
+    }
+}
+
 // [신규, 2026-09-23, PN-547EF839, SP-A658A124 §2 후속 증분 항목6] FAT[1]
 // (예약 엔트리) 상위 비트의 볼륨 dirty 관례 - 이 프로젝트가 새로
 // 고안한 값이 아니다. Microsoft "FAT: General Overview of On-Disk
