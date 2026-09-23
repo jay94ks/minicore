@@ -52,4 +52,14 @@ public:
 
 }  // namespace fs
 
+namespace kernel {
+// [구현, 2026-09-23, PN-4859FDE9 준비 작업, SP-D02C4A73 §2] fs.cpp의
+// kTryAutoMountBlockDevice()가 감지한 스왑 파티션(있다면)을 돌려준다 -
+// 아직 아무것도 마운트되지 않았거나 감지된 블록 장치가 스왑 포맷이
+// 아니면 nullptr. 회수 스캔(page_frame_allocator.cpp)/페이지폴트
+// 스왑인(paging.cpp) 등 fs.cpp 밖의 소비자가 쓴다(둘 다 아직 미배선 -
+// 이 접근자 자체는 그 두 소비자보다 먼저 준비해 두는 것).
+fs::SwapBackend* kActiveSwapBackend();
+}  // namespace kernel
+
 #endif  // MINICORE_KERNEL_SWAP_BACKEND_H

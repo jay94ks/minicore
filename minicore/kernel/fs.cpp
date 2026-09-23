@@ -72,10 +72,12 @@
 #include "channel.h"
 #include "fs_service.h"
 #include "libext4/ext4_driver.h"
+#include "libswapfs/swapfs.h"
 #include "libvfat/vfat_driver.h"
 #include "mount_table.h"
 #include "pnp.h"
 #include "scheduler.h"
+#include "swap_backend.h"
 #include "syscall.h"
 #include "task.h"
 
@@ -114,15 +116,26 @@ bool gHasAhciBlockDevice = false;
 
 // [구현, 2026-09-22, PN-452FF696 항목5] 실제 감지된 블록 장치에
 // 연결할 후보 FileSystemDriver - §3.1 우선순위(ext4 → FAT32/16)로
-// 차례로 mount()를 시도한다. libswapfs는 이 순위 목록에 있지만
-// FileSystemDriver를 구현하지 않는 별도 인터페이스(SwapBackend, 페이지
-// 폴트 스왑인 전용)라 "일반 파일시스템 자동 마운트" 대상이 아니다 -
-// 스왑 파티션은 애초에 VFS 마운트 지점에 붙는 개념이 없다. exFAT/NTFS
-// 는 §4 통합 계층(ExfatDriver/NtfsDriver, PN-09970F05/PN-52C577F3)이
-// 아직 없어 이번 자동 감지 순서에서 제외 - 그 계획들이 완료되면 이
-// 목록에 추가한다.
+// 차례로 mount()를 시도한다. exFAT/NTFS는 §4 통합 계층(ExfatDriver/
+// NtfsDriver, PN-09970F05/PN-52C577F3)이 아직 없어 이번 자동 감지
+// 순서에서 제외 - 그 계획들이 완료되면 이 목록에 추가한다.
 ext4::Ext4Driver gExt4Driver;
 vfat::Fat32Driver gFat32Driver;
+
+// [구현, 2026-09-23, PN-4859FDE9 준비 작업, SP-D02C4A73 §2 명시 지시]
+// libswapfs(SwapfsBackend)는 FileSystemDriver를 구현하지 않는 별도
+// 인터페이스(SwapBackend)라 VFS 마운트 지점에는 붙지 않지만,
+// "자신만의 블록 장치(파티션)에 마운트된다 - SP-7CC5693A §5 5단계
+// (우선순위대로 슈퍼블록 판별)가 그대로 적용된다"고 이 문서가
+// 명시적으로 확정해 뒀다(새 DC 불필요라고까지 적어 둠) - 그래서
+// ext4/FAT32와 같은 우선순위 체인의 마지막 후보로 같은 물리 장치를
+// 그대로 재사용해 탐지한다(v1은 장치가 하나뿐이므로 셋 중 정확히
+// 하나만 실제로 일치할 수 있다). 마운트에 성공해도 VFS 경로에는
+// 아무것도 연결하지 않는다 - `kActiveSwapBackend()`(아래)로 다른
+// 파일(회수 스캔/페이지폴트 스왑인, 아직 미배선)이 나중에 꺼내
+// 쓴다.
+fs::SwapfsBackend gSwapBackend;
+bool gHasSwapBackend = false;
 
 // devmgr에서 하던 EnumerateDevices->매칭->RequestIoPermission->HBA
 // 초기화까지 그대로 이 KernelThread 안에서 직접 호출로 수행한다 -
@@ -214,6 +227,13 @@ void kTryAutoMountBlockDevice() {
         MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gFat32Driver);
         return;
     }
+    // [구현, 2026-09-23, SP-D02C4A73 §2] 위 두 후보와 같은 우선순위
+    // 체인의 마지막 - VFS 마운트 지점에는 연결하지 않는다(스왑은 VFS
+    // 개념이 없음, gSwapBackend 선언부 주석 참고).
+    if (gSwapBackend.mount(&gAhciBlockDevice)) {
+        gHasSwapBackend = true;
+        return;
+    }
 }
 
 // [신규, 2026-09-20, SP-43331889 §3-3] fs가 실제로 쓰는 6개 syscall
@@ -278,6 +298,14 @@ void kAcceptFromChannelDirect(const SharedPtr<Task>& self, AcceptFromChannelArgs
 }
 
 }  // namespace
+
+// [구현, 2026-09-23, PN-4859FDE9 준비 작업] fs.cpp 밖의 소비자(회수
+// 스캔/페이지폴트 스왑인, 아직 미배선)가 감지된 스왑 파티션을 꺼내
+// 쓰는 유일한 통로 - kTryAutoMountBlockDevice()가 아직 안 불렸거나
+// (부팅 극초반) 감지된 블록 장치가 스왑 포맷이 아니면 nullptr.
+fs::SwapBackend* kActiveSwapBackend() {
+    return gHasSwapBackend ? &gSwapBackend : nullptr;
+}
 
 // [교체, 2026-09-20, SP-43331889 §7] `kSpawnKernelThread()`가 새
 // `KernelThread`의 TaskTcb에 이 함수 포인터를 직접 실어 최초 진입 시
