@@ -186,4 +186,13 @@ bool MountTable::unmount(const char* path, uint32_t pathLen) {
     return false;
 }
 
+void MountTable::unmountAllForShutdown() {
+    for (uint32_t i = 0; i < kMaxMountEntries; ++i) {
+        MountEntry& entry = gEntries[i];
+        if (entry.used && entry.kind == MountKind::KernelDriver && entry.kernelDriver) {
+            entry.kernelDriver->onUnmount();
+        }
+    }
+}
+
 }  // namespace kernel

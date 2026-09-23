@@ -10,6 +10,7 @@ add_library(minicore_kernel OBJECT
     page_frame_allocator.cpp
     paging.cpp
     acpi.cpp
+    power.cpp
     lapic.cpp
     nmi.cpp
     ioapic.cpp

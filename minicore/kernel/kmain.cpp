@@ -28,6 +28,7 @@
 #include "paging.h"
 #include "pci.h"
 #include "pnp.h"
+#include "power.h"
 #include "process.h"
 #include "rcu.h"
 #include "resource_group.h"
@@ -567,6 +568,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         kernel::Logger::error("minicore: ACPI MADT parse FAILED");
     }
 
+    // [신규, 2026-09-23, DC-F367AD5D/SP-0C7A4F3B] Acpi::init()이 FADT/
+    // DSDT 위치를 파싱한 직후 - DSDT에서 \_S5 패키지를 스캔해 둔다.
+    kernel::Power::init();
+
     // Acpi::cpuCount()만 있으면 되므로 여기서 바로 초기화한다(코어별
     // 큐를 만들어 두고, 실제 디스패치는 각 코어가 Scheduler::runLoop()
     // 에 들어가면서 시작된다 - PL-2D3184BC 4/5/6단계).
@@ -662,6 +667,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // "번호만 예약" 상태였다.
     kernel::DmaBufferService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: dma buffer alloc/free syscall endpoints registered");
+
+    // SP-0C7A4F3B - Shutdown/Reboot(RM-48E1E610 그룹10 "Power").
+    kernel::PowerService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: shutdown/reboot syscall endpoints registered");
 
     // SP-9A6D579F §3.2/§3.3 - 위와 같은 이유(BSP에서 한 번만). 이번
     // 증분은 DebugAttach/Detach + DebugSetBreakpoint(항목3/4) - 싱글

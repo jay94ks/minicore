@@ -223,6 +223,19 @@ public:
         _registered = true;
     }
 
+    // [신규, 2026-09-23, DC-F367AD5D/SP-0C7A4F3B, PN-0B461E6F] 정상
+    // 종료(Shutdown/Reboot 또는 ACPI 전원 버튼) 직전에
+    // `MountTable::unmountAllForShutdown()`이 마운트된 순서 그대로
+    // 호출한다 - 기본은 no-op(LiveFs/ProcFs/ResourceGroupFs처럼
+    // 온디스크 dirty 비트 개념이 없는 드라이버는 재정의 불필요).
+    // ext4/FAT류(실제 `FileSystemDriver`)가 이 자리에서 각자의
+    // dirty/state 비트를 "정상 종료됨"으로 되돌려 쓴다(`PN-547EF839`
+    // 참고) - 이미 진짜 kernel::Task 컨텍스트(Shutdown/Reboot syscall
+    // 핸들러 또는 전원 버튼 이벤트를 처리하는 지연 실행 콜백)에서만
+    // 불리므로 `mount()`/`remount()`와 동일하게 동기 BlockDevice I/O를
+    // 써도 안전하다(onExec 코루틴 제약 없음 - 위 mount() 관례 그대로).
+    virtual void onUnmount() {}
+
 private:
     AsyncTaskSubjectCode _subjectCode = 0;
     bool _registered = false;
@@ -264,6 +277,14 @@ public:
 
     // 정확히 일치하는 경로의 마운트를 해제한다 - 없으면 false.
     static bool unmount(const char* path, uint32_t pathLen);
+
+    // [신규, 2026-09-23, DC-F367AD5D/SP-0C7A4F3B] 정상 종료 경로
+    // (Power::shutdown()/reboot(), 전원 버튼 이벤트) 전용 - 마운트
+    // 테이블 항목을 지우지 않고(그 뒤 아무도 이 경로에 접근하면 안
+    // 되므로 지우나 안 지우나 사실상 무관하지만, 종료 도중 다른
+    // 요청이 들어와도 안전하게 계속 라우팅되도록 일부러 남겨 둔다)
+    // `MountKind::KernelDriver`인 항목마다 `onUnmount()`만 호출한다.
+    static void unmountAllForShutdown();
 };
 
 }  // namespace kernel

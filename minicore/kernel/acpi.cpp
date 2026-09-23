@@ -133,6 +133,103 @@ struct McfgEntry {
 } __attribute__((packed));
 constexpr kernel::uint32_t kMcfgHeaderPad = 8;  // 예약 필드
 
+// ACPI FADT("FACP" 시그니처, ACPI 스펙 §5.2.9) - SdtHeader(36바이트)
+// 바로 뒤. ACPI 1.0(리비전0/1)부터 있던 32비트 필드(오프셋 0~108)와
+// ACPI 2.0+가 추가한 64비트 확장(X_*, 오프셋 96~) 둘 다 정의해 두되,
+// 확장 필드는 `header.length`가 실제로 그만큼 있을 때만 읽는다(RSDP
+// revision 분기와 동일한 방어 - 짧은 FADT를 읽으면 그 뒤는 다른
+// 테이블의 메모리를 침범해 읽는 것과 같다). GAS(Generic Address
+// Structure, HpetTable의 것과 동일한 12바이트 레이아웃)를 재사용하지
+// 않고 그대로 인라인한다 - HpetTable의 것과 필드 이름이 겹쳐
+// 헷갈리지 않도록.
+struct GenericAddress {
+    kernel::uint8_t addressSpaceId;
+    kernel::uint8_t registerBitWidth;
+    kernel::uint8_t registerBitOffset;
+    kernel::uint8_t accessSize;
+    kernel::uint64_t address;
+} __attribute__((packed));
+static_assert(sizeof(GenericAddress) == 12, "GenericAddress는 ACPI GAS와 같은 12바이트여야 함");
+
+struct Fadt {
+    SdtHeader header;              // 0
+    kernel::uint32_t firmwareCtrl; // 36
+    kernel::uint32_t dsdt;         // 40
+    kernel::uint8_t reserved0;     // 44
+    kernel::uint8_t preferredPmProfile;  // 45
+    kernel::uint16_t sciInt;       // 46
+    kernel::uint32_t smiCmd;       // 48
+    kernel::uint8_t acpiEnable;    // 52
+    kernel::uint8_t acpiDisable;   // 53
+    kernel::uint8_t s4BiosReq;     // 54
+    kernel::uint8_t pstateCnt;     // 55
+    kernel::uint32_t pm1aEvtBlk;   // 56
+    kernel::uint32_t pm1bEvtBlk;   // 60
+    kernel::uint32_t pm1aCntBlk;   // 64
+    kernel::uint32_t pm1bCntBlk;   // 68
+    kernel::uint32_t pm2CntBlk;    // 72
+    kernel::uint32_t pmTmrBlk;     // 76
+    kernel::uint32_t gpe0Blk;      // 80
+    kernel::uint32_t gpe1Blk;      // 84
+    kernel::uint8_t pm1EvtLen;     // 88
+    kernel::uint8_t pm1CntLen;     // 89
+    kernel::uint8_t pm2CntLen;     // 90
+    kernel::uint8_t pmTmrLen;      // 91
+    kernel::uint8_t gpe0BlkLen;    // 92
+    kernel::uint8_t gpe1BlkLen;    // 93
+    kernel::uint8_t gpe1Base;      // 94
+    kernel::uint8_t cstCnt;        // 95
+    kernel::uint16_t pLvl2Lat;     // 96
+    kernel::uint16_t pLvl3Lat;     // 98
+    kernel::uint16_t flushSize;    // 100
+    kernel::uint16_t flushStride;  // 102
+    kernel::uint8_t dutyOffset;    // 104
+    kernel::uint8_t dutyWidth;     // 105
+    kernel::uint8_t dayAlrm;       // 106
+    kernel::uint8_t monAlrm;       // 107
+    kernel::uint8_t century;       // 108
+    kernel::uint16_t iapcBootArch; // 109
+    kernel::uint8_t reserved1;     // 111
+    kernel::uint32_t flags;        // 112
+    GenericAddress resetReg;       // 116
+    kernel::uint8_t resetValue;    // 128
+    kernel::uint16_t archBootFlags2;  // 129 (ARM_BOOT_ARCH, x86은 안 씀)
+    kernel::uint8_t reserved2;     // 131
+    kernel::uint64_t xFirmwareCtrl;  // 132
+    kernel::uint64_t xDsdt;        // 140
+    GenericAddress xPm1aEvtBlk;   // 148
+    GenericAddress xPm1bEvtBlk;   // 160
+    GenericAddress xPm1aCntBlk;   // 172
+    GenericAddress xPm1bCntBlk;   // 184
+    // 이후 X_PM2_CNT_BLK 등은 이번 범위(shutdown/reboot에 필요한
+    // PM1/Reset만) 밖이라 옮기지 않는다 - 위 SuperblockCore/InodeCore와
+    // 같은 절단 관례.
+} __attribute__((packed));
+static_assert(sizeof(SdtHeader) == 36, "SdtHeader는 36바이트여야 함(FADT 오프셋 계산의 기준)");
+static_assert(__builtin_offsetof(Fadt, sciInt) == 46, "Fadt::sciInt 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, pm1aEvtBlk) == 56, "Fadt::pm1aEvtBlk 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, pm1CntLen) == 89, "Fadt::pm1CntLen 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, flags) == 112, "Fadt::flags 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, resetReg) == 116, "Fadt::resetReg 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, resetValue) == 128, "Fadt::resetValue 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, xDsdt) == 140, "Fadt::xDsdt 오프셋이 ACPI 스펙과 어긋남");
+static_assert(__builtin_offsetof(Fadt, xPm1aCntBlk) == 172, "Fadt::xPm1aCntBlk 오프셋이 ACPI 스펙과 어긋남");
+
+constexpr kernel::uint32_t kFadtFlagResetRegSup = 1U << 10;
+// FADT가 이 길이(RESET_REG/RESET_VALUE까지, ACPI 2.0 최소 크기)보다
+// 짧으면 리비전이 그 확장을 아예 정의하지 않는다는 뜻 - 읽으면 안 됨.
+constexpr kernel::uint32_t kFadtLengthWithResetReg = 129;
+// X_DSDT/X_PM1a_CNT_BLK 등 64비트 확장 전체(이 struct가 옮긴 필드
+// 기준 - X_PM1b_CNT_BLK 끝, 오프셋 196)를 담을 최소 길이. 실제
+// ACPI 2.0+ 펌웨어는 보통 FADT 전체 길이를 244(ACPI 5.0 정의 전체
+// 크기)로 보고하지만, 이 struct는 그 뒤(HYPERVISOR_VENDOR_IDENTITY
+// 등)를 옮기지 않았으므로 실제로 필요한 최소값만 기준으로 삼는다
+// (SuperblockCore/InodeCore와 같은 절단 관례 - RM-23F4B687 §4).
+constexpr kernel::uint32_t kFadtLengthWithExtended = 196;
+// SCI_INT~PM1_CNT_LEN(오프셋 46~89)까지 - PM1/SCI/DSDT(32비트) 등
+// 이 코드가 실제로 읽는 ACPI 1.0 시절부터 있던 최소 필드 범위.
+constexpr kernel::uint32_t kFadtLengthWithPm1Core = 90;
+
 kernel::uint64_t gLocalApicAddress = 0;
 kernel::uint32_t gIoApicIds[kernel::kAcpiMaxIoApics];
 kernel::uint32_t gIoApicAddresses[kernel::kAcpiMaxIoApics];
@@ -147,6 +244,29 @@ kernel::uint8_t gMcfgEndBus = 0;
 kernel::uint32_t gCpuApicIds[kernel::kAcpiMaxCpus];
 kernel::uint32_t gCpuNumaNode[kernel::kAcpiMaxCpus];
 kernel::uint32_t gCpuCount = 0;
+
+// [신규, 2026-09-23, DC-F367AD5D/QU-7C3AB7A2 답변] FADT에서 옮긴
+// PM1/Reset/DSDT 위치 - 전부 `Power`(power.h/.cpp)가 실제 하드웨어
+// 조작에 쓴다. hasFadt()==false면 나머지는 전부 의미 없음(0으로
+// 초기화된 채로 남는다 - 실제 물리 하드웨어에서 FADT가 없는 경우는
+// 사실상 없지만, 방어적으로 항상 먼저 확인).
+bool gHasFadt = false;
+kernel::uint32_t gSciInt = 0;
+kernel::uint32_t gSmiCmd = 0;
+kernel::uint8_t gAcpiEnable = 0;
+kernel::uint8_t gAcpiDisable = 0;
+kernel::uint32_t gPm1aEvtBlk = 0;
+kernel::uint32_t gPm1bEvtBlk = 0;
+kernel::uint32_t gPm1EvtLen = 0;
+kernel::uint32_t gPm1aCntBlk = 0;
+kernel::uint32_t gPm1bCntBlk = 0;
+kernel::uint32_t gPm1CntLen = 0;
+bool gHasResetReg = false;
+kernel::uint8_t gResetRegAddressSpaceId = 0;
+kernel::uint64_t gResetRegAddress = 0;
+kernel::uint8_t gResetValue = 0;
+kernel::uint64_t gDsdtPhysAddress = 0;
+kernel::uint32_t gDsdtLength = 0;
 
 // ISA IRQ(인덱스) -> override 존재 여부/GSI/극성/트리거. override가
 // 없는 IRQ는 gIsoPresent[irq]==false로 남고, Acpi::resolveIsaIrq가
@@ -329,19 +449,60 @@ bool Acpi::init(kernel::uint64_t rsdpPhys) {
     const SdtHeader* srat = nullptr;
     const SdtHeader* hpet = nullptr;
     const SdtHeader* mcfg = nullptr;
+    const SdtHeader* fadt = nullptr;
 
     if (rsdp->revision >= 2 && kChecksumOk(rsdp, sizeof(Rsdp)) && rsdp->xsdtAddress) {
         madt = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "APIC");
         srat = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "SRAT");
         hpet = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "HPET");
         mcfg = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "MCFG");
+        fadt = kFindTable<kernel::uint64_t>(rsdp->xsdtAddress, "FACP");
     } else if (kChecksumOk(rsdp, 20)) {  // ACPI 1.0 RSDP는 처음 20바이트만 체크섬 대상
         madt = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "APIC");
         srat = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "SRAT");
         hpet = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "HPET");
         mcfg = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "MCFG");
+        fadt = kFindTable<kernel::uint32_t>(rsdp->rsdtAddress, "FACP");
     } else {
         return false;
+    }
+
+    if (fadt && fadt->length >= kFadtLengthWithPm1Core) {
+        const auto* f = reinterpret_cast<const Fadt*>(fadt);
+        gHasFadt = true;
+        gSciInt = f->sciInt;
+        gSmiCmd = f->smiCmd;
+        gAcpiEnable = f->acpiEnable;
+        gAcpiDisable = f->acpiDisable;
+        gPm1aEvtBlk = f->pm1aEvtBlk;
+        gPm1bEvtBlk = f->pm1bEvtBlk;
+        gPm1EvtLen = f->pm1EvtLen;
+        gPm1aCntBlk = f->pm1aCntBlk;
+        gPm1bCntBlk = f->pm1bCntBlk;
+        gPm1CntLen = f->pm1CntLen;
+        gDsdtPhysAddress = f->dsdt;
+
+        if (fadt->length >= kFadtLengthWithResetReg && (f->flags & kFadtFlagResetRegSup)) {
+            gHasResetReg = true;
+            gResetRegAddressSpaceId = f->resetReg.addressSpaceId;
+            gResetRegAddress = f->resetReg.address;
+            gResetValue = f->resetValue;
+        }
+
+        // ACPI 2.0+는 64비트 X_DSDT를 우선 사용(스펙 권고 - 32비트
+        // DSDT 필드는 하위호환용). 0이면 확장 필드 자체가 안 채워진
+        // 것으로 보고 32비트 값을 그대로 유지한다.
+        if (fadt->length >= kFadtLengthWithExtended && f->xDsdt != 0) {
+            gDsdtPhysAddress = f->xDsdt;
+        }
+        if (gDsdtPhysAddress != 0) {
+            const auto* dsdtHeader = kAsTable<SdtHeader>(gDsdtPhysAddress);
+            if (kSignatureIs(dsdtHeader->signature, "DSDT", 4) && kChecksumOk(dsdtHeader, dsdtHeader->length)) {
+                gDsdtLength = dsdtHeader->length;
+            } else {
+                gDsdtPhysAddress = 0;  // 손상/불일치 - Power가 "S5 정보 없음"으로 취급하도록
+            }
+        }
     }
 
     if (hpet) {
@@ -410,5 +571,25 @@ kernel::uint32_t Acpi::memoryAffinityCount() { return gMemAffinityCount; }
 kernel::uint64_t Acpi::memoryAffinityBase(kernel::uint32_t index) { return gMemAffinities[index].base; }
 kernel::uint64_t Acpi::memoryAffinityLength(kernel::uint32_t index) { return gMemAffinities[index].length; }
 kernel::uint32_t Acpi::memoryAffinityNode(kernel::uint32_t index) { return gMemAffinities[index].node; }
+
+bool Acpi::hasFadt() { return gHasFadt; }
+kernel::uint32_t Acpi::sciInterruptGsi() { return gSciInt; }
+kernel::uint32_t Acpi::smiCommandPort() { return gSmiCmd; }
+kernel::uint8_t Acpi::acpiEnableValue() { return gAcpiEnable; }
+kernel::uint8_t Acpi::acpiDisableValue() { return gAcpiDisable; }
+kernel::uint32_t Acpi::pm1aEventBlock() { return gPm1aEvtBlk; }
+kernel::uint32_t Acpi::pm1bEventBlock() { return gPm1bEvtBlk; }
+kernel::uint32_t Acpi::pm1EventBlockLength() { return gPm1EvtLen; }
+kernel::uint32_t Acpi::pm1aControlBlock() { return gPm1aCntBlk; }
+kernel::uint32_t Acpi::pm1bControlBlock() { return gPm1bCntBlk; }
+kernel::uint32_t Acpi::pm1ControlBlockLength() { return gPm1CntLen; }
+
+bool Acpi::hasResetRegister() { return gHasResetReg; }
+kernel::uint8_t Acpi::resetRegisterAddressSpaceId() { return gResetRegAddressSpaceId; }
+kernel::uint64_t Acpi::resetRegisterAddress() { return gResetRegAddress; }
+kernel::uint8_t Acpi::resetRegisterValue() { return gResetValue; }
+
+kernel::uint64_t Acpi::dsdtPhysAddress() { return gDsdtPhysAddress; }
+kernel::uint32_t Acpi::dsdtLength() { return gDsdtLength; }
 
 }  // namespace kernel

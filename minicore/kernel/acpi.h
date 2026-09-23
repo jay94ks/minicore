@@ -102,6 +102,41 @@ public:
     static uint64_t memoryAffinityBase(uint32_t index);
     static uint64_t memoryAffinityLength(uint32_t index);
     static uint32_t memoryAffinityNode(uint32_t index);
+
+    // [신규, 2026-09-23, DC-F367AD5D/QU-7C3AB7A2 답변 - 커널 Shutdown/
+    // Reboot 경로] ACPI FADT("FACP" 시그니처) - PM1 이벤트/제어
+    // 레지스터 블록(전원 버튼 SCI 처리+실제 절전 진입에 필요)과
+    // ACPI 2.0+ Reset Register(RESET_REG_SUP 플래그가 서 있을 때만
+    // 유효). `Power` 클래스(power.h)가 이 접근자들을 바탕으로 실제
+    // 하드웨어 레지스터를 조작한다 - `Acpi` 자신은 순수 파싱/노출만
+    // 담당(다른 모든 접근자와 동일한 역할 분리).
+    static bool hasFadt();
+    static uint32_t sciInterruptGsi();
+    static uint32_t smiCommandPort();
+    static uint8_t acpiEnableValue();
+    static uint8_t acpiDisableValue();
+    static uint32_t pm1aEventBlock();
+    static uint32_t pm1bEventBlock();  // 0이면 없음(단일 PM1 블록만 있는 보통의 경우)
+    static uint32_t pm1EventBlockLength();
+    static uint32_t pm1aControlBlock();
+    static uint32_t pm1bControlBlock();  // 0이면 없음
+    static uint32_t pm1ControlBlockLength();
+
+    // ACPI 2.0+ Reset Register(FADT flags bit10=RESET_REG_SUP일 때만
+    // 유효 - hasResetRegister()로 먼저 확인). addressSpaceId는 ACPI
+    // Generic Address Structure 값 그대로(0=시스템 메모리, 1=시스템
+    // I/O - 실무에서는 거의 항상 1).
+    static bool hasResetRegister();
+    static uint8_t resetRegisterAddressSpaceId();
+    static uint64_t resetRegisterAddress();
+    static uint8_t resetRegisterValue();
+
+    // DSDT(Differentiated System Description Table, "DSDT" 시그니처)
+    // AML 바이트코드의 물리 주소/길이 - 이 프로젝트는 범용 AML
+    // 인터프리터가 없으므로(그 자체로 별도의 큰 서브시스템) `Power`가
+    // \_S5 패키지 하나만 최소로 스캔하는 데 쓴다(power.cpp 참고).
+    static uint64_t dsdtPhysAddress();
+    static uint32_t dsdtLength();
 };
 
 }  // namespace kernel
