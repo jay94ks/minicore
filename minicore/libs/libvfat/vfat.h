@@ -67,11 +67,32 @@ struct Fat32Extended {
     char     fileSystemType[8];  // 진단용 - 실제 포맷 판별에 안 씀(§3.2, 스펙이 이 필드를 신뢰하지 말라고 명시)
 };
 static_assert(sizeof(Fat32Extended) == 54, "Fat32Extended 레이아웃이 msdos_fs.h와 어긋남");
+
+// [신규, 2026-09-23, PN-5481287C 준비 작업 2단계] FAT12/FAT16 공용
+// 확장 BPB - Fat32Extended에서 FAT32 전용 필드(fatSize32/extFlags/
+// fsVersion/rootCluster/fsInfoSector/backupBootSector/reserved[12],
+// 도합 28바이트)를 뺀 나머지가 오프셋만 36(BpbCommon 바로 뒤, FAT32는
+// 대신 그 28바이트가 먼저 옴)으로 당겨져 그대로 반복된다 - Linux
+// `msdos_fs.h`와 실측(`mkfs.fat -F 12`/`-F 16`으로 만든 실제 이미지의
+// 바이트 36~61을 직접 덤프) 둘 다로 확인: driveNumber=0x80/
+// bootSig=0x29/volumeId가 리틀엔디안 4바이트/volumeLabel="MYFAT12    "
+// (11바이트, 공백 패딩)/fileSystemType="FAT12   "(8바이트) 전부 이
+// 오프셋 그대로 일치.
+struct Fat16Extended {
+    uint8_t  driveNumber;
+    uint8_t  reserved1;
+    uint8_t  bootSig;             // 0x28/0x29면 volumeId/volumeLabel 유효(Fat32Extended와 동일 관례)
+    uint32_t volumeId;
+    char     volumeLabel[11];
+    char     fileSystemType[8];   // "FAT12   " 또는 "FAT16   " - 진단용, 실제 포맷 판별에 안 씀(Fat32Extended와 동일 주의)
+};
+static_assert(sizeof(Fat16Extended) == 26, "Fat16Extended 레이아웃이 msdos_fs.h와 어긋남");
 #pragma pack(pop)
 
 constexpr uint32_t kBootSectorSignatureOffset = 510;
 constexpr uint16_t kBootSectorSignature = 0xAA55;
 constexpr uint32_t kFat32ExtendedOffset = 36;  // sizeof(BpbCommon)과 항상 같아야 함
+constexpr uint32_t kFat16ExtendedOffset = 36;  // FAT12/16은 FAT32 전용 28바이트가 없어 BpbCommon 바로 뒤
 
 // ---------------------------------------------------------------------
 // 3.4 FAT32 엔트리(32비트, 하위 28비트만 유효) - 클러스터 체인.
