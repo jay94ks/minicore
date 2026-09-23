@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-23T11:16:11.935Z
+  updatedAt: 2026-09-23T13:00:35.555Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
