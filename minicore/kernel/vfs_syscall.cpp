@@ -73,6 +73,8 @@ ChannelError kMapVfsError(VfsError error) {
             return ChannelError::PermissionDenied;
         case VfsError::InvalidArgument:
             return ChannelError::InvalidArgument;
+        case VfsError::NoSpace:
+            return ChannelError::ResourceExhausted;
     }
     return ChannelError::InvalidArgument;
 }

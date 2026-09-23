@@ -21,19 +21,42 @@
 // `ext4_driver.cpp` 상단 문서 주석과 동일(코루틴 합성 불가 제약,
 // `SP-F682B889` §9.5 항목3 2026-09-22 정정 문단 참고).
 //
-// FileHandle 인코딩: FAT엔 ext4의 inode 번호 같은 재조회 가능한 단일
-// 정수 식별자가 없다(firstCluster만으로는 fileSize/isDir을 못 얻음 -
-// vfat.h의 `ResolvedEntry` 참고). 이 드라이버는 별도 open-handle
-// 테이블 없이 `FileHandle::value`(uint64_t) 안에 두 값을 직접
-// 인코딩한다 - 하위 32비트: firstCluster, 상위 32비트: fileSize
-// (FAT32 `DirEntry::fileSize` 필드 자체가 32비트라 정확히 들어맞음).
-// isDir은 인코딩하지 않는다 - `Open`이 `OpenResult::isDirectory`로
-// 바로 돌려주고, `Read`는 파일 핸들에만, `Readdir`은 디렉터리
-// 핸들에만 쓰여 호출부(VFS 계층)가 이미 구분해서 부르는 값이므로
-// 핸들 자신이 다시 담을 필요가 없다(디렉터리 핸들의 상위 32비트는
-// 항상 0 - `ResolvedEntry::fileSize`가 디렉터리는 항상 0인 스펙
-// 그대로).
+// FileHandle 인코딩: [갱신, 2026-09-23, PN-9D6FE4B6, QU-E4E83A9A 답변
+// - "(A) 별도 open-handle 테이블 도입"] FAT엔 ext4의 inode 번호 같은
+// 재조회 가능한 단일 정수 식별자가 없다(firstCluster만으로는
+// fileSize/isDir/부모 디렉터리 엔트리 위치를 못 얻음 - 특히 write가
+// 파일 끝을 넘거나 unlink가 디렉터리 엔트리 자체를 고쳐 써야 할 때
+// "이 엔트리가 어느 디렉터리의 어느 위치에 있는지"가 반드시 필요한데
+// 64비트 FileHandle::value 하나로는 담을 여유가 없다). 원래(1차 증분,
+// 읽기 전용) 이 값에 firstCluster(하위32)+fileSize(상위32)를 직접
+// 인코딩하던 방식을 폐기하고, `openHandles_` 배열의 인덱스 하나를
+// 그대로 `FileHandle::value`로 쓴다 - 실제 상태(firstCluster/
+// fileSize/isDir/부모 디렉터리 엔트리 위치)는 전부 그 배열 원소
+// (`OpenHandleEntry`)에 있다. `Open()`이 빈 슬롯에 채워 인덱스를
+// 반환하고, `Close()`가 그 슬롯을 반납한다.
 namespace vfat {
+
+// [신규, 2026-09-23, PN-9D6FE4B6] Open()이 채우고 Read/Write/Readdir/
+// Close가 조회하는 슬롯 - FAT 자신에겐 없는 "재조회 가능한 파일
+// 식별자"를 이 커널 프로세스 생애주기 동안만 메모리에 들고 있는
+// 역할(디스크에 반영 안 됨, 재부팅 시 당연히 사라짐 - 정상).
+struct OpenHandleEntry {
+    bool inUse = false;
+    uint32_t firstCluster = 0;  // 0 = 아직 클러스터가 배정 안 된 빈 파일(FAT32 스펙 관례)
+    uint64_t fileSize = 0;      // 디렉터리는 항상 0
+    bool isDir = false;
+    // entryValid=false는 루트 디렉터리(부모 디렉터리 엔트리 자체가
+    // 없음) - Write/Unlink류가 이 핸들을 대상으로 하면 그 자리에서
+    // 거부한다.
+    bool entryValid = false;
+    uint32_t entryCluster = 0;
+    uint32_t entryByteOffset = 0;
+};
+
+// v1 고정 크기(실측 후 조정 대상, RM-23F4B687 §4 취지) - 이 커널
+// 프로세스 하나가 FAT32 볼륨 하나에 동시에 열어 둘 수 있는 최대
+// 파일/디렉터리 핸들 수.
+constexpr uint32_t kMaxOpenHandles = 64;
 
 class Fat32Driver : public kernel::FileSystemDriver {
 public:
@@ -51,10 +74,9 @@ private:
     // [신규, 2026-09-23, PN-9D6FE4B6 준비 작업, SP-A658A124 §3.4] free
     // 클러스터 선형 스캔의 시작 힌트 - 매번 클러스터 2부터 스캔하지
     // 않고 마지막으로 할당한 자리 다음부터 이어서 찾는다(libswapfs의
-    // allocateSlot과 동일한 방식, §3.4 문서 주석 그대로). Write/Mkdir
-    // 구현 자체는 QU-E4E83A9A(FileHandle이 부모 디렉터리 엔트리 위치를
-    // 못 담는 구조적 문제) 답변 대기 중이라 이 필드는 아직 안 쓰인다.
+    // allocateSlot과 동일한 방식, §3.4 문서 주석 그대로).
     uint32_t nextClusterScanHint_ = 2;
+    OpenHandleEntry openHandles_[kMaxOpenHandles]{};
 };
 
 }  // namespace vfat

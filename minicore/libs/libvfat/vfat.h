@@ -225,6 +225,15 @@ struct ResolvedEntry {
     uint32_t firstCluster = 0;
     uint64_t fileSize = 0;   // 디렉터리는 항상 0(스펙 - 크기는 클러스터 체인 길이로만 앎)
     bool isDir = false;
+    // [신규, 2026-09-23, PN-9D6FE4B6, QU-E4E83A9A 답변("(A) 별도
+    // open-handle 테이블 도입")] 이 엔트리 자신의 디렉터리 엔트리가
+    // 어느 클러스터의 몇 번째 바이트에 있는지 - write가 파일 끝을
+    // 넘을 때 fileSize/firstCluster를 다시 써넣거나 unlink가 name[0]을
+    // 지우려면 이 위치가 필요하다(vfat_driver.h의 OpenHandleEntry
+    // 문서 주석 참고). 루트 디렉터리는 부모 디렉터리 엔트리 자체가
+    // 없으므로 이 값들은 정의되지 않는다.
+    uint32_t entryCluster = 0;
+    uint32_t entryByteOffset = 0;
 };
 
 // ---------------------------------------------------------------------
