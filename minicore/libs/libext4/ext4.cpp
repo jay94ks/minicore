@@ -12,6 +12,50 @@ constexpr uint64_t kCeilDiv(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
 
 }  // namespace
 
+uint32_t kCrc32c(uint32_t seed, const void* data, uint32_t len) {
+    // 표준 reflected CRC-32C(Castagnoli) 다항식. 초기/최종 보수는 호출자
+    // 책임(위 ext4.h 선언부 주석 참고) - 이 함수 자체는 seed를 그대로
+    // 이어받아 이어붙이는 raw continuation 스텝일 뿐이다.
+    constexpr uint32_t kPoly = 0x82F63B78u;
+    uint32_t crc = seed;
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (uint32_t i = 0; i < len; ++i) {
+        crc ^= p[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            const uint32_t mask = (crc & 1u) ? 0xFFFFFFFFu : 0u;
+            crc = (crc >> 1) ^ (kPoly & mask);
+        }
+    }
+    return crc;
+}
+
+uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum, const GroupDesc32& desc) {
+    // 실제 mkfs.ext4 -O metadata_csum 이미지(단일/3그룹 구성 둘 다)의
+    // bg_checksum과 1바이트씩 대조해 확인한 순서(PN-1750A32F) -
+    // 1) uuid로 시드, 2) 그룹 번호(LE) 이어붙임, 3) 체크섬 필드 앞부분,
+    // 4) 체크섬 필드 자리는 0으로 간주해 이어붙임 - 32바이트 디스크립터
+    // (INCOMPAT_64BIT 미지원 범위)라 체크섬 필드가 곧 구조체 끝이므로
+    // 그 뒤에 이어붙일 나머지 바이트는 없다.
+    GroupDesc32 raw = desc;
+    const uint32_t offsetToChecksum = static_cast<uint32_t>(offsetof(GroupDesc32, checksum));
+    static_assert(offsetof(GroupDesc32, checksum) == 30, "checksum 필드 오프셋이 어긋나면 아래 체크섬 계산이 리눅스와 안 맞음");
+    uint8_t* rawBytes = reinterpret_cast<uint8_t*>(&raw);
+
+    uint32_t crc = kCrc32c(0xFFFFFFFFu, uuid, 16);
+    const uint32_t groupNumLe = groupNum;  // 이 프로젝트는 x86_64 리틀엔디안 전용 - 별도 변환 불필요
+    crc = kCrc32c(crc, &groupNumLe, sizeof(groupNumLe));
+    crc = kCrc32c(crc, rawBytes, offsetToChecksum);
+    const uint16_t zeroChecksum = 0;
+    crc = kCrc32c(crc, &zeroChecksum, sizeof(zeroChecksum));
+    // offsetToChecksum + sizeof(checksum) == sizeof(GroupDesc32) == 32이므로
+    // 체크섬 필드 뒤에 이어붙일 나머지 바이트가 없다(64bit 확장 디스크립터
+    // 지원 시 여기에 tail 해시가 추가돼야 함 - §2.2 후속 스코프).
+    static_assert(offsetof(GroupDesc32, checksum) + sizeof(GroupDesc32::checksum) == sizeof(GroupDesc32),
+                  "checksum이 GroupDesc32의 마지막 필드가 아니면 tail 해시 단계를 추가해야 함");
+
+    return static_cast<uint16_t>(crc & 0xFFFFu);
+}
+
 bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out) {
     if (blockLen < sizeof(JournalSuperblockV2)) {
         return false;

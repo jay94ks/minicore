@@ -92,6 +92,12 @@ constexpr uint32_t kIncompat64Bit = 0x80;
 // 파서 코드 변경 불필요, 검사만 통과시키면 됨).
 constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents | kIncompatFlexBg;
 
+// RO_COMPAT_METADATA_CSUM(0x400) - PN-1750A32F(SP-7A9CED3E §2.2 항목3)가
+// 다루는 대상. v1 마운트 허용 여부와는 무관(read-only compat 비트라
+// 몰라도 마운트 자체는 안전) - kExt4ComputeGroupDescChecksum()을 실제로
+// 쓸지 판단하는 호출자 쪽 조건으로만 쓰인다.
+constexpr uint32_t kRoCompatMetadataCsum = 0x400;
+
 // ---------------------------------------------------------------------
 // 3.2 블록 그룹 디스크립터(32바이트, INCOMPAT_64BIT 미지원 - §2.2 후속).
 // [정정, 2026-09-22] SP-7A9CED3E §3.2 원안은 reserved[3](12바이트) 뒤에
@@ -102,6 +108,12 @@ constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents
 // 바이트가 정확히 reserved[3]의 20~31 오프셋 전체를 채운다 - v1은 이
 // 값들 중 아무것도 안 읽으므로 reserved로 전부 묶는 편이 맞다). 다음
 // 그룹 디스크립터를 4바이트 밀려서 잘못 읽는 실제 버그였다.
+// [증분, PN-1750A32F] 위 12바이트를 실제 이름 있는 필드로 쪼갰다 -
+// checksum(bg_checksum)을 kExt4ComputeGroupDescChecksum()으로 계산/
+// 검증(읽기)/갱신(쓰기 시 대입)하려면 그 필드의 정확한 오프셋(30)이
+// 필요하기 때문. 나머지 4개 필드는 v1이 여전히 안 읽지만, 체크섬
+// 계산 시 "필드 자체를 0으로 채운 상태로 해시"하는 범위에 포함되므로
+// 이름을 붙여 두는 편이 코드를 읽을 때 명확하다.
 // ---------------------------------------------------------------------
 #pragma pack(push, 1)
 struct GroupDesc32 {
@@ -112,10 +124,31 @@ struct GroupDesc32 {
     uint16_t freeInodesCountLo;
     uint16_t usedDirsCountLo;
     uint16_t flags;
-    uint8_t  reserved[12];  // excludeBitmapLo+두 csum+itableUnusedLo+checksum, v1 미사용
+    uint32_t excludeBitmapLo;
+    uint16_t blockBitmapCsumLo;
+    uint16_t inodeBitmapCsumLo;
+    uint16_t itableUnusedLo;
+    uint16_t checksum;  // bg_checksum(crc16 또는 crc32c&0xFFFF, feature에 따라 갈림)
 };
 static_assert(sizeof(GroupDesc32) == 32, "GroupDesc32는 정확히 32바이트여야 함");
 #pragma pack(pop)
+
+// crc32c(Castagnoli, 다항식 0x82F63B78 reflected) 순수 계산 함수 - ext4
+// metadata_csum 계열(그룹 디스크립터/비트맵/inode 체크섬)이 공유하는
+// 원시 연속(raw continuation) 형태다. 리눅스 커널 crc32c()/e2fsprogs와
+// 동일하게 함수 자체는 초기/최종 보수(~0) 처리를 하지 않는다 - 호출자가
+// 첫 seed로 0xFFFFFFFF를 넘기고, ext4 체크섬 관례상 최종 값도 보수 없이
+// 그대로 쓴다(표준 단독 CRC32C 체크섬과 다른 점 - PN-1750A32F 조사로
+// 실제 mkfs.ext4 -O metadata_csum 이미지 3개 그룹 전부와 대조 확인).
+uint32_t kCrc32c(uint32_t seed, const void* data, uint32_t len);
+
+// ext4 그룹 디스크립터 체크섬(bg_checksum, RO_COMPAT_METADATA_CSUM 방식)
+// 계산 - 읽은 값과 비교하면 검증, desc.checksum에 대입하면 갱신(쓰기
+// 전 준비)에 그대로 쓸 수 있는 순수 함수(디스크/마운트 상태에 손대지
+// 않음). desc는 checksum 필드가 어떤 값이든 상관없이(내부에서 0으로
+// 간주하고 계산) 안전하게 넘길 수 있다. uuid는 SuperblockCore::uuid
+// (16바이트) 그대로.
+uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum, const GroupDesc32& desc);
 
 // ---------------------------------------------------------------------
 // 3.4 inode 구조체(core 128바이트, inodeSize>128이면 나머지는 확장
