@@ -56,7 +56,30 @@ uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum
     return static_cast<uint16_t>(crc & 0xFFFFu);
 }
 
-uint16_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount) {
+uint16_t kExt4ComputeGroupDesc64Checksum(const uint8_t uuid[16], uint32_t groupNum, const GroupDesc64& desc) {
+    // kExt4ComputeGroupDescChecksum()(32바이트 버전)과 seed/이어붙임
+    // 순서는 동일 - 다른 점은 체크섬 필드(오프셋30) 뒤에 남는 34바이트
+    // (오프셋32~64, hi 필드들)를 마저 이어붙이는 tail 해시 단계뿐
+    // (실제 mke2fs -O 64bit,metadata_csum 이미지로 대조 확인,
+    // PN-59C253E9).
+    GroupDesc64 raw = desc;
+    constexpr uint32_t kChecksumOffset = 30;
+    static_assert(offsetof(GroupDesc64, checksum) == kChecksumOffset,
+                  "checksum 필드 오프셋이 어긋나면 아래 체크섬 계산이 리눅스와 안 맞음");
+    uint8_t* rawBytes = reinterpret_cast<uint8_t*>(&raw);
+
+    uint32_t crc = kCrc32c(0xFFFFFFFFu, uuid, 16);
+    const uint32_t groupNumLe = groupNum;
+    crc = kCrc32c(crc, &groupNumLe, sizeof(groupNumLe));
+    crc = kCrc32c(crc, rawBytes, kChecksumOffset);
+    const uint16_t zeroChecksum = 0;
+    crc = kCrc32c(crc, &zeroChecksum, sizeof(zeroChecksum));
+    crc = kCrc32c(crc, rawBytes + kChecksumOffset + 2, sizeof(GroupDesc64) - (kChecksumOffset + 2));
+
+    return static_cast<uint16_t>(crc & 0xFFFFu);
+}
+
+uint32_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount) {
     // 실제 mkfs.ext4 -O metadata_csum 이미지(단일 그룹 + "마지막 그룹이
     // blocksPerGroup보다 작은" 3그룹 258MB 구성 둘 다)의 bg_block_bitmap_
     // csum_lo/bg_inode_bitmap_csum_lo와 1바이트씩 대조해 확인(PN-625E2804) -
@@ -64,10 +87,11 @@ uint16_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapDa
     // 시드 바로 다음에 비트맵 바이트를 이어붙인다. 해시 길이는 호출자가
     // 넘긴 bitCount(항상 볼륨 전체의 명목상 blocksPerGroup/inodesPerGroup -
     // 그 그룹의 실제 유효 비트 수가 아님, 위 ext4.h 선언부 주석 참고)를
-    // 8로 나눠 올림한 바이트 수.
+    // 8로 나눠 올림한 바이트 수. 반환값은 32비트 전체 그대로(위 ext4.h
+    // 선언부 주석 참고 - 64바이트 디스크립터는 상위 16비트도 실제로
+    // 저장된다, PN-59C253E9 실측 확인).
     const uint32_t byteLen = (bitCount + 7u) / 8u;
-    const uint32_t crc = kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), bitmapData, byteLen);
-    return static_cast<uint16_t>(crc & 0xFFFFu);
+    return kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), bitmapData, byteLen);
 }
 
 uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,

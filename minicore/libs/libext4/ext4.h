@@ -138,6 +138,58 @@ struct GroupDesc32 {
 static_assert(sizeof(GroupDesc32) == 32, "GroupDesc32는 정확히 32바이트여야 함");
 #pragma pack(pop)
 
+// ---------------------------------------------------------------------
+// [추가, PN-59C253E9] INCOMPAT_64BIT 그룹 디스크립터(64바이트) -
+// 리눅스 커널 소스(fs/ext4/ext4.h `struct ext4_group_desc`)와 1바이트
+// 단위로 대조 확정(PN-22784AD4/RM-23F4B687 §1과 동일한 절차). 앞
+// 32바이트는 `GroupDesc32`와 완전히 동일한 레이아웃(오프셋까지)이고,
+// 오프셋 32부터 각 `*Lo` 필드의 `*Hi` 대응 필드가 이어진다.
+// **`checksum`(bg_checksum, 오프셋 30)은 64바이트 디스크립터에서도
+// 여전히 16비트 그대로다 - hi 확장 필드가 없다**(실측 확인). 반면
+// `blockBitmapCsumHi`/`inodeBitmapCsumHi`(오프셋 56/58)는 실제로
+// 존재하며, `kExt4ComputeBitmapChecksum()`이 돌려주는 32비트 crc32c
+// 전체 값 중 상위 16비트를 그대로 담는다(하위 16비트만 담는
+// `GroupDesc32`와 다른 점 - 실제 mke2fs -O 64bit,metadata_csum
+// 이미지로 대조 확인).
+// ---------------------------------------------------------------------
+#pragma pack(push, 1)
+struct GroupDesc64 {
+    uint32_t blockBitmapLo;
+    uint32_t inodeBitmapLo;
+    uint32_t inodeTableLo;
+    uint16_t freeBlocksCountLo;
+    uint16_t freeInodesCountLo;
+    uint16_t usedDirsCountLo;
+    uint16_t flags;
+    uint32_t excludeBitmapLo;
+    uint16_t blockBitmapCsumLo;
+    uint16_t inodeBitmapCsumLo;
+    uint16_t itableUnusedLo;
+    uint16_t checksum;  // bg_checksum - 64바이트 디스크립터에서도 16비트 그대로
+    uint32_t blockBitmapHi;
+    uint32_t inodeBitmapHi;
+    uint32_t inodeTableHi;
+    uint16_t freeBlocksCountHi;
+    uint16_t freeInodesCountHi;
+    uint16_t usedDirsCountHi;
+    uint16_t itableUnusedHi;
+    uint32_t excludeBitmapHi;
+    uint16_t blockBitmapCsumHi;
+    uint16_t inodeBitmapCsumHi;
+    uint32_t reserved;  // v1 미사용
+};
+static_assert(sizeof(GroupDesc64) == 64, "GroupDesc64는 정확히 64바이트여야 함");
+#pragma pack(pop)
+
+// `GroupDesc64`(64바이트, INCOMPAT_64BIT) 버전의 그룹 디스크립터
+// 체크섬 계산 - `kExt4ComputeGroupDescChecksum()`(32바이트 버전)과
+// seed/이어붙임 순서는 동일하나, 체크섬 필드(오프셋30) 이후 나머지
+// 34바이트(오프셋32~64, hi 필드들)까지 마저 이어붙이는 "tail 해시"
+// 단계가 실제로 필요해진다(32바이트 버전은 체크섬 필드가 곧 구조체
+// 끝이라 이 단계가 없었음 - 코드 주석 참고). 실제 mke2fs -O
+// 64bit,metadata_csum 이미지로 대조 확인(PN-59C253E9).
+uint16_t kExt4ComputeGroupDesc64Checksum(const uint8_t uuid[16], uint32_t groupNum, const GroupDesc64& desc);
+
 // crc32c(Castagnoli, 다항식 0x82F63B78 reflected) 순수 계산 함수 - ext4
 // metadata_csum 계열(그룹 디스크립터/비트맵/inode 체크섬)이 공유하는
 // 원시 연속(raw continuation) 형태다. 리눅스 커널 crc32c()/e2fsprogs와
@@ -165,7 +217,15 @@ uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum
 // (실제 mkfs.ext4 이미지로 대조 확인) 여전히 같은 길이를 해시한다.
 // bitCount에는 항상 `blocksPerGroup`/`inodesPerGroup`을 그대로
 // 넘길 것 - 그룹별로 다른 값을 계산해 넘기면 틀린다.
-uint16_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount);
+// [PN-59C253E9 실측 확인] 반환값은 crc32c 전체 32비트 그대로 - 32바이트
+// (INCOMPAT_64BIT 미지원) 디스크립터는 하위 16비트만 `*_csum_lo`에
+// 저장하고 상위는 버리면 되지만, 64바이트 디스크립터는 실제
+// mke2fs -O 64bit 이미지로 대조 확인한 결과 **상위 16비트도 버리지
+// 않고 `*_csum_hi` 필드에 그대로 저장한다**(16비트 절반짜리 체크섬이
+// 아니라 32비트 전체가 두 필드에 나뉘어 저장되는 것) - 32비트
+// GroupDesc32에는 hi 필드 자체가 없으므로 자동으로 버려질 뿐, 함수
+// 자체는 desc_size를 모르므로 항상 전체 32비트를 돌려준다.
+uint32_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount);
 
 // ---------------------------------------------------------------------
 // 3.4 inode 구조체(core 128바이트, inodeSize>128이면 나머지는 확장
