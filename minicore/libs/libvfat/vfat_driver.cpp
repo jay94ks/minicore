@@ -2725,21 +2725,32 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             }
 
             {
-                uint32_t entrySector = 0;
-                if (!kClusterToSector(dataStartSector, sectorsPerCluster, leafMatched.entryCluster, &entrySector)) {
+                // [갱신, 2026-09-23, PN-740005DF 항목3] 예전엔 짧은
+                // 엔트리가 든 섹터 하나만 지웠지만, 그 앞에 LFN 슬롯
+                // 체인이 있으면 고아로 남는다(fsck.vfat이 "Orphaned
+                // long file name part"로 검출 - 실측으로 이미 확인된
+                // 무해하지만 정리 안 된 상태). LFN 슬롯은 PN-3D39A53C가
+                // 쓰기 쪽에서도 확정한 "클러스터 경계를 넘지 않는다"
+                // 제약 덕에 항상 짧은 엔트리와 같은 클러스터 안에 있다
+                // - 클러스터 전체를 읽어 짧은 엔트리 바로 앞부터 역순
+                // (LFN 슬롯은 항상 시퀀스 역순으로, 즉 엔트리에 가장
+                // 가까운 것부터 저장돼 있음)으로 attr==kAttrLongName인
+                // 슬롯을 전부(비-LFN 엔트리를 만나거나 클러스터 시작에
+                // 닿을 때까지) 같이 0xE5로 마킹한 뒤 한 번에 다시 쓴다.
+                uint32_t entryClusterSector = 0;
+                if (!kClusterToSector(dataStartSector, sectorsPerCluster, leafMatched.entryCluster,
+                                       &entryClusterSector)) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
                 }
-                entrySector += leafMatched.entryByteOffset / bytesPerSector;
-                const uint32_t byteInSector = leafMatched.entryByteOffset % bytesPerSector;
-                SlabBuf sectorBuf(bytesPerSector);
-                if (!sectorBuf) {
+                SlabBuf entryClusterBuf(bytesPerCluster);
+                if (!entryClusterBuf) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
                 }
                 fs::BlockIoResult readResult;
-                kernel::AsyncTask* readTask =
-                    kSubmitReadSectors(device, bytesPerSector, entrySector, 1, sectorBuf.get(), &readResult);
+                kernel::AsyncTask* readTask = kSubmitReadSectors(
+                    device, bytesPerSector, entryClusterSector, sectorsPerCluster, entryClusterBuf.get(), &readResult);
                 if (!readTask) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
@@ -2749,10 +2760,17 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
                 }
-                sectorBuf.get()[byteInSector] = static_cast<uint8_t>(kNameDeletedMarker);
+
+                auto* entries = reinterpret_cast<DirEntry*>(entryClusterBuf.get());
+                const uint32_t entryIndex = leafMatched.entryByteOffset / static_cast<uint32_t>(sizeof(DirEntry));
+                entries[entryIndex].name[0] = static_cast<char>(kNameDeletedMarker);
+                for (uint32_t i = entryIndex; i > 0 && entries[i - 1].attr == kAttrLongName; --i) {
+                    entries[i - 1].name[0] = static_cast<char>(kNameDeletedMarker);
+                }
+
                 fs::BlockIoResult writeResult;
-                kernel::AsyncTask* writeTask =
-                    kSubmitWriteSectors(device, bytesPerSector, entrySector, 1, sectorBuf.get(), &writeResult);
+                kernel::AsyncTask* writeTask = kSubmitWriteSectors(
+                    device, bytesPerSector, entryClusterSector, sectorsPerCluster, entryClusterBuf.get(), &writeResult);
                 if (!writeTask) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
@@ -3044,21 +3062,32 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             }
 
             {
-                uint32_t entrySector = 0;
-                if (!kClusterToSector(dataStartSector, sectorsPerCluster, leafMatched.entryCluster, &entrySector)) {
+                // [갱신, 2026-09-23, PN-740005DF 항목3] 예전엔 짧은
+                // 엔트리가 든 섹터 하나만 지웠지만, 그 앞에 LFN 슬롯
+                // 체인이 있으면 고아로 남는다(fsck.vfat이 "Orphaned
+                // long file name part"로 검출 - 실측으로 이미 확인된
+                // 무해하지만 정리 안 된 상태). LFN 슬롯은 PN-3D39A53C가
+                // 쓰기 쪽에서도 확정한 "클러스터 경계를 넘지 않는다"
+                // 제약 덕에 항상 짧은 엔트리와 같은 클러스터 안에 있다
+                // - 클러스터 전체를 읽어 짧은 엔트리 바로 앞부터 역순
+                // (LFN 슬롯은 항상 시퀀스 역순으로, 즉 엔트리에 가장
+                // 가까운 것부터 저장돼 있음)으로 attr==kAttrLongName인
+                // 슬롯을 전부(비-LFN 엔트리를 만나거나 클러스터 시작에
+                // 닿을 때까지) 같이 0xE5로 마킹한 뒤 한 번에 다시 쓴다.
+                uint32_t entryClusterSector = 0;
+                if (!kClusterToSector(dataStartSector, sectorsPerCluster, leafMatched.entryCluster,
+                                       &entryClusterSector)) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
                 }
-                entrySector += leafMatched.entryByteOffset / bytesPerSector;
-                const uint32_t byteInSector = leafMatched.entryByteOffset % bytesPerSector;
-                SlabBuf sectorBuf(bytesPerSector);
-                if (!sectorBuf) {
+                SlabBuf entryClusterBuf(bytesPerCluster);
+                if (!entryClusterBuf) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
                 }
                 fs::BlockIoResult readResult;
-                kernel::AsyncTask* readTask =
-                    kSubmitReadSectors(device, bytesPerSector, entrySector, 1, sectorBuf.get(), &readResult);
+                kernel::AsyncTask* readTask = kSubmitReadSectors(
+                    device, bytesPerSector, entryClusterSector, sectorsPerCluster, entryClusterBuf.get(), &readResult);
                 if (!readTask) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
@@ -3068,10 +3097,17 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
                 }
-                sectorBuf.get()[byteInSector] = static_cast<uint8_t>(kNameDeletedMarker);
+
+                auto* entries = reinterpret_cast<DirEntry*>(entryClusterBuf.get());
+                const uint32_t entryIndex = leafMatched.entryByteOffset / static_cast<uint32_t>(sizeof(DirEntry));
+                entries[entryIndex].name[0] = static_cast<char>(kNameDeletedMarker);
+                for (uint32_t i = entryIndex; i > 0 && entries[i - 1].attr == kAttrLongName; --i) {
+                    entries[i - 1].name[0] = static_cast<char>(kNameDeletedMarker);
+                }
+
                 fs::BlockIoResult writeResult;
-                kernel::AsyncTask* writeTask =
-                    kSubmitWriteSectors(device, bytesPerSector, entrySector, 1, sectorBuf.get(), &writeResult);
+                kernel::AsyncTask* writeTask = kSubmitWriteSectors(
+                    device, bytesPerSector, entryClusterSector, sectorsPerCluster, entryClusterBuf.get(), &writeResult);
                 if (!writeTask) {
                     args->error = kernel::VfsError::InvalidHandle;
                     break;
