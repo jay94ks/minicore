@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-23T01:38:17.860Z
+  updatedAt: 2026-09-23T07:55:35.832Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -611,6 +611,33 @@ QEMU 회귀 무회귀. **쓰기 시 재계산**은 exFAT 쓰기 경로 자체가
   하다고 판단) - 다음 착수 세션은 이 3개 조각(async 쓰기 핸들러 +
   스캔의 non-blocking 제출 배선 + swap-in 폴트 핸들러)을 전부 하나의
   검증 단위로 준비하고 들어갈 것.
+
+  **[추가 조사, 2026-09-23, 같은 세션 다음 틱] §7.2 5단계+§4.2를 실제로
+  구현·실측했고, §4.2(swap-in)에 커널 전체 행(hang) 미해결 버그가
+  확인돼 다시 비활성 상태로 되돌렸다 - 지금은 "설계 대비 미구현"이
+  아니라 "구현은 됐으나 안전하게 켤 수 없어 의도적으로 꺼 둔" 상태다.**
+  `PAGE_RECLAIM_INPROGRESS`(PTE AVL 비트, 위 §7.2 5단계 동시 접근
+  레이스의 QU-D3A9BF13 답변대로) + `Paging`의 4개 신규 API +
+  `SwapReclaimWriteHandler`/`SwapInReadHandler`(둘 다 코루틴 기반
+  `AsyncTaskHandler`)로 §7.2 5단계와 §4.2를 같은 커밋(`1f3f824`)에
+  구현했다. 스왑아웃은 실제 initrd(init/pubreg/authmgr)+mkswap 디스크로
+  58개 진짜 프레임 회수까지 완전히 실측 검증됐지만, 스왑인은
+  `Scheduler::parkFromISR(thread, frame)`(#DB/IST4의 `kHandleUserBreakpointHit()`
+  과 정확히 같은, 이미 프로덕션 검증된 패턴)를 #PF/IST5 경로에서 부르는
+  순간 커널 전체가 패닉 없이 조용히 완전히 멎는 것을 100% 재현 확인
+  (`va=0x400000 slot=54`) - gdb 부착 시도는 이 프로젝트에 이미 기록된
+  타이밍 왜곡 heisenbug 패턴(`PN-3DDF2797`/`PN-E4C6AF72`)과 동일하게
+  실행 속도를 왜곡시켜 재현 실패, 근본 원인 미확정. 대응으로
+  `kReclaimScanCallback()`의 `kReclaimScanReclaimPass()` 호출 단 한
+  줄만 주석 처리해 활성화를 되돌렸다(§7.2 2/3/4단계만 유지 - 기존
+  안전 검증된 baseline과 동일) - 나머지 메커니즘 전부는 컴파일된 채
+  보존돼 그 한 줄만 되살리면 재활성화된다. 자세한 재현 조건/가설/
+  검증 로그는 `PN-4859FDE9` 최상단 절 참고. 이 상태 자체는 §5가
+  경고하는 "설계가 확정한 것이 코드에 없다"는 성격의 갭이 아니라
+  (오히려 설계 그대로 구현까지 됐다) 안전을 위한 의도적 비활성화이므로
+  §1(발견)로 옮기지 않고 이 자리에 이어서 기록해 둔다 - 다음 착수
+  세션이 `parkFromISR`/#PF 버그를 고치고 그 한 줄을 되살리면 이
+  추가 조사 자체가 자동으로 해소된다.
 
 - **[점검 완료, 2026-09-23] `SP-AA6DF406`(libntfs, approved
   2026-09-22) §3.2 - MFT 레코드 fixup(Update Sequence Array) 검증/
