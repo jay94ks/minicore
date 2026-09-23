@@ -150,6 +150,18 @@ uint32_t kCrc32c(uint32_t seed, const void* data, uint32_t len);
 // (16바이트) 그대로.
 uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum, const GroupDesc32& desc);
 
+// 블록/inode 비트맵 체크섬(bg_block_bitmap_csum_lo/bg_inode_bitmap_csum_lo,
+// RO_COMPAT_METADATA_CSUM 방식) 계산 - 그룹 디스크립터 체크섬과 달리
+// 그룹 번호를 이어붙이지 않는다(uuid 시드 다음 바로 비트맵 바이트).
+// [PN-625E2804 실측 확인] 해시 범위는 항상 "이 볼륨의 명목상"
+// bitCount(=`SuperblockCore::blocksPerGroup` 또는 `inodesPerGroup`,
+// 특정 그룹의 실제 유효 비트 수가 아님)를 8로 나눠 올림한 바이트 수
+// 고정이다 - 마지막 그룹이 blocksPerGroup보다 적은 블록만 가져도
+// (실제 mkfs.ext4 이미지로 대조 확인) 여전히 같은 길이를 해시한다.
+// bitCount에는 항상 `blocksPerGroup`/`inodesPerGroup`을 그대로
+// 넘길 것 - 그룹별로 다른 값을 계산해 넘기면 틀린다.
+uint16_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount);
+
 // ---------------------------------------------------------------------
 // 3.4 inode 구조체(core 128바이트, inodeSize>128이면 나머지는 확장
 // 필드 - v1은 읽지 않음) + 익스텐트 트리.

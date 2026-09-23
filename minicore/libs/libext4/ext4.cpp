@@ -56,6 +56,20 @@ uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum
     return static_cast<uint16_t>(crc & 0xFFFFu);
 }
 
+uint16_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount) {
+    // 실제 mkfs.ext4 -O metadata_csum 이미지(단일 그룹 + "마지막 그룹이
+    // blocksPerGroup보다 작은" 3그룹 258MB 구성 둘 다)의 bg_block_bitmap_
+    // csum_lo/bg_inode_bitmap_csum_lo와 1바이트씩 대조해 확인(PN-625E2804) -
+    // 그룹 디스크립터 체크섬과 달리 그룹 번호를 이어붙이지 않고, uuid
+    // 시드 바로 다음에 비트맵 바이트를 이어붙인다. 해시 길이는 호출자가
+    // 넘긴 bitCount(항상 볼륨 전체의 명목상 blocksPerGroup/inodesPerGroup -
+    // 그 그룹의 실제 유효 비트 수가 아님, 위 ext4.h 선언부 주석 참고)를
+    // 8로 나눠 올림한 바이트 수.
+    const uint32_t byteLen = (bitCount + 7u) / 8u;
+    const uint32_t crc = kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), bitmapData, byteLen);
+    return static_cast<uint16_t>(crc & 0xFFFFu);
+}
+
 bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out) {
     if (blockLen < sizeof(JournalSuperblockV2)) {
         return false;
