@@ -92,6 +92,190 @@ bool kSplitParentAndLeaf(const char* relPath, uint32_t relPathLen, uint32_t* out
     return true;
 }
 
+// [신규, 2026-09-23, PN-3D39A53C] LFN 쓰기용 - v1이 8.3 짧은 이름에
+// 그대로 허용하는 보수적 문자 집합(스펙은 더 넓은 집합을 허용하지만,
+// 그 외 문자가 있으면 안전하게 LFN 경로로 보낸다).
+bool kIsValid83Char(char c) {
+    if (c >= '0' && c <= '9') {
+        return true;
+    }
+    if (c >= 'A' && c <= 'Z') {
+        return true;
+    }
+    if (c >= 'a' && c <= 'z') {
+        return true;
+    }
+    return c == '_' || c == '-';
+}
+
+// [신규, 2026-09-23, PN-3D39A53C] 원본 이름이 손실 없이 8.3으로 정확히
+// 표현 가능한지 판정한다(순수 계산) - 가능하면 정규화된 11바이트와
+// NT 케이스 비트(kNtCaseLowerBase/Ext, vfat.h)까지 채워 돌려준다.
+// 이게 true면 LFN 없이 짧은 엔트리만 쓰면 된다(Mkdir의 기존 동작).
+// 점이 2개 이상, 이름부>8, 확장자>3, 대소문자가 이름부/확장자 각각
+// 안에서 섞여 있음(NT 케이스 비트로는 표현 불가), 허용 문자 집합
+// 밖의 문자 - 이 중 하나라도 해당하면 false(LFN 필요).
+bool kTryExactShortName(const char* name, uint32_t nameLen, char out11[11], uint8_t* outNtReserved) {
+    if (nameLen == 0 || nameLen > 12) {
+        return false;
+    }
+    uint32_t dot = nameLen;
+    uint32_t dotCount = 0;
+    for (uint32_t i = 0; i < nameLen; ++i) {
+        if (name[i] == '.') {
+            dot = i;
+            ++dotCount;
+        }
+    }
+    if (dotCount > 1) {
+        return false;
+    }
+    const uint32_t baseLen = (dot < nameLen) ? dot : nameLen;
+    const uint32_t extLen = (dot < nameLen) ? (nameLen - dot - 1) : 0;
+    if (baseLen == 0 || baseLen > 8 || extLen > 3) {
+        return false;
+    }
+    if (dot < nameLen && extLen == 0) {
+        return false;  // "NAME." 처럼 점만 있고 확장자가 없는 꼬리 - LFN으로
+    }
+
+    bool baseHasLower = false;
+    bool baseHasUpper = false;
+    for (uint32_t i = 0; i < baseLen; ++i) {
+        const char c = name[i];
+        if (!kIsValid83Char(c)) {
+            return false;
+        }
+        if (c >= 'a' && c <= 'z') {
+            baseHasLower = true;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            baseHasUpper = true;
+        }
+    }
+    bool extHasLower = false;
+    bool extHasUpper = false;
+    for (uint32_t i = 0; i < extLen; ++i) {
+        const char c = name[dot + 1 + i];
+        if (!kIsValid83Char(c)) {
+            return false;
+        }
+        if (c >= 'a' && c <= 'z') {
+            extHasLower = true;
+        }
+        if (c >= 'A' && c <= 'Z') {
+            extHasUpper = true;
+        }
+    }
+    if ((baseHasLower && baseHasUpper) || (extHasLower && extHasUpper)) {
+        return false;  // 이름부/확장자 안에서 대소문자가 섞임 - NT 비트로 표현 불가
+    }
+
+    auto toUpper = [](char c) -> char { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c; };
+    for (uint32_t i = 0; i < 11; ++i) {
+        out11[i] = ' ';
+    }
+    for (uint32_t i = 0; i < baseLen; ++i) {
+        out11[i] = toUpper(name[i]);
+    }
+    for (uint32_t i = 0; i < extLen; ++i) {
+        out11[8 + i] = toUpper(name[dot + 1 + i]);
+    }
+    uint8_t nt = 0;
+    if (baseHasLower) {
+        nt |= kNtCaseLowerBase;
+    }
+    if (extHasLower) {
+        nt |= kNtCaseLowerExt;
+    }
+    *outNtReserved = nt;
+    return true;
+}
+
+// [신규, 2026-09-23, PN-3D39A53C] LFN이 필요할 때 스펙의 "~N" 관례
+// (fatgen103/Linux fs/fat와 동일한 결)로 8.3 별칭을 생성한다(순수
+// 계산) - collisionIndex(1부터)를 호출부가 반복 시도하며 실제 충돌
+// 여부는 디렉터리를 스캔해 확인한다. 유효하지 않은 문자는 '_'로
+// 대체(스펙의 "OS별 대체 문자" 관례를 단순화).
+void kGenerateShortAlias(const char* name, uint32_t nameLen, uint32_t collisionIndex, char out11[11]) {
+    for (uint32_t i = 0; i < 11; ++i) {
+        out11[i] = ' ';
+    }
+    uint32_t dot = nameLen;
+    for (uint32_t i = 0; i < nameLen; ++i) {
+        if (name[i] == '.') {
+            dot = i;  // 마지막 점 기준(스펙 관례)
+        }
+    }
+    const uint32_t baseLen = (dot < nameLen) ? dot : nameLen;
+    const uint32_t extLen = (dot < nameLen) ? (nameLen - dot - 1) : 0;
+
+    char tail[8];
+    uint32_t tailLen = 0;
+    tail[tailLen++] = '~';
+    char digits[7];
+    uint32_t digitCount = 0;
+    uint32_t v = collisionIndex;
+    do {
+        digits[digitCount++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    } while (v > 0 && digitCount < sizeof(digits));
+    for (uint32_t i = 0; i < digitCount; ++i) {
+        tail[tailLen++] = digits[digitCount - 1 - i];
+    }
+
+    auto toUpper = [](char c) -> char { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c; };
+    const uint32_t keepBase = (baseLen > 8 - tailLen) ? (8 - tailLen) : baseLen;
+    uint32_t pos = 0;
+    for (uint32_t i = 0; i < keepBase; ++i) {
+        const char c = name[i];
+        out11[pos++] = kIsValid83Char(c) ? toUpper(c) : '_';
+    }
+    for (uint32_t i = 0; i < tailLen; ++i) {
+        out11[pos++] = tail[i];
+    }
+    const uint32_t keepExt = (extLen > 3) ? 3 : extLen;
+    for (uint32_t i = 0; i < keepExt; ++i) {
+        const char c = name[dot + 1 + i];
+        out11[8 + i] = kIsValid83Char(c) ? toUpper(c) : '_';
+    }
+}
+
+// [신규, 2026-09-23, PN-3D39A53C] longName(nameLen바이트, ASCII 가정 -
+// kLfnSlotChars의 읽기 쪽과 동일한 v1 스코프 컷)을 위한 LFN 슬롯
+// totalSlots개를 outSlots[0..totalSlots-1]에 채운다(순수 계산, I/O
+// 없음) - outSlots[0]이 디렉터리에 가장 먼저(짧은 엔트리에서 가장
+// 먼 위치) 쓰여야 할, 가장 높은 시퀀스 번호의 슬롯이다(스펙의 역순
+// 배치 관례 그대로 - kAccumulateLfn이 읽는 순서와 대칭).
+void kBuildLfnSlots(const char* longName, uint32_t nameLen, uint8_t checksum, LfnSlot* outSlots,
+                     uint32_t totalSlots) {
+    for (uint32_t slotIdx = 0; slotIdx < totalSlots; ++slotIdx) {
+        const uint32_t seq = totalSlots - slotIdx;  // outSlots[0] = 가장 높은 seq
+        LfnSlot& slot = outSlots[slotIdx];
+        slot.id = static_cast<uint8_t>(seq | ((seq == totalSlots) ? kLfnLastEntryFlag : 0));
+        slot.attr = kAttrLongName;
+        slot.slotType = 0;
+        slot.checksum = checksum;
+        slot.startCluster = 0;
+
+        uint16_t chars[kLfnCharsPerSlot];
+        const uint32_t charBase = (seq - 1) * kLfnCharsPerSlot;
+        for (uint32_t i = 0; i < kLfnCharsPerSlot; ++i) {
+            const uint32_t srcIdx = charBase + i;
+            if (srcIdx < nameLen) {
+                chars[i] = static_cast<uint16_t>(static_cast<uint8_t>(longName[srcIdx]));
+            } else if (srcIdx == nameLen) {
+                chars[i] = 0x0000;
+            } else {
+                chars[i] = 0xFFFF;
+            }
+        }
+        memcpy(slot.name0_4, chars, sizeof(slot.name0_4));
+        memcpy(slot.name5_10, chars + 5, sizeof(slot.name5_10));
+        memcpy(slot.name11_12, chars + 11, sizeof(slot.name11_12));
+    }
+}
+
 bool kNameMatches(const DirEntry& e, const char normalized11[11]) {
     char raw[11];
     memcpy(raw, e.name, 8);
@@ -1667,6 +1851,38 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
             char leafNormalized[11];
             kNormalizeTo83(args->relPath + leafStart, leafLen, leafNormalized);
+
+            // [신규, 2026-09-23, PN-3D39A53C] 이름이 8.3에 정확히 안
+            // 들어가면(kTryExactShortName 실패) LFN이 필요 - 별칭
+            // 후보 8개를 미리 계산해 두고, 부모 디렉터리 전체를 훑으며
+            // (스캔 루프는 이미 전체 체인을 다 도니 그대로 재사용)
+            // 이미 쓰인 8.3 이름과 충돌하는 후보를 걸러낸다.
+            char exactShortName[11];
+            uint8_t exactNtReserved = 0;
+            const bool needsLfn = !kTryExactShortName(args->relPath + leafStart, leafLen, exactShortName, &exactNtReserved);
+            uint32_t lfnSlotCount = 0;
+            char aliasCandidates[8][11];
+            bool aliasTaken[8] = {};
+            if (needsLfn) {
+                if (leafLen > kLfnMaxSlots * kLfnCharsPerSlot) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                lfnSlotCount = (leafLen + kLfnCharsPerSlot - 1) / kLfnCharsPerSlot;
+                for (uint32_t a = 0; a < 8; ++a) {
+                    kGenerateShortAlias(args->relPath + leafStart, leafLen, a + 1, aliasCandidates[a]);
+                }
+            }
+            // LFN 슬롯(있다면) + 짧은 엔트리 1개가 반드시 "한 클러스터
+            // 안에서" 연속된 빈 슬롯으로 확보돼야 한다(PN-1A224EC2가
+            // 읽기 쪽에서 이미 확정한 "LFN 체인은 클러스터 경계를 넘지
+            // 않는다" 제약을 쓰기 쪽에도 그대로 적용).
+            const uint32_t neededSlots = needsLfn ? (lfnSlotCount + 1) : 1;
+            if (neededSlots > bytesPerCluster / sizeof(DirEntry)) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+
             bool alreadyExists = false;
             bool freeSlotFound = false;
             uint32_t freeSlotCluster = 0;
@@ -1710,16 +1926,43 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                         alreadyExists = true;
                         break;
                     }
-                    if (!freeSlotFound) {
+                    {
+                        // [갱신, 2026-09-23, PN-3D39A53C] 예전엔 빈 슬롯
+                        // 1개만 찾으면 끝이었지만, LFN이 필요하면
+                        // `neededSlots`개가 "이 클러스터 안에서" 연속으로
+                        // 비어 있어야 한다 - 클러스터 경계를 넘는 런은
+                        // 인정하지 않는다(runLength를 이 매 클러스터
+                        // 반복마다 새로 0에서 시작). freeSlotFound가 이미
+                        // true여도, needsLfn이면 이미 쓰인 8.3 이름과의
+                        // 별칭 충돌을 걸러내기 위해 나머지 클러스터도
+                        // 계속 훑어야 한다.
                         const uint32_t entriesPerCluster = bytesPerCluster / sizeof(DirEntry);
                         const auto* entries = reinterpret_cast<const DirEntry*>(clusterBuf.get());
+                        uint32_t runLength = 0;
+                        uint32_t runStartOffset = 0;
                         for (uint32_t i = 0; i < entriesPerCluster; ++i) {
                             const uint8_t firstByte = static_cast<uint8_t>(entries[i].name[0]);
-                            if (firstByte == kNameDeletedMarker || firstByte == kNameFreeRestMarker) {
-                                freeSlotFound = true;
-                                freeSlotCluster = scanCluster;
-                                freeSlotByteOffset = i * static_cast<uint32_t>(sizeof(DirEntry));
-                                break;
+                            const bool isFree = (firstByte == kNameDeletedMarker || firstByte == kNameFreeRestMarker);
+                            if (isFree) {
+                                if (runLength == 0) {
+                                    runStartOffset = i * static_cast<uint32_t>(sizeof(DirEntry));
+                                }
+                                ++runLength;
+                                if (!freeSlotFound && runLength >= neededSlots) {
+                                    freeSlotFound = true;
+                                    freeSlotCluster = scanCluster;
+                                    freeSlotByteOffset = runStartOffset;
+                                }
+                            } else {
+                                runLength = 0;
+                                if (needsLfn && entries[i].attr != kAttrLongName) {
+                                    for (uint32_t a = 0; a < 8; ++a) {
+                                        if (!aliasTaken[a] && memcmp(entries[i].name, aliasCandidates[a], 8) == 0 &&
+                                            memcmp(entries[i].ext, aliasCandidates[a] + 8, 3) == 0) {
+                                            aliasTaken[a] = true;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1763,6 +2006,33 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             if (alreadyExists) {
                 args->error = kernel::VfsError::AlreadyExists;
                 break;
+            }
+
+            // [신규, 2026-09-23, PN-3D39A53C] 실제로 쓸 8.3 이름 확정 -
+            // needsLfn이면 8개 후보 중 부모 디렉터리 전체 스캔에서 안
+            // 걸린 첫 번째를 쓴다(전부 걸리면 NoSpace) - 이후의 (비교적
+            // 비싼) 디렉터리 확장/새 클러스터 할당보다 먼저 확인해
+            // 헛수고를 줄인다. LFN이 있으면 정확한 대소문자는 LFN
+            // 자신이 담으므로, 백업 8.3 엔트리엔 NT 케이스 비트를
+            // 쓰지 않는 게 관례(exactShortName 경로만 그 비트를 씀).
+            char finalShortName11[11];
+            uint8_t finalNtReserved = 0;
+            if (needsLfn) {
+                int chosenAlias = -1;
+                for (uint32_t a = 0; a < 8; ++a) {
+                    if (!aliasTaken[a]) {
+                        chosenAlias = static_cast<int>(a);
+                        break;
+                    }
+                }
+                if (chosenAlias < 0) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+                memcpy(finalShortName11, aliasCandidates[chosenAlias], 11);
+            } else {
+                memcpy(finalShortName11, exactShortName, 11);
+                finalNtReserved = exactNtReserved;
             }
             // [신규, 2026-09-23, PN-740005DF 항목2] 부모 디렉터리 확장 -
             // 기존 체인 안에 빈 슬롯이 전혀 없으면 새 클러스터 하나를
@@ -2101,21 +2371,24 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             }
 
             {
-                uint32_t entrySector = 0;
-                if (!kClusterToSector(dataStartSector, sectorsPerCluster, freeSlotCluster, &entrySector)) {
+                // [갱신, 2026-09-23, PN-3D39A53C] 예전엔 엔트리 1개가
+                // 들어가는 섹터 하나만 read-modify-write 했지만, LFN
+                // 슬롯이 짧은 엔트리 앞에 여러 개 들어갈 수 있어(모두
+                // 한 클러스터 안이라는 건 위에서 이미 보장) 클러스터
+                // 전체를 읽고 고쳐서 한 번에 다시 쓴다.
+                uint32_t entryClusterSector = 0;
+                if (!kClusterToSector(dataStartSector, sectorsPerCluster, freeSlotCluster, &entryClusterSector)) {
                     args->error = kernel::VfsError::NoSpace;
                     break;
                 }
-                entrySector += freeSlotByteOffset / bytesPerSector;
-                const uint32_t byteInSector = freeSlotByteOffset % bytesPerSector;
-                SlabBuf sectorBuf(bytesPerSector);
-                if (!sectorBuf) {
+                SlabBuf entryClusterBuf(bytesPerCluster);
+                if (!entryClusterBuf) {
                     args->error = kernel::VfsError::NoSpace;
                     break;
                 }
                 fs::BlockIoResult readResult;
-                kernel::AsyncTask* readTask =
-                    kSubmitReadSectors(device, bytesPerSector, entrySector, 1, sectorBuf.get(), &readResult);
+                kernel::AsyncTask* readTask = kSubmitReadSectors(
+                    device, bytesPerSector, entryClusterSector, sectorsPerCluster, entryClusterBuf.get(), &readResult);
                 if (!readTask) {
                     args->error = kernel::VfsError::NoSpace;
                     break;
@@ -2126,18 +2399,28 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                     break;
                 }
 
-                auto* entry = reinterpret_cast<DirEntry*>(sectorBuf.get() + byteInSector);
+                uint32_t writeOffset = freeSlotByteOffset;
+                if (needsLfn) {
+                    LfnSlot lfnSlots[kLfnMaxSlots];
+                    kBuildLfnSlots(args->relPath + leafStart, leafLen, kLfnChecksum(finalShortName11), lfnSlots,
+                                   lfnSlotCount);
+                    memcpy(entryClusterBuf.get() + writeOffset, lfnSlots, lfnSlotCount * sizeof(LfnSlot));
+                    writeOffset += lfnSlotCount * static_cast<uint32_t>(sizeof(LfnSlot));
+                }
+
+                auto* entry = reinterpret_cast<DirEntry*>(entryClusterBuf.get() + writeOffset);
                 memset(entry, 0, sizeof(DirEntry));
-                memcpy(entry->name, leafNormalized, 8);
-                memcpy(entry->ext, leafNormalized + 8, 3);
+                memcpy(entry->name, finalShortName11, 8);
+                memcpy(entry->ext, finalShortName11 + 8, 3);
                 entry->attr = kAttrDirectory;
+                entry->ntReserved = finalNtReserved;
                 entry->fstClusHi = static_cast<uint16_t>(newCluster >> 16);
                 entry->fstClusLo = static_cast<uint16_t>(newCluster & 0xFFFFu);
                 entry->fileSize = 0;
 
                 fs::BlockIoResult writeResult;
-                kernel::AsyncTask* writeTask =
-                    kSubmitWriteSectors(device, bytesPerSector, entrySector, 1, sectorBuf.get(), &writeResult);
+                kernel::AsyncTask* writeTask = kSubmitWriteSectors(
+                    device, bytesPerSector, entryClusterSector, sectorsPerCluster, entryClusterBuf.get(), &writeResult);
                 if (!writeTask) {
                     args->error = kernel::VfsError::NoSpace;
                     break;
