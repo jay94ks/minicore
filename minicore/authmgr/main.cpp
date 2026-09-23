@@ -5,11 +5,15 @@
 // main.cpp와 완전히 동일한 관례 - 멀티플렉싱 accept+read/write 상태
 // 기계도 그대로 재사용).
 //
-// **[범위, PN-BDEAA9B5] 이 파일은 프로토콜 프레이밍의 원형만 다룬다**
-// - `libmc/authmgr.h`(신규)의 Request/Response/Notification 3종 +
-// Request 내부 discriminator(현재 Ping 하나)까지만 구현한다. 실제
-// UserRecord 조회/등록/인증, libkvdb 연동, sudo/su 판정, libkproto로의
-// 추출은 전부 PN-24A2B6F5의 후속 세션이 이어간다.
+// **[갱신, 2026-09-23, PN-24A2B6F5/PN-B6DB692C] libkvdb 연동 시작** -
+// `LookupByUid`/`CreateUser` 요청 2종을 실제 `kvdb::Store`로 처리한다.
+// **CreateUser는 아직 아무 권한 검사도 하지 않는다**(caller uid를
+// 와이어로 전달하는 규약 자체가 미정 - `libmc/authmgr.h`의
+// `AuthmgrRequestType::CreateUser` 문서 주석 참고) - 지금은 이
+// 서비스 자신의 libkvdb 배선을 검증하기 위한 내부용/테스트 전용
+// 요청이고, 어떤 kernel syscall도 아직 이 요청을 트리거하지 않는다.
+// sudo/su 판정, libkproto로의 추출은 여전히 후속 세션 몫.
+#include "libkvdb/kvdb.h"
 #include "libmc/authmgr.h"
 #include "libmc/channel.h"
 #include "libmc/syscall.h"
@@ -17,6 +21,34 @@
 namespace {
 
 constexpr char kAuthmgrChannelName[] = "authmgr";
+
+// [신규, 2026-09-23, PN-24A2B6F5 §1-C/D 항목1/항목2] uid(4바이트
+// 리틀엔디안 그대로)->AuthmgrUserRecord 저장소가 권위 있는 저장소,
+// loginName->uid(4바이트)는 별도 인스턴스(항목2가 확정한 "완전히
+// 분리된 두 번째 Store" 방침 그대로) - v1은 메모리 전용(재부팅 시
+// 소실, fs 생기기 전까지는 설계 대상도 아님, PN-24A2B6F5 항목4).
+// 용량은 커널 UserRecordCache와 동일한 1024(kernel::
+// kUserRecordMaxCacheEntries와 값만 일치, 실제 상수 공유는 커널/
+// 유저 경계 때문에 불가능 - 어긋나면 캐시보다 authmgr 저장소가
+// 먼저 꽉 차는 비대칭이 생기니 착수 세션이 값을 바꿀 땐 항상 같이
+// 바꿀 것).
+constexpr mc::uint32_t kMaxUserRecords = 1024;
+kvdb::Store<kMaxUserRecords, sizeof(mc::uint32_t), sizeof(mc::AuthmgrUserRecord)> gUserRecordsByUid;
+kvdb::Store<kMaxUserRecords, mc::kAuthmgrLoginNameMaxBytes, sizeof(mc::uint32_t)> gUidByLoginName;
+
+// [설계 확정, 2026-09-17] root(uid=0)는 authmgr 가용성과 무관하게
+// 항상 성립해야 하므로 커널도 부팅 시 하드코딩한다(user_record.cpp
+// UserRecordCache::init()) - authmgr도 자신의 저장소에 같은 값을
+// 미리 심어 둬, 나중에 커널이 실제로 authmgr에 root를 질의하게 되면
+// (지금은 아직 그 경로가 없음) 같은 값을 돌려줄 수 있게 한다.
+void kSeedRootUserRecord() {
+    mc::AuthmgrUserRecord root;
+    root.uid = 0;
+    root.parentUid = 0;
+    root.gid = 0;
+    const unsigned char key[sizeof(mc::uint32_t)] = {0, 0, 0, 0};
+    gUserRecordsByUid.put(key, sizeof(key), reinterpret_cast<const unsigned char*>(&root), sizeof(root));
+}
 
 // v1 상한(RM-23F4B687 §4 - 실측 후 조정) - pubreg의 kMaxConnections
 // 보다 훨씬 작게 잡는다(v1은 Ping 왕복 하나뿐이라 동시 접속 부담이
@@ -76,35 +108,110 @@ void kCloseConnection(Connection* conn) {
     *conn = Connection{};
 }
 
-// Request 프레임 하나를 처리해 conn->buf 맨 앞에 Response를 채우고
-// 그 길이를 반환한다(pubreg의 kHandleRegister/kHandleQuery와 동일한
-// 관례). v1은 Ping만 실제로 안다 - 그 외 requestType은 전부
-// NotSupported 에러 응답(연결을 끊지 않고 계속 받는다 - 알 수 없는
-// 요청 하나가 연결 전체를 죽일 이유는 없음).
+void kUidKey(mc::uint32_t uid, unsigned char out[sizeof(mc::uint32_t)]) {
+    const auto* src = reinterpret_cast<const unsigned char*>(&uid);
+    for (mc::uint32_t i = 0; i < sizeof(mc::uint32_t); ++i) {
+        out[i] = src[i];
+    }
+}
+
+// Request 프레임 하나를 처리해 conn->buf 맨 앞에 Response(고정
+// 헤더 + requestType별 가변 본문)를 채우고 그 전체 길이를 반환한다
+// (pubreg의 kHandleRegister/kHandleQuery와 동일한 관례). 알 수 없는
+// requestType/본문 길이 부족은 전부 NotSupported 에러 응답(연결을
+// 끊지 않고 계속 받는다 - 알 수 없는 요청 하나가 연결 전체를 죽일
+// 이유는 없음).
 mc::uint32_t kHandleRequest(Connection* conn, const mc::uint8_t* body, mc::uint32_t bodyLen) {
     mc::AuthmgrRequestHeader req{};
-    constexpr mc::uint32_t kFixedBodyLen = sizeof(mc::AuthmgrRequestHeader) - sizeof(mc::AuthmgrMessageHeader);
-    if (bodyLen < kFixedBodyLen) {
+    constexpr mc::uint32_t kFixedHeaderLen = sizeof(mc::AuthmgrRequestHeader) - sizeof(mc::AuthmgrMessageHeader);
+    if (bodyLen < kFixedHeaderLen) {
         return 0;
     }
     mc::uint8_t* dst = reinterpret_cast<mc::uint8_t*>(&req) + sizeof(mc::AuthmgrMessageHeader);
-    for (mc::uint32_t i = 0; i < kFixedBodyLen; ++i) {
+    for (mc::uint32_t i = 0; i < kFixedHeaderLen; ++i) {
         dst[i] = body[i];
     }
+    const mc::uint8_t* variableBody = body + kFixedHeaderLen;
+    const mc::uint32_t variableBodyLen = bodyLen - kFixedHeaderLen;
 
     auto* resp = reinterpret_cast<mc::AuthmgrResponseHeader*>(conn->buf);
-    resp->header.frameKind = mc::AuthmgrFrameKind::Response;
-    resp->header.totalLength = sizeof(mc::AuthmgrResponseHeader);
     resp->requestType = req.requestType;
+    mc::uint32_t responseBodyLen = 0;
+    mc::uint8_t* responseBody = conn->buf + sizeof(mc::AuthmgrResponseHeader);
+
     switch (req.requestType) {
         case mc::AuthmgrRequestType::Ping:
             resp->error = 0;  // mc::ChannelError::None - Pong은 이 응답 자체(본문 없음)
             break;
+
+        case mc::AuthmgrRequestType::LookupByUid: {
+            if (variableBodyLen < sizeof(mc::AuthmgrLookupByUidRequestBody)) {
+                return 0;
+            }
+            const auto* reqBody = reinterpret_cast<const mc::AuthmgrLookupByUidRequestBody*>(variableBody);
+            unsigned char key[sizeof(mc::uint32_t)];
+            kUidKey(reqBody->uid, key);
+            mc::AuthmgrUserRecord record;
+            unsigned int outLen = 0;
+            kvdb::ErrorCode kvErr = gUserRecordsByUid.get(key, sizeof(key), reinterpret_cast<unsigned char*>(&record),
+                                                            sizeof(record), &outLen);
+            if (kvErr == kvdb::ErrorCode::None && outLen == sizeof(record)) {
+                resp->error = 0;  // None
+                mc::uint8_t* src = reinterpret_cast<mc::uint8_t*>(&record);
+                for (mc::uint32_t i = 0; i < sizeof(record); ++i) {
+                    responseBody[i] = src[i];
+                }
+                responseBodyLen = sizeof(record);
+            } else {
+                resp->error = static_cast<mc::uint32_t>(mc::ChannelError::NotFound);
+            }
+            break;
+        }
+
+        case mc::AuthmgrRequestType::CreateUser: {
+            // [알려진 제약, libmc/authmgr.h 문서 주석 참고] 권한 검사
+            // 없음 - 아직 이 요청을 트리거하는 kernel syscall 경로
+            // 자체가 없어 실사용 위험이 없다.
+            if (variableBodyLen < sizeof(mc::AuthmgrUserRecord)) {
+                return 0;
+            }
+            const auto* newRecord = reinterpret_cast<const mc::AuthmgrUserRecord*>(variableBody);
+            unsigned char key[sizeof(mc::uint32_t)];
+            kUidKey(newRecord->uid, key);
+            if (gUserRecordsByUid.contains(key, sizeof(key))) {
+                resp->error = static_cast<mc::uint32_t>(mc::ChannelError::AlreadyExists);
+                break;
+            }
+            kvdb::ErrorCode kvErr = gUserRecordsByUid.put(
+                key, sizeof(key), reinterpret_cast<const unsigned char*>(newRecord), sizeof(*newRecord));
+            if (kvErr != kvdb::ErrorCode::None) {
+                resp->error = static_cast<mc::uint32_t>(mc::ChannelError::ResourceExhausted);
+                break;
+            }
+            // 로그인명 인덱스도 함께 갱신(PN-24A2B6F5 항목2 방침 -
+            // 완전히 분리된 두 번째 Store) - 이 인덱스를 실제로 읽는
+            // 조회 요청은 아직 없다(소비자가 생기면 그때 추가).
+            mc::uint32_t loginNameLen = 0;
+            while (loginNameLen < mc::kAuthmgrLoginNameMaxBytes && newRecord->loginName[loginNameLen] != '\0') {
+                ++loginNameLen;
+            }
+            if (loginNameLen > 0) {
+                gUidByLoginName.put(reinterpret_cast<const unsigned char*>(newRecord->loginName), loginNameLen,
+                                     reinterpret_cast<const unsigned char*>(&newRecord->uid),
+                                     sizeof(newRecord->uid));
+            }
+            resp->error = 0;  // None
+            break;
+        }
+
         default:
             resp->error = static_cast<mc::uint32_t>(mc::ChannelError::NotSupported);
             break;
     }
-    return sizeof(mc::AuthmgrResponseHeader);
+
+    resp->header.frameKind = mc::AuthmgrFrameKind::Response;
+    resp->header.totalLength = sizeof(mc::AuthmgrResponseHeader) + responseBodyLen;
+    return resp->header.totalLength;
 }
 
 // conn->buf[0..bytesBuffered)에 완전한 메시지가 쌓여 있으면 처리하고
@@ -139,6 +246,8 @@ bool kTryHandleOneMessage(Connection* conn, mc::uint32_t* outResponseLength) {
 }  // namespace
 
 extern "C" void _start() {
+    kSeedRootUserRecord();
+
     mc::OpenChannelArgs openArgs;
     openArgs.name = kAuthmgrChannelName;
     openArgs.nameLength = sizeof(kAuthmgrChannelName) - 1;

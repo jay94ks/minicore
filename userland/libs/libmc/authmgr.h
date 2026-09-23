@@ -39,10 +39,46 @@ struct AuthmgrMessageHeader {
 
 // Request 프레임 자신이 담는 요청 종류 discriminator - "Request
 // 자체에 요청 구분을 넣으면 다수의 채널을 열 필요가 없다"는 설계자
-// 확정 그대로. v1은 왕복 자체를 증명하는 Ping 하나뿐 - UserRecord
-// 조회/등록/인증 등은 libkvdb가 생긴 뒤 여기 추가된다.
+// 확정 그대로.
 enum class AuthmgrRequestType : uint8_t {
     Ping = 1,
+    // [신규, 2026-09-23, PN-24A2B6F5/PN-B6DB692C] uid로 UserRecord
+    // 조회 - authmgr의 libkvdb Store가 유일한 권위 있는 저장소.
+    // 커널의 UserRecordCache 미스 시 이 요청으로 채운다(배선 자체는
+    // 아직 후속 - 이 증분은 authmgr 쪽만).
+    LookupByUid = 2,
+    // [신규, 2026-09-23] 새 UserRecord 생성 - **[알려진 제약]** 이
+    // 요청은 아직 어떤 kernel syscall 경로로도 노출되지 않는다.
+    // "누가 요청했는지"(caller uid)를 Channel IPC 와이어에 실어
+    // 보내는 규약 자체가 아직 없어(PN-24A2B6F5 항목3 "authmgr 생성
+    // 권한"이 kSetuid류 tree-walk와 정합되게 설계돼야 함, 아직 미정)
+    // 권한 검사를 전혀 하지 않는다 - 지금은 authmgr 자신의 libkvdb
+    // 배선을 검증하기 위한 내부용/테스트 전용 요청이다. 실제로
+    // 노출하려면 caller uid 전달 규약을 먼저 확정할 것(CLAUDE.md
+    // 규칙 4 - 미정 설계를 임의로 채우지 않음).
+    CreateUser = 3,
+};
+
+// [신규, 2026-09-23, PN-B6DB692C] `kernel::UserRecord`(user_record.h)
+// 의 와이어 표현 - 캐시 전용 필드(valid/lastHitTime)는 뺀 authmgr
+// 권위 저장소의 실제 저장 형태 그대로. 필드 크기는 커널 쪽과 정확히
+// 일치시켜야 한다(양쪽 다 SP-30FCC8AE §1-A.1 확정값 - 어긋나면 왕복
+// 시 잘림/오염).
+constexpr uint32_t kAuthmgrLoginNameMaxBytes = 32;
+constexpr uint32_t kAuthmgrPasswordHashMaxBytes = 96;
+constexpr uint32_t kAuthmgrShellMaxBytes = 64;
+
+struct AuthmgrUserRecord {
+    uint32_t uid = 0;
+    uint32_t parentUid = 0;
+    uint32_t gid = 0;
+    char loginName[kAuthmgrLoginNameMaxBytes] = {};
+    char passwordHash[kAuthmgrPasswordHashMaxBytes] = {};
+    char defaultShell[kAuthmgrShellMaxBytes] = {};
+};
+
+struct AuthmgrLookupByUidRequestBody {
+    uint32_t uid = 0;
 };
 
 struct AuthmgrRequestHeader {
@@ -50,7 +86,8 @@ struct AuthmgrRequestHeader {
     AuthmgrRequestType requestType = AuthmgrRequestType::Ping;
     uint8_t reserved[3] = {};
     // requestType별 고정 폭 본문이 있다면 이 구조체 바로 뒤에 이어짐
-    // (v1은 Ping뿐이고 본문 없음).
+    // (Ping은 본문 없음, LookupByUid는 AuthmgrLookupByUidRequestBody,
+    // CreateUser는 AuthmgrUserRecord).
 };
 
 struct AuthmgrResponseHeader {
@@ -60,15 +97,17 @@ struct AuthmgrResponseHeader {
     uint32_t error = 0;  // mc::ChannelError 값 재사용(0=None) - requestType을
                           // 모르는 요청이면 NotSupported류로 채워 반환.
     // requestType별 고정 폭 응답 본문이 있다면 이 구조체 바로 뒤에
-    // 이어짐(v1의 Pong은 본문 없음 - error==None이면 그 자체가 응답).
+    // 이어짐(Pong은 본문 없음 - error==None이면 그 자체가 응답.
+    // LookupByUid는 error==None일 때만 AuthmgrUserRecord가 이어짐 -
+    // NotFound면 본문 없음. CreateUser는 error만, 본문 없음).
 };
 
 // 한 메시지(요청이든 응답이든)의 최대 바이트 수 - Channel IPC 스트림
 // 위에서 메시지 경계를 프레이밍하는 쪽이 이 크기의 버퍼를 준비해
-// 둔다(pubreg.h의 kPubregMaxMessageBytes와 동일한 관례). v1은 고정
-// 크기 헤더뿐이라 여유를 조금만 둔다 - 실제 요청 본문이 추가되면
-// 그때 다시 계산.
-constexpr uint32_t kAuthmgrMaxMessageBytes = 128;
+// 둔다(pubreg.h의 kPubregMaxMessageBytes와 동일한 관례). [갱신,
+// 2026-09-23] `AuthmgrResponseHeader`(16) + `AuthmgrUserRecord`(204)
+// = 220바이트가 가장 큰 프레임 - 여유를 두고 256으로.
+constexpr uint32_t kAuthmgrMaxMessageBytes = 256;
 
 }  // namespace mc
 

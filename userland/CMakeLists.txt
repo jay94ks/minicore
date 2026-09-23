@@ -43,9 +43,18 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/init ${CMAKE_CURRENT_BI
 # out-of-tree add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/pubreg ${CMAKE_CURRENT_BINARY_DIR}/minicore-pubreg)
 
+# libkvdb(SP-30FCC8AE §1-D, PN-24A2B6F5 §1-C/D 항목1) - authmgr(유저
+# 랜드 프로세스)의 의존성이라 이 유저랜드 빌드 트리에도 필요하다.
+# 커널 빌드 트리(top-level CMakeLists.txt)와는 완전히 별개 CMake
+# 프로젝트라 add_subdirectory를 양쪽에 각각 둬야 한다(순수 헤더
+# INTERFACE 라이브러리라 이중 컴파일 걱정은 없음) - init/pubreg와
+# 동일한 out-of-tree 관례.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/libs/libkvdb ${CMAKE_CURRENT_BINARY_DIR}/minicore-libkvdb)
+
 # authmgr(SP-8B6B8D25 §3.1 항목8, PN-24A2B6F5/PN-CFEAEF40) -
-# init/pubreg와 동일한 이유의 out-of-tree add_subdirectory. v1은
-# 스캐폴딩만(PN-CFEAEF40) - 실제 프로토콜/libkvdb 연동은 후속 세션.
+# init/pubreg와 동일한 이유의 out-of-tree add_subdirectory.
+# [갱신, 2026-09-23, PN-24A2B6F5] libkvdb 연동 시작 - 스캐폴딩만
+# 이던 v1에서 확장.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/authmgr ${CMAKE_CURRENT_BINARY_DIR}/minicore-authmgr)
 
 # fs(SP-8B6B8D25 §4-A, PN-452FF696) - **[제외, 2026-09-20,

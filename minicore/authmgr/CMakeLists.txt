@@ -13,4 +13,4 @@ set_target_properties(authmgr PROPERTIES
 )
 
 target_link_options(authmgr PRIVATE -T ${MINICORE_USERLAND_LINKER_SCRIPT})
-target_link_libraries(authmgr PRIVATE libmc libcenv)
+target_link_libraries(authmgr PRIVATE libmc libcenv libkvdb)
