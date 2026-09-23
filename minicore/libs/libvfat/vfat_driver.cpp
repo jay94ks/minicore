@@ -1522,9 +1522,14 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             uint32_t freeSlotCluster = 0;
             uint32_t freeSlotByteOffset = 0;
             bool ioFailed = false;
+            // [신규, 2026-09-23, PN-740005DF 항목2] 빈 슬롯을 못 찾고
+            // 체인이 끝났을 때, 그 체인의 tail 클러스터를 기억해 뒀다가
+            // 새 클러스터를 이어붙이는 데 쓴다(부모 디렉터리 확장).
+            uint32_t parentTailCluster = parentCluster;
             {
                 uint32_t scanCluster = parentCluster;
                 while (true) {
+                    parentTailCluster = scanCluster;
                     uint32_t sector = 0;
                     if (!kClusterToSector(dataStartSector, sectorsPerCluster, scanCluster, &sector)) {
                         break;
@@ -1609,9 +1614,188 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::AlreadyExists;
                 break;
             }
+            // [신규, 2026-09-23, PN-740005DF 항목2] 부모 디렉터리 확장 -
+            // 기존 체인 안에 빈 슬롯이 전혀 없으면 새 클러스터 하나를
+            // 할당해 tail에 이어붙인다. 새 클러스터를 전부 0으로
+            // 초기화하면 그 첫 바이트(name[0])가 자동으로
+            // `kNameFreeRestMarker`(0x00)가 돼 "여기부터 디렉터리 끝"
+            // 이라는 기존 스펙 불변조건을 그대로 만족하므로, 그 클러스터
+            // 오프셋 0을 곧바로 빈 슬롯으로 쓸 수 있다(새 설계 결정
+            // 불필요 - Write()가 이미 구현한 "free 클러스터 할당+링크"
+            // 패턴 재사용).
             if (!freeSlotFound) {
-                args->error = kernel::VfsError::NoSpace;
-                break;
+                uint32_t extCluster = 0;
+                bool extAllocFailed = false;
+                {
+                    const uint32_t clusterCount = volume_.clusterCountValue();
+                    uint32_t candidate = nextClusterScanHint_;
+                    if (candidate < kFirstDataCluster || candidate > clusterCount + 1) {
+                        candidate = kFirstDataCluster;
+                    }
+                    bool foundFree = false;
+                    uint32_t loadedFatSector = 0xFFFFFFFFu;
+                    SlabBuf scanBuf(bytesPerSector);
+                    if (!scanBuf) {
+                        extAllocFailed = true;
+                    } else {
+                        for (uint32_t attempts = 0; attempts < clusterCount && !extAllocFailed; ++attempts) {
+                            uint32_t fatSector = 0;
+                            uint32_t fatByteOffset = 0;
+                            kFatEntryLocation(fatStartSector, bytesPerSector, candidate, &fatSector, &fatByteOffset);
+                            if (fatSector != loadedFatSector) {
+                                fs::BlockIoResult scanIoResult;
+                                kernel::AsyncTask* scanIoTask = kSubmitReadSectors(
+                                    device, bytesPerSector, fatSector, 1, scanBuf.get(), &scanIoResult);
+                                if (!scanIoTask) {
+                                    extAllocFailed = true;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(scanIoTask);
+                                if (!scanIoResult.ok) {
+                                    extAllocFailed = true;
+                                    break;
+                                }
+                                loadedFatSector = fatSector;
+                            }
+                            uint32_t raw = 0;
+                            memcpy(&raw, scanBuf.get() + fatByteOffset, sizeof(raw));
+                            if ((raw & kFatEntryMask) == 0) {
+                                foundFree = true;
+                                extCluster = candidate;
+                                break;
+                            }
+                            candidate = (candidate >= clusterCount + 1) ? kFirstDataCluster : candidate + 1;
+                        }
+                        if (!extAllocFailed && !foundFree) {
+                            extAllocFailed = true;
+                        }
+                    }
+                }
+                if (extAllocFailed) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+                nextClusterScanHint_ =
+                    (extCluster >= volume_.clusterCountValue() + 1) ? kFirstDataCluster : extCluster + 1;
+
+                // extCluster를 EOC로(모든 FAT 사본) + parentTailCluster를
+                // extCluster로 링크(모든 FAT 사본) - 순서는 Write()와
+                // 동일한 방어적 이유(EOC 먼저).
+                bool extLinkFailed = false;
+                const uint32_t numFats = volume_.numFatsValue();
+                const uint32_t fatSize32 = volume_.fatSize32Value();
+                for (uint32_t fatIndex = 0; fatIndex < numFats && !extLinkFailed; ++fatIndex) {
+                    uint32_t sector = 0;
+                    uint32_t byteOffset = 0;
+                    kFatEntryLocation(fatStartSector + fatIndex * fatSize32, bytesPerSector, extCluster, &sector,
+                                       &byteOffset);
+                    SlabBuf buf(bytesPerSector);
+                    if (!buf) {
+                        extLinkFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult readResult;
+                    kernel::AsyncTask* readTask =
+                        kSubmitReadSectors(device, bytesPerSector, sector, 1, buf.get(), &readResult);
+                    if (!readTask) {
+                        extLinkFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(readTask);
+                    if (!readResult.ok) {
+                        extLinkFailed = true;
+                        break;
+                    }
+                    uint32_t raw = 0;
+                    memcpy(&raw, buf.get() + byteOffset, sizeof(raw));
+                    const uint32_t newRaw = kEncodeFatEntry(raw, kFatEocMin);
+                    memcpy(buf.get() + byteOffset, &newRaw, sizeof(newRaw));
+                    fs::BlockIoResult writeResult;
+                    kernel::AsyncTask* writeTask =
+                        kSubmitWriteSectors(device, bytesPerSector, sector, 1, buf.get(), &writeResult);
+                    if (!writeTask) {
+                        extLinkFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(writeTask);
+                    if (!writeResult.ok) {
+                        extLinkFailed = true;
+                        break;
+                    }
+                }
+                if (!extLinkFailed) {
+                    for (uint32_t fatIndex = 0; fatIndex < numFats && !extLinkFailed; ++fatIndex) {
+                        uint32_t sector = 0;
+                        uint32_t byteOffset = 0;
+                        kFatEntryLocation(fatStartSector + fatIndex * fatSize32, bytesPerSector, parentTailCluster,
+                                           &sector, &byteOffset);
+                        SlabBuf buf(bytesPerSector);
+                        if (!buf) {
+                            extLinkFailed = true;
+                            break;
+                        }
+                        fs::BlockIoResult readResult;
+                        kernel::AsyncTask* readTask =
+                            kSubmitReadSectors(device, bytesPerSector, sector, 1, buf.get(), &readResult);
+                        if (!readTask) {
+                            extLinkFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(readTask);
+                        if (!readResult.ok) {
+                            extLinkFailed = true;
+                            break;
+                        }
+                        uint32_t raw = 0;
+                        memcpy(&raw, buf.get() + byteOffset, sizeof(raw));
+                        const uint32_t newRaw = kEncodeFatEntry(raw, extCluster);
+                        memcpy(buf.get() + byteOffset, &newRaw, sizeof(newRaw));
+                        fs::BlockIoResult writeResult;
+                        kernel::AsyncTask* writeTask =
+                            kSubmitWriteSectors(device, bytesPerSector, sector, 1, buf.get(), &writeResult);
+                        if (!writeTask) {
+                            extLinkFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(writeTask);
+                        if (!writeResult.ok) {
+                            extLinkFailed = true;
+                            break;
+                        }
+                    }
+                }
+                if (extLinkFailed) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+
+                SlabBuf zeroBuf(bytesPerCluster);
+                if (!zeroBuf) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+                memset(zeroBuf.get(), 0, bytesPerCluster);
+                uint32_t extDataSector = 0;
+                if (!kClusterToSector(dataStartSector, sectorsPerCluster, extCluster, &extDataSector)) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+                fs::BlockIoResult zeroResult;
+                kernel::AsyncTask* zeroTask = kSubmitWriteSectors(device, bytesPerSector, extDataSector,
+                                                                   sectorsPerCluster, zeroBuf.get(), &zeroResult);
+                if (!zeroTask) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(zeroTask);
+                if (!zeroResult.ok) {
+                    args->error = kernel::VfsError::NoSpace;
+                    break;
+                }
+
+                freeSlotCluster = extCluster;
+                freeSlotByteOffset = 0;
+                freeSlotFound = true;
             }
 
             uint32_t newCluster = 0;
