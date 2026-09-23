@@ -40,6 +40,13 @@ enum class VfsError : uint32_t {
     // 엔트리 슬롯을 못 찾음(디스크 공간 고갈) - vfs_syscall.cpp의
     // kMapVfsError()가 ChannelError::ResourceExhausted로 매핑한다.
     NoSpace,
+    // [신규, 2026-09-23, PN-9D6FE4B6] Mkdir 대상 이름이 부모 디렉터리에
+    // 이미 있음 - ChannelError::AlreadyExists로 매핑.
+    AlreadyExists,
+    // [신규, 2026-09-23, PN-9D6FE4B6] Rmdir 대상 디렉터리가 비어있지
+    // 않음("."/".." 외의 유효 엔트리가 남아있음) - ChannelError::
+    // NotEmpty로 매핑.
+    NotEmpty,
 };
 
 struct FileHandle {

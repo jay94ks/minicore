@@ -75,6 +75,10 @@ ChannelError kMapVfsError(VfsError error) {
             return ChannelError::InvalidArgument;
         case VfsError::NoSpace:
             return ChannelError::ResourceExhausted;
+        case VfsError::AlreadyExists:
+            return ChannelError::AlreadyExists;
+        case VfsError::NotEmpty:
+            return ChannelError::NotEmpty;
     }
     return ChannelError::InvalidArgument;
 }
