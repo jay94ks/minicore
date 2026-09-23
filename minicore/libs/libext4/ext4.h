@@ -264,6 +264,73 @@ private:
 
 constexpr uint32_t kRootInodeNumber = 2;
 
+// ---------------------------------------------------------------------
+// 3.6 jbd2 저널 온디스크 포맷 (PN-BC3A2F5F 준비 작업) - 리눅스 커널
+// fs/jbd2/journal.h와 대조 확정, 실제 mke2fs -t ext4 기본 이미지의
+// 저널 inode(보통 8번, extents 기반)로 오프셋까지 실측 확인
+// (dumpe2fs -h/debugfs 'stat <8>'으로 첫 익스텐트 physical block을
+// 찾아 dd로 그 블록을 직접 dump, 첫 4바이트가 `c0 3b 39 98`임을
+// 확인). **주의: ext4 자신의 온디스크 구조(위 SuperblockCore 등)와
+// 달리 jbd2 필드는 전부 빅엔디안이다** - 이 코드베이스의 다른
+// 온디스크 포맷(ext4/vfat/exfat/ntfs)은 전부 리틀엔디안 그대로
+// 읽으므로 바이트 스왑 헬퍼가 아직 없었다, 여기서 `kJbd2Be32`로
+// 새로 추가한다(x86_64는 항상 리틀엔디안이라 무조건 스왑).
+// **리플레이 로직 자체는 이번 증분에 없다** - 이 절은 순수 파싱
+// 함수뿐이다(PN-5481287C의 FAT12 pack/unpack 준비 작업과 동일한
+// "구현 전 순수 계산 함수부터" 패턴) - 실제 디스크립터/커밋/리보크
+// 블록 파싱과 리플레이는 PN-BC3A2F5F 후속 작업.
+// ---------------------------------------------------------------------
+inline uint32_t kJbd2Be32(uint32_t v) { return __builtin_bswap32(v); }
+
+#pragma pack(push, 1)
+struct JournalHeader {
+    uint32_t magic;      // kJbd2Magic - 빅엔디안 raw, kJbd2Be32로 변환 후 비교
+    uint32_t blockType;  // kJbd2BlockType* - 빅엔디안 raw
+    uint32_t sequence;   // 빅엔디안 raw
+};
+static_assert(sizeof(JournalHeader) == 12, "JournalHeader 레이아웃이 리눅스 소스와 어긋남");
+
+// v1/v2 공용 슈퍼블록(저널 자신의 논리 블록 0, JournalHeader로
+// 시작) - v1은 featureCompat 이후가 정의되지 않지만 오프셋은 동일.
+struct JournalSuperblockV2 {
+    JournalHeader header;      // 0
+    uint32_t blockSize;        // 12 - 저널 자신의 블록 크기(바이트)
+    uint32_t maxLen;           // 16 - 저널 전체 블록 수
+    uint32_t first;            // 20 - 로그 정보의 첫 블록(보통 1)
+    uint32_t sequence;         // 24 - 로그에서 기대하는 첫 커밋 ID
+    uint32_t start;            // 28 - 로그 시작 블록 번호(0 = 저널이 비어있음/클린)
+    uint32_t errno_;           // 32
+    uint32_t featureCompat;    // 36 - v1엔 없는 필드(정의 안 됨)
+    uint32_t featureIncompat;  // 40
+    uint32_t featureRoCompat;  // 44
+    uint8_t uuid[16];          // 48
+    uint32_t nrUsers;          // 64
+    uint32_t dynSuper;         // 68
+    uint32_t maxTransaction;   // 72
+    uint32_t maxTransData;     // 76
+    uint8_t checksumType;      // 80
+    uint8_t padding2[3];       // 81
+    uint32_t numFcBlks;        // 84
+    uint32_t head;             // 88
+    // 이후 padding[40]+checksum+users[16*48] - 아직 안 씀(위
+    // SuperblockCore와 같은 절단 관례, PN-BC3A2F5F가 필요해지면 추가).
+};
+static_assert(sizeof(JournalSuperblockV2) == 92, "JournalSuperblockV2 레이아웃이 리눅스 소스와 어긋남");
+#pragma pack(pop)
+
+constexpr uint32_t kJbd2Magic = 0xc03b3998;
+constexpr uint32_t kJbd2BlockTypeDescriptor = 1;
+constexpr uint32_t kJbd2BlockTypeCommit = 2;
+constexpr uint32_t kJbd2BlockTypeSuperblockV1 = 3;
+constexpr uint32_t kJbd2BlockTypeSuperblockV2 = 4;
+constexpr uint32_t kJbd2BlockTypeRevoke = 5;
+
+// 호출자가 이미 읽어 온 저널 논리 블록 0의 원시 바이트가 유효한
+// jbd2 v1/v2 슈퍼블록인지 확인하고 호스트(리틀엔디안) 값으로 변환해
+// *out에 채운다. false면 매직 불일치(저널 블록이 아니거나 손상) -
+// 순수 함수, 어떤 I/O도 하지 않는다.
+bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out);
+
 }  // namespace ext4
 
 #endif  // MINICORE_LIBEXT4_EXT4_H

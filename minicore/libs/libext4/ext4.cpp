@@ -12,6 +12,45 @@ constexpr uint64_t kCeilDiv(uint64_t a, uint64_t b) { return (a + b - 1) / b; }
 
 }  // namespace
 
+bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out) {
+    if (blockLen < sizeof(JournalSuperblockV2)) {
+        return false;
+    }
+    JournalSuperblockV2 raw;
+    memcpy(&raw, rawBlock, sizeof(raw));
+
+    const uint32_t magic = kJbd2Be32(raw.header.magic);
+    const uint32_t blockType = kJbd2Be32(raw.header.blockType);
+    if (magic != kJbd2Magic) {
+        return false;
+    }
+    if (blockType != kJbd2BlockTypeSuperblockV1 && blockType != kJbd2BlockTypeSuperblockV2) {
+        return false;
+    }
+
+    out->header.magic = magic;
+    out->header.blockType = blockType;
+    out->header.sequence = kJbd2Be32(raw.header.sequence);
+    out->blockSize = kJbd2Be32(raw.blockSize);
+    out->maxLen = kJbd2Be32(raw.maxLen);
+    out->first = kJbd2Be32(raw.first);
+    out->sequence = kJbd2Be32(raw.sequence);
+    out->start = kJbd2Be32(raw.start);
+    out->errno_ = kJbd2Be32(raw.errno_);
+    out->featureCompat = kJbd2Be32(raw.featureCompat);
+    out->featureIncompat = kJbd2Be32(raw.featureIncompat);
+    out->featureRoCompat = kJbd2Be32(raw.featureRoCompat);
+    memcpy(out->uuid, raw.uuid, sizeof(out->uuid));
+    out->nrUsers = kJbd2Be32(raw.nrUsers);
+    out->dynSuper = kJbd2Be32(raw.dynSuper);
+    out->maxTransaction = kJbd2Be32(raw.maxTransaction);
+    out->maxTransData = kJbd2Be32(raw.maxTransData);
+    out->checksumType = raw.checksumType;
+    out->numFcBlks = kJbd2Be32(raw.numFcBlks);
+    out->head = kJbd2Be32(raw.head);
+    return true;
+}
+
 // blockOffset/blockCount는 ext4 자신의 블록 단위(blockSize_) - 장치의
 // LBA(device_->blockSize() 단위)로 변환해 읽는다. libswapfs의
 // slot->LBA 변환과 같은 관용구.
