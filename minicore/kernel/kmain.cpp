@@ -442,6 +442,45 @@ void kSpawnFsKernelThread() {
     kernel::Logger::info("minicore: fs KernelThread spawned (Process-less)");
 }
 
+// [신규, 2026-09-23, DC-F367AD5D/SP-0C7A4F3B §1 항목5] ACPI 전원
+// 버튼(SCI) 감시 - devmgr/fs와 동일한 Process 없는 KernelThread
+// 패턴이나, 애초에 자동 종료를 시작할 방법이 없는 하드웨어(FADT가
+// 없거나/SCI_INT가 0이거나/`\_S5` 패키지를 못 찾았거나)에서는 스레드
+// 자체를 스폰하지 않는다 - devmgr/fs가 "장치 없음"일 때 자기 안에서
+// 계속 대기하는 것과 달리, 이쪽은 조건을 boot 시점에 이미 다 알 수
+// 있어 애초에 만들지 않는 편이 낫다고 판단(RM-23F4B687 §4).
+//
+// **[비활성화, 2026-09-23, PN-0B461E6F]** 이 스레드가 존재하는 것만
+// (실제 전원 버튼 이벤트가 한 번도 안 와도) 표준 회귀 GRUB SMP4에서
+// 100% 재현되는 PANIC(Invalid Opcode/Page Fault, core=1, 버튼 입력
+// 자체는 시도 안 한 순수 부팅만으로도 발생)을 유발함을 실측 확인 -
+// 이 프로젝트가 이미 추적 중인 AHCI+SMP4 인터럽트 서브시스템 재진입
+// 계열(PN-E4C6AF72/PN-3DDF2797)과 같은 근본 원인일 가능성이 높다
+// (InterruptDelegation::allow()로 새 IOAPIC 외부 인터럽트를 구독하는
+// 첫 실사용처가 AHCI 말고 이걸로는 처음이라, 그 자체가 취약점을
+// 다시 노출시킨 것으로 추정 - 확정은 못 함). SMP1은 표준 4시나리오
+// 전부(PVH/GRUB SMP1/직접 shutdown() 호출/실제 QEMU `system_powerdown`
+// 모니터 명령으로 진짜 ACPI 전원 버튼 이벤트까지) 완전히 무결함을
+// 실측 검증했다 - 이 스레드를 스폰하는 호출 한 줄만 주석 처리해
+// 원래 안전한 상태로 되돌린다. Shutdown/Reboot syscall(그룹10)은
+// 이 스레드와 무관하게 완전히 독립적으로 동작하므로 영향 없음.
+// 재활성화하려면 아래 호출부의 주석만 풀면 되지만, 그 전에
+// SMP4에서 이 크래시의 근본 원인부터 규명할 것 - 자세한 내용은
+// PN-0B461E6F 참고.
+[[maybe_unused]] void kSpawnPowerKernelThreadIfSupported() {
+    if (!kernel::Acpi::hasFadt() || kernel::Acpi::sciInterruptGsi() == 0 || !kernel::Power::hasS5()) {
+        kernel::Logger::info("minicore: ACPI power button watch not available - skipping (no FADT/SCI/\\_S5)");
+        return;
+    }
+    kernel::KernelThread* thread = kernel::kSpawnKernelThread(kernel::kPowerKernelMain, nullptr);
+    if (!thread) {
+        kernel::Logger::error("minicore: power KernelThread allocation FAILED");
+        return;
+    }
+    kernel::Scheduler::enqueue(kernel::Scheduler::currentCoreIndex(), thread);
+    kernel::Logger::info("minicore: power KernelThread spawned (Process-less, ACPI power button watch)");
+}
+
 }  // namespace
 
 // boot.S가 higher-half로 넘어온 뒤 호출한다. rdi = 부팅 정보 구조체
@@ -793,6 +832,11 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kSpawnServiceProcesses();
     kSpawnDevmgrKernelThread();
     kSpawnFsKernelThread();
+    // [비활성화, 2026-09-23, PN-0B461E6F] SMP4에서 100% 재현되는 PANIC
+    // 발견 - kSpawnPowerKernelThreadIfSupported() 문서 주석 참고. 이
+    // 한 줄만 주석 처리하면 원래 안전한 상태(SCI 감시 없음, Shutdown/
+    // Reboot syscall은 그대로 동작)로 돌아간다.
+    // kSpawnPowerKernelThreadIfSupported();
 
     // 이 지점부터 BSP 자신도 스케줄러 디스패치 루프에 들어간다 -
     // 절대 반환하지 않는다(PL-2D3184BC 5/6단계). runLoop()을 직접

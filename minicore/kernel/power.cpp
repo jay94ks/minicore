@@ -1,10 +1,18 @@
 #include "power.h"
 
 #include "acpi.h"
+#include "async_task.h"
+#include "interrupt_subscription.h"
+#include "ioapic.h"
+#include "lapic.h"
 #include "libkenv/mem.h"
 #include "libkenv/types.h"
+#include "logger.h"
 #include "mount_table.h"
 #include "paging.h"
+#include "scheduler.h"
+#include "syscall.h"
+#include "task.h"
 #include "x86_64/io_port.h"
 
 namespace {
@@ -104,6 +112,9 @@ kernel::uint32_t gSlpTypB = 0;
 
 constexpr kernel::uint16_t kPm1SlpEnBit = 1U << 13;
 constexpr kernel::uint16_t kPm1SlpTypShift = 10;
+// ACPI 스펙 §4.8.3.1(PM1 Status)/§4.8.3.2(PM1 Enable) 공통 - 전원
+// 버튼 상태/활성화 비트, 두 레지스터에서 같은 비트 위치.
+constexpr kernel::uint16_t kPm1PwrBtnBit = 1U << 8;
 
 // GAS(Generic Address Structure) addressSpaceId 값(ACPI 스펙
 // §5.2.3.2) - 이 프로젝트가 실제로 다루는 건 System I/O뿐이지만
@@ -139,6 +150,72 @@ void kReset8042() {
         }
     }
     kernel::arch::kOutB(0x64, 0xFE);
+}
+
+// [신규, 2026-09-23, SP-0C7A4F3B §1 항목5] `ahci.cpp`의
+// `kSubscribeAhciInterrupt()`와 완전히 동일한 패턴(SyscallRegistry::
+// resolveSubjectCode로 이미 등록된 SubscribeInterrupt/WaitInterrupt
+// 핸들러의 subjectCode를 재사용 + PreemptionGuard 아래 제출 +
+// preemptive=false로 그 안에서 확인된 self-IPI race를 피함 +
+// AsyncTaskWaitGroup::waitAll()로 완료까지 블로킹) - 이 파일 자신의
+// 전용 KernelThread(kPowerKernelMain)가 유일한 호출자라 exclusive=false.
+bool kSubscribePowerButtonInterrupt(const kernel::SharedPtr<kernel::Task>& self, kernel::uint32_t vector) {
+    kernel::AsyncTaskSubjectCode subjectCode = 0;
+    if (!kernel::SyscallRegistry::resolveSubjectCode(kernel::kSyscallEndpointSubscribeInterrupt, &subjectCode)) {
+        return false;
+    }
+    kernel::SubscribeInterruptArgs args;
+    args.vector = vector;
+    args.exclusive = false;
+    kernel::AsyncTask* task = nullptr;
+    {
+        kernel::PreemptionGuard guard;
+        task = kernel::AsyncTask::submit(subjectCode, 0, &args, /*autoFree=*/false, /*preemptive=*/false);
+        if (!task) {
+            return false;
+        }
+        task->submitterTask = kernel::TaskOwnerRef::capture(kernel::WeakPtr<kernel::Task>(self));
+    }
+    kernel::AsyncTaskWaitGroup group;
+    group.add(task);
+    group.waitAll();
+    return args.error == kernel::InterruptSubscriptionError::None;
+}
+
+// 위와 같은 패턴, `WaitInterrupt` 전용 - `subjectCode`는 루프 밖에서
+// 한 번만 구해 재사용한다(매 반복 다시 조회할 이유가 없음).
+bool kWaitPowerButtonInterrupt(const kernel::SharedPtr<kernel::Task>& self, kernel::AsyncTaskSubjectCode subjectCode,
+                                 kernel::uint32_t vector) {
+    kernel::WaitInterruptArgs args;
+    args.vector = vector;
+    kernel::AsyncTask* task = nullptr;
+    {
+        kernel::PreemptionGuard guard;
+        task = kernel::AsyncTask::submit(subjectCode, 0, &args, /*autoFree=*/false, /*preemptive=*/false);
+        if (!task) {
+            return false;
+        }
+        task->submitterTask = kernel::TaskOwnerRef::capture(kernel::WeakPtr<kernel::Task>(self));
+    }
+    kernel::AsyncTaskWaitGroup group;
+    group.add(task);
+    group.waitAll();
+    return args.error == kernel::InterruptSubscriptionError::None;
+}
+
+// PM1x_STS의 PWRBTN_STS 비트를 확인하고, 서 있으면 그 비트만 W1C로
+// 클리어한 뒤 true를 반환한다(그 외 상태 비트는 절대 건드리지
+// 않음 - 쓰기 값 자체에 PWRBTN 비트 하나만 세팅).
+bool kCheckAndClearPowerButtonStatus(kernel::uint32_t eventBlock) {
+    if (eventBlock == 0) {
+        return false;
+    }
+    const kernel::uint16_t sts = kernel::arch::kInW(static_cast<kernel::uint16_t>(eventBlock));
+    if ((sts & kPm1PwrBtnBit) == 0) {
+        return false;
+    }
+    kernel::arch::kOutW(static_cast<kernel::uint16_t>(eventBlock), kPm1PwrBtnBit);
+    return true;
 }
 
 }  // namespace
@@ -233,6 +310,78 @@ RebootHandler gRebootHandler;
 void PowerService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointShutdown, &gShutdownHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointReboot, &gRebootHandler);
+}
+
+// [신규, 2026-09-23, SP-0C7A4F3B §1 항목5] devmgr/fs와 동일한 패턴의
+// Process 없는 순수 커널 KernelThread entry - kmain.cpp가
+// `Acpi::hasFadt()`+`Acpi::sciInterruptGsi()!=0`+`Power::hasS5()`일
+// 때만 스폰한다(그 외엔 애초에 자동 종료를 시작할 방법이 없으니
+// 스레드 하나를 낭비할 이유가 없음). IOAPIC 리다이렉션/PM1_EN 세팅을
+// 이 함수 자신이 직접 하고(같은 이유로 devmgr/fs도 자기 초기화를
+// 자기 entry 안에서 함), 그 뒤 영원히 WaitInterrupt로 대기하다
+// PWRBTN_STS가 서면 클리어 후 `Power::shutdown()`을 부른다 - ISR
+// 안에서 직접 마운트 순회/레지스터 조작을 하지 않는다(이 프로젝트의
+// 기존 인터럽트 컨텍스트 규율과 동일 - `InterruptSubscription`이 ISR
+// 쪽 처리와 이 Task 레벨 처리를 이미 완전히 분리해 준다).
+void kPowerKernelMain(void* /*arg*/) {
+    auto* self = static_cast<KernelThread*>(Scheduler::currentTask());
+    SharedPtr<Task> selfShared = self->weakAsTask().lock();
+
+    if (!InterruptDelegation::allow(kAcpiSciVector)) {
+        for (;;) {
+            asm volatile("pause");
+        }
+    }
+
+    const Acpi::IsaIrqRouting route = Acpi::resolveIsaIrq(Acpi::sciInterruptGsi());
+    if (!IoApic::setRedirection(route.gsi, kAcpiSciVector, Lapic::id(), route.polarity, route.triggerMode)) {
+        for (;;) {
+            asm volatile("pause");
+        }
+    }
+
+    // PM1_EN은 PM1_EVT_BLK 뒤쪽 절반(길이 PM1_EVT_LEN/2)에 있다(ACPI
+    // 스펙 §4.8.3) - 기존 값을 보존한 채(read-modify-write) PWRBTN_EN
+    // 비트만 세팅해 다른 활성화된 이벤트(있다면)를 건드리지 않는다.
+    const uint16_t pm1aEnAddr = static_cast<uint16_t>(Acpi::pm1aEventBlock() + Acpi::pm1EventBlockLength() / 2);
+    arch::kOutW(pm1aEnAddr, static_cast<uint16_t>(arch::kInW(pm1aEnAddr) | kPm1PwrBtnBit));
+    if (Acpi::pm1bEventBlock() != 0) {
+        const uint16_t pm1bEnAddr = static_cast<uint16_t>(Acpi::pm1bEventBlock() + Acpi::pm1EventBlockLength() / 2);
+        arch::kOutW(pm1bEnAddr, static_cast<uint16_t>(arch::kInW(pm1bEnAddr) | kPm1PwrBtnBit));
+    }
+
+    if (!kSubscribePowerButtonInterrupt(selfShared, kAcpiSciVector)) {
+        for (;;) {
+            asm volatile("pause");
+        }
+    }
+
+    AsyncTaskSubjectCode waitSubjectCode = 0;
+    if (!SyscallRegistry::resolveSubjectCode(kSyscallEndpointWaitInterrupt, &waitSubjectCode)) {
+        for (;;) {
+            asm volatile("pause");
+        }
+    }
+
+    for (;;) {
+        if (!kWaitPowerButtonInterrupt(selfShared, waitSubjectCode, kAcpiSciVector)) {
+            break;  // 구독 자체가 깨짐(NotSubscribed 등) - 더 대기할 수 없음
+        }
+        // SCI는 여러 소스가 공유하는 레벨 트리거 신호라, 실제로
+        // 전원 버튼이 눌렸는지는 PM1_STS를 직접 봐야 안다(다른
+        // 이벤트로 SCI가 떴을 수도 있음 - 그 경우 아무 것도 안 하고
+        // 다음 WaitInterrupt로 돌아간다).
+        if (kCheckAndClearPowerButtonStatus(Acpi::pm1aEventBlock())) {
+            Power::shutdown();  // 성공하면 안 돌아옴 - 실패 시에만 루프 계속
+        }
+        if (kCheckAndClearPowerButtonStatus(Acpi::pm1bEventBlock())) {
+            Power::shutdown();
+        }
+    }
+
+    for (;;) {
+        asm volatile("pause");
+    }
 }
 
 }  // namespace kernel

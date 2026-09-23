@@ -58,6 +58,20 @@ public:
     static void registerSyscallEndpoints();
 };
 
+// [신규, 2026-09-23, SP-0C7A4F3B §1 항목5] ACPI 전원 버튼(SCI) - 이
+// 벡터 하나로 시스템 전체에 정확히 하나뿐인 SCI를 받는다(RM-28225668
+// "커널 내부 IPI/최적화 벡터" 범위를 그대로 재사용 - LAPIC IPI가
+// 아니라 IOAPIC이 라우팅하는 외부 인터럽트라는 점만 다르고, "이
+// 벡터는 커널 자신만 처리한다"는 성격은 동일해 같은 범위에 등록).
+constexpr uint32_t kAcpiSciVector = 0xE5;
+
+// devmgr/fs와 동일한 패턴의 Process 없는 순수 커널 KernelThread
+// entry(kmain.cpp가 hasFadt()+sciInterruptGsi()!=0+hasS5()일 때만
+// 스폰) - IOAPIC 리다이렉션+PM1_EN.PWRBTN_EN 세팅까지 이 함수 안에서
+// 직접 하고, 그 뒤 WaitInterrupt로 영원히 대기하다 PWRBTN_STS가
+// 서면 클리어 후 `Power::shutdown()`을 부른다(power.cpp 참고).
+void kPowerKernelMain(void* arg);
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_POWER_H
