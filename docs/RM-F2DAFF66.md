@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-23T13:00:35.555Z
+  updatedAt: 2026-09-23T14:08:27.110Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -610,6 +610,16 @@ QEMU 회귀 무회귀. **쓰기 시 재계산**은 exFAT 쓰기 경로 자체가
 
 ## §2. 점검 완료 - 갭 없음 확인
 
+- **[점검 완료, 2026-09-23] `SP-0C7A4F3B`(Power 서브시스템, approved
+  2026-09-23) §1 6개 항목 전수 대조 - 갭 없음(항목5는 §1-W에 이미
+  기록된 알려진 비활성화, 새 발견 아님)** - 항목1(`Fadt` 구조체,
+  acpi.cpp) 구현 확인, 항목2(`\_S5` 스캔, power.cpp
+  `kFindS5Package`류) 구현 확인, 항목3(`Power::shutdown()`/
+  `reboot()`) 구현 확인, 항목4(Shutdown/Reboot syscall)/항목6
+  (`onUnmount()` 훅)은 `PN-0B461E6F` 완료 기록으로 확인. **같은
+  시점 approved된 `DC-F367AD5D`는 별도 감사 대상이 아님** - 결정
+  요청 문서 자체(자기만의 "확정된 설계" 절이 없음)이고, 그 결정이
+  이미 `SP-0C7A4F3B`로 구체화돼 위에서 함께 점검됐다.
 - **[점검 완료, 2026-09-23] `SP-D02C4A73`(libswapfs, approved
   2026-09-22) §4 - 스왑 PTE 인코딩/폴트-인 경로 미구현은 "실제 갭"이
   아니라 이미 정직하게 문서화된 의도적 범위 결정** - §4.2(폴트-인
@@ -2165,8 +2175,15 @@ AI가 스스로 승인 처리할 수 없어 보류 - `SP-A21DD889`에서도 동�
 방법론으로 대조 완료(libvfat/libext4는 이번 세션 직접 구현 작업
 중 자연스럽게 대조됨, 나머지 3개는 이 §3 스윕으로 별도 확인) -
 발견 1건(libexfat 체크섬, 아래 §1-S)+블로커 갱신 1건(libswapfs,
-§2)+갭 없음 확인 2건(libext4/libntfs). 다음 approved 전환 시까지
-이 §3 스윕은 다시 건너뛴다(2026-09-21 절과 동일한 재소진 패턴).
+§2)+갭 없음 확인 2건(libext4/libntfs).
+
+**[2026-09-23, 추가 틱] 2026-09-23 승인분 2건 확인 완료** -
+`SP-0C7A4F3B`(Power 서브시스템)/`DC-F367AD5D`(그 결정 요청 원본)
+대조 완료 - 갭 없음(§2 참고, 항목5는 §1-W에 이미 기록된 알려진
+비활성화). `document_list(status=approved)` 전수 재확인 결과 이
+방법론을 아직 안 적용한 SP/DC가 더 이상 없음 - 다음 approved
+전환 시까지 이 §3 스윕은 다시 건너뛴다(2026-09-21/2026-09-22
+절과 동일한 재소진 패턴).
 
 **[2026-09-23] `SP-F1987EF8`(libexfat) 점검 완료 - 갭 발견/해소**
 (`PN-831A3998`, commit `863113f`) - §3.5가 "setChecksum은 읽기 시
