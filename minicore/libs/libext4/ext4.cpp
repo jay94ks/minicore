@@ -82,6 +82,60 @@ bool kJbd2ParseCommitHeader(const void* rawBlock, uint32_t blockLen, CommitHeade
     return true;
 }
 
+uint32_t kJbd2ParseDescriptorTags(const void* rawBlock, uint32_t blockLen, uint32_t featureIncompat,
+                                   DescriptorTag* outTags, uint32_t maxTags) {
+    if (blockLen < sizeof(JournalHeader) || maxTags == 0) {
+        return 0;
+    }
+    const uint8_t* base = static_cast<const uint8_t*>(rawBlock);
+    JournalHeader header;
+    memcpy(&header, base, sizeof(header));
+    const uint32_t magic = kJbd2Be32(header.magic);
+    const uint32_t blockType = kJbd2Be32(header.blockType);
+    if (magic != kJbd2Magic || blockType != kJbd2BlockTypeDescriptor) {
+        return 0;
+    }
+
+    const bool csumV3 = (featureIncompat & kJbd2FeatureIncompatCsumV3) != 0;
+    // CSUM_V2 단독/64BIT 단독처럼 실측 이미지가 없는 조합은 거부(위
+    // 헤더 주석 참고) - v1 취급은 관련 비트가 전부 꺼져 있을 때만.
+    if (!csumV3 && (featureIncompat & (kJbd2FeatureIncompat64Bit | kJbd2FeatureIncompatCsumV2)) != 0) {
+        return 0;
+    }
+    const uint32_t tagSize = csumV3 ? 16u : 8u;
+
+    uint32_t pos = sizeof(JournalHeader);
+    uint32_t count = 0;
+    while (pos + tagSize <= blockLen && count < maxTags) {
+        const uint8_t* tagPtr = base + pos;
+        uint32_t blockNrLow;
+        uint32_t flags;
+        uint32_t blockNrHigh = 0;
+        memcpy(&blockNrLow, tagPtr, 4);
+        memcpy(&flags, tagPtr + 4, 4);
+        blockNrLow = kJbd2Be32(blockNrLow);
+        flags = kJbd2Be32(flags);
+        if (csumV3) {
+            memcpy(&blockNrHigh, tagPtr + 8, 4);
+            blockNrHigh = kJbd2Be32(blockNrHigh);
+            // tagPtr+12의 4바이트 checksum(crc32c)은 아직 검증하지
+            // 않는다 - 순수 태그 목록 추출 범위 밖(리플레이 세션 몫).
+        }
+        outTags[count].blockNr = (static_cast<uint64_t>(blockNrHigh) << 32) | blockNrLow;
+        outTags[count].flags = flags;
+        ++count;
+
+        pos += tagSize;
+        if ((flags & kJbd2TagFlagSameUuid) == 0) {
+            pos += 16;  // UUID(16바이트)가 이 태그 뒤에 따라옴
+        }
+        if (flags & kJbd2TagFlagLastTag) {
+            break;
+        }
+    }
+    return count;
+}
+
 // blockOffset/blockCount는 ext4 자신의 블록 단위(blockSize_) - 장치의
 // LBA(device_->blockSize() 단위)로 변환해 읽는다. libswapfs의
 // slot->LBA 변환과 같은 관용구.

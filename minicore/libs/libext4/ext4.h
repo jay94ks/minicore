@@ -372,12 +372,50 @@ static_assert(sizeof(RevokeHeader) == 16, "RevokeHeader 레이아웃이 리눅�
 #pragma pack(pop)
 
 // 커밋 블록 하나를 파싱 - kJbd2ParseSuperblock과 동일한 관례(매직/
-// 블록타입 확인 후 호스트 엔디안으로 변환). 디스크립터 블록의 가변
-// 길이 태그(v1/v2/v3, 체크섬 유무로 태그 크기가 8/12/16바이트로
-// 갈림 - 아직 v1 태그만 실측했음, PN-BC3A2F5F 본문 참고) 파싱은
-// 이번 준비 작업에 포함하지 않았다 - 실제 리플레이 세션이 이어받을
-// 몫.
+// 블록타입 확인 후 호스트 엔디안으로 변환).
 bool kJbd2ParseCommitHeader(const void* rawBlock, uint32_t blockLen, CommitHeader* out);
+
+// [추가, 2026-09-23, PN-BC3A2F5F 준비 작업 3단계] 디스크립터 블록의
+// 가변 길이 태그 - v1(8바이트, blocknr+flags)과 CSUM_V3(16바이트,
+// blocknr+flags+blocknrHigh+checksum) 둘 다 실측 확인 완료. 같은
+// mke2fs 기본 옵션이라도 e2fsprogs 버전/환경에 따라 저널
+// featureIncompat가 다르게 나온다는 걸 이번에 직접 확인했다 - 이전
+// 준비 작업(2단계)이 "journal features: (none)"이라고 적어 둔 환경과
+// 달리, 이번 세션의 WSL e2fsprogs는 기본으로 journal_64bit+
+// journal_checksum_v3(featureIncompat=0x12)를 켠다. 그래서 두 이미지를
+// 각각 만들어(`mke2fs` 기본값 vs `-O ^64bit,^metadata_csum`) 양쪽 다
+// 실제 파일 쓰기+sync로 진짜 트랜잭션을 만들고 디스크립터 블록을
+// 직접 스캔 - 태그 개수/블록 번호(슈퍼블록=0, GDT=1 등 실제 메타데이터
+// 블록과 일치)/LAST_TAG 종료 위치까지 두 포맷 모두 확인됨.
+constexpr uint32_t kJbd2FeatureIncompat64Bit = 0x00000002;
+constexpr uint32_t kJbd2FeatureIncompatCsumV2 = 0x00000008;
+constexpr uint32_t kJbd2FeatureIncompatCsumV3 = 0x00000010;
+
+constexpr uint32_t kJbd2TagFlagEscape = 1;    // 이 블록의 실제 첫 4바이트가 우연히 jbd2 매직과 같아 0으로 치환됐었다는 표시(리플레이 시 원복 필요)
+constexpr uint32_t kJbd2TagFlagSameUuid = 2;  // 세팅되면 이 태그 뒤에 16바이트 UUID가 없음(직전 UUID 재사용)
+constexpr uint32_t kJbd2TagFlagDeleted = 4;
+constexpr uint32_t kJbd2TagFlagLastTag = 8;   // 이 태그가 디스크립터 블록의 마지막 태그
+
+// 정규화된 태그 하나 - v1(8바이트)/v3(16바이트) 두 온디스크 포맷
+// 중 무엇으로 읽었는지와 무관하게 호출자에게는 이 형태로 준다.
+struct DescriptorTag {
+    uint64_t blockNr;  // 대상 파일시스템 블록 번호(v1은 항상 32비트 범위, v3는 blocknrHigh 결합)
+    uint32_t flags;    // kJbd2TagFlag* 비트마스크(호스트 엔디안)
+};
+
+// 디스크립터 블록(JournalHeader로 시작, blockType==
+// kJbd2BlockTypeDescriptor) 하나를 훑어 태그를 outTags[0..반환값)에
+// 채운다. featureIncompat은 그 저널의 JournalSuperblockV2::
+// featureIncompat을 그대로 넘긴다 - CSUM_V3 비트가 켜져 있으면
+// 16바이트 태그, 아무 관련 비트도 없으면 8바이트 v1 태그로 해석한다
+// (SAME_UUID가 없는 태그 뒤엔 16바이트 UUID가 따라오므로 함께
+// 건너뜀). **CSUM_V2 단독 또는 64BIT 단독처럼 실제 이미지로 실측하지
+// 못한 조합은 추측하지 않고 0(실패)을 반환**한다(정직한 실패 -
+// RM-23F4B687 §4 취지). LAST_TAG를 만나거나 outTags 용량(maxTags)이
+// 차거나 블록 끝에 닿으면 멈춘다. 순수 함수 - 어떤 I/O도, 파일시스템
+// 상태 변경도 하지 않는다(태그 목록만 뽑아낼 뿐 리플레이가 아니다).
+uint32_t kJbd2ParseDescriptorTags(const void* rawBlock, uint32_t blockLen, uint32_t featureIncompat,
+                                   DescriptorTag* outTags, uint32_t maxTags);
 
 }  // namespace ext4
 
