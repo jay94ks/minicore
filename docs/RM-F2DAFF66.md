@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-23T00:14:59.140Z
+  updatedAt: 2026-09-23T01:12:19.157Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -57,6 +57,34 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
    "문서만 정정"으로 기록.
 
 ## §1. 확정된 발견 (완료)
+
+### 1-U. `PN-CF030FC3`(Mkdir/Unlink syscall) - Rmdir syscall 배선을 빠뜨림 (코드 갭, 완전 해소, commit 1467b93)
+
+- **출처**: `KernelFsOpCode`(mount_table.h)는 처음부터 9개 op
+  (Open/Close/Read/Write/Stat/Mkdir/Rmdir/Unlink/Readdir)를 정의해
+  뒀고, `PN-CF030FC3`(제목 "Mkdir/Unlink syscall 구현")가 그 중
+  Mkdir/Unlink만 실제 syscall 번호(그룹3 call 12/13)+핸들러로
+  노출했다.
+- **실제**: Rmdir은 `vfs_syscall.h`/`vfs_syscall.cpp` 어디에도
+  syscall 번호/핸들러가 없었다 - `PN-CF030FC3` 계획 본문 자체가
+  제목/범위 어디에도 Rmdir을 언급하지 않아, 의도적 제외가 아니라
+  순수 누락으로 보인다(Readdir처럼 "범위 밖"으로 명시적으로 적어 둔
+  것과 다름).
+- **왜 지금까지 관찰 가능한 버그가 아니었나**: `Fat32Driver`/
+  `Ext4Driver` 모두 `Rmdir` 케이스를 그동안 `PermissionDenied` 스텁
+  으로만 뒀었고(1차 증분들이 전부 읽기 전용), livefs도 항상
+  `PermissionDenied`라 syscall 자체가 없어도 "아무도 실제로 부를
+  일이 없는" 상태였다 - `PN-9D6FE4B6`가 `Fat32Driver::Rmdir`을 처음
+  실구현하면서 "그런데 이걸 부를 syscall이 아예 없다"는 게 드러났다.
+- **고침**: `RM-48E1E610` 그룹3 call 14로 예약, `RmdirArgs`/
+  `kSyscallEndpointRmdir`(vfs_syscall.h) + `RmdirHandler`
+  (vfs_syscall.cpp, `UnlinkHandler`와 완전히 동일한 골격) 추가 후
+  `registerSyscallEndpoints()`에 등록.
+- **검증**: 표준 4시나리오 QEMU 회귀 무회귀(구조가 이미 검증된
+  Mkdir/Unlink 핸들러의 기계적 복제라 별도 실측 없이 컴파일+회귀로
+  충분하다고 판단 - `Fat32Driver::Rmdir` 자체의 로직 검증은
+  `PN-9D6FE4B6`에서 실제 mkfs.vfat 이미지로 이미 마쳤음).
+- **참고**: `PN-9D6FE4B6`(libvfat 쓰기 경로) - 이 발견의 계기.
 
 ### 1-T. `SP-D02C4A73`(libswapfs) §2 - "swap도 SP-7CC5693A §5 5단계 우선순위 판별을 그대로 적용받는다, 새 DC 불필요"가 코드에 반영 안 돼 있었음 (코드 갭, 완전 해소, commit 5a3edeb)
 
