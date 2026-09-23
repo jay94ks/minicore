@@ -75,6 +75,11 @@ constexpr uint32_t kSuperblockOffset = 1024;
 constexpr uint16_t kMagic = 0xEF53;
 constexpr uint32_t kStateValidFs = 0x1;
 
+// s_checksum 필드의 슈퍼블록 시작 기준 바이트 오프셋(1024바이트
+// 슈퍼블록 자체의 마지막 4바이트) - `kExt4ComputeSuperblockChecksum()`
+// 선언부 참고.
+constexpr uint32_t kSuperblockChecksumOffset = 0x3FC;
+
 constexpr uint32_t kIncompatFiletype = 0x2;
 constexpr uint32_t kIncompatExtents = 0x40;
 constexpr uint32_t kIncompatFlexBg = 0x200;
@@ -210,6 +215,20 @@ static_assert(sizeof(InodeCore) == 132, "InodeCore 레이아웃이 리눅스 소
 // 그 필드 자체가 온디스크에 없으므로 호출자가 무시할 것).
 uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
                                     const void* rawInode, uint32_t inodeSize);
+
+// 슈퍼블록 자신의 체크섬(s_checksum, RO_COMPAT_METADATA_CSUM 방식)
+// 계산 - `SuperblockCore`가 파싱하는 204바이트가 아니라 **실제 온디스크
+// 슈퍼블록 전체 1024바이트**(오프셋 `kSuperblockOffset`부터)가 필요
+// 하다. [PN-625E2804 실측 확인] 그룹 디스크립터/비트맵/inode 세
+// 체크섬과 또 다른(네 번째) 규칙 - uuid를 별도 seed로 쓰지 않고
+// `seed=0xFFFFFFFF`에서 슈퍼블록 원본 바이트를 그대로 이어붙인다
+// (그 안에 담긴 uuid 필드까지 자연히 함께 해시됨). 체크섬 필드
+// (`kSuperblockChecksumOffset`~1024)가 곧 슈퍼블록의 끝이라 잘라서
+// 넘기는 것만으로 자연히 제외되므로, 그룹 디스크립터/inode 체크섬과
+// 달리 그 필드를 별도로 0으로 채워 이어붙이는 단계가 없다. 반환값은
+// 16비트 절반이 아니라 32비트 값 그대로가 s_checksum(실제 mkfs.ext4
+// 이미지 2개, 서로 다른 크기/볼륨 라벨로 대조 확인).
+uint32_t kExt4ComputeSuperblockChecksum(const void* rawSuperblock1024Bytes);
 
 constexpr uint32_t kExtentsFl = 0x80000;
 constexpr uint16_t kExtentMagic = 0xF30A;

@@ -116,6 +116,17 @@ uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, ui
     return crc;
 }
 
+uint32_t kExt4ComputeSuperblockChecksum(const void* rawSuperblock1024Bytes) {
+    // 실제 mkfs.ext4 이미지 2개(서로 다른 크기 8MB/64MB, 볼륨 라벨
+    // 유무도 다름)의 s_checksum과 대조해 확인(PN-625E2804) - 그룹
+    // 디스크립터/비트맵/inode 세 체크섬과 달리 uuid를 별도 seed로
+    // 쓰지 않고 seed=0xFFFFFFFF에서 슈퍼블록 원본 바이트를 그대로
+    // 이어붙인다. 체크섬 필드 자체가 슈퍼블록의 맨 끝(오프셋
+    // kSuperblockChecksumOffset~1024)이라 잘라서 넘기는 것만으로
+    // 자연히 제외되므로 별도로 0을 채워 이어붙이는 단계가 없다.
+    return kCrc32c(0xFFFFFFFFu, rawSuperblock1024Bytes, kSuperblockChecksumOffset);
+}
+
 bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out) {
     if (blockLen < sizeof(JournalSuperblockV2)) {
         return false;
