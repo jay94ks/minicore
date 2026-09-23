@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-23T07:55:35.832Z
+  updatedAt: 2026-09-23T11:16:11.935Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -57,6 +57,53 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
    "문서만 정정"으로 기록.
 
 ## §1. 확정된 발견 (완료)
+
+### 1-W. `SP-0C7A4F3B`(Power 서브시스템) §1 항목5 - "ACPI 전원 버튼(SCI) 트리거"가 확정된 설계이나 실제 부팅 경로에서는 비활성 (코드 갭 아님 - 알려진 비활성화, 완전 추적됨)
+
+`SP-0C7A4F3B`가 approved로 전환된 뒤(2026-09-23) 처음 이 방법론을
+적용해 §1(범위) 6개 항목을 실제 코드와 대조했다:
+
+1. FADT 확장 파싱 - `Acpi` 클래스에 구현됨, §2가 명시한 실측값
+   (`sci=9 smi_cmd=0xb2 pm1a_evt_blk=0x600 ...`)까지 코드와 정확히
+   일치. **갭 없음.**
+2. 최소 `\_S5` DSDT 스캔 - `power.cpp`의 `kFindS5SleepType()`으로
+   구현됨, §3 알고리즘(PkgLength/ComputationalData 인코딩)과 일치.
+   **갭 없음.**
+3. `Power` 클래스 `shutdown()`/`reboot()` - 구현됨, §1 항목3이 서술한
+   SMI_CMD→ACPI_ENABLE→PM1 제어 레지스터 순서 및 8042 폴백 그대로.
+   **갭 없음.**
+4. 새 syscall 2종(Shutdown/Reboot, 그룹10) - `PowerService::
+   registerSyscallEndpoints()`로 구현됨, `RM-48E1E610`에도 반영됨.
+   **갭 없음.**
+5. **ACPI 전원 버튼(SCI) 트리거** - `kPowerKernelMain`/
+   `kSubscribePowerButtonInterrupt` 등 구현 자체는 전부 존재하고
+   SMP1에서 실제 `system_powerdown` 모니터 명령으로 E2E 검증까지
+   끝났으나, **GRUB SMP4에서 매우 높은 빈도로 재현되는 PANIC**이
+   발견돼 `kmain.cpp`의 스폰 호출 한 줄이 현재 주석 처리돼 있다 -
+   즉 이 approved 설계 항목이 **지금 부팅 경로에서는 비활성**이다.
+   `Task::numaNode` 사례와 표면적으로 같은 모양(확정된 설계가 실행
+   경로에 안 살아있음)이지만, 이번엔 **미착수로 조용히 빠진 게
+   아니라 의도적으로 비활성화하고 그 사실 자체를 코드 주석
+   (kmain.cpp)+계획(`PN-0B461E6F`)에 상세히 기록해 둔 경우**라 새
+   PN을 또 등록하지 않는다 - 기존 `PN-0B461E6F`가 이미 이 갭을
+   정확히 추적 중이므로 여기서는 상호 링크만 남긴다.
+6. `FileSystemDriver::onUnmount()` + 마운트 전체 순회 - 구현됨(다만
+   함수명이 설계 문서의 `MountTable::unmountAll()`이 아니라
+   `MountTable::unmountAllForShutdown()`으로 지어졌다 - 기능은
+   `Power::shutdown()`/`reboot()` 양쪽 모두 레지스터 조작 직전에
+   호출하는 것으로 코드 확인, 완전히 일치. 이름 차이는 순수 표기
+   문제라 별도 갭으로 등록하지 않음). **갭 없음(기능 기준).**
+
+**결론**: 항목5 하나만 "확정된 설계가 실행 경로에 없음" 상태 -
+이미 `PN-0B461E6F`가 원인 조사 중이므로 추가 조치 불필요, 이
+문서에는 감사 결과만 기록. 부수적으로 `kmain.cpp`의 관련 주석이
+"100% 재현"이라는 이제는 정정된 서술을 그대로 갖고 있던 것도 발견해
+같은 틱에서 갱신(commit fd93b252, §5 규칙 - 문서 walk-back 시 근거
+소스 주석도 함께 갱신).
+
+## 참고
+- `SP-0C7A4F3B` - 이번에 대조한 설계 문서.
+- `PN-0B461E6F` - 항목5 비활성화 상태를 이미 추적 중인 계획.
 
 ### 1-V. `SP-2AAD7C8D` §9.3 - `OpenFlags` enum이 확정만 되고 실제 코드엔 정의조차 없었음 (코드 갭, 완전 해소, commit 75b511c)
 
