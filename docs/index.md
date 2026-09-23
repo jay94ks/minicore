@@ -47,8 +47,8 @@
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-21T14:44:26.180Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-20T02:36:52.596Z |
-| [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-17T00:15:27.234Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-23T09:06:41.325Z |
+| [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-23T09:56:09.008Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-23T10:16:32.297Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-23T09:06:59.493Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-22T09:35:12.639Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
