@@ -331,6 +331,54 @@ constexpr uint32_t kJbd2BlockTypeRevoke = 5;
 // 순수 함수, 어떤 I/O도 하지 않는다.
 bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out);
 
+// [추가, 2026-09-23, PN-BC3A2F5F 준비 작업 2단계] 커밋 블록(고정
+// 60바이트) - 실제 파일 하나를 쓰고 sync한 뒤 언마운트해 만든 진짜
+// 저널 트랜잭션(디스크립터+커밋 블록 쌍)으로 오프셋까지 실측 확인
+// (`h_commit_sec`가 dd 실행 당시 실제 날짜의 유닉스 타임스탬프로,
+// `h_commit_nsec`가 10억 미만의 유효한 나노초 값으로 정확히 나옴).
+// `h_chksum_type`/`h_chksum_size`가 0이어도(이 이미지는 저널
+// 체크섬 기능 자체가 꺼져 있음, `journal features: (none)`)
+// `h_chksum[0]`엔 여전히 값이 들어 있었다 - jbd2가 기능 비트와
+// 무관하게 항상 레거시 crc32 하나는 써 둔다는 뜻으로 보이나, 이
+// 필드의 정확한 의미/검증 방법은 착수 세션이 실제 리플레이 시
+// 재확인할 것(현재는 불투명 배열로만 다룬다).
+#pragma pack(push, 1)
+struct CommitHeader {
+    JournalHeader header;    // 0
+    uint8_t chksumType;      // 12
+    uint8_t chksumSize;      // 13
+    uint8_t padding[2];      // 14
+    uint32_t chksum[8];      // 16 - 불투명(위 주석 참고), 32바이트
+    uint64_t commitSec;      // 48
+    uint32_t commitNsec;     // 56
+};
+static_assert(sizeof(CommitHeader) == 60, "CommitHeader 레이아웃이 리눅스 소스와 어긋남");
+#pragma pack(pop)
+
+// [추가, 2026-09-23, PN-BC3A2F5F 준비 작업 2단계] 리보크 블록 헤더
+// (JournalHeader + r_count) - **아직 실제 리보크 블록으로 실측
+// 확인하지 못했다**(리보크는 같은 저널 에폭 안에서 최근 쓰인
+// 블록을 재사용/삭제할 때만 생기는데, 이번 검증 시나리오(파일 1개
+// 생성+sync)는 그 조건을 만들지 않았음) - JournalHeader 자체는
+// 슈퍼블록/디스크립터/커밋 세 곳에서 이미 실측 검증됐으므로 오프셋
+// 신뢰도는 높지만, 착수 세션이 실제 리보크 블록으로 한 번 더
+// 재확인할 것.
+#pragma pack(push, 1)
+struct RevokeHeader {
+    JournalHeader header;  // 0
+    uint32_t count;        // 12 - 이 블록에서 실제 쓰인 바이트 수(헤더 포함)
+};
+static_assert(sizeof(RevokeHeader) == 16, "RevokeHeader 레이아웃이 리눅스 소스와 어긋남");
+#pragma pack(pop)
+
+// 커밋 블록 하나를 파싱 - kJbd2ParseSuperblock과 동일한 관례(매직/
+// 블록타입 확인 후 호스트 엔디안으로 변환). 디스크립터 블록의 가변
+// 길이 태그(v1/v2/v3, 체크섬 유무로 태그 크기가 8/12/16바이트로
+// 갈림 - 아직 v1 태그만 실측했음, PN-BC3A2F5F 본문 참고) 파싱은
+// 이번 준비 작업에 포함하지 않았다 - 실제 리플레이 세션이 이어받을
+// 몫.
+bool kJbd2ParseCommitHeader(const void* rawBlock, uint32_t blockLen, CommitHeader* out);
+
 }  // namespace ext4
 
 #endif  // MINICORE_LIBEXT4_EXT4_H

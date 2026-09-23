@@ -51,6 +51,37 @@ bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperb
     return true;
 }
 
+bool kJbd2ParseCommitHeader(const void* rawBlock, uint32_t blockLen, CommitHeader* out) {
+    if (blockLen < sizeof(CommitHeader)) {
+        return false;
+    }
+    CommitHeader raw;
+    memcpy(&raw, rawBlock, sizeof(raw));
+
+    const uint32_t magic = kJbd2Be32(raw.header.magic);
+    const uint32_t blockType = kJbd2Be32(raw.header.blockType);
+    if (magic != kJbd2Magic || blockType != kJbd2BlockTypeCommit) {
+        return false;
+    }
+
+    out->header.magic = magic;
+    out->header.blockType = blockType;
+    out->header.sequence = kJbd2Be32(raw.header.sequence);
+    out->chksumType = raw.chksumType;
+    out->chksumSize = raw.chksumSize;
+    for (uint32_t i = 0; i < 8; ++i) {
+        out->chksum[i] = kJbd2Be32(raw.chksum[i]);
+    }
+    // h_commit_sec는 __be64지만 raw 필드 자체를 64비트 통째로 바이트
+    // 스왑하는 헬퍼가 없다 - 32비트씩 스왑 후 상위/하위를 맞바꿔
+    // 합성한다(x86_64 리틀엔디안 전제 그대로).
+    const uint32_t secHi = kJbd2Be32(static_cast<uint32_t>(raw.commitSec & 0xFFFFFFFFu));
+    const uint32_t secLo = kJbd2Be32(static_cast<uint32_t>(raw.commitSec >> 32));
+    out->commitSec = (static_cast<uint64_t>(secHi) << 32) | secLo;
+    out->commitNsec = kJbd2Be32(raw.commitNsec);
+    return true;
+}
+
 // blockOffset/blockCount는 ext4 자신의 블록 단위(blockSize_) - 장치의
 // LBA(device_->blockSize() 단위)로 변환해 읽는다. libswapfs의
 // slot->LBA 변환과 같은 관용구.
