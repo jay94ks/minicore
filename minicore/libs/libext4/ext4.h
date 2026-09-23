@@ -64,11 +64,25 @@ struct SuperblockCore {
     char     volumeName[16];
     char     lastMounted[64];
     uint32_t algorithmUsageBitmap;
-    // 이후 저널/64bit/checksum 등 확장 필드는 총 1024바이트 중 나머지 -
-    // v1이 안 읽는 필드라 이 struct에 옮기지 않는다(실제 읽기는 항상
-    // 1024바이트를 통째로 읽어 이 struct 크기만큼만 해석하는 방식).
+    // [추가, PN-59C253E9] 오프셋 204~336(132바이트) - preallocBlocks/
+    // preallocDirBlocks/reservedGdtBlocks/journalUuid/journalInum/
+    // journalDev/lastOrphan/hashSeed/defHashVersion/jnlBackupType/
+    // descSize/defaultMountOpts/firstMetaBg/mkfsTime/jnlBlocks[17] -
+    // v1이 개별 필드로 안 읽으므로(GroupDesc32의 옛 reserved 묶음과
+    // 같은 관례) 이름 없는 바이트 배열로 통째로 건너뛴다. 아래
+    // *Hi 3종 필드의 정확한 오프셋(336/340/344)만 실제 mke2fs -O
+    // 64bit,metadata_csum 이미지로 대조 확정(PN-59C253E9) - journalInum
+    // (오프셋224, 실제 저널 inode 번호 8과 일치)/descSize(오프셋254,
+    // 실제 64와 일치)/mkfsTime(오프셋264, 실제 생성 시각과 초 단위까지
+    // 일치)/checksumType/kbytesWritten 등 여러 앵커 필드로 이 132바이트
+    // 갭의 시작/끝 오프셋 자체도 함께 실측 검증했다.
+    uint8_t reservedJournalAndHashFields[132];
+    uint32_t blocksCountHi;      // 336 - INCOMPAT_64BIT일 때만 유효
+    uint32_t rBlocksCountHi;     // 340
+    uint32_t freeBlocksCountHi;  // 344
+    // 이후(348~) 여전히 v1이 안 읽는 필드 - 위와 같은 절단 관례.
 };
-static_assert(sizeof(SuperblockCore) == 204, "SuperblockCore 레이아웃이 리눅스 소스와 어긋남");
+static_assert(sizeof(SuperblockCore) == 348, "SuperblockCore 레이아웃이 리눅스 소스와 어긋남");
 #pragma pack(pop)
 
 constexpr uint32_t kSuperblockOffset = 1024;
@@ -277,8 +291,9 @@ uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, ui
                                     const void* rawInode, uint32_t inodeSize);
 
 // 슈퍼블록 자신의 체크섬(s_checksum, RO_COMPAT_METADATA_CSUM 방식)
-// 계산 - `SuperblockCore`가 파싱하는 204바이트가 아니라 **실제 온디스크
-// 슈퍼블록 전체 1024바이트**(오프셋 `kSuperblockOffset`부터)가 필요
+// 계산 - `SuperblockCore`가 파싱하는 범위(현재 348바이트)가 아니라
+// **실제 온디스크 슈퍼블록 전체 1024바이트**(오프셋 `kSuperblockOffset`
+// 부터)가 필요
 // 하다. [PN-625E2804 실측 확인] 그룹 디스크립터/비트맵/inode 세
 // 체크섬과 또 다른(네 번째) 규칙 - uuid를 별도 seed로 쓰지 않고
 // `seed=0xFFFFFFFF`에서 슈퍼블록 원본 바이트를 그대로 이어붙인다
