@@ -686,6 +686,18 @@ bool Fat32Driver::remount(bool writable) {
     return true;
 }
 
+void Fat32Driver::onUnmount() {
+    // 읽기 전용으로 마운트된 채였다면 mount()/remount() 어느 쪽도
+    // dirty로 표시한 적이 없다 - 여기서 clean으로 되돌릴 것도 없다
+    // (애초에 볼륨을 변경할 수 없는 매체일 수도 있으므로 굳이 써서
+    // 실패할 위험을 만들지 않는다).
+    if (!mounted_ || readOnly_) {
+        return;
+    }
+    kSetFat32CleanShutdownBit(volume_.device(), volume_.bytesPerSectorValue(), volume_.fatStartSectorValue(),
+                               volume_.numFatsValue(), volume_.fatSize32Value(), /*clean=*/true);
+}
+
 kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
     const auto op = *static_cast<const kernel::KernelFsOpCode*>(argsRaw);
     fs::BlockDevice* device = volume_.device();

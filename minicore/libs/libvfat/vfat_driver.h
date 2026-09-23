@@ -62,6 +62,12 @@ class Fat32Driver : public kernel::FileSystemDriver {
 public:
     bool mount(fs::BlockDevice* device, bool readOnly) override;
     bool remount(bool writable) override;
+    // [신규, 2026-09-23, PN-547EF839, SP-0C7A4F3B의 onUnmount() 훅
+    // 첫 실사용처] Shutdown/Reboot(또는 전원 버튼 이벤트) 직전에
+    // `MountTable::unmountAllForShutdown()`이 호출 - mount()/remount()
+    // 가 dirty로 표시했던 것의 반대로, clean-shutdown 비트를 다시
+    // 세운다(§3.4 문서 주석과 동일한 근거로 동기 I/O 안전).
+    void onUnmount() override;
 
     kernel::AsyncExecCoro onExec(kernel::AsyncTask* task, void* argsRaw) override;
     void onFailure(kernel::AsyncTask*) override {}
