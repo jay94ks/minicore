@@ -62,6 +62,7 @@ enum class ChannelError : uint32_t {
     Interrupted,           // [신규, PN-B5C2845A] 대기 도중 호출자 자신이 Kill/Terminate 대상이 돼 강제로 실패 완료됨(QU-8E137FFD 답변 - "얘들을 실패시키면 되잖아")
     NotEmpty,              // [신규, PN-4190BBD3, SP-6A563A8F §5-A] ResourceGroupDestroy - 자식/멤버가 남아있는 그룹은 삭제 거부(Linux cgroup과 동일한 "비어있음 강제")
     NotOwner,              // [신규, PN-E82744B1, SP-0666DB3C §17.4] MutexUnlock - 호출자가 그 Mutex의 마지막 lock 성공자(UserMutex::owner)가 아님(락 상태는 그대로 유지)
+    ServiceUnavailable,    // [신규, PN-B6DB692C, SP-30FCC8AE §1-D] authmgr read-through 캐시 미스 - authmgr 응답을 기다리지 않고 즉시 실패 반환("죽었으면 캐시된 범위 내에서만 허가, 나머지는 서비스 불가, 잠시후 재시도" 설계자 확정 정책과 동일한 의미)
 };
 
 // 링버퍼 크기 정책(설계 문서 "링버퍼 크기 정책") - 호출부는 정확한

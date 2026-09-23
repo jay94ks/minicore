@@ -38,6 +38,7 @@ add_library(minicore_kernel OBJECT
     mount_table.cpp
     vfs_syscall.cpp
     process.cpp
+    user_record.cpp
     debug_session.cpp
     address_space.cpp
     tlb_shootdown.cpp

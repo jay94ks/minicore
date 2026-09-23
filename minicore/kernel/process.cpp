@@ -11,6 +11,7 @@
 #include "resource_group.h"
 #include "scheduler.h"
 #include "syscall.h"
+#include "user_record.h"
 #include "waitable.h"
 
 namespace {
@@ -1745,6 +1746,31 @@ public:
 
 DetachHandler gDetachHandler;
 
+// [신규, 2026-09-23, SP-30FCC8AE §1-A, PN-B6DB692C] `Setuid` 본체 -
+// DetachHandler와 동일한 논블로킹 패턴(이번 증분은 캐시만 보고
+// authmgr 비동기 질의를 안 하므로 co_await 없이 즉시 끝남).
+class SetuidHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<SetuidArgs*>(argsRaw);
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!proc) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        args->error = kSetuid(*proc, args->targetUid);
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+SetuidHandler gSetuidHandler;
+
 // [신규, 2026-09-18, SP-30FCC8AE §3/§4, PN-88E62419] Kill의 권한
 // 판정 - §3이 확정한 순서 그대로: (1) 커널/KernelService는 role 자체가
 // 이미 무제한이라 uid 판정을 아예 건너뛴다(uid/gid와 통합 안 함,
@@ -2125,6 +2151,7 @@ void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointCreateThread, &gCreateThreadHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointJoin, &gJoinHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDetach, &gDetachHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointSetuid, &gSetuidHandler);
 }
 
 }  // namespace kernel

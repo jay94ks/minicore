@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_PROCESS_H
 
 #include "address_space.h"
+#include "channel.h"  // ChannelError - kSetuid() 반환 타입(user_record.h)용
 #include "debug_session.h"
 #include "libkenv/permission.h"
 #include "libkenv/shared_ptr.h"
@@ -422,8 +423,12 @@ public:
 
     // [신규, 2026-09-18, SP-30FCC8AE §1/§2, PN-617F4E52, PN-88E62419]
     // 사용자/권한 신원 - SpawnProcess/fork() 시 부모로부터 그대로
-    // 상속되며(process.cpp), kSetuid() 승격 경로는 아직 없다(§1-A,
-    // PN-B6DB692C 후속). 최초 프로세스(init)는 상속받을 부모가 없어
+    // 상속되며(process.cpp). **[갱신, 2026-09-23, PN-B6DB692C]**
+    // `kSetuid()`(user_record.h, Setuid syscall - 아래
+    // `kSyscallEndpointSetuid`)로 uid만 전환 가능(gid는 이 경로가
+    // 건드리지 않음, POSIX 관례) - root는 임의 uid로, 그 외에는
+    // authmgr read-through 캐시에 있는 자신의 하위 uid로만. 최초
+    // 프로세스(init)는 상속받을 부모가 없어
     // root(0)로 시작한다(kSpawnInitProcess가 init() 직후 값을 바꾸지
     // 않음 - 아래 기본값 자체가 root). Resurrect(§6.2)가 같은 정적
     // Process를 재사용할 수 있으므로 init()에서 매번 root로 리셋한다
@@ -438,7 +443,8 @@ public:
     // §4) owner-write 비트만 세운 값으로 시작한다 - "같은 uid의
     // 프로세스는 서로 신호를 보낼 수 있고, 그 외에는(root/커널/조상
     // 예외가 아니면) 못 보낸다"는 흔한 Unix 기본값과 같은 모양이다.
-    // 이 값을 바꾸는 syscall은 아직 없다(kSetuid와 마찬가지로 후속).
+    // 이 값을 바꾸는 syscall은 아직 없다(후속 대상 - kSetuid는
+    // 2026-09-23에 구현됐지만 이 필드와는 무관).
     Permission signalPermission = kPermOwnerWrite;
 
     // [신규, 2026-09-19, SP-30FCC8AE §4류, PN-85FA4992] "누가 이
@@ -787,6 +793,20 @@ struct DetachArgs {
     ThreadId targetThread = kInvalidThreadId;
     // out
     DetachError error = DetachError::None;
+};
+
+// [신규, 2026-09-23, SP-30FCC8AE §1-A, PN-B6DB692C] `Setuid`
+// (RM-48E1E610 그룹0 #11) - user_record.h의 `kSetuid()`를 그대로
+// 감싼 논블로킹 syscall(이번 증분은 authmgr 비동기 질의를 아직
+// 배선하지 않아 캐시만 보므로 co_await 없이 즉시 끝난다 - 다음
+// 증분이 캐시 미스 경로를 authmgr Channel IPC로 확장하면 그때
+// 블로킹으로 바뀔 수 있다).
+constexpr SyscallEndpointId kSyscallEndpointSetuid = kMakeSyscallEndpointId(0, 11);
+
+struct SetuidArgs {
+    Uid targetUid = kRootUid;
+    // out
+    ChannelError error = ChannelError::None;
 };
 
 // [신규, 2026-09-18, PN-44C91D6E, SP-6BEAE0C1] `fork()` - 이 syscall만

@@ -41,6 +41,7 @@
 #include "task.h"
 #include "timer.h"
 #include "tlb_shootdown.h"
+#include "user_record.h"
 #include "user_sync.h"
 #include "vfs_syscall.h"
 
@@ -686,6 +687,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 자체를 한 곳에만 둔다).
     kernel::Channel::registerSyscallEndpoints();
     kernel::Logger::info("minicore: channel IPC syscall endpoints registered");
+
+    // SP-30FCC8AE §1-A/PN-B6DB692C - root 엔트리를 캐시에 심어 둬야
+    // 그 직후 등록되는 Setuid syscall(Process 그룹)이 항상 root
+    // 판정을 성립시킬 수 있다.
+    kernel::UserRecordCache::init();
+    kernel::Logger::info("minicore: user record cache initialized (root entry)");
 
     // SP-6BEAE0C1/PN-543C0CE9 - 위 Channel 등록과 같은 이유(BSP에서
     // 한 번만).
