@@ -195,6 +195,22 @@ struct InodeCore {
 static_assert(sizeof(InodeCore) == 132, "InodeCore 레이아웃이 리눅스 소스와 어긋남");
 #pragma pack(pop)
 
+// ext4 inode 체크섬(i_checksum_lo/i_checksum_hi, RO_COMPAT_METADATA_CSUM
+// 방식) 계산 - `InodeCore`가 파싱하는 132바이트가 아니라 **실제 온디스크
+// inode 레코드 전체**(inodeSize바이트, `SuperblockCore::inodeSize` -
+// 보통 256, 128을 넘는 crtime 등 v1이 안 읽는 확장 필드까지 해시 범위에
+// 포함되기 때문)가 필요하다. rawInode는 그 inodeSize바이트를 그대로
+// 가리키는 포인터, generation은 그 inode의 `InodeCore::generation`과
+// 같은 값(오프셋 100). [PN-625E2804 실측 확인] 그룹 디스크립터/비트맵과
+// 또 다른 세 번째 이어붙임 규칙 - per-inode seed가 전역 uuid seed에
+// inode 번호(LE32)와 generation(LE32)을 순서대로 이어붙여 별도로
+// 만들어진다(실제 mkfs.ext4 이미지의 root inode(2번)+debugfs로 만든
+// 파일 inode 2개, 총 3개 inode 전부 실측 대조 완료). 반환값 하위
+// 16비트가 i_checksum_lo, 상위 16비트가 i_checksum_hi(inodeSize<=128이면
+// 그 필드 자체가 온디스크에 없으므로 호출자가 무시할 것).
+uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                    const void* rawInode, uint32_t inodeSize);
+
 constexpr uint32_t kExtentsFl = 0x80000;
 constexpr uint16_t kExtentMagic = 0xF30A;
 constexpr uint32_t kExtentUninitLenBit = 0x8000;  // ee_len 최상위 비트 - uninitialized 익스텐트

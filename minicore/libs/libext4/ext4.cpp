@@ -70,6 +70,52 @@ uint16_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapDa
     return static_cast<uint16_t>(crc & 0xFFFFu);
 }
 
+uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                    const void* rawInode, uint32_t inodeSize) {
+    // 실제 mkfs.ext4 -O metadata_csum 이미지의 root inode(2번, generation=0)
+    // + debugfs로 새로 쓴 파일 inode 2개(11/12번)까지 총 3개를 실측
+    // 대조해 확정한 순서(PN-625E2804) - 리눅스 커널
+    // ext4_inode_csum()/__ext4_iget()의 per-inode seed 계산과 동일:
+    // 1) 전역 uuid seed에 inode 번호(LE32)+generation(LE32) 순서로
+    //    이어붙여 이 inode 전용 seed를 만들고,
+    // 2) good-old 128바이트 영역을 i_checksum_lo 필드(오프셋 124) 앞/
+    //    뒤로 나눠 그 필드 자리는 0으로 간주해 이어붙이고,
+    // 3) inodeSize>128(확장 필드 존재)이면 128~130(extraIsize 필드
+    //    자체)을 이어붙인 뒤, extraIsize가 i_checksum_hi(오프셋 130)까지
+    //    실제로 덮는 경우에만 그 필드도 0으로 간주해 이어붙이고, 나머지
+    //    꼬리를 이어붙인다.
+    constexpr uint32_t kGoodOldInodeSize = 128;
+    constexpr uint32_t kChecksumLoOffset = 124;  // osd2[12](오프셋116)의 8~10바이트 - l_i_checksum_lo
+    constexpr uint32_t kChecksumHiOffset = 130;  // extraIsize(128,2) 다음 - InodeCore::checksumHi와 동일 오프셋
+    static_assert(offsetof(InodeCore, osd2) + 8 == kChecksumLoOffset,
+                  "l_i_checksum_lo 오프셋이 InodeCore::osd2 레이아웃과 어긋남");
+    static_assert(offsetof(InodeCore, checksumHi) == kChecksumHiOffset,
+                  "i_checksum_hi 오프셋이 InodeCore::checksumHi와 어긋남");
+    const uint8_t* raw = static_cast<const uint8_t*>(rawInode);
+    const uint16_t zero16 = 0;
+
+    uint32_t seed = kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), &inodeNum, sizeof(inodeNum));
+    seed = kCrc32c(seed, &generation, sizeof(generation));
+
+    uint32_t crc = kCrc32c(seed, raw, kChecksumLoOffset);
+    crc = kCrc32c(crc, &zero16, sizeof(zero16));
+    crc = kCrc32c(crc, raw + kChecksumLoOffset + 2, kGoodOldInodeSize - (kChecksumLoOffset + 2));
+
+    if (inodeSize > kGoodOldInodeSize) {
+        crc = kCrc32c(crc, raw + kGoodOldInodeSize, kChecksumHiOffset - kGoodOldInodeSize);
+        uint16_t extraIsize;
+        memcpy(&extraIsize, raw + kGoodOldInodeSize, sizeof(extraIsize));
+        const bool fitsChecksumHi = (kGoodOldInodeSize + extraIsize) >= (kChecksumHiOffset + 2);
+        uint32_t offset = kChecksumHiOffset;
+        if (fitsChecksumHi) {
+            crc = kCrc32c(crc, &zero16, sizeof(zero16));
+            offset += 2;
+        }
+        crc = kCrc32c(crc, raw + offset, inodeSize - offset);
+    }
+    return crc;
+}
+
 bool kJbd2ParseSuperblock(const void* rawBlock, uint32_t blockLen, JournalSuperblockV2* out) {
     if (blockLen < sizeof(JournalSuperblockV2)) {
         return false;
