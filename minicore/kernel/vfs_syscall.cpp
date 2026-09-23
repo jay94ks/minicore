@@ -743,6 +743,51 @@ public:
 
 UnlinkHandler gUnlinkHandler;
 
+// [신규, 2026-09-23, PN-9D6FE4B6, RM-48E1E610 call 14] UnlinkHandler와
+// 완전히 동일한 골격 - Mkdir/Unlink(PN-CF030FC3) 시점에 함께
+// 노출됐어야 했는데 빠졌던 것을 뒤늦게 채운다.
+class RmdirHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<RmdirArgs*>(argsRaw);
+        if (!kValidateVfsBuffer(task, args->path, args->pathLen)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
+
+        MountKind kind{};
+        uint64_t channelId = 0;
+        KernelFsDriver* driver = nullptr;
+        uint32_t relOffset = 0;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (kind == MountKind::Channel) {
+            args->error = ChannelError::NotSupported;  // PN-EA4EE935와 동일한 스코프 결정
+            co_return;
+        }
+
+        KernelFsRmdirArgs kfsArgs;
+        kfsArgs.relPath = args->path + relOffset;
+        kfsArgs.relPathLen = args->pathLen - relOffset;
+        AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
+        if (!fsTask) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // PN-EA4EE935 실측 발견 그대로 재적용
+        AsyncTaskAwaiter(fsTask).await();
+
+        args->error = kMapVfsError(kfsArgs.error);
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+RmdirHandler gRmdirHandler;
+
 }  // namespace
 
 void VfsSyscallService::registerSyscallEndpoints() {
@@ -760,6 +805,7 @@ void VfsSyscallService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointReaddir, &gReaddirHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointMkdir, &gMkdirHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointUnlink, &gUnlinkHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointRmdir, &gRmdirHandler);
 }
 
 }  // namespace kernel

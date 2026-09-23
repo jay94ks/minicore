@@ -165,6 +165,18 @@ struct UnlinkArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-23, PN-9D6FE4B6, RM-48E1E610 call 14] KernelFsOpCode
+// 9개 op 중 유일하게 syscall이 없던 Rmdir - Mkdir/Unlink(PN-CF030FC3)
+// 시점에 함께 노출됐어야 했는데 빠졌던 것을 vfat_driver.cpp가 실제
+// Rmdir 구현을 갖추며 발견해 뒤늦게 채운다. MkdirArgs/UnlinkArgs와
+// 동일한 모양(경로 in, error out).
+struct RmdirArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 // [신규, 2026-09-19, PN-770A28FB, SP-7CC5693A §3.2] 디렉터리를 먼저
 // `Open()`으로 열어 얻은 `fd`에 대해 반복 호출하는 스트리밍 나열 -
 // 매 호출마다 다음 엔트리 하나(커서는 `Process::FileDescriptor::offset`
@@ -197,10 +209,11 @@ constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10)
 constexpr SyscallEndpointId kSyscallEndpointReaddir = kMakeSyscallEndpointId(3, 11);
 constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
 constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
+constexpr SyscallEndpointId kSyscallEndpointRmdir = kMakeSyscallEndpointId(3, 14);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 14개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 15개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 
