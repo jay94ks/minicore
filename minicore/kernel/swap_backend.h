@@ -44,6 +44,15 @@ public:
     virtual bool allocateSlot(SwapSlot* out) = 0;
     virtual void freeSlot(SwapSlot slot) = 0;
 
+    // [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계/§4.2] 회수 스캔(쓰기)/
+    // 페이지폴트 스왑인(읽기) 둘 다 `writeSlot()`/`readSlot()`(동기,
+    // 블로킹)을 그대로 못 쓰고 `BlockDevice::submitWriteBlocks()`/
+    // `submitReadBlocks()`로 직접 비동기 제출해야 한다(paging.cpp/
+    // page_frame_allocator.cpp의 새 코루틴 핸들러 - swapfs_io.h 문서
+    // 주석 참고) - 그러려면 이 백엔드가 쓰는 `BlockDevice*` 자체가
+    // 필요하다. mount() 이전이면 nullptr.
+    virtual BlockDevice* device() const = 0;
+
     // [신규, 2026-09-22, PN-6D9A5DAE] block_device.h의 BlockDevice와
     // 동일한 이유로 가상 소멸자를 일부러 안 둔다(그 헤더의 클래스 문서
     // 주석 참고) - 이 인터페이스의 유일한 구현체(SwapfsBackend,

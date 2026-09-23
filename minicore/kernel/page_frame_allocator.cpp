@@ -1,11 +1,15 @@
 #include "page_frame_allocator.h"
 
 #include "acpi.h"
+#include "async_task.h"
+#include "block_device.h"
 #include "delayed_exec.h"
 #include "lapic.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "libswapfs/swapfs.h"
+#include "swap_backend.h"
 #include "paging.h"
 #include "process.h"
 
@@ -419,6 +423,203 @@ void kReclaimScanDemotePass() {
     }
 }
 
+// [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] 실제 회수(스왑아웃) 쓰기
+// 완료 처리 - 쓰기 완료 시점에 이 프레임의 회수를 확정(스왑 마커
+// 전환+물리 프레임 반납)할지 포기할지 결정하고 후속 조치를 전부
+// 끝낸다(kEnsureSwapReclaimWriteHandlerRegistered 아래 참고 - 완료를
+// 관측할 별도 "제출자"가 없는 fire-and-forget 제출이라, swapfs_io.h의
+// SwapWriteHandler와 달리 이 핸들러 하나가 후속 조치까지 전부 진다).
+struct SwapReclaimArgs {
+    fs::BlockDevice* device = nullptr;
+    fs::SwapSlot slot = 0;
+    kernel::PageFrame* frame = nullptr;
+    kernel::uint64_t physAddr = 0;
+};
+
+class SwapReclaimWriteHandler : public kernel::AsyncTaskHandler {
+public:
+    kernel::AsyncExecCoro onExec(kernel::AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<SwapReclaimArgs*>(argsRaw);
+
+        const kernel::uint32_t blockSize = args->device->blockSize();
+        const kernel::uint32_t blocksPerPage = static_cast<kernel::uint32_t>(fs::kSwapPageSize / blockSize);
+        const kernel::uint64_t lba = (args->slot * fs::kSwapPageSize) / blockSize;
+        void* srcPage = reinterpret_cast<void*>(kernel::kPhysToVirt(args->physAddr));
+
+        fs::BlockIoResult ioResult;
+        kernel::AsyncTask* ioTask = args->device->submitWriteBlocks(lba, srcPage, blocksPerPage, &ioResult);
+        if (ioTask) {
+            co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+        } else {
+            ioResult.ok = false;
+        }
+
+        // 성공했고 그 사이 취소되지도 않았을 때만 실제로 물리 프레임을
+        // 반납한다 - 그 외(디스크 쓰기 실패, 또는 쓰기 폴트로 이미
+        // 취소됨)엔 슬롯만 돌려주고 프레임은 그대로 살려 둔다(실패를
+        // 영구 에러로 승격하지 않는다 - RM-23F4B687 §4, 다음 스캔에서
+        // 다시 회수 후보가 될 뿐).
+        bool reclaimedSuccessfully = false;
+        {
+            kernel::SpinlockGuard guard(gLruLock);
+            kernel::PageFrame* frame = args->frame;
+            const bool canceled = (frame->flags & kernel::kPageFrameFlagReclaimCanceled) != 0;
+            frame->flags = static_cast<kernel::uint16_t>(
+                frame->flags & ~(kernel::kPageFrameFlagReclaiming | kernel::kPageFrameFlagReclaimCanceled));
+
+            if (ioResult.ok && !canceled) {
+                reclaimedSuccessfully = true;
+                for (kernel::RmapEntry* rmap = frame->rmapHead; rmap; rmap = rmap->next) {
+                    kernel::Paging::finalizeReclaimToSwap(rmap->virtAddr, rmap->owner->pml4Phys, args->slot);
+                }
+                // 더 이상 이 물리 프레임을 매핑하는 곳이 없다(전부
+                // 스왑 마커로 바뀜) - kHandleCowWriteFault의 "removeRmap
+                // 먼저, freePage 나중" 순서와 동일하게, rmap 리스트를
+                // 먼저 비운 뒤(아래 루프 이후) freePage를 이 임계구역
+                // 밖에서 부른다.
+                kernel::RmapEntry* entry = frame->rmapHead;
+                while (entry) {
+                    kernel::RmapEntry* next = entry->next;
+                    kernel::GenericSlabAllocator::free(entry, sizeof(kernel::RmapEntry));
+                    entry = next;
+                }
+                frame->rmapHead = nullptr;
+                frame->mapCount = 0;
+                frame->flags = static_cast<kernel::uint16_t>(
+                    frame->flags &
+                    ~(kernel::kPageFrameFlagActive | kernel::kPageFrameFlagAccessed | kernel::kPageFrameFlagSwappable));
+                // frame은 이미 kReclaimScanReclaimPass()가 kLruUnlink해
+                // 뒀으므로 여기서 리스트 조작이 필요 없다.
+            } else {
+                // 실패 또는 취소 - PTE는 이미 원상복구돼 있다(실패:
+                // 아래에서, 취소: kHandleReclaimWriteFault가 이미) -
+                // 다시 회수 후보 목록(inactive tail)으로 되돌린다.
+                if (!ioResult.ok) {
+                    for (kernel::RmapEntry* rmap = frame->rmapHead; rmap; rmap = rmap->next) {
+                        kernel::Paging::cancelReclaimInProgress(rmap->virtAddr, rmap->owner->pml4Phys);
+                    }
+                }
+                kLruPushBack(gInactiveList, frame);
+            }
+        }
+
+        fs::SwapBackend* backend = kernel::kActiveSwapBackend();
+        if (reclaimedSuccessfully) {
+            kernel::PageFrameAllocator::freePage(args->physAddr);
+        } else if (backend) {
+            backend->freeSlot(args->slot);
+        }
+
+        kernel::GenericSlabAllocator::free(args, sizeof(SwapReclaimArgs));
+        co_return;
+    }
+    void onFailure(kernel::AsyncTask*) override {}
+    void onCancel(kernel::AsyncTask*, void*) override {}
+};
+
+SwapReclaimWriteHandler gSwapReclaimWriteHandler;
+kernel::AsyncTaskSubjectCode gSwapReclaimWriteSubjectCode = 0;
+bool gSwapReclaimWriteHandlerRegistered = false;
+
+kernel::AsyncTaskSubjectCode kEnsureSwapReclaimWriteHandlerRegistered() {
+    if (!gSwapReclaimWriteHandlerRegistered) {
+        gSwapReclaimWriteSubjectCode = kernel::AsyncCallbackRegistry::registerHandler(&gSwapReclaimWriteHandler);
+        gSwapReclaimWriteHandlerRegistered = true;
+    }
+    return gSwapReclaimWriteSubjectCode;
+}
+
+// [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] inactive head부터 최대
+// kReclaimScanBatchSize개를 훑어 실제 회수를 시작한다 - 이미 회수
+// 진행중이거나(kPageFrameFlagReclaiming) 공유 중인(refCount!=0, COW 등
+// - 여러 프로세스의 매핑이 걸려 있어 v1 회수 대상이 아님, PN-4859FDE9
+// 본문 "정직한 v1 한계" 참고) 프레임은 건너뛴다. 대상마다 (1) 슬롯
+// 할당(순수 비트맵 연산, I/O 없음 - gLruLock 아래에서 안전), (2) rmap
+// 전체를 `Paging::markReclaimInProgress()`로 전환, (3) inactive에서
+// 빼고(`kPageFrameFlagReclaiming` 세움) `SwapReclaimWriteHandler`에
+// fire-and-forget 제출. 슬롯 고갈이면 이번 스캔은 그 자리에서 끝낸다.
+//
+// [[maybe_unused]]: 위 kReclaimScanCallback()이 실제로 이 함수를
+// 부르는 한 줄을 parkFromISR 행 버그 때문에 주석 처리해 뒀다(그
+// 문서 주석 참고) - 이 함수 자체는 스왑아웃 쓰기 경로로서는 실측
+// 검증이 끝난 상태라 그대로 남겨 둔다, -Wunused-function만 잠재운다.
+[[maybe_unused]] void kReclaimScanReclaimPass() {
+    fs::SwapBackend* backend = kernel::kActiveSwapBackend();
+    if (!backend) {
+        return;  // 스왑 백엔드가 없으면 회수 자체가 무의미 - v1은 스왑 없이도 그냥 계속 동작(조용히 건너뜀)
+    }
+    kernel::PageFrame* cursor = gInactiveList.head;
+    kernel::uint32_t scanned = 0;
+    while (cursor && scanned < kReclaimScanBatchSize) {
+        kernel::PageFrame* next = cursor->lruNext;
+        ++scanned;
+        if (cursor->flags & kernel::kPageFrameFlagReclaiming) {
+            cursor = next;
+            continue;
+        }
+        const kernel::uint64_t physAddr =
+            static_cast<kernel::uint64_t>(cursor - gPageFrames) * kPageSize;
+        if (kernel::PageFrameAllocator::refCount(physAddr) != 0) {
+            cursor = next;  // 공유 프레임 - v1 회수 대상 아님
+            continue;
+        }
+
+        fs::SwapSlot slot = 0;
+        if (!backend->allocateSlot(&slot)) {
+            break;  // 스왑 공간 고갈 - 이번 스캔은 여기서 끝
+        }
+
+        bool anyMarked = false;
+        for (kernel::RmapEntry* rmap = cursor->rmapHead; rmap; rmap = rmap->next) {
+            if (kernel::Paging::markReclaimInProgress(rmap->virtAddr, rmap->owner->pml4Phys)) {
+                anyMarked = true;
+            }
+        }
+        if (!anyMarked) {
+            // rmap이 비어 있거나 전부 실패(예: 방금 폴트로 사라짐) -
+            // 슬롯을 반납하고 다음 후보로.
+            backend->freeSlot(slot);
+            cursor = next;
+            continue;
+        }
+
+        auto* args = static_cast<SwapReclaimArgs*>(kernel::GenericSlabAllocator::alloc(sizeof(SwapReclaimArgs)));
+        if (!args) {
+            // 슬랩 고갈 - 방금 세운 모든 rmap 엔트리를 그 자리에서
+            // 원복한다(이 프레임을 영원히 회수 진행중 상태로 방치하는
+            // 것보다 안전).
+            for (kernel::RmapEntry* rmap = cursor->rmapHead; rmap; rmap = rmap->next) {
+                kernel::Paging::cancelReclaimInProgress(rmap->virtAddr, rmap->owner->pml4Phys);
+            }
+            backend->freeSlot(slot);
+            cursor = next;
+            continue;
+        }
+        new (args) SwapReclaimArgs();
+        args->device = backend->device();
+        args->slot = slot;
+        args->frame = cursor;
+        args->physAddr = physAddr;
+
+        kLruUnlink(gInactiveList, cursor);
+        cursor->flags = static_cast<kernel::uint16_t>(cursor->flags | kernel::kPageFrameFlagReclaiming);
+
+        const kernel::AsyncTaskSubjectCode subjectCode = kEnsureSwapReclaimWriteHandlerRegistered();
+        kernel::AsyncTask* task = kernel::AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/true);
+        if (!task) {
+            args->~SwapReclaimArgs();
+            kernel::GenericSlabAllocator::free(args, sizeof(SwapReclaimArgs));
+            for (kernel::RmapEntry* rmap = cursor->rmapHead; rmap; rmap = rmap->next) {
+                kernel::Paging::cancelReclaimInProgress(rmap->virtAddr, rmap->owner->pml4Phys);
+            }
+            cursor->flags = static_cast<kernel::uint16_t>(cursor->flags & ~kernel::kPageFrameFlagReclaiming);
+            kLruPushBack(gInactiveList, cursor);
+            backend->freeSlot(slot);
+        }
+        cursor = next;
+    }
+}
+
 // `kernel::DelayedExecutionQueue::schedule()`이 요구하는 원시 함수
 // 포인터 시그니처(`void(*)(void*)`) - 매 실행 끝에 스스로를 다시
 // 등록해 주기적 동작을 흉내낸다(전용 Task 없음, SP-F15B4A63 §3).
@@ -428,9 +629,47 @@ void kReclaimScanCallback(void*) {
         kernel::SpinlockGuard guard(gLruLock);
         kReclaimScanPromotePass();
         kReclaimScanDemotePass();
-        // §7.2 5단계(실제 회수) 자리 - QU-41F78A3E 답변 대기 중이라
-        // 이번 증분은 여기서 멈춘다(gLruLock 문서 주석/page_frame_allocator.h
-        // startReclaimScan() 문서 주석 참고).
+        // [보류, 2026-09-23, PN-4859FDE9 §7.2 5단계 - 실측으로 확정된
+        // 행 버그 발견, 활성화 보류] 아래 kReclaimScanReclaimPass()/
+        // SwapReclaimWriteHandler 자체(실제 스왑아웃 쓰기)는 실측으로
+        // 완전히 검증됐다 - mkswap 실제 이미지+실제 init/pubreg/authmgr
+        // 프로세스로 부팅해 5분+ 동안 58개 프레임을 실제로 스왑아웃
+        // 시켰고 전부 성공(ok=1, 손상/크래시 없음). 문제는 그 반대편,
+        // §4.2 스왑인(Paging::handlePageFault의 PAGE_SWAP_MARKER 분기 +
+        // SwapInReadHandler + Scheduler::parkFromISR)에서 발견됐다 -
+        // 스왑아웃된 프로세스가 그 페이지를 다시 건드려 실제로 폴트가
+        // 나는 순간(실측 재현: va=0x400000, slot=54, 매 실행 100%
+        // 재현) `Paging::handlePageFault`가 `kTrySubmitSwapIn()`까지
+        // 정확히 실행하고(로그로 확인) `idt.cpp`가 `Scheduler::
+        // parkFromISR(thread, frame)`를 부르는 지점까지도 도달하는데
+        // (그 직전 로그도 정상 출력됨 - frame 내용 자체는 정상,
+        // rip=0x400072/cs=0x23로 멀쩡한 ring3 코드 폴트), 그 뒤로는
+        // 커널 전체가 조용히 완전히 멎는다(패닉 로그 없음, 이후 어떤
+        // reclaim tick도, 어떤 로그도 다시 안 찍힘 - 재부팅도 안 되는
+        // -no-reboot 상태의 순수 정지, SMP1). #DB의
+        // kHandleUserBreakpointHit()이 정확히 같은 parkFromISR 패턴을
+        // 이미 프로덕션에서 검증받았음에도 #PF에서는 재현되는 걸 보아
+        // 두 IST 벡터(#DB=IST4/#PF=IST5) 사이에 아직 못 찾은 미묘한
+        // 차이가 있는 것으로 보인다. gdb로 실제 정지 지점을 잡으려는
+        // 시도는 이 정지 자체가 gdb 부착 시 타이밍이 크게 달라져(이
+        // 프로젝트에 이미 여러 번 기록된 heisenbug 패턴, PN-3DDF2797/
+        // PN-E4C6AF72와 동일 계열) 재현 자체가 극도로 느려지거나
+        // 재현되지 않아 결론을 못 냈다 - 다음 세션은 게스트 내부
+        // 저오버헤드 진단(진단 링 버퍼류, 이 프로젝트가 PN-E4C6AF72에서
+        // 이미 채택한 방식)으로 접근할 것을 권장한다.
+        //
+        // **읽기(스왑인) 없이 쓰기(스왑아웃)만 활성화하면 절대 안
+        // 된다**(이 계획 본문이 처음부터 명시한 제약 그대로 - 회수된
+        // 페이지를 다시 건드리는 순간 이 행 버그로 시스템 전체가
+        // 멎는다) - 그래서 위 §7.2 2/3/4단계(접근 감지+승격/강등)만
+        // 남기고 5단계(실제 회수) 자체를 호출하지 않는다. 관련 코드
+        // (kReclaimScanReclaimPass/SwapReclaimWriteHandler/
+        // Paging::markReclaimInProgress 등 4개 신규 메서드/
+        // kTrySubmitSwapIn/SwapInReadHandler/PAGE_RECLAIM_INPROGRESS/
+        // Paging::PageFaultOutcome::ParkForSwapIn)는 전부 컴파일된 채로
+        // 남겨 뒀다 - 다음 세션이 parkFromISR 버그만 고치면 이 줄
+        // 하나(kReclaimScanReclaimPass() 호출)만 다시 살리면 된다.
+        // kReclaimScanReclaimPass();
     }
     kernel::DelayedExecutionQueue::schedule(kReclaimScanIntervalTicks, &kReclaimScanCallback, nullptr);
 }
@@ -656,6 +895,17 @@ void PageFrameAllocator::removeRmap(uint64_t physAddr, Process* owner, uint64_t 
             return;
         }
         cur = &(*cur)->next;
+    }
+}
+
+void PageFrameAllocator::cancelReclaimForFrame(PageFrame* frame) {
+    SpinlockGuard guard(gLruLock);
+    if (!(frame->flags & kPageFrameFlagReclaiming) || (frame->flags & kPageFrameFlagReclaimCanceled)) {
+        return;  // 회수 대상이 아니거나 이미 취소됨(레이스로 두 번 불릴 수 있음) - 방어적
+    }
+    frame->flags |= kPageFrameFlagReclaimCanceled;
+    for (RmapEntry* rmap = frame->rmapHead; rmap; rmap = rmap->next) {
+        Paging::cancelReclaimInProgress(rmap->virtAddr, rmap->owner->pml4Phys);
     }
 }
 

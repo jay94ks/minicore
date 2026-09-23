@@ -1,13 +1,18 @@
 #include "paging.h"
 
+#include "async_task.h"
+#include "block_device.h"
 #include "libkenv/chunked_list.h"
 #include "libkenv/mem.h"
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "libswapfs/swapfs.h"
+#include "swap_backend.h"
 #include "page_frame_allocator.h"
 #include "process.h"
 #include "scheduler.h"
+#include "tlb_shootdown.h"
 #include "x86_64/msr.h"
 
 namespace {
@@ -266,6 +271,33 @@ kernel::Spinlock* kLockForAddressSpaceOp(kernel::uint64_t virtualAddr, kernel::u
     return lock ? lock : &gHigherHalfPagingLock;
 }
 
+// [신규, 2026-09-23, PN-4859FDE9] testAndClearAccessed/kHandleCowWriteFault가
+// 각자 반복해 온 PML4->PDPT->PD->PT 순회를, PTE 값 자체를 읽고/고치는
+// 여러 단계를 하나의 임계구역으로 묶어야 하는 새 함수들(아래
+// markReclaimInProgress 등)을 위해 한 번만 뽑아 둔다 - 호출자가 이미
+// kLockForAddressSpaceOp()로 얻은 락을 쥐고 있어야 한다(이 함수 자신은
+// 잠그지 않음). 중간 테이블이 없거나(진짜 미매핑) PD 엔트리가 2MiB
+// 대형 페이지면 nullptr - 이 스캔/회수 계열 전부의 공통 전제(anonymous
+// rmap 매핑은 항상 4KiB 단일 페이지, PageFrameAllocator::retain() 문서
+// 주석과 동일)이다.
+kernel::uint64_t* kFindLeafPteLocked(kernel::uint64_t virtualAddr, kernel::uint64_t pml4Phys) {
+    kernel::uint64_t* pml4 = kAsTable(pml4Phys);
+    if (!(pml4[kPml4Index(virtualAddr)] & kernel::PAGE_PRESENT)) {
+        return nullptr;
+    }
+    kernel::uint64_t* pdpt = kAsTable(pml4[kPml4Index(virtualAddr)] & kAddrMask);
+    if (!(pdpt[kPdptIndex(virtualAddr)] & kernel::PAGE_PRESENT)) {
+        return nullptr;
+    }
+    kernel::uint64_t* pd = kAsTable(pdpt[kPdptIndex(virtualAddr)] & kAddrMask);
+    const kernel::uint64_t pdEntry = pd[kPdIndex(virtualAddr)];
+    if (!(pdEntry & kernel::PAGE_PRESENT) || (pdEntry & kPageSizeBit)) {
+        return nullptr;
+    }
+    kernel::uint64_t* pt = kAsTable(pdEntry & kAddrMask);
+    return &pt[kPtIndex(virtualAddr)];
+}
+
 // [신규, 2026-09-16, SP-6BEAE0C1 §2/§11, PN-543C0CE9 착수 6번째 증분]
 // `PAGE_COW` 쓰기 폴트 처리 - 항상 **지금 실행 중인(CR3) 주소공간**
 // 기준으로만 동작한다(#PF는 그 폴트를 일으킨 코드가 실제로 실행되던
@@ -350,6 +382,186 @@ bool kHandleCowWriteFault(kernel::uint64_t faultAddr) {
     // 문서 주석(removeRmap)이 명시한 순서 그대로.
     kernel::PageFrameAllocator::freePage(oldPhys);
     return true;
+}
+
+// [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] `PAGE_RECLAIM_INPROGRESS`
+// 쓰기 폴트 처리 - kHandleCowWriteFault와 마찬가지로 항상 현재(CR3)
+// 주소공간 기준. present이면서 `PAGE_WRITABLE`이 꺼져 있는데 COW도
+// 아니면(이 코드베이스에서 그 조합을 만드는 건 이 비트뿐) 이 경로다 -
+// 새 park/resume 없이 그 자리에서 즉시 회수를 취소하고 재시도시킨다
+// (paging.h의 PAGE_RECLAIM_INPROGRESS 문서 주석 참고 - 비동기 쓰기가
+// 나중에 끝나면 완료 핸들러가 `kPageFrameFlagReclaimCanceled`를 보고
+// 스왑 전환을 건너뛴다). 대상이 애초에 이 비트가 아니면(테이블 경로가
+// 끊겨 있거나 이미 취소/완료된 뒤 등) false.
+bool kHandleReclaimWriteFault(kernel::uint64_t faultAddr) {
+    const kernel::uint64_t va = faultAddr & ~(kPageSize4K - 1);
+    const kernel::uint64_t pml4Phys = kCurrentPml4Phys();
+
+    kernel::Spinlock* lock = kLockForAddressSpaceOp(va, pml4Phys);
+    kernel::uint64_t phys = 0;
+    {
+        kernel::SpinlockGuard guard(*lock);
+        const kernel::uint64_t* pte = kFindLeafPteLocked(va, pml4Phys);
+        if (!pte || !(*pte & kernel::PAGE_PRESENT) || !(*pte & kernel::PAGE_RECLAIM_INPROGRESS)) {
+            return false;
+        }
+        phys = *pte & kAddrMask;
+    }
+    // 위 임계구역을 빠져나온 뒤 PageFrameAllocator::cancelReclaimForFrame()이
+    // 그 자신의 gLruLock을 잡고 다시 주소공간 락을 잡는다(문서화된
+    // 락 순서 "gLruLock -> 주소공간 락"을 그대로 지키기 위해 - 이
+    // 함수가 먼저 주소공간 락을 쥔 채로 gLruLock을 요구하면 순서가
+    // 뒤집힌다). phys가 가리키는 PageFrame이 이미 free된 극단적 경우
+    // (레이스로 인한 방어적 처리)엔 frameFor()가 nullptr을 돌려주므로
+    // cancelReclaimForFrame() 자체가 안전하게 아무 일도 안 한다.
+    kernel::PageFrame* frame = kernel::PageFrameAllocator::frameFor(phys);
+    if (frame) {
+        kernel::PageFrameAllocator::cancelReclaimForFrame(frame);
+    } else {
+        kernel::Paging::cancelReclaimInProgress(va, pml4Phys);
+    }
+    return true;
+}
+
+// [신규, 2026-09-23, PN-4859FDE9 §4.2] 스왑인 읽기 - onExec() 자신의
+// 완료 시점에 PTE 설치/rmap 삽입/파킹된 스레드 깨우기까지 전부 처리한다
+// (swapfs_io.h의 SwapWriteHandler/SwapReadHandler는 "순수 슬롯 읽기/
+// 쓰기"만 하고 호출부별 후속 조치를 의도적으로 안 하는데, 이 호출부
+// (#PF 핸들러)는 그 후속 조치를 관측할 "제출자"가 없다(fire-and-forget,
+// Syscall::submitDetached()와 동일한 관례) - 그래서 그 두 핸들러를
+// 재사용하지 않고 슬롯->LBA 산출까지 포함해 이 핸들러 하나로 완결
+// 짓는다).
+struct SwapInArgs {
+    fs::BlockDevice* device = nullptr;
+    fs::SwapSlot slot = 0;
+    kernel::uint64_t newPhys = 0;    // 이미 할당된 목적지 프레임 - kPhysToVirt로 직접 읽어들임
+    kernel::uint64_t virtAddr = 0;   // 폴트난 가상주소(4K 정렬)
+    kernel::uint64_t pml4Phys = 0;
+    kernel::WeakPtr<kernel::Task> parkedThread;  // parkFromISR로 파킹된 스레드(스레드가 그 사이 죽었을 수 있어 Weak)
+    kernel::uint32_t resumeCoreHint = 0;          // 원래 폴트난 코어 - 깨울 때 그 코어 큐로
+};
+
+class SwapInReadHandler : public kernel::AsyncTaskHandler {
+public:
+    kernel::AsyncExecCoro onExec(kernel::AsyncTask*, void* argsRaw) override {
+        auto* args = static_cast<SwapInArgs*>(argsRaw);
+
+        const kernel::uint32_t blockSize = args->device->blockSize();
+        const kernel::uint32_t blocksPerPage = static_cast<kernel::uint32_t>(fs::kSwapPageSize / blockSize);
+        const kernel::uint64_t lba = (args->slot * fs::kSwapPageSize) / blockSize;
+        void* destPage = reinterpret_cast<void*>(kernel::kPhysToVirt(args->newPhys));
+
+        fs::BlockIoResult ioResult;
+        kernel::AsyncTask* ioTask = args->device->submitReadBlocks(lba, destPage, blocksPerPage, &ioResult);
+        if (ioTask) {
+            co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+        } else {
+            ioResult.ok = false;
+        }
+
+        // 읽기 성공 여부와 무관하게 파킹된 스레드는 반드시 깨워야 한다
+        // (안 그러면 영원히 멈춰 있음) - 읽기가 실패했으면 PTE는 그대로
+        // 스왑 마커로 남겨 두고 newPhys만 반납한다. 다음에 이 주소를
+        // 다시 건드리면 또 폴트가 나 재시도된다(디스크 일시 오류류를
+        // 이렇게 자연스럽게 재시도하게 됨 - v1은 영구 read 실패를
+        // SIGSEGV로 승격시키는 로직까지는 안 둔다, RM-23F4B687 §4).
+        bool installed = false;
+        if (ioResult.ok) {
+            installed = kernel::Paging::completeSwapIn(args->virtAddr, args->pml4Phys, args->newPhys);
+            if (installed) {
+                kernel::SharedPtr<kernel::Task> t = args->parkedThread.lock();
+                kernel::Process* owner = nullptr;
+                if (t && t->isUserLevel) {
+                    auto* thread = static_cast<kernel::UserThread*>(t.get());
+                    kernel::SharedPtr<kernel::Process> proc = thread->process.lock();
+                    owner = proc.get();
+                }
+                if (owner) {
+                    kernel::PageFrameAllocator::insertRmap(args->newPhys, owner, args->virtAddr);
+                }
+            }
+        }
+        if (!installed) {
+            // 실패했거나(디스크 오류) 경쟁하던 다른 스왑인이 먼저
+            // 끝났거나 - 어느 쪽이든 이 핸들러가 확보해 둔 프레임은
+            // 더 이상 쓸모없다.
+            kernel::PageFrameAllocator::freePage(args->newPhys);
+        }
+
+        kernel::SharedPtr<kernel::Task> waiter = args->parkedThread.lock();
+        if (waiter) {
+            kernel::Scheduler::enqueue(args->resumeCoreHint, waiter.get());
+        }
+        // waiter가 없으면(스레드가 파킹된 채로 죽음 - 프로세스 강제
+        // 종료 등) 깨울 대상 자체가 없다 - 정직한 v1 한계로 남겨 둔다
+        // (그 스레드의 다른 정리 경로가 이미 처리했을 것이라는 전제,
+        // 프로세스 종료와 이 회수 경로의 상호작용은 PN-4859FDE9 본문
+        // 참고).
+
+        kernel::GenericSlabAllocator::free(args, sizeof(SwapInArgs));
+        co_return;
+    }
+    void onFailure(kernel::AsyncTask*) override {}
+    void onCancel(kernel::AsyncTask*, void*) override {}
+};
+
+SwapInReadHandler gSwapInReadHandler;
+kernel::AsyncTaskSubjectCode gSwapInReadSubjectCode = 0;
+bool gSwapInReadHandlerRegistered = false;
+
+kernel::AsyncTaskSubjectCode kEnsureSwapInReadHandlerRegistered() {
+    if (!gSwapInReadHandlerRegistered) {
+        gSwapInReadSubjectCode = kernel::AsyncCallbackRegistry::registerHandler(&gSwapInReadHandler);
+        gSwapInReadHandlerRegistered = true;
+    }
+    return gSwapInReadSubjectCode;
+}
+
+// [신규, 2026-09-23, PN-4859FDE9 §4.2] not-present + PAGE_SWAP_MARKER
+// 폴트를 실제로 처리 - 새 프레임을 확보하고 위 핸들러에 fire-and-forget
+// 제출한 뒤 ParkForSwapIn을 돌려준다(park 자체는 idt.cpp가 gInPageFaultHandler
+// 가드를 내린 뒤 수행 - paging.h 문서 주석 참고). 프레임 고갈/등록
+// 실패면 NotHandled(호출부가 그대로 SIGSEGV로 떨어뜨림 - 스왑 영역이
+// 있는데도 OOM이면 v1은 복구를 시도하지 않는다).
+kernel::Paging::PageFaultOutcome kTrySubmitSwapIn(kernel::uint64_t faultAddr, kernel::uint64_t pml4Phys,
+                                                    kernel::uint64_t slot) {
+    fs::SwapBackend* backend = kernel::kActiveSwapBackend();
+    if (!backend) {
+        return kernel::Paging::PageFaultOutcome::NotHandled;  // 스왑 백엔드가 없는데 스왑 마커 PTE - 설계 불변식 위반, 방어적
+    }
+    const kernel::uint64_t newPhys = kernel::PageFrameAllocator::allocPage();
+    if (!newPhys) {
+        return kernel::Paging::PageFaultOutcome::NotHandled;
+    }
+    auto* args = static_cast<SwapInArgs*>(kernel::GenericSlabAllocator::alloc(sizeof(SwapInArgs)));
+    if (!args) {
+        kernel::PageFrameAllocator::freePage(newPhys);
+        return kernel::Paging::PageFaultOutcome::NotHandled;
+    }
+    new (args) SwapInArgs();
+    args->device = backend->device();
+    args->slot = slot;
+    args->newPhys = newPhys;
+    args->virtAddr = faultAddr & ~(kPageSize4K - 1);
+    args->pml4Phys = pml4Phys;
+    // #PF는 항상 그 폴트를 낸 Task 자신의 동기적 실행 흐름 안이라
+    // Scheduler::currentTask()가 항상 정확하고(kHandleCowWriteFault의
+    // 문서 주석과 동일한 전제), ring3에서 온 폴트이므로 항상
+    // UserThread다(weakAsTask()는 Task 자신이 아니라 UserThread/
+    // KernelThread 각자가 EnableSharedFromThis로 따로 제공한다).
+    auto* faultingThread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+    args->parkedThread = faultingThread->weakAsTask();
+    args->resumeCoreHint = kernel::Scheduler::currentCoreIndex();
+
+    const kernel::AsyncTaskSubjectCode subjectCode = kEnsureSwapInReadHandlerRegistered();
+    kernel::AsyncTask* task = kernel::AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/true);
+    if (!task) {
+        args->~SwapInArgs();
+        kernel::GenericSlabAllocator::free(args, sizeof(SwapInArgs));
+        kernel::PageFrameAllocator::freePage(newPhys);
+        return kernel::Paging::PageFaultOutcome::NotHandled;
+    }
+    return kernel::Paging::PageFaultOutcome::ParkForSwapIn;
 }
 
 }  // namespace
@@ -551,30 +763,62 @@ bool Paging::mergeRange(uint64_t virtualAddr, uint64_t sizeBytes, uint64_t pml4P
     return mergedAny;
 }
 
-bool Paging::handlePageFault(uint64_t faultAddr, uint64_t errorCode) {
+Paging::PageFaultOutcome Paging::handlePageFault(uint64_t faultAddr, uint64_t errorCode) {
     constexpr uint64_t kErrorCodePresentBit = 1UL << 0;
     constexpr uint64_t kErrorCodeWriteBit = 1UL << 1;
     if (errorCode & kErrorCodePresentBit) {
-        // 이미 매핑된 페이지에 대한 위반 - [신규, PN-543C0CE9 착수
-        // 6번째 증분] COW 쓰기 폴트만 예외적으로 처리한다(§2/§11).
-        // 그 외(쓰기가 아닌 위반, COW 아닌 페이지에 대한 위반)는
-        // 조용히 넘기지 않고 그대로 패닉시킨다.
+        // 이미 매핑된 페이지에 대한 위반 - [PN-543C0CE9 착수 6번째
+        // 증분] COW, [신규, PN-4859FDE9 §7.2 5단계] 회수 진행중 쓰기
+        // 폴트 두 가지만 예외적으로 처리한다(§2/§11, PAGE_RECLAIM_INPROGRESS
+        // 문서 주석). 그 외(쓰기가 아닌 위반, 둘 다 아닌 페이지에 대한
+        // 위반)는 조용히 넘기지 않고 NotHandled로 패스스루한다.
         if (!(errorCode & kErrorCodeWriteBit)) {
-            return false;
+            return PageFaultOutcome::NotHandled;
         }
-        return kHandleCowWriteFault(faultAddr);
+        if (kHandleCowWriteFault(faultAddr)) {
+            return PageFaultOutcome::Handled;
+        }
+        if (kHandleReclaimWriteFault(faultAddr)) {
+            return PageFaultOutcome::Handled;
+        }
+        return PageFaultOutcome::NotHandled;
     }
+
+    // [신규, 2026-09-23, PN-4859FDE9 §4.2] not-present 폴트 - 스왑
+    // 마커인지 먼저 확인한다(지연 매핑 구역 검사보다 먼저 - 스왑아웃된
+    // 유저 페이지는 kLazyZoneBase 범위 밖이므로 순서 자체는 서로
+    // 배타적이지만, 스왑 마커 쪽이 개념상 더 구체적인 조건이라 먼저
+    // 본다).
+    {
+        const uint64_t va = faultAddr & ~(kPageSize4K - 1);
+        const uint64_t pml4Phys = kCurrentPml4Phys();
+        Spinlock* lock = kLockForAddressSpaceOp(va, pml4Phys);
+        bool isSwapped = false;
+        uint64_t slot = 0;
+        {
+            SpinlockGuard guard(*lock);
+            const uint64_t* pte = kFindLeafPteLocked(va, pml4Phys);
+            if (pte && !(*pte & PAGE_PRESENT) && (*pte & PAGE_SWAP_MARKER)) {
+                isSwapped = true;
+                slot = kSwapSlotFromPte(*pte);
+            }
+        }
+        if (isSwapped) {
+            return kTrySubmitSwapIn(va, pml4Phys, slot);
+        }
+    }
+
     if (faultAddr < kLazyZoneBase || faultAddr >= kLazyZoneBase + kLazyZoneSize) {
-        return false;  // 지연 매핑 구역 밖 - 진짜 잘못된 접근
+        return PageFaultOutcome::NotHandled;  // 지연 매핑 구역 밖 - 진짜 잘못된 접근
     }
 
     const uint64_t phys = PageFrameAllocator::allocPage();
     if (!phys) {
-        return false;  // OOM - 매핑해줄 방법이 없으니 그대로 패닉시킨다
+        return PageFaultOutcome::NotHandled;  // OOM - 매핑해줄 방법이 없으니 그대로 패닉시킨다
     }
 
     mapPage(faultAddr & ~(kPageSize4K - 1), phys, PAGE_WRITABLE);
-    return true;
+    return PageFaultOutcome::Handled;
 }
 
 void Paging::unmapPage(uint64_t virtualAddr, uint64_t pml4Phys) {
@@ -674,6 +918,66 @@ bool Paging::testAndClearAccessed(uint64_t virtualAddr, uint64_t pml4Phys) {
         }
     }
     return wasAccessed;
+}
+
+bool Paging::markReclaimInProgress(uint64_t virtualAddr, uint64_t pml4Phys) {
+    virtualAddr &= ~(kPageSize4K - 1);
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+
+    uint64_t* pte = kFindLeafPteLocked(virtualAddr, pml4Phys);
+    if (!pte || !(*pte & PAGE_PRESENT) || (*pte & PAGE_RECLAIM_INPROGRESS)) {
+        return false;
+    }
+    *pte = (*pte & ~PAGE_WRITABLE) | PAGE_RECLAIM_INPROGRESS;
+    TlbShootdown::broadcast(virtualAddr, virtualAddr + kPageSize4K, pml4Phys);
+    return true;
+}
+
+void Paging::cancelReclaimInProgress(uint64_t virtualAddr, uint64_t pml4Phys) {
+    virtualAddr &= ~(kPageSize4K - 1);
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+
+    uint64_t* pte = kFindLeafPteLocked(virtualAddr, pml4Phys);
+    if (!pte || !(*pte & PAGE_RECLAIM_INPROGRESS)) {
+        return;
+    }
+    *pte = (*pte & ~PAGE_RECLAIM_INPROGRESS) | PAGE_WRITABLE;
+    TlbShootdown::broadcast(virtualAddr, virtualAddr + kPageSize4K, pml4Phys);
+}
+
+void Paging::finalizeReclaimToSwap(uint64_t virtualAddr, uint64_t pml4Phys, uint64_t slot) {
+    virtualAddr &= ~(kPageSize4K - 1);
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+
+    uint64_t* pte = kFindLeafPteLocked(virtualAddr, pml4Phys);
+    if (!pte || !(*pte & PAGE_RECLAIM_INPROGRESS)) {
+        return;  // 이미 취소됨(쓰기 폴트가 먼저 원복) - 호출부가 flags로 알아서 건너뜀
+    }
+    *pte = kMakeSwapPte(slot);
+    TlbShootdown::broadcast(virtualAddr, virtualAddr + kPageSize4K, pml4Phys);
+}
+
+bool Paging::completeSwapIn(uint64_t virtualAddr, uint64_t pml4Phys, uint64_t newPhys) {
+    virtualAddr &= ~(kPageSize4K - 1);
+    Spinlock* lock = kLockForAddressSpaceOp(virtualAddr, pml4Phys);
+    SpinlockGuard guard(*lock);
+
+    uint64_t* pte = kFindLeafPteLocked(virtualAddr, pml4Phys);
+    if (!pte) {
+        return false;
+    }
+    if (*pte & PAGE_PRESENT) {
+        return false;  // 경쟁하던 다른 스왑인이 먼저 끝남 - 호출부가 newPhys를 반납해야 함
+    }
+    *pte = newPhys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    // not-present -> present로 새로 매핑하는 것뿐이라(이전엔 캐싱될
+    // 수조차 없었던 자리) 크로스 코어 무효화가 필요 없다(mapPage의
+    // 지연 매핑 경로와 동일한 근거) - 로컬 TLB도 애초에 이 주소를
+    // 캐싱한 적이 없으므로 invlpg조차 불필요.
+    return true;
 }
 
 bool Paging::isUserRangeValid(uint64_t virtualAddr, uint64_t length, uint64_t pml4Phys) {

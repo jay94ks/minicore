@@ -41,6 +41,22 @@ constexpr uint64_t PAGE_PAT = 1UL << 7;
 // 지금 준비해 둔다"는 원칙 그대로).
 constexpr uint64_t PAGE_COW = 1UL << 9;
 
+// [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계, 설계자 답변 QU-D3A9BF13 -
+// "물리 page 엔트리 자체에 AVL 필드가 있을텐데 그거랑 잘 조합해서
+// 회수 진행 중/대기 등 임시 상태를 만들어야해"] 회수(스왑아웃) 진행
+// 중 임시 상태 - 비트 10(PAGE_COW와 같은 AVL 구간, 아직 아무도 안 씀).
+// present=1인 leaf에서만 의미 있고, 항상 PAGE_WRITABLE이 꺼져 있어야
+// 한다(그래야 이 프레임에 대한 실제 쓰기 시도가 #PF를 일으켜
+// handlePageFault가 가로챌 수 있다 - PAGE_COW와 정확히 같은 관례).
+// 읽기는 present 그대로라 폴트 없이 통과한다(디스크 쓰기가 끝날 때까지
+// 데이터가 실제로 바뀌지 않으므로 안전) - 오직 "쓰기"만 막아 회수용
+// 비동기 디스크 전송 도중 내용이 바뀌는 레이스를 원천 차단한다. 쓰기
+// 폴트가 나면(COW 아닌 이 비트) `PageFrameAllocator::cancelReclaimForFrame()`
+// 이 그 자리에서 즉시 원상복구(Writable 복원)하므로 새 park/resume
+// 메커니즘이 전혀 필요 없다(paging.cpp `kHandleReclaimWriteFault` 참고) -
+// 스왑인(읽기 폴트, 아래 §4.2)만 진짜 비동기 대기가 필요하다.
+constexpr uint64_t PAGE_RECLAIM_INPROGRESS = 1UL << 10;
+
 // [신규, 2026-09-22, SP-D02C4A73 §4, PN-6D9A5DAE] 스왑 PTE 인코딩 -
 // 이 커널 자신의 설계(외부 표준 없음, libswapfs의 온디스크 포맷과는
 // 별개 문제). x86_64 PTE는 `Present`(bit0)가 0이면 하드웨어가 나머지
@@ -218,20 +234,41 @@ public:
     // 소유한 프로세스"를 뜻한다.
     static bool isUserRangeValid(uint64_t virtualAddr, uint64_t length, uint64_t pml4Phys = 0);
 
+    // [신규, 2026-09-23, PN-4859FDE9 §4.2] handlePageFault()의 반환값 -
+    // 기존 bool(처리함/못함)로는 "스왑인 읽기가 비동기로 진행 중이라
+    // 이 스레드를 파킹해야 한다"는 세 번째 결과를 표현할 수 없어 enum
+    // 으로 확장했다. idt.cpp가 `ParkForSwapIn`을 받으면 (1) 이미
+    // `handlePageFault()` 호출 직후 내린 `gInPageFaultHandler` 재진입
+    // 가드를 그대로 둔 채(이미 내려간 뒤이므로 안전), (2)
+    // `thread->state = TaskState::Blocked` 후 `Scheduler::parkFromISR
+    // (thread, frame)`을 직접 호출한다(반환하지 않음) - `handlePageFault`
+    // 자신은 절대 parkFromISR을 부르지 않는다(가드를 내리기 전에
+    // IST5를 떠나면 안 되므로, 그 순서를 아는 idt.cpp가 대신 한다).
+    enum class PageFaultOutcome : uint8_t {
+        NotHandled,    // 진짜 세그폴트 - idt.cpp가 기존처럼 SIGSEGV/패닉 처리
+        Handled,       // 그 자리에서 즉시 해결(지연매핑/COW/회수취소) - 재시도하면 성공
+        ParkForSwapIn  // 스왑인 읽기 제출 완료, 스레드를 파킹해야 함(위 참고)
+    };
+
     // #PF(vector 14) 핸들러가 호출한다(idt.cpp). faultAddr는 CR2,
-    // errorCode는 하드웨어가 스택에 남긴 값 그대로. 이 폴트를 정말
-    // 처리했으면(=매핑을 새로 붙여서 재실행하면 될 상황) true를
-    // 반환한다 - false면 호출부가 평소대로 패닉한다. 두 가지 경우만
-    // 처리한다: (1) kLazyZoneBase 범위 안의 not-present 폴트(기존),
-    // (2) [신규, PN-543C0CE9 착수 6번째 증분] `PAGE_COW`가 세팅된
-    // present 페이지에 대한 쓰기 위반 - 새 물리 프레임을 확보해 내용을
-    // 복사한 뒤 이 주소공간만 그 새 프레임으로 다시 매핑(WRITABLE,
-    // COW 비트 제거)하고, 원래 공유 프레임은 `PageFrameAllocator::
-    // freePage`로 참조 카운트를 하나 줄인다(0이 되지 않는 한 실제
-    // 반납은 안 됨 - retain()/freePage 관례 그대로). 그 외 모든 권한
-    // 위반(COW 아닌 present 페이지에 대한 위반, 쓰기가 아닌 위반 등)은
-    // 조용히 덮어쓰지 않고 그대로 패닉시킨다.
-    static bool handlePageFault(uint64_t faultAddr, uint64_t errorCode);
+    // errorCode는 하드웨어가 스택에 남긴 값 그대로. 처리 결과는 위
+    // `PageFaultOutcome` 참고. 이제 네 가지 경우를 처리한다: (1)
+    // kLazyZoneBase 범위 안의 not-present 폴트(기존), (2) `PAGE_COW`가
+    // 세팅된 present 페이지에 대한 쓰기 위반(기존, PN-543C0CE9) - 새
+    // 물리 프레임을 확보해 내용을 복사한 뒤 이 주소공간만 그 새
+    // 프레임으로 다시 매핑하고 원래 공유 프레임의 참조 카운트를
+    // 줄인다, (3) [신규, PN-4859FDE9 §7.2 5단계] `PAGE_RECLAIM_INPROGRESS`
+    // 가 세팅된 present 페이지에 대한 쓰기 위반 - 그 자리에서 즉시
+    // 회수를 취소(원상복구)한다(비동기 대기 불필요, 위 비트 문서 주석
+    // 참고), (4) [신규, PN-4859FDE9 §4.2] `PAGE_SWAP_MARKER`가 세팅된
+    // not-present 페이지에 대한 폴트 - 새 프레임을 확보하고 스왑인
+    // 읽기를 비동기로 제출한 뒤 `ParkForSwapIn`을 반환한다(SP-0666DB3C
+    // §7이 확정한 "폴트 처리를 또 하나의 대기 항목으로 모델링" 그대로,
+    // 다만 syscall의 pendingSyscalls 대신 #DB의 parkFromISR/TCB 재사용
+    // 패턴을 그대로 따른다 - PN-EA968DF0/PN-81E49523이 이미 증명한
+    // "IST 공유 스택 위에서 안전하게 블로킹하는 유일한 방법"). 그 외
+    // 모든 권한 위반은 조용히 덮어쓰지 않고 `NotHandled`로 패스스루한다.
+    static PageFaultOutcome handlePageFault(uint64_t faultAddr, uint64_t errorCode);
 
     // [신규, 2026-09-22, SP-6CEFBE9B §7.2 2/3단계, PN-4859FDE9] 4KiB
     // leaf PTE의 하드웨어 Accessed 비트(bit5)를 읽고, 세팅돼 있었으면
@@ -251,6 +288,47 @@ public:
     // 가시성 자체를 바꾸지 않으므로 `TlbShootdown::broadcast()`
     // 같은 크로스 코어 무효화가 필요 없다).
     static bool testAndClearAccessed(uint64_t virtualAddr, uint64_t pml4Phys = 0);
+
+    // [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] present 4KiB leaf를
+    // "회수 진행중"으로 전환한다 - `PAGE_WRITABLE`을 끄고
+    // `PAGE_RECLAIM_INPROGRESS`를 세운다(Present는 그대로 유지 - 읽기는
+    // 계속 통과, 쓰기만 폴트를 일으켜 `handlePageFault`가 가로챈다).
+    // 대상이 present가 아니거나 이미 진행중이면 false(호출부인 회수
+    // 스캔은 그 rmap 엔트리를 조용히 건너뛰어야 한다 - 방금 폴트로
+    // 사라졌거나 이미 다른 이유로 회수 중일 수 있음, 새 에러 경로를
+    // 늘리지 않는다). 이 매핑을 지금 보고 있을 수 있는 모든 코어에
+    // `TlbShootdown::broadcast()`로 즉시 전파한다(순수 타이밍 휴리스틱인
+    // testAndClearAccessed와 달리 이건 실제 쓰기 보호이므로 스테일 TLB를
+    // 남겨두면 안 됨).
+    static bool markReclaimInProgress(uint64_t virtualAddr, uint64_t pml4Phys);
+
+    // 회수 취소 - `PAGE_RECLAIM_INPROGRESS`를 끄고 `PAGE_WRITABLE`을
+    // 되돌린다(원래 present+writable로 복원). `markReclaimInProgress`가
+    // 세워 둔 상태가 아니면 아무 것도 안 한다(방어적 - 이미 완료/취소된
+    // 뒤 중복 호출될 수 있음). `PageFrameAllocator::cancelReclaimForFrame()`
+    // (쓰기 폴트 즉시 처리)과 회수 완료 핸들러(취소된 채로 끝난 경우)
+    // 양쪽이 호출한다.
+    static void cancelReclaimInProgress(uint64_t virtualAddr, uint64_t pml4Phys);
+
+    // 회수 완료 - present 리프를 스왑 마커(`kMakeSwapPte(slot)`)로
+    // 바꾼다. `markReclaimInProgress`가 세워 둔 상태가 아니면(이미
+    // 쓰기 폴트로 취소됐음) 아무 것도 안 한다 - 호출부(회수 완료
+    // 핸들러)가 이 반환 여부와 무관하게 항상 먼저
+    // `PageFrame::flags & kPageFrameFlagReclaimCanceled`를 확인해야
+    // 한다(이 함수 자체는 그 플래그를 모른다, page_frame_allocator.h
+    // 참고).
+    static void finalizeReclaimToSwap(uint64_t virtualAddr, uint64_t pml4Phys, uint64_t slot);
+
+    // [신규, 2026-09-23, PN-4859FDE9 §4.2] 스왑인 완료 - not-present
+    // 스왑 마커 리프를 present+writable+user로 바꾼다. 이미 present면
+    // (경쟁하던 다른 스레드/코어의 스왑인이 먼저 끝남 - 같은 프로세스의
+    // 다른 스레드나, 이론상 동시에 같은 슬롯을 가리키는 두 폴트가 겹칠
+    // 때) false를 반환하고 아무 것도 안 한다 - 호출부는 방금 읽어들인
+    // `newPhys`를 대신 `PageFrameAllocator::freePage()`로 반납해야
+    // 한다. not-present -> present로 새로 매핑하는 것뿐이라(이전엔
+    // 캐싱될 수조차 없었던 자리) 크로스 코어 TLB 무효화가 필요 없다
+    // (`mapPage`의 지연 매핑 경로와 동일한 근거).
+    static bool completeSwapIn(uint64_t virtualAddr, uint64_t pml4Phys, uint64_t newPhys);
 
     // 지금 실행 중인 CR3(활성 PML4의 물리 프레임 주소) - 새 주소공간을
     // 만들 때 "커널 상위 절반"을 복사해 올 원본으로 쓴다

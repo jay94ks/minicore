@@ -22,6 +22,20 @@ constexpr uint16_t kPageFrameFlagHead = 1U << 1;       // PG_HEAD - order>0 블�
 constexpr uint16_t kPageFrameFlagActive = 1U << 2;     // PG_ACTIVE - active LRU 리스트 소속(미배선)
 constexpr uint16_t kPageFrameFlagAccessed = 1U << 3;   // PG_ACCESSED - 최근 참조됨(미배선)
 constexpr uint16_t kPageFrameFlagSwappable = 1U << 4;  // PG_SWAPPABLE - rmap/LRU 추적 대상(미배선)
+// [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] 이 프레임의 비동기
+// 스왑아웃 쓰기가 지금 진행 중이다 - `SwapReclaimWriteHandler`가
+// gLruLock 아래에서 세우고, 그 자신의 완료 시점(성공/취소 무엇이든)에
+// 내린다. 이 플래그가 서 있는 동안은 회수 스캔이 이 프레임을 다시
+// 회수 후보로 고르면 안 된다(page_frame_allocator.cpp kReclaimScanCallback
+// 참고).
+constexpr uint16_t kPageFrameFlagReclaiming = 1U << 5;
+// [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] 위 회수가 진행되는 동안
+// 다른 스레드가 그 프레임에 실제로 썼다(paging.cpp kHandleReclaimWriteFault가
+// 그 자리에서 즉시 세움 - 새 park/resume 불필요, PAGE_RECLAIM_INPROGRESS
+// 문서 주석 참고) - `SwapReclaimWriteHandler`가 나중에 쓰기를 완료해도
+// 이 플래그를 보면 스왑 전환을 건너뛰고 그냥 회수를 포기한다(이미
+// 쓰기 폴트 쪽에서 PTE를 원상복구해 뒀으므로 추가로 할 일 없음).
+constexpr uint16_t kPageFrameFlagReclaimCanceled = 1U << 6;
 
 // [신규, 2026-09-18, PN-2FC5ED36, SP-6CEFBE9B §5] rmap 엔트리 -
 // `PageFrame::rmapHead`가 가리키는 단일 연결 리스트의 노드 하나("이
@@ -180,6 +194,21 @@ public:
     // 데드락하는 실측 확인된 위험 때문 - 자세한 근거는 `QU-41F78A3E`
     // (SP-6CEFBE9B 대상)/`PN-4859FDE9` 참고, 설계자 답변 대기 중이다.
     static void startReclaimScan();
+
+    // [신규, 2026-09-23, PN-4859FDE9 §7.2 5단계] `frame`의 비동기
+    // 스왑아웃 쓰기가 진행 중인 동안 그 프레임에 대한 쓰기 폴트가
+    // 발생했을 때 즉시 호출한다(paging.cpp `kHandleReclaimWriteFault`) -
+    // gLruLock 아래에서 이 프레임의 모든 rmap 엔트리를 `Paging::
+    // cancelReclaimInProgress()`로 원상복구(Writable 복원)하고
+    // `kPageFrameFlagReclaimCanceled`를 세운다. 나중에 끝나는
+    // `SwapReclaimWriteHandler`가 그 플래그를 보고 스왑 전환(PTE를
+    // 스왑 마커로) 대신 그냥 포기하게 만드는 게 이 함수의 유일한
+    // 목적 - 이미 이 함수가 PTE를 되돌려 놨으므로 그 외에 할 일은
+    // 없다. `kPageFrameFlagReclaiming`이 꺼져 있거나 이미
+    // `kPageFrameFlagReclaimCanceled`가 서 있으면(레이스로 두 번
+    // 불릴 수 있음 - 예: 같은 프레임을 공유하는 두 rmap 엔트리가
+    // 동시에 쓰기 폴트) 아무 것도 안 한다.
+    static void cancelReclaimForFrame(PageFrame* frame);
 };
 
 }  // namespace kernel

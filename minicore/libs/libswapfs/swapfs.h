@@ -66,6 +66,7 @@ public:
     bool readSlot(SwapSlot slot, void* page) override;
     bool allocateSlot(SwapSlot* out) override;
     void freeSlot(SwapSlot slot) override;
+    BlockDevice* device() const override { return device_; }
 
     // 진단/테스트 전용 - mount() 이후에만 유효한 값.
     const SwapHeaderInfo& header() const { return header_; }

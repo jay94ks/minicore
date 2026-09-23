@@ -1041,10 +1041,21 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
         }
         gInPageFaultHandler[coreIndex] = 1;
         const kernel::uint64_t faultAddr = kReadCr2();
-        const bool handled = kernel::Paging::handlePageFault(faultAddr, frame->errorCode);
-        gInPageFaultHandler[coreIndex] = 0;  // 아래 두 미반환 경로 전에 반드시 먼저 내린다
-        if (handled) {
+        const kernel::Paging::PageFaultOutcome outcome = kernel::Paging::handlePageFault(faultAddr, frame->errorCode);
+        gInPageFaultHandler[coreIndex] = 0;  // 아래 세 미반환 경로 전에 반드시 먼저 내린다 - IST5를 완전히 비운 뒤에만 park/terminate로 넘어간다
+        if (outcome == kernel::Paging::PageFaultOutcome::Handled) {
             return;
+        }
+        if (outcome == kernel::Paging::PageFaultOutcome::ParkForSwapIn) {
+            // [신규, 2026-09-23, PN-4859FDE9 §4.2] 스왑인 읽기가 이미
+            // 비동기로 제출됐다(handlePageFault 내부) - 이 스레드를
+            // #DB의 kHandleUserBreakpointHit()과 정확히 같은 방식으로
+            // 파킹한다(parkFromISR가 frame을 thread->tcb로 복사해 넣고
+            // idle로 전환 - 반환하지 않음). 위에서 이미 gInPageFaultHandler를
+            // 내렸으므로 IST5는 이 시점에 이미 완전히 비어 있다.
+            auto* thread = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+            thread->state = kernel::TaskState::Blocked;
+            kernel::Scheduler::parkFromISR(thread, frame);  // 반환하지 않음
         }
         // [QU-04C420BF, PN-71E50394 항목3] 온디맨드 매핑으로도 못 고친
         // 진짜 세그폴트 - ring3(유저 코드)에서 난 것이면 커널 전체를
