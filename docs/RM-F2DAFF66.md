@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-23T01:12:19.157Z
+  updatedAt: 2026-09-23T01:38:17.860Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -57,6 +57,40 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
    "문서만 정정"으로 기록.
 
 ## §1. 확정된 발견 (완료)
+
+### 1-V. `SP-2AAD7C8D` §9.3 - `OpenFlags` enum이 확정만 되고 실제 코드엔 정의조차 없었음 (코드 갭, 완전 해소, commit 75b511c)
+
+- **출처**: `SP-2AAD7C8D` §9.3("Syscall API")이 `OpenFlags`(ReadOnly/
+  WriteOnly/ReadWrite/Create/Truncate/Append/Directory)를 코드
+  스니펫으로 명시적으로 확정해 뒀고, `OpenArgs::flags`/
+  `KernelFsOpenArgs::flags`(mount_table.h)도 처음부터 이 값을
+  담을 목적으로 존재했다(주석에 "§9.3 OpenFlags" 명시).
+- **실제**: `OpenFlags` enum 자체가 코드 어디에도 정의돼 있지 않았다
+  - `flags` 필드는 그냥 raw `uint32_t`로 값 없이 지나가기만 했다.
+  1차 증분(읽기 전용)에서는 이 필드를 아무도 검사하지 않아 값이
+  있으나 없으나 차이가 없어 지금까지 드러나지 않았다.
+- **왜 지금 드러났나**: `PN-740005DF`(libvfat 쓰기 경로 잔여) 항목1
+  "truncate를 어느 syscall로 노출할지"를 조사하다, 이미 §9.3이
+  `OpenFlags::Truncate`(open() 플래그 하나, POSIX O_TRUNC와 동일한
+  결)로 답을 정해 뒀다는 걸 재확인 - 그런데 그 enum 정의 자체가
+  없어서 실제로 쓸 수가 없었다.
+- **고침**: `mount_table.h`에 `OpenFlags` enum 신설(§9.3 코드
+  스니펫 그대로). `Fat32Driver::onExec()`의 Open 분기가 `Truncate`
+  비트를 처음으로 실제 소비 - 성공적으로 해석된 일반 파일이고
+  쓰기 가능 마운트면, 핸들 슬롯을 채우기 전에 클러스터 체인을
+  전부 반납 + 디스크 디렉터리 엔트리를 0바이트로 갱신한다.
+- **아직 안 채운 것**: `Create`/`Append`/`Directory` 세 비트는 여전히
+  어떤 드라이버도 소비하지 않는다(§9.3이 확정한 값 자체는 맞지만,
+  "파일이 없으면 새로 만든다"류 동작은 아직 어떤 FileSystemDriver
+  구현체에도 없음 - Mkdir이 디렉터리 생성을 이미 지원하는 것과
+  달리 파일 생성은 Open()의 Create 플래그로 노출될 예정이나 미착수).
+- **검증**: 실제 mkfs.vfat 이미지의 2000바이트 파일을 Truncate
+  플래그로 Open → 읽으면 0바이트, 호스트(`mdir`)로도 0바이트+
+  클러스터 1개(루트 자신)만 사용 확인. `fsck.vfat` 1회
+  auto-correct(기존 알려진 dirty bit/FSInfo 캐시 갭만) 후 완전히
+  clean. 표준 4시나리오 무회귀.
+- **참고**: `PN-740005DF` 항목1 - 이 발견의 계기, 아직 항목3(LFN
+  정리)이 남아 있음.
 
 ### 1-U. `PN-CF030FC3`(Mkdir/Unlink syscall) - Rmdir syscall 배선을 빠뜨림 (코드 갭, 완전 해소, commit 1467b93)
 
