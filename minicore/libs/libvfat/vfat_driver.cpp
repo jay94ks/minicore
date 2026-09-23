@@ -626,8 +626,158 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 currentEntryByteOffset = matched.entryByteOffset;
             }
 
+            // [구현, 2026-09-23, PN-740005DF 항목1, SP-2AAD7C8D §9.3]
+            // `OpenFlags::Truncate`(mount_table.h) - open()이 규정한
+            // 대로 별도 syscall/op이 아니라 이 플래그 하나로 노출된다
+            // (POSIX O_TRUNC와 동일한 결). 이 enum 자체가 §9.3에
+            // 명시돼 있었는데 실제 코드 어디에도 정의/소비되지 않고
+            // 있었다(RM-F2DAFF66 §1-V로 기록) - 대상이 일반 파일이고
+            // (디렉터리는 무시), 쓰기 가능 마운트이고, 이미 클러스터가
+            // 있으면(비어 있으면 할 일 없음) 체인을 전부 반납 + 크기를
+            // 0으로 만든다. Open() 자신의 성공/실패에 영향을 주므로
+            // 핸들 슬롯을 채우기 전, 위 경로 탐색 직후 처리한다.
+            // 경로 탐색 실패는 항상 NotFound(기존 관례) - truncate
+            // 자체가 실패하면 더 정확한 사유로 덮어쓴다.
+            kernel::VfsError openFailReason = kernel::VfsError::NotFound;
+            bool truncateFailed = false;
+            if (!failed && !currentIsDir && currentEntryValid &&
+                (args->flags & static_cast<uint32_t>(kernel::OpenFlags::Truncate)) != 0) {
+                if (readOnly_) {
+                    failed = true;
+                    openFailReason = kernel::VfsError::PermissionDenied;
+                } else if (currentCluster != 0) {
+                    uint32_t c = currentCluster;
+                    const uint32_t numFats = volume_.numFatsValue();
+                    const uint32_t fatSize32 = volume_.fatSize32Value();
+                    while (c != 0 && !truncateFailed) {
+                        uint32_t nextC = 0;
+                        ChainStep step = ChainStep::Invalid;
+                        {
+                            uint32_t fatSector = 0;
+                            uint32_t fatByteOffset = 0;
+                            kFatEntryLocation(fatStartSector, bytesPerSector, c, &fatSector, &fatByteOffset);
+                            SlabBuf fatBuf(bytesPerSector);
+                            if (!fatBuf) {
+                                truncateFailed = true;
+                            } else {
+                                fs::BlockIoResult fatIoResult;
+                                kernel::AsyncTask* fatIoTask = kSubmitReadSectors(
+                                    device, bytesPerSector, fatSector, 1, fatBuf.get(), &fatIoResult);
+                                if (!fatIoTask) {
+                                    truncateFailed = true;
+                                } else {
+                                    co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                                    if (!fatIoResult.ok) {
+                                        truncateFailed = true;
+                                    } else {
+                                        uint32_t raw = 0;
+                                        memcpy(&raw, fatBuf.get() + fatByteOffset, sizeof(raw));
+                                        step = kInterpretFatEntry(raw, &nextC);
+                                    }
+                                }
+                            }
+                        }
+                        for (uint32_t fatIndex = 0; fatIndex < numFats && !truncateFailed; ++fatIndex) {
+                            uint32_t sector = 0;
+                            uint32_t byteOffset = 0;
+                            kFatEntryLocation(fatStartSector + fatIndex * fatSize32, bytesPerSector, c, &sector,
+                                               &byteOffset);
+                            SlabBuf buf(bytesPerSector);
+                            if (!buf) {
+                                truncateFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult readResult;
+                            kernel::AsyncTask* readTask =
+                                kSubmitReadSectors(device, bytesPerSector, sector, 1, buf.get(), &readResult);
+                            if (!readTask) {
+                                truncateFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(readTask);
+                            if (!readResult.ok) {
+                                truncateFailed = true;
+                                break;
+                            }
+                            uint32_t raw = 0;
+                            memcpy(&raw, buf.get() + byteOffset, sizeof(raw));
+                            const uint32_t newRaw = kEncodeFatEntry(raw, 0);
+                            memcpy(buf.get() + byteOffset, &newRaw, sizeof(newRaw));
+                            fs::BlockIoResult writeResult;
+                            kernel::AsyncTask* writeTask =
+                                kSubmitWriteSectors(device, bytesPerSector, sector, 1, buf.get(), &writeResult);
+                            if (!writeTask) {
+                                truncateFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(writeTask);
+                            if (!writeResult.ok) {
+                                truncateFailed = true;
+                                break;
+                            }
+                        }
+                        if (truncateFailed || step != ChainStep::Next) {
+                            break;
+                        }
+                        c = nextC;
+                    }
+
+                    if (!truncateFailed) {
+                        uint32_t entrySector = 0;
+                        if (!kClusterToSector(dataStartSector, sectorsPerCluster, currentEntryCluster,
+                                               &entrySector)) {
+                            truncateFailed = true;
+                        } else {
+                            entrySector += currentEntryByteOffset / bytesPerSector;
+                            const uint32_t byteInSector = currentEntryByteOffset % bytesPerSector;
+                            SlabBuf sectorBuf(bytesPerSector);
+                            if (!sectorBuf) {
+                                truncateFailed = true;
+                            } else {
+                                fs::BlockIoResult readResult;
+                                kernel::AsyncTask* readTask = kSubmitReadSectors(
+                                    device, bytesPerSector, entrySector, 1, sectorBuf.get(), &readResult);
+                                if (!readTask) {
+                                    truncateFailed = true;
+                                } else {
+                                    co_await kernel::AsyncTaskCoroAwaiter(readTask);
+                                    if (!readResult.ok) {
+                                        truncateFailed = true;
+                                    } else {
+                                        auto* entry = reinterpret_cast<DirEntry*>(sectorBuf.get() + byteInSector);
+                                        entry->fileSize = 0;
+                                        entry->fstClusHi = 0;
+                                        entry->fstClusLo = 0;
+                                        fs::BlockIoResult writeResult;
+                                        kernel::AsyncTask* writeTask =
+                                            kSubmitWriteSectors(device, bytesPerSector, entrySector, 1,
+                                                                 sectorBuf.get(), &writeResult);
+                                        if (!writeTask) {
+                                            truncateFailed = true;
+                                        } else {
+                                            co_await kernel::AsyncTaskCoroAwaiter(writeTask);
+                                            if (!writeResult.ok) {
+                                                truncateFailed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (truncateFailed) {
+                        failed = true;
+                        openFailReason = kernel::VfsError::InvalidHandle;
+                    } else {
+                        currentCluster = 0;
+                        currentFileSize = 0;
+                    }
+                }
+            }
+
             if (failed) {
-                args->result = kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
+                args->result = kernel::OpenResult{kernel::FileHandle{}, false, openFailReason};
             } else {
                 // [갱신, 2026-09-23, PN-9D6FE4B6, QU-E4E83A9A 답변] open-handle
                 // 테이블에서 빈 슬롯을 찾아 채우고, 그 인덱스를 FileHandle로

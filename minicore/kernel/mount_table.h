@@ -86,6 +86,24 @@ enum class KernelFsOpCode : uint32_t {
     Readdir,
 };
 
+// [신규, 2026-09-23, PN-740005DF 항목1, RM-F2DAFF66 §1-V] SP-2AAD7C8D
+// §9.3이 이미 확정해 둔 값인데, `KernelFsOpenArgs::flags`/`OpenArgs::
+// flags`(vfs_syscall.h) 필드는 처음부터 있었으면서도 이 enum 자체가
+// 실제 코드 어디에도 정의/소비되지 않고 있었다(설계는 확정, 구현만
+// 누락) - Truncate(POSIX O_TRUNC와 동일한 결 - 성공적으로 열리는
+// 순간 기존 내용을 0바이트로 만듦)가 처음으로 이 값을 실제로 소비
+// (Fat32Driver::onExec의 Open 분기). Create/Append/Directory는
+// 여전히 미소비 - 실제로 필요해지는 착수 세션이 이어서 구현한다.
+enum class OpenFlags : uint32_t {
+    ReadOnly = 1 << 0,
+    WriteOnly = 1 << 1,
+    ReadWrite = ReadOnly | WriteOnly,
+    Create = 1 << 2,
+    Truncate = 1 << 3,
+    Append = 1 << 4,
+    Directory = 1 << 5,  // 디렉터리로 열기(readdir 전용)
+};
+
 // 9개 KernelFsXxxArgs 전부 첫 필드가 `op`로 시작한다 - onExec()가
 // `args`를 이 태그만으로 먼저 읽어(모든 구조체의 첫 멤버이므로 어떤
 // 구체 타입으로 들어와도 안전) 실제 op별 구조체로 재캐스팅해 분기한다.
