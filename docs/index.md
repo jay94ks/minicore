@@ -46,7 +46,7 @@
 | [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-21T14:15:10.089Z |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-21T14:44:26.180Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
-| [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-20T02:36:52.596Z |
+| [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-23T09:56:09.008Z |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-24T00:46:58.286Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-23T11:46:13.823Z |
@@ -103,6 +103,7 @@
 | [SP-C2670F69](./SP-C2670F69.md) | AHCI(SATA 스토리지 컨트롤러) 드라이버 — 설계 제안 | approved | 2026-09-19T18:40:04.085Z |
 | [SP-CA3C3E57](./SP-CA3C3E57.md) | Channel/BridgeHandle 안전한 핸들 해석 — 세부 설계 (PN-CE6A04AB) | approved | 2026-09-17T03:17:05.229Z |
 | [SP-CC1CF30E](./SP-CC1CF30E.md) | authmgr 커널 서비스(사용자 신원 관리, Key-Value DB) — 설계 제안 | approved | 2026-09-18T06:56:55.919Z |
+| [SP-CC2B18C6](./SP-CC2B18C6.md) | UEFI 직접 부팅 - 커널 물리 재배치(physicalBase) 설계 | review | 2026-09-24T05:00:23.804Z |
 | [SP-CCACB192](./SP-CCACB192.md) | libjson — 커널/유저 공용 JSON 파서/직렬화 라이브러리 설계 제안 | approved | 2026-09-17T02:37:51.540Z |
 | [SP-D02C4A73](./SP-D02C4A73.md) | libswapfs — 스왑 슬롯 온디스크 포맷 + SwapfsBackend 구현 설계 | approved | 2026-09-22T03:48:27.925Z |
 | [SP-D7013B26](./SP-D7013B26.md) | Slab 할당자(libkmm) — 설계 제안 | approved | 2026-09-14T11:52:49.691Z |

@@ -149,12 +149,17 @@ MCP 도구(`cnw`)로만 읽고 쓴다. 파일을 직접 만들거나 수정해�
 - 헤더 가드는 전통적 `#ifndef`/`#define`(`#pragma once` 아님). 커널
   코드에서 C++ 예외 금지, `errno_t` 체계 사용. RTTI/STL은 부팅 초기엔
   freestanding 최소 범위만, 이후 단계적으로 확장.
-- 디렉터리: `minicore/arch/<arch>`는 순수 부팅 stub만, 부팅 이후에도
-  쓰는 아키텍처 종속 코드는 `minicore/libs/<arch_name>`, 아키텍처
-  무관 early 런타임(memcpy 등)은 `minicore/libs/libkenv`, 커널은
+- 디렉터리(**[변경, 2026-09-24, QU-A2CABBC6] `arch`/`boot` 역할이
+  서로 맞바뀜 - 진행 중, PN-7FBF255A/PN-E612E714**): `minicore/boot/<arch>`
+  는 순수 부팅 stub만(옛 `minicore/arch/<arch>` 역할, UEFI는
+  `minicore/boot/<arch>/uefi`), 부팅 이후에도 쓰는 아키텍처 종속
+  코드는 `minicore/arch/<arch_name>`(옛 `minicore/libs/<arch_name>`
+  역할 - **유저/커널 공용으로 확장**), 아키텍처 무관 early 런타임
+  (memcpy 등)은 `minicore/libs/libkenv`(변경 없음), 커널은
   `minicore/kernel`, 유저랜드 서비스는 `minicore/net`/`tty`(devmgr/fs는
   2026-09-21부로 Process 없는 순수 커널 KernelThread로 완전 흡수돼
-  `minicore/kernel` 안으로 옮겨졌다 - PN-D6A05E78).
+  `minicore/kernel` 안으로 옮겨졌다 - PN-D6A05E78). 상세는 RM-23F4B687
+  §3.
 - 빌드: CMake + WSL의 clang. 첫 구현 부팅 경로는 multiboot2, 부트로더는
   기존 것을 체인로더로 활용. 라이선스: MIT.
 
