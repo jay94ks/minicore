@@ -23,6 +23,20 @@ set(MINICORE_USERLAND_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/linker-use
 add_subdirectory(libs/libmc)
 add_subdirectory(libs/libcenv)
 add_subdirectory(libs/libcpio)
+
+# arch/x86_64(SP-8B6B8D25 §3.0, RM-23F4B687 §3 갱신, PN-E612E714) -
+# io_port.h/msr.h는 애초에 유저/커널 공용을 전제로 설계됐다
+# (QU-4606360C) - init/pubreg 등과 동일한 이유의 out-of-tree
+# add_subdirectory(커널 빌드 트리와 완전히 별개 CMake 프로젝트라
+# 양쪽에 각각 add_subdirectory 필요). 이 타깃(OBJECT 라이브러리,
+# isr.S/context_switch.S/syscall_entry.S는 커널 전용) 자체를 지금
+# 당장 어느 유저랜드 실행 파일이 링크하는 건 아니다 - 헤더 include
+# 경로를 노출해 두는 게 목적이고, 실제 컴파일 확인은 아래
+# userlandtest에서 별도로 한다(이 OBJECT 타깃을 링크하면 커널 전용
+# .S 파일들의 심볼까지 끌려와 불필요한 링크 문제가 생길 수 있어
+# 피한다).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/arch/x86_64 ${CMAKE_CURRENT_BINARY_DIR}/minicore-arch-x86_64)
+
 add_subdirectory(tests/userlandtest)
 
 # minicore/init(SP-68182FBD §2.4) - userland/ 밖에 있지만 다른 유저
