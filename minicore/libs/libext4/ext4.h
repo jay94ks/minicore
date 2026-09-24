@@ -80,9 +80,24 @@ struct SuperblockCore {
     uint32_t blocksCountHi;      // 336 - INCOMPAT_64BIT일 때만 유효
     uint32_t rBlocksCountHi;     // 340
     uint32_t freeBlocksCountHi;  // 344
-    // 이후(348~) 여전히 v1이 안 읽는 필드 - 위와 같은 절단 관례.
+    // [추가, PN-D168A778] 오프셋 348~576(228바이트) - minExtraIsize부터
+    // s_last_error_func까지, v1이 개별 필드로 안 읽어 위와 같은 관례로
+    // 통째로 건너뛴다. 로컬 리눅스 커널 소스(fs/ext4/ext4.h struct
+    // ext4_super_block)를 실제로 컴파일해 offsetof()로 뽑은 값과 실제
+    // mke2fs -O quota,metadata_csum 이미지의 uid/gid quota inode 번호
+    // (dumpe2fs "User/Group quota inode: 3/4") 둘 다로 아래 usrQuotaInum/
+    // grpQuotaInum/prjQuotaInum 세 필드의 정확한 오프셋(576/580/620)을
+    // 교차 검증했다(PN-D168A778) - 커널 헤더가 로컬에 있다고 그대로
+    // 믿지 않고 실제 이미지로 다시 확인한다는 CLAUDE.md 규칙4 취지
+    // 그대로.
+    uint8_t reservedErrorAndMountOptFields[228];
+    uint32_t usrQuotaInum;  // 576 - RO_COMPAT_QUOTA일 때만 유효, 사용자 쿼터 파일의 inode 번호
+    uint32_t grpQuotaInum;  // 580 - 그룹 쿼터 파일의 inode 번호
+    uint8_t reservedOverheadAndEncryptFields[36];  // 584~620 - overheadClusters/backupBgs/encryptAlgos/encryptPwSalt/lpfIno, v1 미사용
+    uint32_t prjQuotaInum;  // 620 - 프로젝트 쿼터 파일의 inode 번호(RO_COMPAT_PROJECT 별도 기능 - v1 미지원, 오프셋만 기록)
+    // 이후(624~) 여전히 v1이 안 읽는 필드 - 위와 같은 절단 관례.
 };
-static_assert(sizeof(SuperblockCore) == 348, "SuperblockCore 레이아웃이 리눅스 소스와 어긋남");
+static_assert(sizeof(SuperblockCore) == 624, "SuperblockCore 레이아웃이 리눅스 소스와 어긋남");
 #pragma pack(pop)
 
 constexpr uint32_t kSuperblockOffset = 1024;
@@ -116,6 +131,14 @@ constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents
 // 몰라도 마운트 자체는 안전) - kExt4ComputeGroupDescChecksum()을 실제로
 // 쓸지 판단하는 호출자 쪽 조건으로만 쓰인다.
 constexpr uint32_t kRoCompatMetadataCsum = 0x400;
+
+// RO_COMPAT_QUOTA(0x100) - PN-D168A778(SP-7A9CED3E §2.2 항목5)가
+// 다루는 대상. 켜져 있으면 `SuperblockCore::usrQuotaInum`/
+// `grpQuotaInum`(624바이트 확장 뒤에 나온 세 필드 중 두 개)이
+// 가리키는 일반 파일 inode 안에 "quota v2"(vfsv0/vfsv1 - 리눅스
+// VFS 공용 포맷, ext4 전용 아님) 형식의 쿼터 데이터가 들어 있다 -
+// `QuotaV2Header`/`QuotaV2Info` 참고.
+constexpr uint32_t kRoCompatQuota = 0x100;
 
 // ---------------------------------------------------------------------
 // 3.2 블록 그룹 디스크립터(32바이트, INCOMPAT_64BIT 미지원 - §2.2 후속).
@@ -583,6 +606,51 @@ struct DescriptorTag {
 // 상태 변경도 하지 않는다(태그 목록만 뽑아낼 뿐 리플레이가 아니다).
 uint32_t kJbd2ParseDescriptorTags(const void* rawBlock, uint32_t blockLen, uint32_t featureIncompat,
                                    DescriptorTag* outTags, uint32_t maxTags);
+
+// ---------------------------------------------------------------------
+// 3.7 쿼터 파일 온디스크 포맷 "quota v2"(vfsv0/vfsv1, PN-D168A778 준비
+// 작업) - **이 프로젝트가 새로 고안한 포맷이 아니고, ext4 전용도
+// 아니다** - 리눅스 VFS가 여러 파일시스템에 공용으로 쓰는 포맷
+// (`fs/quota/quotaio_v2.h`)을 `RO_COMPAT_QUOTA`(위 `kRoCompatQuota`)
+// 켜진 ext4가 `SuperblockCore::usrQuotaInum`/`grpQuotaInum`이 가리키는
+// 일반 파일 inode 안에 그대로 저장하는 것뿐이다. 실제
+// `mke2fs -O quota,metadata_csum` 이미지의 사용자 쿼터 inode(3번)
+// 내용을 직접 읽어 매직(`0xd9c01f11`=USRQUOTA)/버전(1)/
+// `dqi_bgrace`·`dqi_igrace`(둘 다 604800초=7일, 표준 기본값)/
+// `dqi_blocks`(파일 크기 6144바이트 = 1024바이트 쿼터 블록 6개와
+// 일치)까지 실측 대조 완료(PN-D168A778). **이 두 struct(헤더+정보)
+// 까지만 검증했다 - 실제 쿼터 레코드가 저장되는 radix-tree 구조
+// (`fs/quota/quota_tree.c`, `V2_DQBLKSIZE_BITS=10`=1024바이트 리프
+// 블록)와 사용자별 `v2r1_disk_dqblk` 레코드 파싱/탐색은 이번 준비
+// 작업 범위 밖 - 착수 세션이 실제 사용량이 기록된 이미지(quotacheck
+// 등으로 채워야 함, 이 세션 WSL 환경엔 quota 패키지 자체가 없어
+// 준비 못 함)로 별도 검증할 것.
+// ---------------------------------------------------------------------
+constexpr uint32_t kQuotaV2MagicUser = 0xd9c01f11;
+constexpr uint32_t kQuotaV2MagicGroup = 0xd9c01927;
+constexpr uint32_t kQuotaV2MagicProject = 0xd9c03f14;
+constexpr uint32_t kQuotaV2Version = 1;
+
+#pragma pack(push, 1)
+struct QuotaV2Header {
+    uint32_t magic;    // kQuotaV2Magic* 중 하나와 일치해야 함
+    uint32_t version;  // kQuotaV2Version(1)과 일치 - v1은 그 외 버전 미지원
+};
+static_assert(sizeof(QuotaV2Header) == 8, "QuotaV2Header는 8바이트");
+
+// 헤더(오프셋 0~8) 바로 뒤(오프셋 8~32)에 이어지는 포맷 정보 - 실제
+// 쿼터 레코드가 담긴 radix-tree는 이 뒤(쿼터 파일의 두 번째
+// 1024바이트 블록부터) 시작한다.
+struct QuotaV2Info {
+    uint32_t bgrace;      // 블록 소프트 한도 초과 유예 시간(초) - 보통 604800(7일)
+    uint32_t igrace;      // inode 소프트 한도 초과 유예 시간(초)
+    uint32_t flags;       // DQF_* 비트마스크(v1 미해석)
+    uint32_t blocks;      // 쿼터 파일 전체의 1024바이트 블록 수
+    uint32_t freeBlk;     // 프리 리스트의 첫 블록 번호
+    uint32_t freeEntry;   // 빈 엔트리가 있는 블록 중 하나의 번호
+};
+static_assert(sizeof(QuotaV2Info) == 24, "QuotaV2Info는 24바이트");
+#pragma pack(pop)
 
 }  // namespace ext4
 
