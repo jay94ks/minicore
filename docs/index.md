@@ -103,7 +103,7 @@
 | [SP-C2670F69](./SP-C2670F69.md) | AHCI(SATA 스토리지 컨트롤러) 드라이버 — 설계 제안 | approved | 2026-09-19T18:40:04.085Z |
 | [SP-CA3C3E57](./SP-CA3C3E57.md) | Channel/BridgeHandle 안전한 핸들 해석 — 세부 설계 (PN-CE6A04AB) | approved | 2026-09-17T03:17:05.229Z |
 | [SP-CC1CF30E](./SP-CC1CF30E.md) | authmgr 커널 서비스(사용자 신원 관리, Key-Value DB) — 설계 제안 | approved | 2026-09-18T06:56:55.919Z |
-| [SP-CC2B18C6](./SP-CC2B18C6.md) | UEFI 직접 부팅 - 커널 물리 재배치(physicalBase) 설계 | approved | 2026-09-24T07:16:19.757Z |
+| [SP-CC2B18C6](./SP-CC2B18C6.md) | UEFI 직접 부팅 - 커널 물리 재배치(physicalBase) 설계 | approved | 2026-09-24T08:23:05.063Z |
 | [SP-CCACB192](./SP-CCACB192.md) | libjson — 커널/유저 공용 JSON 파서/직렬화 라이브러리 설계 제안 | approved | 2026-09-17T02:37:51.540Z |
 | [SP-D02C4A73](./SP-D02C4A73.md) | libswapfs — 스왑 슬롯 온디스크 포맷 + SwapfsBackend 구현 설계 | approved | 2026-09-22T03:48:27.925Z |
 | [SP-D7013B26](./SP-D7013B26.md) | Slab 할당자(libkmm) — 설계 제안 | approved | 2026-09-14T11:52:49.691Z |
