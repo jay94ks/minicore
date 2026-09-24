@@ -411,4 +411,32 @@ uint64_t Ext4Volume::groupInodeTableBlock(uint32_t group) const {
     return kExt4Combine64(sb_.featureIncompat, lo, hi);
 }
 
+uint64_t Ext4Volume::groupBlockBitmapBlock(uint32_t group) const {
+    if (group >= groupCount_ || !groupDescsRaw_) {
+        return 0;
+    }
+    const uint8_t* descPtr = groupDescsRaw_ + static_cast<uint64_t>(group) * groupDescStride_;
+    uint32_t lo;
+    memcpy(&lo, descPtr + offsetof(GroupDesc32, blockBitmapLo), sizeof(lo));
+    uint32_t hi = 0;
+    if (is64Bit_) {
+        memcpy(&hi, descPtr + offsetof(GroupDesc64, blockBitmapHi), sizeof(hi));
+    }
+    return kExt4Combine64(sb_.featureIncompat, lo, hi);
+}
+
+uint64_t Ext4Volume::groupInodeBitmapBlock(uint32_t group) const {
+    if (group >= groupCount_ || !groupDescsRaw_) {
+        return 0;
+    }
+    const uint8_t* descPtr = groupDescsRaw_ + static_cast<uint64_t>(group) * groupDescStride_;
+    uint32_t lo;
+    memcpy(&lo, descPtr + offsetof(GroupDesc32, inodeBitmapLo), sizeof(lo));
+    uint32_t hi = 0;
+    if (is64Bit_) {
+        memcpy(&hi, descPtr + offsetof(GroupDesc64, inodeBitmapHi), sizeof(hi));
+    }
+    return kExt4Combine64(sb_.featureIncompat, lo, hi);
+}
+
 }  // namespace ext4

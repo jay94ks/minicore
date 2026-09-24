@@ -474,6 +474,15 @@ public:
     // ext4_driver.cpp의 kLocateInode 참고).
     uint64_t groupInodeTableBlock(uint32_t group) const;
 
+    // [신규, 2026-09-25, PN-FE718C87] groupInodeTableBlock()과 완전히
+    // 같은 방식(hi 필드까지 kExt4Combine64()로 합성) - 그룹 group의
+    // block/inode 비트맵 시작 블록의 진짜 64비트 절대 블록 번호.
+    // 읽기 경로(1차 증분)는 이 두 비트맵을 전혀 안 썼으나(free 여부를
+    // 신경 쓸 필요가 없었으므로), 쓰기 경로(블록/inode 할당)는
+    // 이 비트맵을 실제로 스캔/갱신해야 한다.
+    uint64_t groupBlockBitmapBlock(uint32_t group) const;
+    uint64_t groupInodeBitmapBlock(uint32_t group) const;
+
 private:
     fs::BlockDevice* device_ = nullptr;
     SuperblockCore sb_{};
@@ -488,6 +497,55 @@ private:
 };
 
 constexpr uint32_t kRootInodeNumber = 2;
+
+// ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-FE718C87] 블록/inode 비트맵 - 이 프로젝트가
+// 새로 고안한 게 아니라 ext4의 표준 관례 그대로: 비트맵은 그룹당
+// blocksPerGroup(또는 inodesPerGroup) 비트, **비트값 1=사용 중,
+// 0=free**(리눅스 커널 fs/ext4/balloc.c/ialloc.c와 동일 - 일반적인
+// "1=set/활성"이라는 직관과 반대이니 주의). 비트 인덱스는 그
+// 그룹에서의 **상대** 인덱스 - 블록 비트맵은 그 그룹의 첫 데이터
+// 블록을 인덱스 0으로, inode 비트맵은 그 그룹의 첫 inode 번호를
+// 인덱스 0으로 삼는다(호출자가 이미 그룹 상대 인덱스로 변환해
+// 넘길 것 - 이 함수들 자체는 절대 블록/inode 번호를 모른다).
+// 순수 함수(I/O 없음) - 이미 읽어 온 비트맵 바이트 버퍼를 스캔/
+// 갱신만 한다.
+// ---------------------------------------------------------------------
+
+// bitCount(그 그룹의 명목상 blocksPerGroup/inodesPerGroup)개 비트 중
+// 처음 나오는 0비트(=free)의 상대 인덱스를 찾는다. 없으면 bitCount를
+// 돌려준다(호출자가 "이 그룹엔 없음"으로 해석할 것).
+inline uint32_t kExt4BitmapFindFirstFree(const uint8_t* bitmap, uint32_t bitCount) {
+    const uint32_t byteCount = (bitCount + 7u) / 8u;
+    for (uint32_t byteIndex = 0; byteIndex < byteCount; ++byteIndex) {
+        const uint8_t byteValue = bitmap[byteIndex];
+        if (byteValue == 0xFFu) {
+            continue;  // 이 바이트 8비트 전부 사용 중 - 다음 바이트로
+        }
+        for (uint32_t bit = 0; bit < 8; ++bit) {
+            const uint32_t index = byteIndex * 8u + bit;
+            if (index >= bitCount) {
+                return bitCount;
+            }
+            if ((byteValue & (1u << bit)) == 0) {
+                return index;
+            }
+        }
+    }
+    return bitCount;
+}
+
+inline bool kExt4BitmapTestBit(const uint8_t* bitmap, uint32_t relIndex) {
+    return (bitmap[relIndex / 8u] & (1u << (relIndex % 8u))) != 0;
+}
+
+inline void kExt4BitmapSetBit(uint8_t* bitmap, uint32_t relIndex) {
+    bitmap[relIndex / 8u] = static_cast<uint8_t>(bitmap[relIndex / 8u] | (1u << (relIndex % 8u)));
+}
+
+inline void kExt4BitmapClearBit(uint8_t* bitmap, uint32_t relIndex) {
+    bitmap[relIndex / 8u] = static_cast<uint8_t>(bitmap[relIndex / 8u] & ~(1u << (relIndex % 8u)));
+}
 
 // ---------------------------------------------------------------------
 // 3.6 jbd2 저널 온디스크 포맷 (PN-BC3A2F5F 준비 작업) - 리눅스 커널
