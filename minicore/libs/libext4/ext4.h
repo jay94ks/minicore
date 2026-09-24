@@ -531,8 +531,20 @@ static_assert(sizeof(RevokeHeader) == 16, "RevokeHeader 레이아웃이 리눅�
 bool kJbd2ParseCommitHeader(const void* rawBlock, uint32_t blockLen, CommitHeader* out);
 
 // [추가, 2026-09-23, PN-BC3A2F5F 준비 작업 3단계] 디스크립터 블록의
-// 가변 길이 태그 - v1(8바이트, blocknr+flags)과 CSUM_V3(16바이트,
-// blocknr+flags+blocknrHigh+checksum) 둘 다 실측 확인 완료. 같은
+// 가변 길이 태그 - v1(8바이트)과 CSUM_V3(16바이트,
+// blocknr+flags+blocknrHigh+checksum) 둘 다 실측 확인 완료. [정확화,
+// 2026-09-24, 로컬 리눅스 커널 소스(include/linux/jbd2.h
+// journal_block_tag_t, fs/jbd2/journal.c journal_tag_bytes()) 대조]
+// 8바이트 v1 태그는 "blocknr+flags"가 아니라 **blocknr(4)+
+// checksum_be16(2)+flags_be16(2)**다 - 이 checksum 필드가 CSUM_V2/V3
+// 기능이 꺼져 있을 때 항상 0이라, 그 2바이트+뒤이은 flags 2바이트를
+// 하나의 be32로 읽어도(현재 구현) checksum 상위 바이트가 전부
+// 0이므로 flags 값과 수치가 정확히 같아 결과적으로 문제없다(우연이
+// 아니라 checksum=0이 보장되는 조건에서만 성립하는 구조적 사실).
+// **CSUM_V2 단독**(checksum 필드가 실제로 0이 아닐 수 있는 유일한
+// 8~10바이트 조합)을 여전히 미지원으로 거부하는 이유가 바로 이것 -
+// 그 경우 이 4바이트 뭉치 읽기가 flags를 잘못된 값으로 오염시킨다.
+// 같은
 // mke2fs 기본 옵션이라도 e2fsprogs 버전/환경에 따라 저널
 // featureIncompat가 다르게 나온다는 걸 이번에 직접 확인했다 - 이전
 // 준비 작업(2단계)이 "journal features: (none)"이라고 적어 둔 환경과
