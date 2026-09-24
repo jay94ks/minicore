@@ -92,7 +92,7 @@
 | [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-17T12:27:37.052Z |
 | [SP-9A6D579F](./SP-9A6D579F.md) | 프로세스 디버깅(브레이크포인트/싱글스텝) 서브시스템 — 설계 제안 | approved | 2026-09-20T04:50:48.737Z |
 | [SP-9CB55C5B](./SP-9CB55C5B.md) | Kill 대상 확장 — 안전한 ProcessId 해석 메커니즘 설계 제안 | approved | 2026-09-22T00:48:55.792Z |
-| [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved | 2026-09-21T19:33:26.563Z |
+| [SP-9DD4F3EA](./SP-9DD4F3EA.md) | 장치 자동 인식 및 핫플러그 프레임워크(PnP) — 설계 제안 | approved | 2026-09-24T12:02:22.391Z |
 | [SP-9F1DB1D8](./SP-9F1DB1D8.md) | gCurrentTask 크로스코어 접근 보호 — RwSpinlock 설계 스케치 (QU-68D76FC4) | approved | 2026-09-17T02:18:05.726Z |
 | [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | approved | 2026-09-22T07:19:02.888Z |
 | [SP-A252E82F](./SP-A252E82F.md) | 인터럽트 컨텍스트 재설계 - 회피 불가능한 예외만 IST로 격리, 일반 인터럽트는 단일 스택 통일, gInterruptDepth 폐기 | approved | 2026-09-21T23:03:58.039Z |

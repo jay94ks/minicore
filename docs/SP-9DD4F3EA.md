@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-9DD4F3EA
   status: approved
-  updatedAt: 2026-09-21T19:33:26.563Z
+  updatedAt: 2026-09-24T12:02:22.391Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -290,6 +290,29 @@ DC 없이 임의로 확정하지 않고 질의로 등록해 둔다(RM-23F4B687 �
 원칙, CLAUDE.md 규칙 4).
 
 ## 5. 선행 조건 (계획으로 등록 예정)
+
+**[정정, 2026-09-24, minicore-3c 세션] §3.2/§6의 "devmgr이 `mc::fork()`
+호출"은 devmgr이 KernelThread로 흡수되며 이미 한 차례 더 뒤집힌
+상태다** - 이 문서의 fork() 설계(§3.2 "새 설계"/§6, 2026-09-15
+답변 기준)는 devmgr이 여전히 실제 유저랜드 Process(syscall 트랩
+컨텍스트 보유)라는 전제 위에 서 있었다. 그런데 devmgr 자신이
+`SP-43331889`/`PN-615C48D5`(2026-09-20/21 완료)로 **Process 없는
+순수 커널 `KernelThread`**로 흡수되며 `libmc`(트랩 기반 syscall
+왕복) 자체를 더 이상 쓰지 않는다(`minicore/kernel/devmgr.cpp` 문서
+주석 참고) - `mc::fork()`를 호출할 유저랜드 트랩 컨텍스트 자체가
+없어졌으므로, 이 문서가 서술한 방식 그대로는 더 이상 성립하지
+않는다. **이미 해결책도 마련돼 있다** - `SP-43331889` §5가
+`kSpawnUserModeDriver()`(devmgr이 커널 모드에서 직접 새 ring3
+Process를 만드는 함수, `kSpawnInitProcess`/`kSpawnServiceProcesses`
+공통 로직 재사용)를 새로 설계해 이 문제를 정확히 다뤘고,
+`PN-A8BE8BED` 항목1로 구현이 추적되고 있다(현재 devmgr PnP 매칭
+테이블이 비어 있어 - AHCI가 §3.1 각주대로 fs로 이관됨 - 실제
+트리거되지 않아 설계자 지시로 "유저랜드 본격 착수 시" 재검토로
+의도적으로 보류 중, 새 갭이 아님). 향후 비-스토리지 PnP 드라이버가
+실제로 필요해지면 이 문서의 §3.2/§6이 아니라 `SP-43331889` §5/
+`PN-A8BE8BED`를 따라 구현해야 한다.
+
+## 선행 조건
 
 - 프로세스 모델(PN-16CA347D) - **완료됨** - devmgr
   자체가 실행되려면 필요했던 이 전제는 충족됐다. 실제 devmgr 프로세스
