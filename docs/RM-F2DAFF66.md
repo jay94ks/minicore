@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-24T09:12:00.834Z
+  updatedAt: 2026-09-24T10:43:03.081Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -462,11 +462,11 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
      결과 참조 0건(미배선 맞음) - v1은 재폴트 경로 자체가 거의 없어
      소비처가 없다는 판단이 타당함(`SP-6CEFBE9B` §7.3 기존 합의와
      일치) - swap 착수 시(`PN-4859FDE9`) 재검토.
-  3. `elf::loadIntoAddressSpace()`의 PT_LOAD 세그먼트가 `VmaBacking::
-     Anonymous`로 등록되는지는 `elf.cpp`가 이 저장소 `minicore/kernel`
-     밖에 있어 미확인(`PN-2FC5ED36`에 참고용으로 남김, Anonymous가
-     아니면 rmap 커버리지에 조용한 공백 가능성 - 다음에 ELF 로딩
-     경로를 손댈 세션이 확인 권장).
+  3. **[해소, 2026-09-24, minicore-3c 세션]** `elf::loadIntoAddressSpace()`
+     (`minicore/libs/libelf/elf.cpp:134`)의 PT_LOAD 세그먼트가
+     `kernel::VmaBacking::Anonymous`로 등록됨을 직접 소스로 확인 -
+     rmap 커버리지 공백 없음, ELF 로딩 경로도 정상적으로
+     rmap/LRU 대상이다.
 - **부수 확인**: 같은 날 `PN-9E2CC631`(FileBacked 캐시 정책)도
   완료돼 `SP-6CEFBE9B` §6.3/§7.4가 "Anonymous/FileBacked 공유 LRU"로
   갱신됐다(정책 확정, 코드는 fs 서비스 실코드 대기).
@@ -2180,12 +2180,25 @@ AI가 스스로 승인 처리할 수 없어 보류 - `SP-A21DD889`에서도 동�
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
+**[2026-09-24, 추가 갱신] `DC-F196028B`(UEFI memmap/RSDP 전달 방식)도
+점검 완료 - 갭 없음.** 이 DC는 승인 답변("부팅 정보 구조체를
+통합해")으로 3가지 결정 지점을 확정했다 - (1) memmap 전달은 실측
+확인된 실제 필요치(QEMU+OVMF 126~129개)를 반영해 `kUefiMaxMemmapEntries
+=256`(kmain.cpp:300, 여유 확보)으로 구현, (2) RSDP는 `UefiBootInfo::
+rsdpPaddr`로 전달돼 `kMain`이 `Acpi::init(rsdpPaddr)`(kmain.cpp:685)에
+그대로 넘김, (3) "스크래치 채널을 계속 필드별로 늘리지 말고 구조체
+하나로 통합"이 `UefiBootInfo`(minicore/kernel/uefi_boot_info.h +
+UEFI측 사본 minicore/boot/x86_64/uefi/efi/boot_info.h) 신설로 정확히
+반영됨 - 전부 실제 QEMU+OVMF 부팅으로 ACPI 파싱+PCI 열거 성공까지
+실측 검증 완료(같은 세션). **§2로 이동.**
+
 **[2026-09-24, 갱신] `SP-CC2B18C6`은 위 §2로 이동 완료** - 구현이
 실제로 kMain 도달까지 진행돼(`PN-7FBF255A`) 대조 가능해졌고, 갭
 없음으로 확인됐다(§2 해당 항목 참고). `document_list(status=approved)`
-전수 재확인 결과 `SP-CC2B18C6`가 여전히 가장 최근 approved 문서라
-이 §3 스윕으로 새로 대조할 대상이 없다 - 다음 approved 전환 시까지
-다시 건너뛴다(2026-09-21/22/23과 동일한 재소진 패턴).
+전수 재확인 결과 `DC-F196028B`가 가장 최근 approved 문서이고(위에서
+바로 대조 완료) 그 외 새로 approved 전환된 SP/DC는 없다 - 다음
+approved 전환 시까지 이 §3 스윕은 다시 건너뛴다(2026-09-21/22/23과
+동일한 재소진 패턴).
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
