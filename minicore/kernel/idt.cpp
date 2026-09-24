@@ -1103,10 +1103,17 @@ extern "C" void kIsrHandler(kernel::InterruptFrame* frame) {
             // 첫 경계다. Exit 로그가 안 찍히면 핸들러(kAsyncDrainIsr) 본문
             // 안에서, Enter 자체가 안 찍히면 이 지점 이전(캡처/앞선 벡터
             // 분기 체인)에서 손상이 일어났다는 뜻.
+            // [확장, 2026-09-24, PN-E4C6AF72 §"남은 것" 0번] CS 진단을
+            // Enter/LeaveInterruptStack(PN-61D908EB)에 이어 여기에도 남긴다
+            // - 이 핸들러 호출 전후로 frame->cs가 이미 오염돼 있었는지
+            // (진입 이전 손상) 아니면 handler(frame) 실행 도중 바뀌는지
+            // (이 핸들러 자신의 문제)를 구분하기 위한 것.
             const kernel::uint32_t coreIndex = kernel::Scheduler::currentCoreIndex();
-            kernel::kDiagRingLog(kernel::DiagRingEvent::DynamicDispatchEnter, coreIndex, frame->vector, 0);
+            kernel::kDiagRingLog(kernel::DiagRingEvent::DynamicDispatchEnter, coreIndex, frame->vector, 0,
+                                  frame->cs);
             handler(frame);
-            kernel::kDiagRingLog(kernel::DiagRingEvent::DynamicDispatchExit, coreIndex, frame->vector, 0);
+            kernel::kDiagRingLog(kernel::DiagRingEvent::DynamicDispatchExit, coreIndex, frame->vector, 0,
+                                  frame->cs);
             kernel::Lapic::sendEoi();
             return;
         }

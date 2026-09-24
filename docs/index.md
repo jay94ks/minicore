@@ -113,7 +113,7 @@
 | [SP-DF89897F](./SP-DF89897F.md) | 커널 로깅 인프라 추상화 — 설계 제안 | approved | 2026-09-16T02:32:42.138Z |
 | [SP-E35FD36C](./SP-E35FD36C.md) | USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안 | approved | 2026-09-24T12:28:28.017Z |
 | [SP-E9B44929](./SP-E9B44929.md) | Syscall Group+Call 2단계 인코딩 — 설계 제안 | approved | 2026-09-21T01:06:39.333Z |
-| [SP-EAB162FC](./SP-EAB162FC.md) | 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안 | approved | 2026-09-16T14:16:06.929Z |
+| [SP-EAB162FC](./SP-EAB162FC.md) | 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안 | approved | 2026-09-24T14:13:49.409Z |
 | [SP-ECC59BAE](./SP-ECC59BAE.md) | Running Task 강제 이관(선점형 로드밸런싱) — 설계 제안 | approved | 2026-09-16T02:55:51.632Z |
 | [SP-F146B7F8](./SP-F146B7F8.md) | Minicore Thread-Local/Per-CPU 변수 인프라(TLS/PerCpu) — 설계 제안 | approved | 2026-09-17T07:57:08.800Z |
 | [SP-F15B4A63](./SP-F15B4A63.md) | 지연 실행(타이머/알람) 인프라 — 설계 제안 | approved | 2026-09-16T02:36:33.487Z |

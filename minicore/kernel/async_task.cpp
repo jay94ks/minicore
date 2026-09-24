@@ -21,6 +21,17 @@ namespace {
 
 extern "C" void kTaskStartTrampoline();
 
+// [신규, 2026-09-24, PN-E4C6AF72 §"남은 것" 0번] StackfulDispatchBegin/End
+// 시점엔 InterruptFrame이 없다(호출 컨텍스트가 인터럽트 스택이 아닐 수도
+// 있음 - kAsyncDrainIsr/self-IPI 경유든 waitAll()의 Task 레벨 호출이든
+// 공통으로 쓰는 지점이라서) - 그래서 스택에 실려 온 값을 읽는 대신
+// 지금 이 순간의 실제 CS 레지스터 값을 직접 읽는다.
+kernel::uint64_t kReadCurrentCodeSegment() {
+    kernel::uint16_t cs = 0;
+    asm volatile("mov %%cs, %0" : "=r"(cs));
+    return cs;
+}
+
 // [신규, PN-523B779F 조사 중 발견/수정] onExec()이 제출자(UserThread)의
 // 유저 포인터를 직접 역참조하는 게 이 코드베이스 전반의 기존 관례인데
 // (channel.cpp의 kValidateUserBuffer/kResolveOwnedBridge, pnp.cpp의
@@ -865,9 +876,14 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             // 일반 인터럽트가 이 코어에 들어오면 gSavedTaskRsp[coreIndex]
             // 단일 슬롯이 덮어써질 수 있다는 게 PN-3DDF2797이 확정한 근본
             // 원인이다 - 그 가설을 gdb 없이 검증하기 위한 비관측적 기록.
-            kDiagRingLog(DiagRingEvent::StackfulDispatchBegin, coreIndex, 0, 0);
+            // [확장, 2026-09-24, PN-E4C6AF72 §"남은 것" 0번] CS 진단을
+            // Enter/LeaveInterruptStack/DynDispatchEnter/Exit에 이어 이
+            // 지점에도 남긴다 - kContextSwitch 전후로 CS가 이미 오염돼
+            // 있었는지(그 이전 구간의 문제) 아니면 이 kContextSwitch
+            // 자체가 오염을 유발하는지를 구분하기 위한 것.
+            kDiagRingLog(DiagRingEvent::StackfulDispatchBegin, coreIndex, 0, 0, kReadCurrentCodeSegment());
             kContextSwitch(&gReactorSavedRsp[coreIndex], task->tcb);
-            kDiagRingLog(DiagRingEvent::StackfulDispatchEnd, coreIndex, 0, 0);
+            kDiagRingLog(DiagRingEvent::StackfulDispatchEnd, coreIndex, 0, 0, kReadCurrentCodeSegment());
         }
         // [PN-584DB994] coroHandle 분기와 동일 - 리액터/idle 컨텍스트로
         // 돌아가기 전 CR3를 이 재개/진입 이전 값으로 되돌린다.

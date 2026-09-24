@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-EAB162FC
   status: approved
-  updatedAt: 2026-09-16T14:16:06.929Z
+  updatedAt: 2026-09-24T14:13:49.409Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -68,8 +68,26 @@ enum class ProcessRole : uint8_t {
 
 ### 2.2 부팅 매니페스트 - 누가 KernelService인가
 
+**[정정, 2026-09-24, minicore-3c 세션] 아래 "다섯 이름"은 2026-09-20
+이후 더 이상 정확하지 않다** - `devmgr`/`fs`는 `SP-43331889`/
+`PN-615C48D5`(2026-09-20/21 완료)로 Process 없는 순수 커널
+`KernelThread`로 흡수되며 이 ELF 기반 부팅 매니페스트(`kmain.cpp`의
+`gServiceManifest[]`)에서 완전히 빠졌다 - 애초에 `Process`가 없으니
+`ProcessRole::KernelService`를 부여할 대상 자체가 없다(`kmain.cpp`
+115-122행 주석 참고). 실제 현재 매니페스트는 **`net`/`tty`/`pubreg`/
+`authmgr`** 4개뿐이다(`authmgr`은 이 문서 작성 이후 신설된 6번째
+커널 서비스, `SP-30FCC8AE`). devmgr/fs는 `kSpawnDevmgrKernelThread()`/
+`kSpawnFsKernelThread()`라는 완전히 별개의 경로로 스폰되며, 그
+KernelThread들이 `ProcessRole`을 아예 갖지 않으므로 아래 §2.2/§6의
+"devmgr이 KernelService 역할을 부여받는다" 서술은 devmgr에는 더 이상
+적용되지 않는다(fs도 동일) - net/tty/pubreg/authmgr 4개와, §2.2가
+이어서 다루는 "devmgr이 스폰하는 PnP 드라이버 자식"(현재
+`kSpawnUserModeDriver()`로 이름만 바뀐 채 보류 중, `PN-A8BE8BED`
+참고)에는 원문 그대로 유효하다.
+
 `kmain.cpp`의 초기 부팅 시퀀스(SP-8B6B8D25 §2-A가 이미 "devmgr을
-커널이 유저랜드 서비스로 직접 기동한다"고 전제한 지점)에서, 커널이
+커널이 유저랜드 서비스로 직접 기동한다"고 전제한 지점, 위 정정 참고
+- 이 전제 자체가 devmgr에 한해 뒤집힘)에서, 커널이
 initrd/부트 모듈로부터 고정된 이름 목록(`devmgr`, `fs`, `net`,
 `tty`, **`pubreg`**[추가, 2026-09-16, 설계자 지시 - SP-B071E628
 "프로세스간 공개 인터페이스" 재설계로 5번째 커널 서비스 신설] -

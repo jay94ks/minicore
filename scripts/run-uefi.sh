@@ -64,8 +64,16 @@ set +e
 # BdsDxe 진행 로그를 debugcon이 아니라 COM1 시리얼로 보낸다 -
 # -debugcon으로는 빈 로그만 남았고, -serial file:<path>로 정확히
 # "BdsDxe: loading/starting Boot0001 ..." 시퀀스를 확인했다.
+# [신규, 2026-09-24, PN-61D908EB 재현 중 발견] QEMU 기본 메모리(-m
+# 미지정 시 128MiB)로는 커널 이미지가 커지면서(현재 imageSpan
+# ~24.6MiB) UEFI 스텁의 재배치 대상 physicalBase 탐색(main.cpp
+# "physicalBase search" - 1GiB 미만의 미사용 연속 영역 필요)이
+# 100% 실패해(`physicalBase search NOT FOUND`) 커널 진입 자체가
+# 안 되는 걸 실측 확인 - 256M으로 늘리자 즉시 성공했다. 커널이 더
+# 커지면 이 값도 같이 늘려야 할 수 있다.
 timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -machine q35 \
+    -m 256M \
     -drive if=pflash,format=raw,readonly=on,file="${OVMF_CODE}" \
     -drive if=pflash,format=raw,file="${OVMF_VARS_RW}" \
     -drive file=fat:rw:"${ESP_DIR}",format=raw \
