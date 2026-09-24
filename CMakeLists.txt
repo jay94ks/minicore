@@ -12,7 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # 소스 대응도 정확하다).
 add_compile_options(-Wall -Wextra -g)
 
-set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/arch/x86_64/linker.ld)
+set(MINICORE_LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/minicore/boot/x86_64/linker.ld)
 
 # PL-2D3184BC 3단계 - Task 커널 스택 언더플로우 감지용 가드 페이지.
 # 디버그 빌드 전용(기본 꺼짐) - 켜지면 스택마다 direct map 밖 전용
@@ -44,12 +44,12 @@ add_subdirectory(minicore/libs/libvfat)
 add_subdirectory(minicore/libs/libexfat)
 add_subdirectory(minicore/libs/libntfs)
 add_subdirectory(minicore/libs/x86_64)
-add_subdirectory(minicore/arch/x86_64)
+add_subdirectory(minicore/boot/x86_64)
 add_subdirectory(minicore/kernel)
 
 add_executable(minicore.elf)
 target_link_libraries(minicore.elf PRIVATE
-    minicore_arch_x86_64
+    minicore_boot_x86_64
     minicore_kernel
     libkenv
     libcpio

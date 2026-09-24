@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# minicore/boot-uefi(PN-7FBF255A)를 빌드해 QEMU+OVMF(UEFI 펌웨어)로
+# minicore/boot/x86_64/uefi(구 minicore/boot-uefi, PN-7FBF255A)를
+# 빌드해 QEMU+OVMF(UEFI 펌웨어)로
 # 부팅한다 - run-qemu.sh(PVH)/run-grub.sh(BIOS/GRUB multiboot2)와는
 # 완전히 다른 세 번째 부팅 경로다. UEFI는 El Torito(GRUB ISO)가 아니라
 # FAT 파일시스템의 \EFI\BOOT\BOOTX64.EFI 관례로 부팅하므로, QEMU의
@@ -26,8 +27,8 @@ TIMEOUT_SECS="${MINICORE_QEMU_TIMEOUT:-10}"
 # (이 스크립트의 기존 용도 - 스텁 자체 검증 - 를 깨지 않기 위함).
 KERNEL_ELF="${MINICORE_KERNEL_ELF:-${ROOT_DIR}/build/minicore.elf}"
 
-cmake -S "${ROOT_DIR}/minicore/boot-uefi" -B "${BUILD_DIR}" -G Ninja \
-    -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/minicore/boot-uefi/cmake/toolchain-uefi-x86_64.cmake" \
+cmake -S "${ROOT_DIR}/minicore/boot/x86_64/uefi" -B "${BUILD_DIR}" -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/minicore/boot/x86_64/uefi/cmake/toolchain-uefi-x86_64.cmake" \
     >/dev/null
 cmake --build "${BUILD_DIR}" >/dev/null
 

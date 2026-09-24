@@ -6,7 +6,8 @@
  * 매핑한다 - 이 링커 스크립트는 코드/데이터/BSS만 다룬다.
  *
  * PHDRS로 R+X(.text)/R(.rodata)/R+W(.data+.bss) 세그먼트를 분리한다 -
- * 커널 링커 스크립트(minicore/arch/x86_64/linker.ld)와 같은 이유
+ * 커널 링커 스크립트(minicore/boot/x86_64/linker.ld, 2026-09-24부로
+ * 구 minicore/arch/x86_64/linker.ld)와 같은 이유
  * (전부 하나의 RWX 세그먼트로 뭉개지 않음). NX(실행 금지) 비트는
  * 아직 Paging에 없어 커널 로더가 실제로 그 권한 차이를 전부 강제하진
  * 못하지만(PN-58501EAA 참고), ELF 자체는 표준대로 분리해 둔다.
@@ -22,7 +23,7 @@ PHDRS
     urodata PT_LOAD FLAGS(4);   /* R */
     udata   PT_LOAD FLAGS(6);   /* R+W */
     utls    PT_TLS  FLAGS(4);   /* R - PN-22E5E9E7 항목5, 커널 링커
-                                   스크립트(minicore/arch/x86_64/linker.ld)
+                                   스크립트(minicore/boot/x86_64/linker.ld)
                                    §4.2와 정확히 같은 관례 - .tdata/.tbss는
                                    :udata에도 동시에 속한다(PT_LOAD가 실제
                                    로드, PT_TLS는 그 안에서 TLS 템플릿

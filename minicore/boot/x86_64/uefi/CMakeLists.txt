@@ -10,8 +10,8 @@
 # 실측 확인).
 #
 # 빌드:
-#   cmake -S minicore/boot-uefi -B build-uefi -G Ninja \
-#       -DCMAKE_TOOLCHAIN_FILE=minicore/boot-uefi/cmake/toolchain-uefi-x86_64.cmake
+#   cmake -S minicore/boot/x86_64/uefi -B build-uefi -G Ninja \
+#       -DCMAKE_TOOLCHAIN_FILE=minicore/boot/x86_64/uefi/cmake/toolchain-uefi-x86_64.cmake
 #   cmake --build build-uefi
 cmake_minimum_required(VERSION 3.20)
 project(minicore-boot-uefi CXX)

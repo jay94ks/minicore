@@ -1,7 +1,8 @@
 # x86-64 아키텍처별 공통 코드 라이브러리 (SP-8B6B8D25 §3.0) - 커널
 # 서비스가 필요하면 직접 링크해 재사용할 수 있는 아키텍처 종속 코드
 # (ISR 저지대 스텁, 포트 I/O). 순수 부팅 stub/bootstrap은 여기가
-# 아니라 minicore/arch/x86_64에 있다.
+# 아니라 minicore/boot/x86_64(2026-09-24, RM-23F4B687 §3 갱신 -
+# 구 minicore/arch/x86_64)에 있다.
 add_library(minicore_libs_x86_64 OBJECT
     isr.S
     context_switch.S
