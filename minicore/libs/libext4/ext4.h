@@ -1,6 +1,7 @@
 #ifndef MINICORE_LIBEXT4_EXT4_H
 #define MINICORE_LIBEXT4_EXT4_H
 
+#include "libkenv/mem.h"
 #include "libkenv/types.h"
 
 namespace fs {
@@ -423,6 +424,56 @@ struct ExtentIdx {        // depth>0
 };
 static_assert(sizeof(ExtentIdx) == 12, "ExtentIdx는 12바이트");
 #pragma pack(pop)
+
+// [신규, 2026-09-25, PN-FE718C87] `InodeCore::block[60]`을 인라인
+// 익스텐트 리프(depth=0)로 다루는 순수 함수 - 헤더(12바이트) 뒤에
+// Extent 엔트리가 최대 (60-12)/12=4개 들어간다. 새로 할당된 inode는
+// 항상 이 "빈 인라인 리프" 상태에서 시작하고, 파일이 4개보다 많은
+// 익스텐트를 필요로 할 때만 비로소 실제 온디스크 트리 확장/분할
+// (§5, 이 함수 범위 밖 - PN-FE718C87 3단계 이후)이 필요해진다 -
+// 즉 "작은 파일"(익스텐트 4개 이하로 표현되는 한)은 이 두 함수만으로
+// 충분하다. 실제 mke2fs+debugfs로 만든 파일(6바이트, 익스텐트 1개
+// (0):1618)의 진짜 inode.block[60] 원본 바이트와 1바이트 단위로
+// 대조 완료(PN-FE718C87 3단계 검증 기록 참고).
+constexpr uint32_t kExtentInlineBytes = 60;  // sizeof(InodeCore::block)
+constexpr uint16_t kExtentInlineMaxEntries = 4;  // (60-sizeof(ExtentHeader))/sizeof(Extent)
+
+inline void kExt4InitInlineExtentLeaf(uint8_t block60[kExtentInlineBytes]) {
+    ExtentHeader header{};
+    header.magic = kExtentMagic;
+    header.entries = 0;
+    header.max = kExtentInlineMaxEntries;
+    header.depth = 0;
+    header.generation = 0;
+    memcpy(block60, &header, sizeof(header));
+    memset(block60 + sizeof(header), 0, kExtentInlineBytes - sizeof(header));
+}
+
+// logicalBlock부터 len개 연속 논리 블록을 physicalBlock부터 len개
+// 연속 물리 블록에 매핑하는 익스텐트 하나를 리프 끝에 이어붙인다 -
+// 이 v1은 "파일 끝에 이어 붙이는" 단순 append만 지원(logicalBlock이
+// 기존 마지막 익스텐트 바로 다음이라는 정렬 불변조건은 호출자
+// 책임 - 이 함수 자체는 검사하지 않는다). 이미 꽉 찼거나(entries==max)
+// block60이 인라인 리프가 아니면(magic 불일치/depth!=0) 아무것도
+// 바꾸지 않고 false.
+inline bool kExt4AppendInlineExtent(uint8_t block60[kExtentInlineBytes], uint32_t logicalBlock,
+                                     uint64_t physicalBlock, uint16_t len) {
+    ExtentHeader header;
+    memcpy(&header, block60, sizeof(header));
+    if (header.magic != kExtentMagic || header.depth != 0 || header.entries >= header.max) {
+        return false;
+    }
+    Extent ext{};
+    ext.block = logicalBlock;
+    ext.len = len;
+    ext.startHi = static_cast<uint16_t>(physicalBlock >> 32);
+    ext.startLo = static_cast<uint32_t>(physicalBlock & 0xFFFFFFFFu);
+    memcpy(block60 + sizeof(ExtentHeader) + static_cast<uint32_t>(header.entries) * sizeof(Extent), &ext,
+           sizeof(ext));
+    ++header.entries;
+    memcpy(block60, &header, sizeof(header));
+    return true;
+}
 
 // ---------------------------------------------------------------------
 // 3.5 디렉터리 엔트리(INCOMPAT_FILETYPE 필수 - §2.1).
