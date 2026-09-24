@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CC2B18C6
   status: approved
-  updatedAt: 2026-09-24T08:43:59.302Z
+  updatedAt: 2026-09-24T10:15:36.347Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -426,6 +426,36 @@ map ready, page frame allocator ready, slab allocator ready까지
 "후속 과제"로 남겨 둔 부분이지 새 문제가 아니다). 이로써 이 설계
 문서(§1~§3-3)가 다루는 범위의 핵심 메커니즘(마커 기반 재배치 +
 CR3 전환 + 커널 진입)은 전부 실측 검증됐다.
+
+#### [세 번째 추가 정정, 2026-09-24, PN-61D908EB 실측으로 발견] boot_stack_top도 physicalBaseDelta 보정이 빠져 있었다
+
+DC-F196028B 답변 반영(UefiBootInfo 통합 구조체로 memmap/RSDP
+전달) 이후 실측 중 발견 - `higher_half_entry`의 `movabs rsp,
+offset boot_stack_top`도 `long_mode_entry`/`gdt64`/`pml4`/
+`saved_start_info`와 똑같이 `.boot`(VMA=LMA) 섹션 심볼이라 재배치와
+무관한 "원본" 물리주소 상수인데, **이 심볼만 유일하게 마커/보정
+대상에서 빠져 있었다** - UEFI 경로에서 커널이 재배치된 자기
+이미지가 아니라 원본(복사도 0채움도 전혀 안 된) 임의의 물리
+메모리를 스택으로 쓰게 되는 실제 버그였다. `PN-61D908EB`(PCI 열거
+직후 GP Fault 조사)가 diag_ring에 `InterruptFrame::cs` 진단을
+추가해 크래시 시점 rsp가 `pml4`(`nm`으로 확인한 원본 물리주소)와
+같은 원본 대역에 있음을 실측으로 확인해 확정했다.
+
+**수정**(commit `07051bf`): 새 마커 필드를 추가하는 대신(이미 있는
+채널 재사용) `higher_half_entry`에서
+`saved_boot_protocol==kBootProtocolUefi(2)`일 때만
+`saved_start_info`(=`UefiBootInfo*`)의 첫 필드(`physicalBaseDelta`)
+를 읽어 `rsp`에 더한다. GRUB/PVH는 이 분기를 절대 안 타므로 완전한
+no-op(표준 4시나리오 무회귀 확인) - `delta` 적용이 정확함을 실측으로
+확인(`physicalBaseDelta=0x3c00000`일 때 rsp가 그 값만큼 정확히
+이동).
+
+**다만 이 수정만으로 `PN-61D908EB`의 GP Fault가 전부 해소되지는
+않았다** - 재배치된 올바른 rsp를 쓰면서도 같은 크래시가 재현된다
+(5회 중 3회). 이 정정 자체는 실재하고 가치 있는 버그 수정이지만,
+그 계획이 원래 발견한 증상의 유일한 원인은 아니었다 - `PN-E4C6AF72`
+(AHCI+SMP4 공통 잠복 결함, 아직 미해결)와 근본 원인을 공유할
+가능성이 더 높은 것으로 갱신됐다(두 계획 본문 참고).
 
 ## 3-old. [대체됨, 2026-09-24, QU-A2CABBC6 답변 반영 - 위 3-0~3-2가 정본]
 
