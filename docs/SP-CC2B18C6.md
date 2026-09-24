@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CC2B18C6
   status: approved
-  updatedAt: 2026-09-24T06:38:27.991Z
+  updatedAt: 2026-09-24T07:16:19.757Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -295,6 +295,43 @@ PT_LOAD 범위 안을 8바이트 정렬로 훑는 것뿐이라 훨씬 단순하�
 "`long_mode_entry`를 거쳐야 하는지" - 매직 넘버 마커 하나로 둘 다
 답이 나온다.
 
+#### [정정, 2026-09-24, 착수 직전 실제 코드 대조로 발견] 마커 값은 "가상주소"가 아니라 KERNEL_LMA 기준 물리주소 - physicalBaseDelta 보정 필수
+
+실제 `minicore/arch/x86_64/linker.ld`를 대조한 결과, 위 코드 예시와
+아래 §5 초판이 "이 값은 재배치와 무관한 가상주소"라고 서술한 부분은
+**틀렸다** - 실제로 바로잡는다:
+
+```
+.boot ALIGN(4K) : AT(ADDR(.boot)) { *(.boot.text) *(.boot.data) *(.boot.bss) } :boot
+```
+
+`.boot` 섹션(그 안의 `long_mode_entry` 포함)은 **`AT(ADDR(.boot))`로
+VMA=LMA**다 - `.text`/`.rodata`/`.data`처럼 `AT(ADDR(x) - KERNEL_VMA)`로
+높은 가상주소에 낮은 물리주소를 매핑하는 게 아니라, **애초에 링크
+타임부터 물리주소(=KERNEL_LMA=1MiB 기준) 그 자체로 링크된다.** 즉
+`boot_marker_entry_addr`에 저장되는 `long_mode_entry`의 값은 "커널이
+물리 1MiB에 로드된다"는 전제 위에서만 유효한 **물리주소**다 -
+§1/§2가 `kernel_phys_start`/`pdptPhys` 등에 적용한 것과 정확히 같은
+문제가 여기도 그대로 적용된다.
+
+**올바른 사용법**: UEFI 로더는 스캔으로 얻은 마커 값을 그대로 jmp
+대상으로 쓰면 안 되고, §2가 이미 정의한 `physicalBaseDelta`(=
+`physicalBase - KERNEL_LMA`)를 더해야 한다:
+
+```
+actualJumpTarget = markerValue + physicalBaseDelta
+```
+
+(§3-2 3번의 PT_LOAD memcpy 목적지 계산 `physicalBase + (p_paddr -
+KERNEL_LMA)`와 완전히 같은 산수 - `long_mode_entry`도 그 PT_LOAD
+세그먼트 안에 있으므로 memcpy로 실제 옮겨지는 위치가 정확히
+`markerValue + physicalBaseDelta`다.) **GRUB/PVH처럼 `delta=0`이면
+`markerValue`를 그대로 써도 결과가 같으므로 이 정정이 기존 경로에
+영향을 주지는 않는다** - UEFI(delta≠0)에서만 실제로 차이가 난다.
+
+아래 §5도 이 정정을 반영해 갱신했다 - 착수 세션은 이 §3-3(정정판)
+그대로 구현하면 된다(추가 질의 불필요, 순수 사실 정정).
+
 ## 3-old. [대체됨, 2026-09-24, QU-A2CABBC6 답변 반영 - 위 3-0~3-2가 정본]
 
 이 절은 "UEFI 로더가 boot.S와 무관한 자기 자신만의 독립 트램폴린을
@@ -346,10 +383,11 @@ GRUB(`Multiboot2Info::parse()`)/PVH 경로는 이 필드를 그냥 0으로
 - ~~**`long_mode_entry`(세그먼트 재적재)를 거쳐야 하는지, 곧바로
   `higher_half_entry`로 점프해도 되는지**~~ **[해소, 2026-09-24,
   같은 답변, §3-3 참고]** `long_mode_entry` 경유로 확정 - 마커가
-  가리키는 대상 자체가 `long_mode_entry`. 다만 그 진입점의
-  재배치된 물리주소가 아니라 **가상주소**를 마커에 저장하므로(위
-  §3-3 코드 예시), CR3 전환 후 곧바로 이 가상주소로 jmp하면 되고
-  별도 물리주소 재계산은 불필요(§3-2 5-6번과 일치).
+  가리키는 대상 자체가 `long_mode_entry`. **[정정, 2026-09-24, §3-3
+  하단 정정 절 참고]** 이 값은 가상주소가 아니라 KERNEL_LMA 기준
+  **물리주소**다(`.boot` 섹션이 `AT(ADDR(.boot))`로 VMA=LMA 링크됨) -
+  CR3 전환 후 잡는 jmp 목표는 `마커값 + physicalBaseDelta`로 보정한
+  값이어야 한다(GRUB/PVH는 delta=0이라 결과가 같음).
 - **PT_LOAD 세그먼트 memcpy 시 파일 오프셋과 물리 오프셋의 관계** -
   `PN-7FBF255A`가 이미 파싱해 둔 `p_offset`/`p_filesz`/`p_memsz`를
   그대로 쓰면 될 것으로 보이나 착수 시 재확인.
