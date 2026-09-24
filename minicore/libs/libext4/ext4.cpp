@@ -349,25 +349,77 @@ bool Ext4Volume::mount(fs::BlockDevice* device) {
     if (blockSize_ % devBlockSize != 0) {
         return false;  // v1 제약(위 readExtBlocksImpl과 동일한 전제)
     }
-    groupCount_ = static_cast<kernel::uint32_t>(kCeilDiv(sb_.blocksCountLo, sb_.blocksPerGroup));
-    if (groupCount_ == 0) {
+    // [갱신, PN-59C253E9] blocksCountLo만 쓰면 INCOMPAT_64BIT 볼륨의
+    // 실제 그룹 수를 과소평가해(그 결과 위 3)단계의 hi 필드 안전장치가
+    // 못 보는 그룹이 생겨) 위험하므로, kExt4Combine64()로 합성한 실제
+    // 64비트 블록 수를 쓴다. 결과 그룹 수 자체가 이 커널의 현실적
+    // 볼륨 규모를 벗어나면(예: 손상된 슈퍼블록이 터무니없는 값을
+    // 담은 경우) 거대한 슬랩 할당을 시도하지 않고 안전하게 거부한다.
+    const kernel::uint64_t totalBlocks64 = kExt4Combine64(sb_.featureIncompat, sb_.blocksCountLo, sb_.blocksCountHi);
+    const kernel::uint64_t groupCount64 = kCeilDiv(totalBlocks64, sb_.blocksPerGroup);
+    constexpr kernel::uint64_t kMaxSaneGroupCount = 1u << 20;  // 넉넉한 상한(libswapfs의 "현실적 볼륨 규모" 전제와 동일한 취지)
+    if (groupCount64 == 0 || groupCount64 > kMaxSaneGroupCount) {
         return false;
     }
+    groupCount_ = static_cast<kernel::uint32_t>(groupCount64);
 
     // 3) 그룹 디스크립터 테이블 - firstDataBlock+1 블록부터 groupCount_
-    // 개(32바이트 고정, INCOMPAT_64BIT 미지원 - §2.2 후속) 연속 배치.
+    // 개 연속 배치. [갱신, PN-59C253E9] 온디스크 stride는 INCOMPAT_64BIT
+    // 여부에 따라 32바이트(GroupDesc32) 또는 64바이트(GroupDesc64) -
+    // `GroupDesc64`의 앞 32바이트가 `GroupDesc32`와 완전히 동일한
+    // 레이아웃임이 이미 실측 확인됐으므로(ext4.h 주석 참고), 64바이트로
+    // 읽더라도 각 엔트리의 앞 32바이트만 뽑아 촘촘한 `GroupDesc32[]`로
+    // 압축해 저장한다 - `Ext4Driver::onExec()`(ext4_driver.cpp)의 기존
+    // 9개 op 핸들러는 전부 `GroupDesc32` 필드(blockBitmapLo/
+    // inodeBitmapLo/inodeTableLo/flags)만 쓰므로 이 압축 덕분에 손댈
+    // 필요가 없다. **주의**: 이 v1은 여전히 `blocksCountLo`(32비트)만
+    // 쓰므로 4G 블록을 넘는 실제 대용량 볼륨(`*Hi` 필드가 실제로
+    // 0이 아닌 경우)의 그룹 수/오프셋은 아직 정확하지 않을 수 있다 -
+    // "64바이트 포맷을 안전하게 파싱"하는 단계까지만이고 "4G 블록
+    // 초과 대용량 지원"은 여전히 후속(`kExt4Combine64()` 배선, 항목3).
+    const kernel::uint32_t onDiskDescSize =
+        (sb_.featureIncompat & kIncompat64Bit) ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
     const kernel::uint64_t gdtStartBlock = sb_.firstDataBlock + 1;
-    const kernel::uint64_t gdtBytes = static_cast<kernel::uint64_t>(groupCount_) * sizeof(GroupDesc32);
+    const kernel::uint64_t gdtBytes = static_cast<kernel::uint64_t>(groupCount_) * onDiskDescSize;
     const kernel::uint32_t gdtBlocks = static_cast<kernel::uint32_t>(kCeilDiv(gdtBytes, blockSize_));
-    auto* gdtBuf = static_cast<kernel::uint8_t*>(kernel::GenericSlabAllocator::alloc(gdtBlocks * blockSize_));
-    if (!gdtBuf) {
+    auto* gdtRawBuf = static_cast<kernel::uint8_t*>(kernel::GenericSlabAllocator::alloc(gdtBlocks * blockSize_));
+    if (!gdtRawBuf) {
         return false;
     }
-    if (!readExtBlocksImpl(device, blockSize_, gdtStartBlock, gdtBlocks, gdtBuf)) {
-        kernel::GenericSlabAllocator::free(gdtBuf, gdtBlocks * blockSize_);
+    if (!readExtBlocksImpl(device, blockSize_, gdtStartBlock, gdtBlocks, gdtRawBuf)) {
+        kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
         return false;
     }
-    groupDescs_ = reinterpret_cast<GroupDesc32*>(gdtBuf);
+    if (onDiskDescSize == sizeof(GroupDesc32)) {
+        groupDescs_ = reinterpret_cast<GroupDesc32*>(gdtRawBuf);
+    } else {
+        // [안전장치, PN-59C253E9] 압축은 각 엔트리의 hi 필드(block/inode
+        // 비트맵·테이블의 상위 32비트 주소)를 버린다 - 이 v1은 여전히
+        // blocksCountLo 기준 32비트 주소 공간만 지원하므로, hi 필드가
+        // 실제로 0이 아닌 그룹이 하나라도 있으면(그 그룹의 실제 위치가
+        // 4G 블록을 넘는다는 뜻) 조용히 잘못된 주소로 읽는 대신 마운트
+        // 자체를 거부한다("64bit 포맷을 안전하게 파싱"까지만 지원,
+        // "4G 블록 초과 대용량 실제 지원"은 여전히 후속 - 위 주석 참고).
+        for (kernel::uint32_t g = 0; g < groupCount_; ++g) {
+            GroupDesc64 raw;
+            memcpy(&raw, gdtRawBuf + static_cast<kernel::uint64_t>(g) * onDiskDescSize, sizeof(raw));
+            if (raw.blockBitmapHi != 0 || raw.inodeBitmapHi != 0 || raw.inodeTableHi != 0) {
+                kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
+                return false;
+            }
+        }
+        auto* compacted = static_cast<GroupDesc32*>(
+            kernel::GenericSlabAllocator::alloc(groupCount_ * sizeof(GroupDesc32)));
+        if (!compacted) {
+            kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
+            return false;
+        }
+        for (kernel::uint32_t g = 0; g < groupCount_; ++g) {
+            memcpy(&compacted[g], gdtRawBuf + static_cast<kernel::uint64_t>(g) * onDiskDescSize, sizeof(GroupDesc32));
+        }
+        kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
+        groupDescs_ = compacted;
+    }
 
     device_ = device;
     return true;

@@ -124,7 +124,16 @@ constexpr uint32_t kIncompat64Bit = 0x80;
 // "그룹 디스크립터가 가리키는 곳을 그대로 따라간다" 읽기 경로에
 // 아무 영향이 없다 - 그래서 목적어 없이 허용 목록에 추가한다(실제
 // 파서 코드 변경 불필요, 검사만 통과시키면 됨).
-constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents | kIncompatFlexBg;
+// [추가, PN-59C253E9] `kIncompat64Bit`도 허용 목록에 추가 - `GroupDesc64`
+// 레이아웃이 실측 검증됐고(위 참고), `Ext4Volume::mount()`가 각 그룹
+// 디스크립터의 hi 필드(block/inode 비트맵·테이블 상위 32비트)가 전부
+// 0인 경우에만(=실제로는 4G 블록을 넘지 않는 볼륨) 통과시키고, 하나라도
+// 0이 아니면 이 v1이 그 주소를 정확히 표현할 수 없으므로 조용히 잘못
+// 읽는 대신 마운트 자체를 거부한다 - "64bit 포맷을 안전하게 파싱"까지만
+// 지원, "4G 블록을 실제로 초과하는 대용량 볼륨"은 여전히 후속(§2.2
+// 항목4 나머지 - `blocksCountLo`+`blocksCountHi` 합성만으로는 각 그룹의
+// 물리 주소가 32비트를 넘는지 여부와 별개 문제).
+constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents | kIncompatFlexBg | kIncompat64Bit;
 
 // [추가, PN-59C253E9] `*Lo`/`*Hi` 필드 쌍을 실제 64비트 값으로 합성 -
 // 리눅스 커널 `ext4_blocks_count()`/`ext4_r_blocks_count()`/
