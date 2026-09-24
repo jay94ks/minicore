@@ -29,6 +29,9 @@ struct DiagRingEntry {
     // 위해 추가 - 호출부 시그니처는 안 바꾸고 이 함수 안에서 직접
     // 읽는다(모든 기존 kDiagRingLog 호출부가 자동으로 덕을 본다).
     bool ifFlag = false;
+    // [신규, 2026-09-24, PN-61D908EB/PN-E4C6AF72] diag_ring.h 주석
+    // 참고 - Enter/LeaveInterruptStack만 InterruptFrame::cs를 채운다.
+    uint64_t extra = 0;
 };
 
 struct DiagRingBuffer {
@@ -67,7 +70,7 @@ const char* kEventName(uint8_t event) {
 
 }  // namespace
 
-void kDiagRingLog(DiagRingEvent event, uint32_t coreIndex, uint32_t vector, uint64_t rsp) {
+void kDiagRingLog(DiagRingEvent event, uint32_t coreIndex, uint32_t vector, uint64_t rsp, uint64_t extra) {
     if (coreIndex >= kAcpiMaxCpus) {
         return;
     }
@@ -82,6 +85,7 @@ void kDiagRingLog(DiagRingEvent event, uint32_t coreIndex, uint32_t vector, uint
     e.vector = vector;
     e.event = static_cast<uint8_t>(event);
     e.ifFlag = (rflags & (1ULL << 9)) != 0;
+    e.extra = extra;
 }
 
 void kDiagRingDump(uint32_t coreIndex) {
@@ -96,8 +100,8 @@ void kDiagRingDump(uint32_t coreIndex) {
     for (uint64_t i = 0; i < count; ++i) {
         const uint64_t seq = start + i;
         const DiagRingEntry& e = ring.entries[seq % kDiagRingCapacity];
-        Logger::info("  [%llu] %s vector=%x rsp=%llx if=%u", e.seq, kEventName(e.event), e.vector, e.rsp,
-                     e.ifFlag ? 1u : 0u);
+        Logger::info("  [%llu] %s vector=%x rsp=%llx if=%u cs=%llx", e.seq, kEventName(e.event), e.vector, e.rsp,
+                     e.ifFlag ? 1u : 0u, e.extra);
     }
 }
 

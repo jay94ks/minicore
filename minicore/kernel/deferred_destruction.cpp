@@ -3,6 +3,7 @@
 #include "acpi.h"
 #include "diag_ring.h"
 #include "gdt.h"
+#include "interrupt_frame.h"
 #include "libkenv/shared_ptr.h"
 #include "libkenv/spinlock.h"
 #include "scheduler.h"
@@ -85,14 +86,23 @@ void kDrainDeferredDestructions() {
 extern "C" kernel::uint64_t kEnterInterruptStack(kernel::uint64_t currentRsp, kernel::uint32_t vector) {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
     kernel::gSavedTaskRsp[idx] = currentRsp;
-    kernel::kDiagRingLog(kernel::DiagRingEvent::EnterInterruptStack, idx, vector, currentRsp);
+    // [신규, PN-61D908EB/PN-E4C6AF72] currentRsp는 곧 InterruptFrame*
+    // (isr_common_stub이 스왑 전 rsp를 그대로 넘김) - 이 시점의 cs를
+    // 같이 남겨 두면, 나중에 크래시가 나도 "이 ISR 진입 시점엔 이미
+    // cs가 오염돼 있었는지"를 바로 알 수 있다.
+    const auto* frame = reinterpret_cast<const kernel::InterruptFrame*>(currentRsp);
+    kernel::kDiagRingLog(kernel::DiagRingEvent::EnterInterruptStack, idx, vector, currentRsp, frame->cs);
     return kernel::kInterruptDispatchStackTop(idx);
 }
 
 extern "C" kernel::uint64_t kLeaveInterruptStack() {
     const kernel::uint32_t idx = kernel::Scheduler::currentCoreIndex();
     const kernel::uint64_t saved = kernel::gSavedTaskRsp[idx];
-    kernel::kDiagRingLog(kernel::DiagRingEvent::LeaveInterruptStack, idx, 0, saved);
+    // [신규, PN-61D908EB/PN-E4C6AF72] saved도 마찬가지로 InterruptFrame*
+    // - kIsrHandler(및 그 안의 동적 벡터 핸들러)가 실행되는 동안 cs가
+    // 바뀌었는지를 Enter 시점 기록과 비교해 바로 확인할 수 있다.
+    const auto* frame = reinterpret_cast<const kernel::InterruptFrame*>(saved);
+    kernel::kDiagRingLog(kernel::DiagRingEvent::LeaveInterruptStack, idx, 0, saved, frame->cs);
     return saved;
 }
 

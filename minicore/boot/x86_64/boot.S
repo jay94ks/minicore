@@ -415,6 +415,28 @@ higher_half_entry:
      * 그대로 커널 스택으로 쓴다. */
     movabs rsp, offset boot_stack_top
 
+    /* [신규, 2026-09-24, PN-61D908EB 실측으로 발견한 버그 수정]
+     * boot_stack_top도 long_mode_entry/gdt64 등과 똑같이 .boot 섹션
+     * (VMA=LMA) 심볼이라 재배치와 무관한 "원본" 물리주소 상수다 -
+     * UEFI 직접 부팅 경로(physicalBaseDelta != 0)에서 이 보정 없이
+     * 그대로 쓰면, 커널이 재배치된 자기 이미지가 아니라 원본
+     * (복사도 0채움도 전혀 안 된) 임의의 물리 메모리를 스택으로
+     * 쓰게 된다 - 실측(PN-61D908EB)으로 GP Fault 크래시의 rsp가
+     * 항상 [0x102000,0x106000) 원본 대역(=pml4 등 다른 .boot.bss
+     * 심볼과 동일 대역)에 있음을 확인해 확정했다. GRUB/PVH는
+     * delta=0이라 이 보정이 수치상 완전한 no-op(무회귀) -
+     * saved_boot_protocol==kBootProtocolUefi(2)일 때만
+     * saved_start_info(=UefiBootInfo*, 그 첫 필드가
+     * physicalBaseDelta - uefi_boot_info.h 참고)를 읽어 rsp에
+     * 더한다. */
+    movabs rax, offset saved_boot_protocol
+    cmp dword ptr [rax], 2
+    jne .Lstack_delta_done
+    movabs rax, offset saved_start_info
+    mov eax, [rax]            /* eax = UefiBootInfo*(32비트 값, rax 상위는 자동 0확장) */
+    add rsp, [rax]             /* rsp += UefiBootInfo::physicalBaseDelta(첫 필드, 오프셋 0) */
+.Lstack_delta_done:
+
     /* System V AMD64 호출 규약의 첫 인자(rdi)로 부팅 정보 구조체(PVH면
      * hvm_start_info, multiboot2면 그 정보 구조체)의 물리 주소를,
      * 두 번째 인자(rsi)로 어느 프로토콜인지(0=PVH, 1=multiboot2)를

@@ -39,7 +39,14 @@ enum class DiagRingEvent : uint8_t {
 // 계열에서만 의미 있고(StackfulDispatch 계열은 0으로 채움), 코어별로
 // 독립된 슬롯에 기록하므로 락이 필요 없다(자기 코어 외 다른 코어의
 // 슬롯을 쓰는 호출부는 없음).
-void kDiagRingLog(DiagRingEvent event, kernel::uint32_t coreIndex, kernel::uint32_t vector, kernel::uint64_t rsp);
+// [신규, 2026-09-24, PN-61D908EB/PN-E4C6AF72] `extra` - Enter/Leave
+// InterruptStack이 그 순간의 InterruptFrame::cs를 실어 보낸다(다른
+// 이벤트는 기본값 0, 기존 호출부는 안 바뀜) - iretq에서 CS/SS가
+// TSS 셀렉터(0x38)로 오염되는 걸 실측한 뒤, "정확히 어느 ISR
+// 진입/이탈 시점에 오염이 이미 있었는지"를 다음 재현에서 바로
+// 잡기 위한 것.
+void kDiagRingLog(DiagRingEvent event, kernel::uint32_t coreIndex, kernel::uint32_t vector, kernel::uint64_t rsp,
+                   kernel::uint64_t extra = 0);
 
 // 패닉 시점에 호출 - coreIndex 하나의 최근 기록을 시리얼로 덤프한다.
 void kDiagRingDump(kernel::uint32_t coreIndex);
