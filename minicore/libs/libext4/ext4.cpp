@@ -94,6 +94,177 @@ uint32_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapDa
     return kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), bitmapData, byteLen);
 }
 
+namespace {
+
+// groupDescBuf(온디스크 stride 그대로)에서 free count 필드 하나를
+// lo+hi 16비트 쌍으로 읽어 합성 - freeBlocksCountLo/Hi와
+// freeInodesCountLo/Hi 둘 다 같은 오프셋 패턴(GroupDesc32/64에서
+// 완전히 동일한 상대 위치)이라 오프셋만 매개변수로 받는다.
+uint32_t kReadGroupDescFreeCount(const uint8_t* groupDescBuf, uint32_t loOffset, uint32_t hiOffset, bool is64Bit) {
+    uint16_t lo;
+    memcpy(&lo, groupDescBuf + loOffset, sizeof(lo));
+    uint16_t hi = 0;
+    if (is64Bit) {
+        memcpy(&hi, groupDescBuf + hiOffset, sizeof(hi));
+    }
+    return (static_cast<uint32_t>(hi) << 16) | lo;
+}
+
+void kWriteGroupDescFreeCount(uint8_t* groupDescBuf, uint32_t loOffset, uint32_t hiOffset, bool is64Bit,
+                               uint32_t value) {
+    const uint16_t lo = static_cast<uint16_t>(value & 0xFFFFu);
+    memcpy(groupDescBuf + loOffset, &lo, sizeof(lo));
+    if (is64Bit) {
+        const uint16_t hi = static_cast<uint16_t>(value >> 16);
+        memcpy(groupDescBuf + hiOffset, &hi, sizeof(hi));
+    }
+}
+
+// groupDescBuf의 bg_checksum 필드를 재계산해 써 넣는다 - is64Bit
+// 여부에 따라 32/64바이트 버전 체크섬 함수 중 맞는 쪽을 호출.
+void kRecomputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum, bool is64Bit, uint8_t* groupDescBuf) {
+    uint16_t checksum;
+    if (is64Bit) {
+        GroupDesc64 desc;
+        memcpy(&desc, groupDescBuf, sizeof(desc));
+        checksum = kExt4ComputeGroupDesc64Checksum(uuid, groupNum, desc);
+    } else {
+        GroupDesc32 desc;
+        memcpy(&desc, groupDescBuf, sizeof(desc));
+        checksum = kExt4ComputeGroupDescChecksum(uuid, groupNum, desc);
+    }
+    memcpy(groupDescBuf + offsetof(GroupDesc32, checksum), &checksum, sizeof(checksum));
+}
+
+// 비트맵 할당/해제 공용 본체(블록/inode 어느 쪽이든 동일 절차) -
+// freeCountLoOffset/HiOffset과 csumLoOffset/HiOffset만 호출자(블록용/
+// inode용)가 다르게 넘긴다. allocating=true면 첫 free 비트를 찾아
+// 세우고 free count -1, false면 relIndex 비트를 지우고 free count +1.
+bool kExt4ToggleBitInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t bitsPerGroup,
+                            uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf, uint8_t* groupDescBuf,
+                            uint32_t freeCountLoOffset, uint32_t freeCountHiOffset, uint32_t csumLoOffset,
+                            uint32_t csumHiOffset, bool allocating, uint32_t* relIndexInOut) {
+    if (allocating) {
+        const uint32_t found = kExt4BitmapFindFirstFree(bitmapBuf, bitsPerGroup);
+        if (found >= bitsPerGroup) {
+            return false;
+        }
+        *relIndexInOut = found;
+    } else {
+        if (!kExt4BitmapTestBit(bitmapBuf, *relIndexInOut)) {
+            return false;  // 이미 free인 비트를 또 해제하려 함 - 이중 해제 방어
+        }
+    }
+
+    uint32_t freeCount = kReadGroupDescFreeCount(groupDescBuf, freeCountLoOffset, freeCountHiOffset, is64Bit);
+    if (allocating) {
+        if (freeCount == 0) {
+            return false;  // 비트맵-free count 불일치(방어적) - 아무것도 안 바꿈
+        }
+        kExt4BitmapSetBit(bitmapBuf, *relIndexInOut);
+        --freeCount;
+    } else {
+        kExt4BitmapClearBit(bitmapBuf, *relIndexInOut);
+        ++freeCount;
+    }
+    kWriteGroupDescFreeCount(groupDescBuf, freeCountLoOffset, freeCountHiOffset, is64Bit, freeCount);
+
+    if (featureRoCompat & kRoCompatMetadataCsum) {
+        const uint32_t bitmapCsum = kExt4ComputeBitmapChecksum(uuid, bitmapBuf, bitsPerGroup);
+        const uint16_t csumLo = static_cast<uint16_t>(bitmapCsum & 0xFFFFu);
+        memcpy(groupDescBuf + csumLoOffset, &csumLo, sizeof(csumLo));
+        if (is64Bit) {
+            const uint16_t csumHi = static_cast<uint16_t>(bitmapCsum >> 16);
+            memcpy(groupDescBuf + csumHiOffset, &csumHi, sizeof(csumHi));
+        }
+        kRecomputeGroupDescChecksum(uuid, groupNum, is64Bit, groupDescBuf);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool kExt4AllocateBlockInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t blocksPerGroup,
+                                uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                                uint8_t* groupDescBuf, uint32_t* outRelIndex) {
+    return kExt4ToggleBitInGroup(uuid, groupNum, blocksPerGroup, featureRoCompat, is64Bit, bitmapBuf,
+                                  groupDescBuf, offsetof(GroupDesc32, freeBlocksCountLo),
+                                  offsetof(GroupDesc64, freeBlocksCountHi), offsetof(GroupDesc32, blockBitmapCsumLo),
+                                  offsetof(GroupDesc64, blockBitmapCsumHi), /*allocating=*/true, outRelIndex);
+}
+
+bool kExt4FreeBlockInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t blocksPerGroup,
+                            uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                            uint8_t* groupDescBuf, uint32_t relIndex) {
+    return kExt4ToggleBitInGroup(uuid, groupNum, blocksPerGroup, featureRoCompat, is64Bit, bitmapBuf,
+                                  groupDescBuf, offsetof(GroupDesc32, freeBlocksCountLo),
+                                  offsetof(GroupDesc64, freeBlocksCountHi), offsetof(GroupDesc32, blockBitmapCsumLo),
+                                  offsetof(GroupDesc64, blockBitmapCsumHi), /*allocating=*/false, &relIndex);
+}
+
+bool kExt4AllocateInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t inodesPerGroup,
+                                uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                                uint8_t* groupDescBuf, uint32_t* outRelIndex) {
+    return kExt4ToggleBitInGroup(uuid, groupNum, inodesPerGroup, featureRoCompat, is64Bit, bitmapBuf,
+                                  groupDescBuf, offsetof(GroupDesc32, freeInodesCountLo),
+                                  offsetof(GroupDesc64, freeInodesCountHi), offsetof(GroupDesc32, inodeBitmapCsumLo),
+                                  offsetof(GroupDesc64, inodeBitmapCsumHi), /*allocating=*/true, outRelIndex);
+}
+
+bool kExt4FreeInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t inodesPerGroup,
+                            uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                            uint8_t* groupDescBuf, uint32_t relIndex) {
+    return kExt4ToggleBitInGroup(uuid, groupNum, inodesPerGroup, featureRoCompat, is64Bit, bitmapBuf,
+                                  groupDescBuf, offsetof(GroupDesc32, freeInodesCountLo),
+                                  offsetof(GroupDesc64, freeInodesCountHi), offsetof(GroupDesc32, inodeBitmapCsumLo),
+                                  offsetof(GroupDesc64, inodeBitmapCsumHi), /*allocating=*/false, &relIndex);
+}
+
+bool kExt4AdjustSuperblockFreeBlocks(void* rawSuperblock1024Bytes, kernel::int64_t blocksDelta,
+                                      uint32_t featureIncompat, uint32_t featureRoCompat) {
+    auto* raw = static_cast<uint8_t*>(rawSuperblock1024Bytes);
+    uint32_t lo;
+    memcpy(&lo, raw + offsetof(SuperblockCore, freeBlocksCountLo), sizeof(lo));
+    uint32_t hi = 0;
+    if (featureIncompat & kIncompat64Bit) {
+        memcpy(&hi, raw + offsetof(SuperblockCore, freeBlocksCountHi), sizeof(hi));
+    }
+    const uint64_t current = (static_cast<uint64_t>(hi) << 32) | lo;
+    const kernel::int64_t updated = static_cast<kernel::int64_t>(current) + blocksDelta;
+    if (updated < 0) {
+        return false;
+    }
+    lo = static_cast<uint32_t>(static_cast<uint64_t>(updated) & 0xFFFFFFFFu);
+    memcpy(raw + offsetof(SuperblockCore, freeBlocksCountLo), &lo, sizeof(lo));
+    if (featureIncompat & kIncompat64Bit) {
+        hi = static_cast<uint32_t>(static_cast<uint64_t>(updated) >> 32);
+        memcpy(raw + offsetof(SuperblockCore, freeBlocksCountHi), &hi, sizeof(hi));
+    }
+    if (featureRoCompat & kRoCompatMetadataCsum) {
+        const uint32_t checksum = kExt4ComputeSuperblockChecksum(raw);
+        memcpy(raw + kSuperblockChecksumOffset, &checksum, sizeof(checksum));
+    }
+    return true;
+}
+
+bool kExt4AdjustSuperblockFreeInodes(void* rawSuperblock1024Bytes, kernel::int64_t inodesDelta,
+                                      uint32_t featureRoCompat) {
+    auto* raw = static_cast<uint8_t*>(rawSuperblock1024Bytes);
+    uint32_t count;
+    memcpy(&count, raw + offsetof(SuperblockCore, freeInodesCount), sizeof(count));
+    const kernel::int64_t updated = static_cast<kernel::int64_t>(count) + inodesDelta;
+    if (updated < 0) {
+        return false;
+    }
+    count = static_cast<uint32_t>(updated);
+    memcpy(raw + offsetof(SuperblockCore, freeInodesCount), &count, sizeof(count));
+    if (featureRoCompat & kRoCompatMetadataCsum) {
+        const uint32_t checksum = kExt4ComputeSuperblockChecksum(raw);
+        memcpy(raw + kSuperblockChecksumOffset, &checksum, sizeof(checksum));
+    }
+    return true;
+}
+
 uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
                                     const void* rawInode, uint32_t inodeSize) {
     // 실제 mkfs.ext4 -O metadata_csum 이미지의 root inode(2번, generation=0)

@@ -296,6 +296,40 @@ uint16_t kExt4ComputeGroupDescChecksum(const uint8_t uuid[16], uint32_t groupNum
 uint32_t kExt4ComputeBitmapChecksum(const uint8_t uuid[16], const void* bitmapData, uint32_t bitCount);
 
 // ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-FE718C87] 그룹 하나 안에서 블록/inode 하나를
+// 실제로 할당/해제 - 비트맵 비트 갱신 + 그룹 디스크립터의 free count
+// 갱신 + (RO_COMPAT_METADATA_CSUM이면) 비트맵/그룹 디스크립터 체크섬
+// 재계산까지 한 번에 처리하는 순수 함수(I/O 없음, 이미 읽어 온 버퍼를
+// 제자리에서 갱신). `groupDescBuf`는 그 그룹 디스크립터 하나의 온디스크
+// stride(32 또는 64바이트, `is64Bit`로 구분) 그대로, `bitmapBuf`는 그
+// 그룹의 block/inode 비트맵 내용 그대로(둘 다 호출자가 이미 디스크에서
+// 읽어 옴). 할당 실패(빈 비트 없음)/해제 실패(이미 free인 비트를
+// 또 해제하려 함)면 아무것도 바꾸지 않고 false.
+bool kExt4AllocateBlockInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t blocksPerGroup,
+                                uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                                uint8_t* groupDescBuf, uint32_t* outRelIndex);
+bool kExt4FreeBlockInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t blocksPerGroup,
+                            uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                            uint8_t* groupDescBuf, uint32_t relIndex);
+bool kExt4AllocateInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t inodesPerGroup,
+                                uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                                uint8_t* groupDescBuf, uint32_t* outRelIndex);
+bool kExt4FreeInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t inodesPerGroup,
+                            uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
+                            uint8_t* groupDescBuf, uint32_t relIndex);
+
+// 슈퍼블록의 전역 free 블록/inode 수를 blocksDelta/inodesDelta만큼
+// 조정(양수=증가/음수=감소)하고, RO_COMPAT_METADATA_CSUM이면 s_checksum
+// 도 재계산한다 - `kExt4ComputeSuperblockChecksum()`과 동일하게
+// `rawSuperblock1024Bytes`는 오프셋 1024부터의 실제 온디스크 1024바이트
+// 전체(이 struct가 파싱하는 부분 절단본이 아님). 결과가 음수가 되면
+// (버그 방어) 아무것도 바꾸지 않고 false.
+bool kExt4AdjustSuperblockFreeBlocks(void* rawSuperblock1024Bytes, kernel::int64_t blocksDelta,
+                                      uint32_t featureIncompat, uint32_t featureRoCompat);
+bool kExt4AdjustSuperblockFreeInodes(void* rawSuperblock1024Bytes, kernel::int64_t inodesDelta,
+                                      uint32_t featureRoCompat);
+
+// ---------------------------------------------------------------------
 // 3.4 inode 구조체(core 128바이트, inodeSize>128이면 나머지는 확장
 // 필드 - v1은 읽지 않음) + 익스텐트 트리.
 // ---------------------------------------------------------------------
