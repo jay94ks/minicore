@@ -137,7 +137,11 @@ public:
     // -kmain.cpp-가 PageFrameAllocator::init()과 같은 memmap을 스캔해
     // 구한다) - 이 값까지 1GiB 페이지로 direct map을 늘린다(최소
     // 4GiB/최대 512GiB로 clamp, kDirectMapBase 주석 참고).
-    static void init(uint64_t maxPhysAddr);
+    // physicalBaseDelta: 커널이 KERNEL_LMA(1MiB)가 아닌 다른 물리주소에
+    // 로드됐을 때의 보정값(actualPhysicalLoadBase - KERNEL_LMA) - GRUB/
+    // PVH는 항상 0(SP-CC2B18C6 §2), UEFI 직접 부팅 경로가 실제 값을
+    // 넘긴다.
+    static void init(uint64_t maxPhysAddr, uint64_t physicalBaseDelta);
 
     // [신규, 2026-09-18, SP-8D206F11 §2.2] IA32_PAT(MSR 0x277)는
     // STAR/LSTAR/SFMASK 등과 마찬가지로 논리 프로세서별(코어별) MSR이라

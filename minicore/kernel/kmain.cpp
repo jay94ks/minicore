@@ -525,6 +525,10 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::uint64_t rsdpPaddr = 0;
     kernel::uint64_t startInfoSize = 0;
     kernel::BootInfo bootInfo{};
+    // SP-CC2B18C6 §2 - 커널이 KERNEL_LMA(1MiB)가 아닌 물리주소에 로드된
+    // 경우의 보정값. GRUB/PVH는 항상 1MiB 고정 로드라 0(무회귀) - UEFI
+    // 직접 부팅 경로(PN-7FBF255A)가 도입되면 이 분기에서 실제 값을 채운다.
+    kernel::uint64_t physicalBaseDelta = 0;
 
     if (bootProtocol == kBootProtocolMultiboot2) {
         kernel::Logger::info("minicore: booted via multiboot2 (GRUB, higher-half, long mode)");
@@ -590,7 +594,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 테이블용 프레임을 받아옴 - 그 안에서 자기 자신의 id()를 부르지
     // 않도록 Lapic::isReady()로 방어돼 있음, 2026-09-14 실측으로
     // 발견한 초기화 순서 문제).
-    kernel::Paging::init(kComputeMaxUsablePhysAddr(memmap, memmapEntries));
+    kernel::Paging::init(kComputeMaxUsablePhysAddr(memmap, memmapEntries), physicalBaseDelta);
     // [신규, 2026-09-18, SP-8D206F11 §2.2] IA32_PAT는 코어별 MSR이라
     // BSP도 자기 몫을 스스로 설정해야 한다(kApMain이 AP 몫을 설정 -
     // smp.cpp 참고, SyscallFastPath::initForThisCore()와 동일한 관례).
@@ -631,8 +635,8 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
 
     kernel::PageFrameAllocator::init(
         memmap, memmapEntries,
-        reinterpret_cast<kernel::uint64_t>(kernel_phys_start),
-        reinterpret_cast<kernel::uint64_t>(kernel_phys_end),
+        reinterpret_cast<kernel::uint64_t>(kernel_phys_start) + physicalBaseDelta,
+        reinterpret_cast<kernel::uint64_t>(kernel_phys_end) + physicalBaseDelta,
         static_cast<kernel::uint64_t>(startInfoAddr), startInfoSize);
 
     kernel::Logger::info("minicore: page frame allocator ready, nodes=%x free_pages=%llx",

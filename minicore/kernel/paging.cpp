@@ -568,7 +568,7 @@ kernel::Paging::PageFaultOutcome kTrySubmitSwapIn(kernel::uint64_t faultAddr, ke
 
 namespace kernel {
 
-void Paging::init(uint64_t maxPhysAddr) {
+void Paging::init(uint64_t maxPhysAddr, uint64_t physicalBaseDelta) {
     uint64_t* pml4 = kLowIdentityTable(kCurrentPml4Phys());
     auto* pdpt = reinterpret_cast<uint64_t*>(&gDirectMapPdptStorage[0]);
     kZeroTable(pdpt);
@@ -592,7 +592,9 @@ void Paging::init(uint64_t maxPhysAddr) {
     // 빼서 되돌린다.
     const uint64_t pdptVirt = reinterpret_cast<uint64_t>(pdpt);
     constexpr uint64_t kKernelVma = 0xFFFFFFFF80000000UL;
-    const uint64_t pdptPhys = pdptVirt - kKernelVma;
+    // SP-CC2B18C6 §2 physicalBaseDelta 보정 - GRUB/PVH는 항상 0이라
+    // 기존 값과 수치상 동일(무회귀).
+    const uint64_t pdptPhys = pdptVirt - kKernelVma + physicalBaseDelta;
 
     const uint32_t pml4Index = kPml4Index(kDirectMapBase);
     pml4[pml4Index] = pdptPhys | PAGE_PRESENT | PAGE_WRITABLE;
