@@ -37,7 +37,7 @@ using kernel::arch::kWriteMsr64;
 
 }  // namespace
 
-// syscall_entry.S(minicore/libs/x86_64) - `syscall` 명령의 LSTAR
+// syscall_entry.S(minicore/arch/x86_64) - `syscall` 명령의 LSTAR
 // 목표. `swapgs`로 이 코어의 SyscallPerCpuScratch를 GS_BASE로 끌어와
 // gs:[0]에 유저 RSP를 저장하고 gs:[8]의 커널 RSP로 전환한 뒤,
 // `kernel::kDispatchSyscallVerb`(syscall.h/idt.cpp)를 호출해 int 0x80

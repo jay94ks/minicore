@@ -43,7 +43,7 @@ add_subdirectory(minicore/libs/libext4)
 add_subdirectory(minicore/libs/libvfat)
 add_subdirectory(minicore/libs/libexfat)
 add_subdirectory(minicore/libs/libntfs)
-add_subdirectory(minicore/libs/x86_64)
+add_subdirectory(minicore/arch/x86_64)
 add_subdirectory(minicore/boot/x86_64)
 add_subdirectory(minicore/kernel)
 
@@ -62,7 +62,7 @@ target_link_libraries(minicore.elf PRIVATE
     libvfat
     libexfat
     libntfs
-    minicore_libs_x86_64
+    minicore_arch_x86_64
 )
 
 set_target_properties(minicore.elf PROPERTIES

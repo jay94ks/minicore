@@ -1,9 +1,10 @@
-#ifndef MINICORE_LIBS_X86_64_MSR_H
-#define MINICORE_LIBS_X86_64_MSR_H
+#ifndef MINICORE_ARCH_X86_64_MSR_H
+#define MINICORE_ARCH_X86_64_MSR_H
 
 #include "libkenv/types.h"
 
-// minicore/libs/x86_64 - x86-64 아키텍처별 공통 코드 라이브러리
+// minicore/arch/x86_64(2026-09-24부로 이 위치, PN-E612E714 - 구
+// minicore/libs/x86_64) - x86-64 아키텍처별 공통 코드 라이브러리
 // (SP-8B6B8D25 §3.0, io_port.h와 동일한 배치 근거) - Model-Specific
 // Register 접근(rdmsr/wrmsr)은 x86 계열 ISA 명령어라 libkenv(아키텍처
 // 무관)가 아니라 여기 있다.
@@ -33,4 +34,4 @@ inline void kWriteMsr64(uint32_t msr, uint64_t value) {
 }  // namespace arch
 }  // namespace kernel
 
-#endif  // MINICORE_LIBS_X86_64_MSR_H
+#endif  // MINICORE_ARCH_X86_64_MSR_H

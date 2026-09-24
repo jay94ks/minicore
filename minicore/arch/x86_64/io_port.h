@@ -1,9 +1,10 @@
-#ifndef MINICORE_LIBS_X86_64_IO_PORT_H
-#define MINICORE_LIBS_X86_64_IO_PORT_H
+#ifndef MINICORE_ARCH_X86_64_IO_PORT_H
+#define MINICORE_ARCH_X86_64_IO_PORT_H
 
 #include "libkenv/types.h"
 
-// minicore/libs/x86_64 - x86-64 아키텍처별 공통 코드 라이브러리
+// minicore/arch/x86_64(2026-09-24부로 이 위치, PN-E612E714 - 구
+// minicore/libs/x86_64) - x86-64 아키텍처별 공통 코드 라이브러리
 // (SP-8B6B8D25 §3.0) - 커널(및 나중에 커널 서비스)이 직접 링크해
 // 재사용할 수 있는 아키텍처 종속 프리미티브. 포트 I/O는 x86 계열
 // ISA 명령어라 다른 아키텍처엔 이 형태로 존재하지 않는다 - 그래서
@@ -56,4 +57,4 @@ inline uint32_t kInL(uint16_t port) {
 }  // namespace arch
 }  // namespace kernel
 
-#endif  // MINICORE_LIBS_X86_64_IO_PORT_H
+#endif  // MINICORE_ARCH_X86_64_IO_PORT_H
