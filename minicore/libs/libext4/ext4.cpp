@@ -318,6 +318,48 @@ uint32_t kExt4ComputeDirBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum,
     return kCrc32c(seed, dirBlockData, blockSize - static_cast<uint32_t>(sizeof(DirEntryTail)));
 }
 
+bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t hasTailBytes, uint32_t inode,
+                          const char* name, uint8_t nameLen, uint8_t fileType) {
+    const uint32_t reclenNeeded = kExt4DirRecLen(nameLen);
+    const uint32_t searchLimit = blockSize - hasTailBytes;
+    uint32_t offset = 0;
+    while (offset + sizeof(DirEntry2Header) <= searchLimit) {
+        DirEntry2Header entry;
+        memcpy(&entry, dirBlockData + offset, sizeof(entry));
+        if (entry.recLen < sizeof(DirEntry2Header) || offset + entry.recLen > searchLimit) {
+            break;  // 손상 방어 - 더 진행하지 않고 실패 처리
+        }
+        const uint32_t entryOwnSize = (entry.inode != 0) ? kExt4DirRecLen(entry.nameLen) : 0;
+        const uint32_t available = entry.recLen - entryOwnSize;
+        if (available >= reclenNeeded) {
+            uint32_t newEntryOffset = offset;
+            uint16_t newEntryRecLen = entry.recLen;
+            if (entry.inode != 0) {
+                // 사용 중인 엔트리의 슬랙만 떼어낸다 - 기존 엔트리는
+                // 자신의 실제 필요 크기로 줄어들고, 새 엔트리가 그
+                // 뒤(슬랙 자리)에 들어간다.
+                entry.recLen = static_cast<uint16_t>(entryOwnSize);
+                memcpy(dirBlockData + offset, &entry, sizeof(entry));
+                newEntryOffset = offset + entryOwnSize;
+                newEntryRecLen = static_cast<uint16_t>(available);
+            }
+            // else: 삭제된 엔트리(inode==0)를 recLen 그대로 통째로
+            // 재사용 - 분할하지 않는다(커널의 ext4_insert_dentry와
+            // 동일한 분기).
+            DirEntry2Header newEntry;
+            newEntry.inode = inode;
+            newEntry.recLen = newEntryRecLen;
+            newEntry.nameLen = nameLen;
+            newEntry.fileType = fileType;
+            memcpy(dirBlockData + newEntryOffset, &newEntry, sizeof(newEntry));
+            memcpy(dirBlockData + newEntryOffset + sizeof(DirEntry2Header), name, nameLen);
+            return true;
+        }
+        offset += entry.recLen;
+    }
+    return false;
+}
+
 uint32_t kExt4ComputeSuperblockChecksum(const void* rawSuperblock1024Bytes) {
     // 실제 mkfs.ext4 이미지 2개(서로 다른 크기 8MB/64MB, 볼륨 라벨
     // 유무도 다름)의 s_checksum과 대조해 확인(PN-625E2804) - 그룹

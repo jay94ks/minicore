@@ -527,6 +527,38 @@ static_assert(sizeof(DirEntryTail) == 12, "DirEntryTail은 12바이트여야 함
 uint32_t kExt4ComputeDirBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
                                        const void* dirBlockData, uint32_t blockSize);
 
+// [신규, 2026-09-25, PN-FE718C87] 디렉터리 엔트리 하나가 필요로 하는
+// 최소 온디스크 크기(4바이트 정렬) - 리눅스 커널 fs/ext4/ext4.h
+// `ext4_dir_rec_len()`과 동일(이 프로젝트는 hash-in-dirent 확장
+// 기능을 안 쓰므로 그 조건 분기는 없음, WSL2-Linux-Kernel 로컬 소스
+// 확인).
+inline uint32_t kExt4DirRecLen(uint8_t nameLen) {
+    return (static_cast<uint32_t>(nameLen) + 8u + 3u) & ~3u;
+}
+
+// 디렉터리 리프 블록 하나(dirBlockData, blockSize바이트, 디스크에서
+// 이미 읽어 온 것 - 제자리에서 갱신됨)에 새 엔트리를 실제로 삽입
+// - 리눅스 커널 fs/ext4/namei.c `ext4_find_dest_de()`+
+// `ext4_insert_dentry()`와 완전히 동일한 알고리즘(이 프로젝트가 새로
+// 고안한 게 아니다, WSL2-Linux-Kernel 로컬 소스 확인 - 자세한 경로는
+// reference_local_linux_kernel_source 메모리 참고). 기존 엔트리를
+// 순서대로 훑으며 first-fit으로 빈 공간을 찾는다:
+//   - 그 엔트리가 삭제됨(inode==0)이면 recLen 전체를 그대로 재사용
+//     가능한 후보로 본다(분할 없음 - 통째로 덮어씀),
+//   - 사용 중(inode!=0)이면 "그 엔트리 자신의 실제 필요 크기"를 뺀
+//     나머지(slack)만 후보로 보고, 맞으면 그 슬랙만큼만 떼어 새
+//     엔트리로 분할한다(기존 엔트리의 recLen은 자신의 최소 크기로
+//     줄어듦).
+// hasTailBytes(RO_COMPAT_METADATA_CSUM 볼륨의 디렉터리면
+// sizeof(DirEntryTail)=12, 아니면 0)만큼은 애초에 탐색·분할 대상
+// 범위에서 제외한다(그 자리는 항상 체크섬 엔트리 몫). 실제 mke2fs+
+// debugfs로 재현한 두 시나리오(기존 엔트리 슬랙 분할/디렉터리 끝
+// 확장) 모두와 결과 바이트가 1바이트도 안 틀리게 일치 확인
+// (PN-FE718C87 검증 기록 참고). 자리가 전혀 없으면(모든 기존
+// 엔트리가 빡빡함) 아무것도 바꾸지 않고 false.
+bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t hasTailBytes, uint32_t inode,
+                          const char* name, uint8_t nameLen, uint8_t fileType);
+
 // ---------------------------------------------------------------------
 // 4. Ext4Volume - 마운트 + mount()가 캐싱한 슈퍼블록/그룹 디스크립터
 // 상태의 읽기 전용 노출.
