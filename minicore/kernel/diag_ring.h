@@ -58,6 +58,16 @@ enum class DiagRingEvent : uint8_t {
     // kCopyApTrampolineToRuntimeAddress()(memcpy) 전후로 한 번 더
     // 이분한다.
     BootAfterTrampolineCopy = 14,  // Smp::startApCores()의 kCopyApTrampolineToRuntimeAddress() 직후
+
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] QEMU -d int 트레이스로
+    // "CS 오염이 인터럽트 전달 그 자체에서 온다 - 즉 IDT 게이트의
+    // segment selector 필드가 손상됐다"는 재해석이 나왔다(PN-61D908EB
+    // 참고) - 이 이벤트로 특정 벡터의 게이트 selector를 여러 부팅
+    // 지점에서 스냅샷해, 정확히 언제 0x08에서 바뀌는지 좁힌다.
+    // `vector` 필드=조회한 IDT 벡터 번호, `extra` 필드=그 순간의
+    // selector 값. 같은 이벤트를 여러 지점에서 재사용하므로 어느
+    // 지점인지는 diag_ring 덤프의 순서(seq)로 구분한다.
+    IdtGateSnapshot = 15,
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

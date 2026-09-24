@@ -44,6 +44,13 @@ public:
     // 의도적 이벤트).
     using DebugCallback = bool (*)(InterruptFrame*, uint64_t dr6);
     static void registerDebugCallback(DebugCallback callback);
+
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72 진단 전용] gIdt가
+    // idt.cpp의 익명 네임스페이스에 있어 외부에서 직접 못 보므로,
+    // 특정 벡터의 게이트 segment selector를 diag_ring에 스냅샷하는
+    // 전용 accessor - "gIdt 자체가 실행 중 손상되는지"를 여러 부팅
+    // 지점에서 비교하기 위함(diag_ring.h의 IdtGateSnapshot 참고).
+    static void logGateSelectorSnapshot(uint32_t vector, uint32_t coreIndex);
 };
 
 }  // namespace kernel

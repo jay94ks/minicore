@@ -73,6 +73,8 @@ const char* kEventName(uint8_t event) {
             return "BootAfterStartApCores";
         case DiagRingEvent::BootAfterTrampolineCopy:
             return "BootAfterTrampolineCopy";
+        case DiagRingEvent::IdtGateSnapshot:
+            return "IdtGateSnapshot";
         default:
             return "?";
     }

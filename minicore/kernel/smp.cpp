@@ -154,6 +154,7 @@ void Smp::startApCores() {
         asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
         kDiagRingLog(DiagRingEvent::BootAfterTrampolineCopy, 0, 0, bootRsp);
     }
+    Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 5/5
 
     const uint32_t bspApicId = Lapic::id();
     const uint32_t cpuCount = Acpi::cpuCount();

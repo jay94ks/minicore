@@ -671,6 +671,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Logger::info("minicore: GDT ready");
 
     kernel::Idt::init();
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] gIdt[0x22] selector
+    // 스냅샷 1/5 - Idt::init() 직후, 이 값은 항상 kKernelCodeSelector
+    // (0x08)여야 정상이다. "인터럽트 전달 자체가 CS=0x38을 로드한다"는
+    // 발견(QEMU -d int 트레이스) 이후 gIdt 자체의 실행 중 손상 여부를
+    // 좁히기 위한 계측.
+    kernel::Idt::logGateSelectorSnapshot(0x22, 0);
     kernel::Logger::info("minicore: IDT ready");
 
     kLogBootInfo(bootInfo);
@@ -756,6 +762,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
         kernel::kDiagRingLog(kernel::DiagRingEvent::BootTssLoadDone, 0, 0, bootRsp);
     }
+    kernel::Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 2/5
     kernel::Logger::info("minicore: TSS/IST ready (core 0)");
 
     // PN-124C105B("syscall 명령 경로") - Lapic::id()로 코어 인덱스를
@@ -928,6 +935,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
         kernel::kDiagRingLog(kernel::DiagRingEvent::BootBeforeSti, 0, 0, bootRsp);
     }
+    kernel::Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 3/5 - sti 직전, 마지막 안전 지점
     // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
     asm volatile("sti");
 
@@ -940,6 +948,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
         kernel::kDiagRingLog(kernel::DiagRingEvent::BootAfterStartApCores, 0, 0, bootRsp);
     }
+    kernel::Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 4/5
 
     // [순서 재배치, 2026-09-17, PN-9F8FF132, 설계자 지시] 이 두 호출
     // (Process::init()을 실제로 부르는 첫 지점)은 예전엔 Smp::

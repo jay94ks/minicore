@@ -230,6 +230,13 @@ void Idt::registerDebugCallback(DebugCallback callback) {
     gDebugCallback = callback;
 }
 
+void Idt::logGateSelectorSnapshot(uint32_t vector, uint32_t coreIndex) {
+    if (vector >= 256) {
+        return;
+    }
+    kDiagRingLog(DiagRingEvent::IdtGateSnapshot, coreIndex, vector, 0, gIdt[vector].selector);
+}
+
 }  // namespace kernel
 
 namespace {
