@@ -238,6 +238,25 @@ inline uint32_t kFatFirstCluster(const DirEntry& e) {
     return (static_cast<uint32_t>(e.fstClusHi) << 16) | e.fstClusLo;
 }
 
+// [신규, 2026-09-25, PN-83AE8AE9, SP-A658A124 §2/§3.5] FAT 날짜/시간
+// 인코딩 - 이 프로젝트가 새로 고안한 형식이 아니다("FAT: General
+// Overview of On-Disk Format" 문서, Linux 커널 fs/fat/misc.c의
+// fat_time_fat2unix()/fat_time_unix2fat()과 동일한 비트 배치 그대로,
+// RM-23F4B687 §4). date: 비트15-9=1980년 기준 연도(0-127)/8-5=월
+// (1-12)/4-0=일(1-31). time: 비트15-11=시(0-23)/10-5=분(0-59)/
+// 4-0=초를 2로 나눈 값(0-29, FAT 타임스탬프의 초 단위 해상도가
+// 2초라 홀수 초는 표현 불가 - 스펙 자체의 한계).
+inline uint16_t kFatEncodeDate(uint16_t year, uint8_t month, uint8_t day) {
+    const uint16_t y = (year >= 1980) ? static_cast<uint16_t>(year - 1980) : 0;
+    return static_cast<uint16_t>((y << 9) | ((static_cast<uint16_t>(month) & 0x0Fu) << 5) |
+                                  (static_cast<uint16_t>(day) & 0x1Fu));
+}
+
+inline uint16_t kFatEncodeTime(uint8_t hour, uint8_t minute, uint8_t second) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(hour) << 11) | (static_cast<uint16_t>(minute) << 5) |
+                                  ((static_cast<uint16_t>(second) / 2) & 0x1Fu));
+}
+
 // Fat32Driver::onExec()이 `FileHandle::value`에 인코딩해 들고
 // 다니는, 디렉터리 엔트리 하나의 요약 - FAT엔 ext4의 inode 같은 별도
 // 메타데이터 테이블이 없어서(크기/디렉터리 여부가 전부 부모 디렉터리

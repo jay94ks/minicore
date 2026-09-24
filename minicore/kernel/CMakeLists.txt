@@ -18,6 +18,7 @@ add_library(minicore_kernel OBJECT
     pci.cpp
     smp.cpp
     timer.cpp
+    rtc.cpp
     task.cpp
     scheduler.cpp
     async_task.cpp

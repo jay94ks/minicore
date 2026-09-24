@@ -3,6 +3,7 @@
 #include "block_device.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
+#include "rtc.h"
 
 // [실측으로 발견, minicore/libs/libext4/ext4_driver.cpp(PN-9AE5BFE4)와
 // 동일한 제약] `Fat32Volume`의 옛 무상태 함수(resolvePath/readData/
@@ -55,6 +56,23 @@ void kNormalizeTo83(const char* seg, uint32_t segLen, char out11[11]) {
             out11[8 + i] = toUpper(seg[dot + 1 + i]);
         }
     }
+}
+
+// [신규, 2026-09-25, PN-83AE8AE9] 지금 순간의 wall-clock을 FAT
+// date/time 쌍으로 인코딩 - Mkdir(생성 시각)/Write(수정 시각)가
+// 공유하는 한 지점(RTC 호출을 각 호출부에 중복시키지 않음).
+struct FatTimestamp {
+    uint16_t date = 0;
+    uint16_t time = 0;
+    uint8_t timeTenth = 0;  // 2초 미만 해상도(생성 시각 전용 필드, wrtTime엔 없음) - CMOS RTC는 초 단위까지만 주므로 항상 0
+};
+
+FatTimestamp kCurrentFatTimestamp() {
+    const kernel::WallClockTime now = kernel::Rtc::readWallClock();
+    FatTimestamp ts;
+    ts.date = kFatEncodeDate(now.year, now.month, now.day);
+    ts.time = kFatEncodeTime(now.hour, now.minute, now.second);
+    return ts;
 }
 
 // [신규, 2026-09-23, PN-9D6FE4B6] relPath를 "부모 디렉터리 경로" +
@@ -1587,11 +1605,17 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 break;
             }
 
-            // 4단계: fileSize/firstCluster를 메모리 + 디스크 디렉터리
-            // 엔트리 양쪽에 반영.
+            // 4단계: fileSize/firstCluster/수정 시각을 메모리 + 디스크
+            // 디렉터리 엔트리 양쪽에 반영.
+            // [갱신, 2026-09-25, PN-83AE8AE9] 이전엔 크기/클러스터가
+            // 실제로 바뀔 때만 엔트리를 다시 썼으나, 파일 중간을
+            // 덮어써 크기가 안 변하는 쓰기도 wrtDate/wrtTime은
+            // 갱신해야 스펙에 맞다(mtime은 "내용이 바뀌면" 갱신 -
+            // 크기 불변 여부와 무관) - 그래서 totalWritten>0이면
+            // 항상 다시 쓰도록 조건을 넓혔다.
             const uint64_t newFileSize = (writeEnd > h.fileSize) ? writeEnd : h.fileSize;
-            const bool clusterAssigned = (h.firstCluster == 0 && firstCluster != 0);
-            if ((newFileSize != h.fileSize || clusterAssigned) && h.entryValid) {
+            if (totalWritten > 0 && h.entryValid) {
+                const FatTimestamp writeTs = kCurrentFatTimestamp();
                 uint32_t entrySector = 0;
                 if (kClusterToSector(dataStartSector, sectorsPerCluster, h.entryCluster, &entrySector)) {
                     entrySector += h.entryByteOffset / bytesPerSector;
@@ -1608,6 +1632,9 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                                 entry->fileSize = static_cast<uint32_t>(newFileSize);
                                 entry->fstClusHi = static_cast<uint16_t>(firstCluster >> 16);
                                 entry->fstClusLo = static_cast<uint16_t>(firstCluster & 0xFFFFu);
+                                entry->wrtDate = writeTs.date;
+                                entry->wrtTime = writeTs.time;
+                                entry->lastAccessDate = writeTs.date;
                                 fs::BlockIoResult writeResult;
                                 kernel::AsyncTask* writeTask = kSubmitWriteSectors(
                                     device, bytesPerSector, entrySector, 1, sectorBuf.get(), &writeResult);
@@ -2333,6 +2360,12 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 }
             }
 
+            // [신규, 2026-09-25, PN-83AE8AE9] 이 mkdir() 호출 전체(새
+            // 디렉터리의 "."/".." + 부모 안의 새 엔트리)가 공유할 단일
+            // 생성 시각 - 아래 두 블록 모두에서 쓰므로 그 바깥(이 case
+            // 전체 스코프)에서 한 번만 읽는다.
+            const FatTimestamp mkdirTs = kCurrentFatTimestamp();
+
             {
                 SlabBuf newClusterBuf(bytesPerCluster);
                 if (!newClusterBuf) {
@@ -2342,6 +2375,11 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 memset(newClusterBuf.get(), 0, bytesPerCluster);
                 auto* dotEntries = reinterpret_cast<DirEntry*>(newClusterBuf.get());
 
+                // [신규, 2026-09-25, PN-83AE8AE9] "."/".."도 스펙상
+                // 정식 디렉터리 엔트리라 유효한 날짜가 있어야 한다
+                // (0으로 두면 1980-00-00으로 디코딩돼 일부 파서가
+                // 이상 값으로 취급할 수 있음) - 새 디렉터리 자신의
+                // 생성 시각(mkdirTs, 위에서 이미 읽음)을 그대로 채운다.
                 memset(dotEntries[0].name, ' ', 8);
                 dotEntries[0].name[0] = '.';
                 memset(dotEntries[0].ext, ' ', 3);
@@ -2349,6 +2387,12 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 dotEntries[0].fstClusHi = static_cast<uint16_t>(newCluster >> 16);
                 dotEntries[0].fstClusLo = static_cast<uint16_t>(newCluster & 0xFFFFu);
                 dotEntries[0].fileSize = 0;
+                dotEntries[0].crtDate = mkdirTs.date;
+                dotEntries[0].crtTime = mkdirTs.time;
+                dotEntries[0].crtTimeTenth = mkdirTs.timeTenth;
+                dotEntries[0].wrtDate = mkdirTs.date;
+                dotEntries[0].wrtTime = mkdirTs.time;
+                dotEntries[0].lastAccessDate = mkdirTs.date;
 
                 memset(dotEntries[1].name, ' ', 8);
                 dotEntries[1].name[0] = '.';
@@ -2362,6 +2406,12 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 dotEntries[1].fstClusHi = static_cast<uint16_t>(dotDotCluster >> 16);
                 dotEntries[1].fstClusLo = static_cast<uint16_t>(dotDotCluster & 0xFFFFu);
                 dotEntries[1].fileSize = 0;
+                dotEntries[1].crtDate = mkdirTs.date;
+                dotEntries[1].crtTime = mkdirTs.time;
+                dotEntries[1].crtTimeTenth = mkdirTs.timeTenth;
+                dotEntries[1].wrtDate = mkdirTs.date;
+                dotEntries[1].wrtTime = mkdirTs.time;
+                dotEntries[1].lastAccessDate = mkdirTs.date;
 
                 uint32_t newDataSector = 0;
                 if (!kClusterToSector(dataStartSector, sectorsPerCluster, newCluster, &newDataSector)) {
@@ -2429,6 +2479,15 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 entry->fstClusHi = static_cast<uint16_t>(newCluster >> 16);
                 entry->fstClusLo = static_cast<uint16_t>(newCluster & 0xFFFFu);
                 entry->fileSize = 0;
+                // [신규, 2026-09-25, PN-83AE8AE9] "."/".."에 쓴 것과
+                // 같은 생성 시각(mkdirTs) - 부모 안의 이 엔트리 자신도
+                // 같은 mkdir() 호출 한 번의 결과이므로 동일 시각이 맞다.
+                entry->crtDate = mkdirTs.date;
+                entry->crtTime = mkdirTs.time;
+                entry->crtTimeTenth = mkdirTs.timeTenth;
+                entry->wrtDate = mkdirTs.date;
+                entry->wrtTime = mkdirTs.time;
+                entry->lastAccessDate = mkdirTs.date;
 
                 fs::BlockIoResult writeResult;
                 kernel::AsyncTask* writeTask = kSubmitWriteSectors(
