@@ -103,6 +103,14 @@ unsigned long long gRawEntry = 0;
 // 참고 - 재배치된 사본에 쓰면 안 됨). saved_boot_protocol은 바로
 // 뒤 4바이트(중간 정렬 패딩 없음).
 unsigned long long gRawSavedStartInfoAddr = 0;
+// [신규, SP-CC2B18C6 §3-3 두 번째 추가 정정, 실측으로 발견] long_mode_entry
+// 진입 직후 "mov ax,0x10; mov ds,ax; ..."가 boot.S의 gdt64가 이미
+// 로드돼 있다고 가정한다 - UEFI 로더는 그 준비 코드를 안 거치므로
+// 점프 전에 직접 lgdt해야 한다(안 하면 UEFI 자신의 GDT에서 그
+// 선택자를 찾다 #GP - 실측 확인). limit(=23, 엔트리 3개 고정)은
+// 링크 타임 상수라 마커 불필요, base(gdt64 주소)만 필요.
+unsigned long long gRawGdt64Addr = 0;
+constexpr unsigned short kGdt64Limit = 23;  // 3*8-1, boot.S gdt64 참고
 
 // 이 로더 자신의 실행 위치가 낮은 1GiB 안에 있는지 - CR3 전환 직후에도
 // 이 코드 자신이 계속 매핑돼 있어야 하므로(§3-2 5번) 새 페이지
@@ -390,7 +398,7 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                                     // 확인해 둘 수 있어 이 방식을 택했다. 파일 오프셋
                                     // 기준 정렬이 실제 물리 배치의 8바이트 정렬과 다를
                                     // 수 있어 1바이트 단위로 스캔한다(성능보다 정확성).
-                                    for (unsigned long long off = 0; off + 32 <= readSize; ++off) {
+                                    for (unsigned long long off = 0; off + 40 <= readSize; ++off) {
                                         unsigned long long candidate = 0;
                                         kCopyBytes(reinterpret_cast<unsigned char*>(&candidate),
                                                    gKernelElfBuffer + off, 8);
@@ -403,6 +411,8 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                                                    gKernelElfBuffer + off + 16, 8);
                                         kCopyBytes(reinterpret_cast<unsigned char*>(&gRawSavedStartInfoAddr),
                                                    gKernelElfBuffer + off + 24, 8);
+                                        kCopyBytes(reinterpret_cast<unsigned char*>(&gRawGdt64Addr),
+                                                   gKernelElfBuffer + off + 32, 8);
                                         gMarkerFound = true;
                                         break;
                                     }
@@ -416,6 +426,8 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                                             kPrintUint64(conOut, gRawEntry);
                                             kPrint(conOut, u" rawSavedStartInfo=");
                                             kPrintUint64(conOut, gRawSavedStartInfoAddr);
+                                            kPrint(conOut, u" rawGdt64=");
+                                            kPrintUint64(conOut, gRawGdt64Addr);
                                         }
                                         kPrint(conOut, u"\r\n");
                                     }
@@ -490,8 +502,34 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                         if (region->Type != kEfiConventionalMemory) {
                             continue;
                         }
-                        const unsigned long long candidate = region->PhysicalStart;
-                        if (region->NumberOfPages * kPageSize4K < imageSpan) {
+                        // [신규, SP-CC2B18C6 §3-3 세 번째 추가 정정, 실측으로
+                        // 발견] PD_HIGH의 2MiB huge page 엔트리(pdHigh[i] =
+                        // i*2MiB + delta)가 유효하려면 그 물리 베이스가
+                        // 2MiB 정렬이어야 한다(PDE의 PS=1 huge page는 하위
+                        // 21비트가 반드시 0) - i*2MiB는 항상 2MiB 정렬이므로
+                        // delta 자신도 2MiB 정렬이어야 전체가 정렬 유지된다.
+                        // kKernelLma(0x100000)가 2MiB의 절반 지점이라
+                        // delta=physicalBase-kKernelLma가 2MiB 정렬이려면
+                        // physicalBase ≡ kKernelLma (mod 2MiB)여야 한다 -
+                        // 후보를 이 조건에 맞게 올림 정렬한 뒤 모든 제약을
+                        // 그 정렬된 값 기준으로 재확인한다(실측: 정렬 안 한
+                        // 채로 진행했더니 higher_half_entry로 점프한 직후
+                        // 명령어 페치 자체가 실패해 트리플 폴트 - QEMU
+                        // -d int 로그로 확인).
+                        unsigned long long candidate = region->PhysicalStart;
+                        {
+                            const unsigned long long rem = candidate % kPageSize2M;
+                            const unsigned long long targetRem = kKernelLma % kPageSize2M;
+                            if (rem != targetRem) {
+                                candidate += (rem < targetRem) ? (targetRem - rem) : (kPageSize2M - rem + targetRem);
+                            }
+                        }
+                        if (candidate < region->PhysicalStart ||
+                            candidate - region->PhysicalStart >= region->NumberOfPages * kPageSize4K) {
+                            continue;  // 정렬 보정이 이 영역 밖으로 나감
+                        }
+                        const unsigned long long alignedRegionEnd = region->PhysicalStart + region->NumberOfPages * kPageSize4K;
+                        if (alignedRegionEnd - candidate < imageSpan) {
                             continue;
                         }
                         if (candidate + imageSpan > kOneGiB) {
@@ -618,13 +656,38 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
             auto* rawSavedBootProtocol = reinterpret_cast<unsigned int*>(gRawSavedStartInfoAddr + 4);
             *rawSavedStartInfo = static_cast<unsigned int>(delta);
             *rawSavedBootProtocol = 2;  // kBootProtocolUefi - kmain.cpp와 일치시켜야 함
+
+            // [신규, SP-CC2B18C6 §3-3 두 번째 추가 정정 - 실측으로 발견한
+            // 원인] long_mode_entry가 곧바로 "mov ax,0x10; mov ds,ax;
+            // ..."로 세그먼트 레지스터를 재적재하는데, GDTR은 여전히
+            // UEFI 자신의 GDT를 가리키고 있어(우리는 32비트 준비 코드를
+            // 건너뛰었으므로 boot.S의 gdt64가 로드된 적이 없음) 그
+            // 선택자가 UEFI GDT에서 엉뚱한(혹은 무효한) 엔트리를
+            // 가리켜 #GP가 난다(QEMU -d int 실측: v=0d e=0010, 에러
+            // 코드의 GDT 인덱스 필드가 정확히 2=오프셋0x10과 일치).
+            // jmp 전에 boot.S의 gdt64(재배치 보정)를 직접 lgdt한다.
+            const unsigned long long actualGdt64Addr = gRawGdt64Addr + delta;
+            struct __attribute__((packed)) Gdtr {
+                unsigned short limit;
+                unsigned long long base;
+            } gdtr{kGdt64Limit, actualGdt64Addr};
             kRawSerialWrite("[T:jmp-imminent]");
 
+            // [주의] lgdt는 CR3 전환 *전에* 실행해야 한다 - lgdt 자신의
+            // 피연산자(&gdtr, UEFI 스택의 지금 유효한 주소)를 메모리에서
+            // 읽어와야 하는데, CR3를 먼저 바꾸면 우리 새 페이지테이블이
+            // (낮은 1GiB identity + 재배치 이미지 범위 밖은 전혀 매핑
+            // 안 함) 이 스택 주소를 못 찾을 수 있다(&gdtr 값 자체가
+            // GDTR에 실리는 건 이 시점이고, 그 값이 실제로 역참조되는
+            // 건 나중에 long_mode_entry가 세그먼트 레지스터를 재적재할
+            // 때이므로 - 그때는 이미 새 CR3가 활성화돼 있어
+            // actualGdt64Addr가 identity map으로 정상 역참조된다).
             asm volatile(
+                "lgdt (%2)\n"
                 "mov %0, %%cr3\n"
                 "jmp *%1\n"
                 :
-                : "r"(actualPml4Addr), "r"(actualEntry)
+                : "r"(actualPml4Addr), "r"(actualEntry), "r"(&gdtr)
                 : "memory");
         }
 

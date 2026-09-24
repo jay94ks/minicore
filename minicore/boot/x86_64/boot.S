@@ -127,6 +127,23 @@ boot_marker_entry_addr:
  * 마커에 추가하지 않는다. */
 boot_marker_saved_start_info_addr:
     .quad saved_start_info
+/* [신규, SP-CC2B18C6 §3-3 두 번째 추가 정정, 2026-09-24, 실측으로
+ * 발견] long_mode_entry의 첫 줄들("mov ax, 0x10; mov ds, ax; ...")은
+ * gdt64가 이미 로드돼 있다는 전제(GRUB/PVH는 enable_long_mode가
+ * lgdt [gdt64_ptr]를 미리 해 둠)로 짠 코드다 - UEFI 스테이지 로더는
+ * 이 32비트 준비 코드를 전혀 거치지 않고 CR3만 바꾼 뒤 곧장
+ * long_mode_entry로 점프하므로, GDTR이 여전히 UEFI 자신의 GDT를
+ * 가리킨 채로 "mov ds, ax"(선택자 0x10 = gdt64 안 데이터 세그먼트
+ * 인덱스)를 실행하게 되어 #GP(General Protection Fault, UEFI의
+ * GDT에서 그 인덱스가 우리가 기대한 것과 다르므로)가 발생한다(실측
+ * 확인 - QEMU -d int 로그의 "v=0d e=0010" 항목, 에러코드의 GDT
+ * 인덱스 필드가 정확히 2=오프셋0x10과 일치). UEFI 로더가 점프 직전
+ * 자체적으로 lgdt를 해야 하므로 gdt64 자신의 주소도 필요하다 -
+ * limit(=gdt64_end-gdt64-1=23, 엔트리 3개 고정이라 링크 타임
+ * 상수라서 이 마커에 안 실어도 됨)와 달리 base는 재배치 시
+ * physicalBaseDelta 보정이 필요한 물리주소라 마커에 추가한다. */
+boot_marker_gdt64_addr:
+    .quad gdt64
 
 .align 8
 gdt32:
