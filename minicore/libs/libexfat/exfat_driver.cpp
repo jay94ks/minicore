@@ -182,29 +182,6 @@ ExfatParsedEntry kParseFileEntrySet(const uint8_t* entrySet, uint32_t secondaryC
     return result;
 }
 
-// FileHandle 인코딩(exfat_driver.h 문서 주석 참고) - 하위 32비트:
-// firstCluster, 상위 31비트(32~62): fileSize(v1 절단, 최대 2GiB-1),
-// 최상위 1비트(63): noFatChain.
-constexpr uint64_t kHandleClusterMask = 0xFFFFFFFFull;
-constexpr uint32_t kHandleSizeShift = 32;
-constexpr uint64_t kHandleSizeMask = 0x7FFFFFFFull;
-constexpr uint64_t kHandleNoFatChainBit = 1ull << 63;
-
-uint64_t kEncodeHandle(uint32_t cluster, uint64_t fileSize, bool noFatChain) {
-    uint64_t value =
-        (static_cast<uint64_t>(cluster) & kHandleClusterMask) | ((fileSize & kHandleSizeMask) << kHandleSizeShift);
-    if (noFatChain) {
-        value |= kHandleNoFatChainBit;
-    }
-    return value;
-}
-
-void kDecodeHandle(uint64_t value, uint32_t* outCluster, uint64_t* outFileSize, bool* outNoFatChain) {
-    *outCluster = static_cast<uint32_t>(value & kHandleClusterMask);
-    *outFileSize = (value >> kHandleSizeShift) & kHandleSizeMask;
-    *outNoFatChain = (value & kHandleNoFatChainBit) != 0;
-}
-
 }  // namespace
 
 bool ExfatDriver::mount(fs::BlockDevice* device, bool readOnly) {
@@ -418,26 +395,56 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
             if (failed) {
                 args->result = kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
             } else {
-                const uint64_t handleValue = kEncodeHandle(currentCluster, currentFileSize, currentNoFatChain);
-                args->result =
-                    kernel::OpenResult{kernel::FileHandle{handleValue}, currentIsDir, kernel::VfsError::None};
+                // [갱신, 2026-09-25, PN-06690A0E] open-handle 테이블에서
+                // 빈 슬롯을 찾아 채우고, 그 인덱스를 FileHandle로 돌려준다
+                // (exfat_driver.h 문서 주석, vfat_driver.cpp와 동일한 관례) -
+                // fileSize를 더 이상 자르지 않는다.
+                uint32_t slotIndex = kMaxOpenHandles;
+                for (uint32_t i = 0; i < kMaxOpenHandles; ++i) {
+                    if (!openHandles_[i].inUse) {
+                        slotIndex = i;
+                        break;
+                    }
+                }
+                if (slotIndex == kMaxOpenHandles) {
+                    args->result = kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NoSpace};
+                } else {
+                    OpenHandleEntry& slot = openHandles_[slotIndex];
+                    slot.inUse = true;
+                    slot.firstCluster = currentCluster;
+                    slot.fileSize = currentFileSize;
+                    slot.noFatChain = currentNoFatChain;
+                    slot.isDir = currentIsDir;
+                    args->result = kernel::OpenResult{kernel::FileHandle{slotIndex}, currentIsDir,
+                                                       kernel::VfsError::None};
+                }
             }
             break;
         }
 
         case kernel::KernelFsOpCode::Close: {
-            // 무상태(FileHandle 자체가 firstCluster+fileSize+noFatChain을
-            // 이미 담고 있음) - Ext4Driver/Fat32Driver와 동일하게 따로
-            // 정리할 자원이 없다.
+            // [갱신, 2026-09-25, PN-06690A0E] open-handle 테이블 도입
+            // 이후 - 이 핸들이 쓰던 슬롯을 반납한다(vfat_driver.cpp와
+            // 동일한 관례). 범위 밖 인덱스나 이미 닫힌 핸들은 조용히
+            // 무시 - VFS 계층이 이미 유효한 핸들만 넘긴다는 전제.
+            auto* args = static_cast<kernel::KernelFsCloseArgs*>(argsRaw);
+            const uint32_t index = static_cast<uint32_t>(args->handle.value);
+            if (index < kMaxOpenHandles) {
+                openHandles_[index].inUse = false;
+            }
             break;
         }
 
         case kernel::KernelFsOpCode::Read: {
             auto* args = static_cast<kernel::KernelFsReadArgs*>(argsRaw);
-            uint32_t firstCluster = 0;
-            uint64_t fileSize = 0;
-            bool noFatChain = false;
-            kDecodeHandle(args->handle.value, &firstCluster, &fileSize, &noFatChain);
+            const uint32_t handleIndex = static_cast<uint32_t>(args->handle.value);
+            if (handleIndex >= kMaxOpenHandles || !openHandles_[handleIndex].inUse) {
+                args->result = kernel::ReadResult{0, kernel::VfsError::InvalidHandle};
+                break;
+            }
+            const uint32_t firstCluster = openHandles_[handleIndex].firstCluster;
+            const uint64_t fileSize = openHandles_[handleIndex].fileSize;
+            const bool noFatChain = openHandles_[handleIndex].noFatChain;
 
             if (args->offset >= fileSize) {
                 args->result = kernel::ReadResult{0, kernel::VfsError::None};  // EOF
@@ -789,10 +796,15 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
         case kernel::KernelFsOpCode::Readdir: {
             auto* args = static_cast<kernel::KernelFsReaddirArgs*>(argsRaw);
-            uint32_t dirCluster = 0;
-            uint64_t dirFileSize = 0;
-            bool dirNoFatChain = false;
-            kDecodeHandle(args->dirHandle.value, &dirCluster, &dirFileSize, &dirNoFatChain);
+            const uint32_t dirHandleIndex = static_cast<uint32_t>(args->dirHandle.value);
+            if (dirHandleIndex >= kMaxOpenHandles || !openHandles_[dirHandleIndex].inUse) {
+                args->hasMore = false;
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            const uint32_t dirCluster = openHandles_[dirHandleIndex].firstCluster;
+            const uint64_t dirFileSize = openHandles_[dirHandleIndex].fileSize;
+            const bool dirNoFatChain = openHandles_[dirHandleIndex].noFatChain;
 
             uint64_t seen = 0;
             bool found = false;
