@@ -92,6 +92,26 @@ saved_start_info:
 saved_boot_protocol:
     .long 0
 
+/* [신규, SP-CC2B18C6 §3-3] UEFI 스테이지 로더(minicore/boot/x86_64/
+ * uefi/main.cpp, PN-7FBF255A)가 별도 빌드 트리라 이 커널 ELF를
+ * 재배치해 실은 뒤 컴파일 타임엔 알 수 없는 물리주소(pml4/
+ * long_mode_entry)를 찾아야 한다 - 재배치된 바이트를 스캔해 이
+ * 매직으로 위치를 찾고, 그 직후 16바이트를 읽어 진입에 필요한
+ * 물리주소 2개를 얻는다. 나머지 4개 테이블(pdpt_low/pd_low/
+ * pdpt_high/pd_high)은 여기 저장된 pml4 값 + N*4096으로 계산한다
+ * (.boot.bss의 실제 선언 순서/정렬이 정확히 4096바이트 간격이라
+ * 성립 - 위 .boot.bss 블록 참고). 이 두 값은 링크 타임 상수라
+ * .boot.bss가 아니라 실제 바이트가 존재하는 .boot.data에 있어야
+ * UEFI가 memcpy한 결과물 안에 그대로 들어있다. */
+.align 8
+.global boot_marker_magic
+boot_marker_magic:
+    .quad 0x544F4F42434E494D    /* "MINCBOOT" ASCII, 리틀엔디안 배치 */
+boot_marker_pml4_addr:
+    .quad pml4                  /* KERNEL_LMA 기준 물리주소(링크 타임 상수) */
+boot_marker_entry_addr:
+    .quad long_mode_entry       /* 위와 동일 - SP-CC2B18C6 §3-3 정정대로 가상주소 아님 */
+
 .align 8
 gdt32:
     .quad 0                      /* null */
