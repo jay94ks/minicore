@@ -64,6 +64,89 @@ unsigned char gMemoryMapBuffer[kMemoryMapBufferCapacity];
 constexpr unsigned long long kKernelElfBufferCapacity = 8 * 1024 * 1024;
 unsigned char gKernelElfBuffer[kKernelElfBufferCapacity];
 
+// [신규, PN-7FBF255A 체크리스트 5번 - UEFI 스테이지 로더 본체]
+// SP-CC2B18C6(approved)가 확정한 재배치 메커니즘 - linker.ld의
+// KERNEL_LMA(minicore/boot/x86_64/linker.ld와 반드시 일치)와
+// boot.S의 마커(boot_marker_magic 등, §3-3)를 그대로 쓴다.
+constexpr unsigned long long kKernelLma = 0x100000ULL;
+constexpr unsigned long long kOneGiB = 1ULL << 30;
+constexpr unsigned long long kBootMarkerMagic = 0x544F4F42434E494DULL;  // "MINCBOOT"
+// ap_trampoline.S(PL-65C20380)가 고정으로 쓰는 물리 페이지 - AP
+// 트램폴린과 재배치된 커널 이미지가 겹치면 SMP 부팅이 깨지므로 후보
+// physicalBase 탐색에서 이 범위를 피한다(§3-2 4번 "안전 여유" 항목).
+constexpr unsigned long long kApTrampolinePhys = 0x8000ULL;
+constexpr unsigned long long kApTrampolineSafeLimit = 0x9000ULL;
+constexpr unsigned long long kPageSize4K = 4096ULL;
+constexpr unsigned long long kPageSize2M = 0x200000ULL;
+constexpr unsigned long long kPagePresentWritable = 0x3ULL;
+constexpr unsigned long long kPagePresentWritableHuge = 0x83ULL;
+constexpr unsigned int kMaxLoadSegments = 8;  // 실측(2026-09-22) 5개 - 여유 포함
+
+struct LoadSegment {
+    unsigned long long paddr;   // KERNEL_LMA 기준 물리주소(링크 타임)
+    unsigned long long offset;  // ELF 파일 안에서 이 세그먼트 시작 오프셋
+    unsigned long long filesz;
+    unsigned long long memsz;
+};
+LoadSegment gLoadSegments[kMaxLoadSegments];
+unsigned int gLoadSegmentCount = 0;
+
+// 마커 스캔으로 얻은 원시 값(KERNEL_LMA 기준 물리주소, physicalBaseDelta
+// 보정 전) - SP-CC2B18C6 §3-3 [정정] 참고, 가상주소 아님.
+bool gMarkerFound = false;
+unsigned long long gRawPml4 = 0;
+unsigned long long gRawEntry = 0;
+// [신규, SP-CC2B18C6 §3-3 추가 정정] higher_half_entry가 kMain 인자를
+// 읽을 때 쓰는 "offset saved_start_info" 절대주소 - 재배치 여부와
+// 무관하게 항상 이 원본 주소를 가리키므로, 이 주소에 직접 값을
+// 써야 kMain에 physicalBaseDelta/bootProtocol이 전달된다(boot.S
+// 참고 - 재배치된 사본에 쓰면 안 됨). saved_boot_protocol은 바로
+// 뒤 4바이트(중간 정렬 패딩 없음).
+unsigned long long gRawSavedStartInfoAddr = 0;
+
+// 이 로더 자신의 실행 위치가 낮은 1GiB 안에 있는지 - CR3 전환 직후에도
+// 이 코드 자신이 계속 매핑돼 있어야 하므로(§3-2 5번) 새 페이지
+// 테이블을 실제로 쓰기 전에 반드시 확인해야 하는 전제 조건이다.
+bool gSelfBelowOneGiB = false;
+
+// UEFI에는 freestanding 표준 라이브러리가 없어(이 파일에 memcpy/memset을
+// 링크할 libc가 없음) 필요한 최소 바이트 복사/제로화를 직접 구현한다 -
+// 커널 쪽 libkenv와 같은 이유, 이 파일 전용이라 별도 라이브러리로
+// 분리하지 않는다.
+void kCopyBytes(unsigned char* dest, const unsigned char* src, unsigned long long count) {
+    for (unsigned long long i = 0; i < count; ++i) {
+        dest[i] = src[i];
+    }
+}
+
+void kZeroBytes(unsigned char* dest, unsigned long long count) {
+    for (unsigned long long i = 0; i < count; ++i) {
+        dest[i] = 0;
+    }
+}
+
+// [TEMP 진단, PN-7FBF255A - ExitBootServices 이후 원인 파악용, 검증
+// 끝나면 제거] ConOut은 ExitBootServices 성공 후 무효라 못 쓰지만,
+// 이 프로젝트의 run-uefi.sh가 이미 같은 COM1(0x3F8)을 -serial file:
+// 로 캡처하고 있어 - BootServices 호출 없이 raw I/O 포트로 직접 쓰면
+// 명세 위반 없이 이 시점 이후에도 진단 로그를 남길 수 있다.
+inline unsigned char kInb(unsigned short port) {
+    unsigned char value;
+    asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+inline void kOutb(unsigned short port, unsigned char value) {
+    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+void kRawSerialWrite(const char* s) {
+    while (*s) {
+        while (!(kInb(0x3FD) & 0x20)) {
+        }
+        kOutb(0x3F8, static_cast<unsigned char>(*s));
+        ++s;
+    }
+}
+
 }  // namespace
 
 extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemTable) {
@@ -151,9 +234,10 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                             kPrint(conOut, u" regionPages=");
                             kPrintUint64(conOut, region->NumberOfPages);
                             kPrint(conOut, u" belowOneGiB=");
-                            kPrintUint64(conOut, imageAddr < (1ULL << 30) ? 1 : 0);
+                            kPrintUint64(conOut, imageAddr < kOneGiB ? 1 : 0);
                             kPrint(conOut, u"\r\n");
                         }
+                        gSelfBelowOneGiB = imageAddr < kOneGiB;
                         break;
                     }
                 }
@@ -278,6 +362,62 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                                             kPrintUint64(conOut, phdr->pMemsz);
                                             kPrint(conOut, u"\r\n");
                                         }
+                                        // [신규, PN-7FBF255A 체크리스트 5번] 세그먼트를
+                                        // 나중에 physicalBase로 복사하려면 이 시점에
+                                        // 저장해 둬야 한다 - ExitBootServices 이후엔
+                                        // gKernelElfBuffer만 남고 이 파싱 컨텍스트(ehdr/
+                                        // phdr 지역 포인터)는 스코프를 벗어난다.
+                                        if (gLoadSegmentCount < kMaxLoadSegments) {
+                                            gLoadSegments[gLoadSegmentCount].paddr = phdr->pPaddr;
+                                            gLoadSegments[gLoadSegmentCount].offset = phdr->pOffset;
+                                            gLoadSegments[gLoadSegmentCount].filesz = phdr->pFilesz;
+                                            gLoadSegments[gLoadSegmentCount].memsz = phdr->pMemsz;
+                                            ++gLoadSegmentCount;
+                                        } else if (conOut) {
+                                            kPrint(conOut,
+                                                   u"minicore: too many PT_LOAD segments - increase kMaxLoadSegments\r\n");
+                                        }
+                                    }
+
+                                    // [신규, PN-7FBF255A 체크리스트 5번] boot.S §3-3
+                                    // 마커 스캔 - 파일 바이트(gKernelElfBuffer) 안에서
+                                    // 직접 찾는다. .boot.data는 파일에 실제 바이트가
+                                    // 있는 섹션이라(.boot.bss와 달리) 이 시점에 이미
+                                    // 값이 존재하고, 마커에 저장된 두 값(pml4/
+                                    // long_mode_entry)은 링크 타임 상수라 물리 배치
+                                    // 전/후 어느 쪽에서 읽어도 바이트가 동일하다 -
+                                    // ExitBootServices 이전(conOut 사용 가능)에 미리
+                                    // 확인해 둘 수 있어 이 방식을 택했다. 파일 오프셋
+                                    // 기준 정렬이 실제 물리 배치의 8바이트 정렬과 다를
+                                    // 수 있어 1바이트 단위로 스캔한다(성능보다 정확성).
+                                    for (unsigned long long off = 0; off + 32 <= readSize; ++off) {
+                                        unsigned long long candidate = 0;
+                                        kCopyBytes(reinterpret_cast<unsigned char*>(&candidate),
+                                                   gKernelElfBuffer + off, 8);
+                                        if (candidate != kBootMarkerMagic) {
+                                            continue;
+                                        }
+                                        kCopyBytes(reinterpret_cast<unsigned char*>(&gRawPml4),
+                                                   gKernelElfBuffer + off + 8, 8);
+                                        kCopyBytes(reinterpret_cast<unsigned char*>(&gRawEntry),
+                                                   gKernelElfBuffer + off + 16, 8);
+                                        kCopyBytes(reinterpret_cast<unsigned char*>(&gRawSavedStartInfoAddr),
+                                                   gKernelElfBuffer + off + 24, 8);
+                                        gMarkerFound = true;
+                                        break;
+                                    }
+                                    if (conOut) {
+                                        kPrint(conOut, u"minicore: boot marker ");
+                                        kPrint(conOut, gMarkerFound ? u"found" : u"NOT FOUND");
+                                        if (gMarkerFound) {
+                                            kPrint(conOut, u" rawPml4=");
+                                            kPrintUint64(conOut, gRawPml4);
+                                            kPrint(conOut, u" rawEntry=");
+                                            kPrintUint64(conOut, gRawEntry);
+                                            kPrint(conOut, u" rawSavedStartInfo=");
+                                            kPrintUint64(conOut, gRawSavedStartInfoAddr);
+                                        }
+                                        kPrint(conOut, u"\r\n");
                                     }
                                 }
                             }
@@ -304,6 +444,25 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
         if (conOut) {
             kPrint(conOut, u"minicore: exiting boot services\r\n");
         }
+        // [신규, PN-7FBF255A 체크리스트 5번] 재배치할 커널 이미지가
+        // 차지할 physicalBase 후보를 찾는다 - ExitBootServices 직전에
+        // 새로 받은(가장 최신) 메모리맵을 그대로 재사용한다(별도
+        // BootServices 호출 없이 로컬 버퍼만 스캔하므로 MapKey를
+        // 무효화하지 않음 - GetMemoryMap과 ExitBootServices 사이에
+        // 끼워 넣어도 안전하다). §3-1 제약(physicalBase+imageSpan
+        // <= 1GiB) + AP 트램폴린(0x8000) 회피까지 여기서 확인한다.
+        unsigned long long imageSpan = 0;
+        for (unsigned int i = 0; i < gLoadSegmentCount; ++i) {
+            const unsigned long long segEnd = (gLoadSegments[i].paddr - kKernelLma) + gLoadSegments[i].memsz;
+            if (segEnd > imageSpan) {
+                imageSpan = segEnd;
+            }
+        }
+        const bool loaderPreconditionsOk = gMarkerFound && gLoadSegmentCount > 0 && gSelfBelowOneGiB;
+
+        unsigned long long physicalBase = 0;
+        bool physicalBaseFound = false;
+        bool physicalBaseSearchDone = false;
         bool exitedBootServices = false;
         for (unsigned int attempt = 0; attempt < 3 && !exitedBootServices; ++attempt) {
             unsigned long long finalMapSize = kMemoryMapBufferCapacity;
@@ -320,6 +479,55 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                 }
                 break;
             }
+
+            if (!physicalBaseSearchDone) {
+                physicalBaseSearchDone = true;
+                if (loaderPreconditionsOk && finalDescriptorSize > 0) {
+                    const unsigned long long entryCount = finalMapSize / finalDescriptorSize;
+                    for (unsigned long long i = 0; i < entryCount; ++i) {
+                        const auto* region =
+                            reinterpret_cast<const EFI_MEMORY_DESCRIPTOR*>(gMemoryMapBuffer + i * finalDescriptorSize);
+                        if (region->Type != kEfiConventionalMemory) {
+                            continue;
+                        }
+                        const unsigned long long candidate = region->PhysicalStart;
+                        if (region->NumberOfPages * kPageSize4K < imageSpan) {
+                            continue;
+                        }
+                        if (candidate + imageSpan > kOneGiB) {
+                            continue;
+                        }
+                        if (candidate <= kApTrampolineSafeLimit && candidate + imageSpan > kApTrampolinePhys) {
+                            continue;  // AP 트램폴린 고정 물리주소(0x8000)와 겹침
+                        }
+                        // [신규, SP-CC2B18C6 §3-3 추가 정정] saved_start_info 등
+                        // "원본(비재배치)" 스크래치 주소가 [kKernelLma,
+                        // kKernelLma+imageSpan) 범위 안에 있다 - 재배치
+                        // 목적지가 이 범위와 겹치면 세그먼트 복사가 그
+                        // 스크래치 값을 덮어쓰거나(복사가 나중이면) 반대로
+                        // 스크래치 쓰기가 이미 복사된 커널 바이트 일부를
+                        // 훼손할 수 있어(쓰기가 나중이면) 겹치지 않는
+                        // 후보만 채택한다.
+                        if (candidate < kKernelLma + imageSpan && candidate + imageSpan > kKernelLma) {
+                            continue;
+                        }
+                        physicalBase = candidate;
+                        physicalBaseFound = true;
+                        break;
+                    }
+                }
+                if (conOut) {
+                    kPrint(conOut, u"minicore: physicalBase search ");
+                    kPrint(conOut, physicalBaseFound ? u"found=" : u"NOT FOUND");
+                    if (physicalBaseFound) {
+                        kPrintUint64(conOut, physicalBase);
+                    }
+                    kPrint(conOut, u" imageSpan=");
+                    kPrintUint64(conOut, imageSpan);
+                    kPrint(conOut, u"\r\n");
+                }
+            }
+
             EFI_STATUS exitStatus = systemTable->BootServices->ExitBootServices(imageHandle, finalMapKey);
             if (exitStatus == kEfiSuccess) {
                 exitedBootServices = true;
@@ -334,19 +542,100 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
             }
         }
 
-        if (exitedBootServices) {
-            // Boot Services는 이 시점부터 전부 호출 금지(명세) - ConOut
-            // 도 더 이상 유효하다는 보장이 없어 여기서부터는 아무것도
-            // 찍지 않는다. PT_LOAD 세그먼트 물리 배치 + GDT/CR3 전환
-            // (체크리스트 5번 나머지)은 다음 증분 몫 - 지금은
-            // "ExitBootServices 호출 자체가 성공하는가"만 검증하는
-            // 단계라, 성공하면 그냥 여기서 영원히 멈춘다(더 이상 할
-            // 일이 없는데 firmware로 되돌아가면 명세 위반이라 hlt
-            // 루프로 대기 - 다음 증분이 이 자리를 세그먼트 복사 +
-            // GDT/CR3 전환 + 커널 진입점 jmp로 대체한다).
-            for (;;) {
-                asm volatile("cli; hlt");
+        // Boot Services는 이 시점부터 전부 호출 금지(명세) - ConOut도
+        // 더 이상 유효하다는 보장이 없어 exitedBootServices==true 이후
+        // 아무것도 찍지 않는다(아래 전부 무음 - 실패하면 hlt로 정직하게
+        // 멈춘다는 이 파일의 기존 관례를 그대로 따른다). [TEMP 진단]
+        // raw serial(BootServices 호출 아님, 명세 위반 없음)로 이
+        // 시점 이후 진행 상황을 표시한다 - 원인 파악 끝나면 제거.
+        kRawSerialWrite(exitedBootServices ? "[T:exit=1]" : "[T:exit=0]");
+        const bool loaderReady = exitedBootServices && loaderPreconditionsOk && physicalBaseFound;
+        kRawSerialWrite(loaderReady ? "[T:ready=1]" : "[T:ready=0]");
+        if (loaderReady) {
+            kRawSerialWrite("[T:copy-begin]");
+            // [신규, PN-7FBF255A 체크리스트 5번] 각 PT_LOAD 세그먼트를
+            // physicalBase 기준 새 위치로 복사 - UEFI x64는 자신의
+            // usable RAM 전체를 identity map한 상태로 두므로 물리주소를
+            // 그대로 포인터로 캐스팅해 쓸 수 있다는 게 이 설계의 전제
+            // (SP-CC2B18C6 §3-2). memsz > filesz인 나머지(.bss, boot.S의
+            // pml4 등 5개 페이지테이블 포함)는 0으로 채운다.
+            const unsigned long long delta = physicalBase - kKernelLma;
+            for (unsigned int i = 0; i < gLoadSegmentCount; ++i) {
+                const LoadSegment& seg = gLoadSegments[i];
+                auto* dest = reinterpret_cast<unsigned char*>(physicalBase + (seg.paddr - kKernelLma));
+                kCopyBytes(dest, gKernelElfBuffer + seg.offset, seg.filesz);
+                if (seg.memsz > seg.filesz) {
+                    kZeroBytes(dest + seg.filesz, seg.memsz - seg.filesz);
+                }
             }
+
+            // boot.S .boot.bss 선언 순서(pml4->pdpt_low->pd_low->
+            // pdpt_high->pd_high, 각 4096바이트 .align)를 그대로 이용해
+            // 나머지 4개 테이블 주소를 pml4 기준 오프셋으로 계산한다
+            // (SP-CC2B18C6 §3-2 4번).
+            const unsigned long long actualPml4Addr = gRawPml4 + delta;
+            const unsigned long long actualPdptLowAddr = actualPml4Addr + kPageSize4K;
+            const unsigned long long actualPdLowAddr = actualPml4Addr + kPageSize4K * 2;
+            const unsigned long long actualPdptHighAddr = actualPml4Addr + kPageSize4K * 3;
+            const unsigned long long actualPdHighAddr = actualPml4Addr + kPageSize4K * 4;
+            const unsigned long long actualEntry = gRawEntry + delta;
+            kRawSerialWrite("[T:copy-done]");
+
+            auto* pml4 = reinterpret_cast<unsigned long long*>(actualPml4Addr);
+            auto* pdptLow = reinterpret_cast<unsigned long long*>(actualPdptLowAddr);
+            auto* pdLow = reinterpret_cast<unsigned long long*>(actualPdLowAddr);
+            auto* pdptHigh = reinterpret_cast<unsigned long long*>(actualPdptHighAddr);
+            auto* pdHigh = reinterpret_cast<unsigned long long*>(actualPdHighAddr);
+
+            // boot.S setup_page_tables와 정확히 같은 값 - PD_LOW는
+            // physicalBase와 무관한 순수 물리 identity map(0..1GiB,
+            // §3-1), PD_HIGH만 원본 공식(V - KERNEL_VMA, 즉 i*2MiB)에
+            // +delta를 더해 물리적으로 재배치된 위치를 가리키게 한다
+            // (paging.cpp의 pdptPhys 보정과 동일한 physicalBaseDelta
+            // 패턴, SP-CC2B18C6 §2).
+            pml4[0] = actualPdptLowAddr | kPagePresentWritable;
+            pdptLow[0] = actualPdLowAddr | kPagePresentWritable;
+            for (unsigned int i = 0; i < 512; ++i) {
+                pdLow[i] = (static_cast<unsigned long long>(i) * kPageSize2M) | kPagePresentWritableHuge;
+            }
+            pml4[511] = actualPdptHighAddr | kPagePresentWritable;
+            pdptHigh[510] = actualPdHighAddr | kPagePresentWritable;
+            for (unsigned int i = 0; i < 512; ++i) {
+                pdHigh[i] = ((static_cast<unsigned long long>(i) * kPageSize2M) + delta) | kPagePresentWritableHuge;
+            }
+
+            // [신규, SP-CC2B18C6 §3-3 추가 정정] higher_half_entry는
+            // "movabs rax, offset saved_start_info"라는 링크 타임
+            // 절대주소(재배치 무관, 항상 원본 물리주소)로 kMain 인자를
+            // 읽는다 - 그래서 재배치된 사본이 아니라 이 원본 주소에
+            // 직접 physicalBaseDelta/bootProtocol=2(kBootProtocolUefi,
+            // kmain.cpp와 반드시 일치)를 써야 한다. 위 physicalBase
+            // 탐색에서 이 원본 범위와 재배치 목적지가 겹치지 않게 이미
+            // 배제했으므로 이 쓰기가 방금 복사한 커널 바이트를 훼손하지
+            // 않는다. delta는 §3-1 제약(physicalBase+imageSpan<=1GiB)
+            // 덕에 항상 32비트에 들어맞는다.
+            auto* rawSavedStartInfo = reinterpret_cast<unsigned int*>(gRawSavedStartInfoAddr);
+            auto* rawSavedBootProtocol = reinterpret_cast<unsigned int*>(gRawSavedStartInfoAddr + 4);
+            *rawSavedStartInfo = static_cast<unsigned int>(delta);
+            *rawSavedBootProtocol = 2;  // kBootProtocolUefi - kmain.cpp와 일치시켜야 함
+            kRawSerialWrite("[T:jmp-imminent]");
+
+            asm volatile(
+                "mov %0, %%cr3\n"
+                "jmp *%1\n"
+                :
+                : "r"(actualPml4Addr), "r"(actualEntry)
+                : "memory");
+        }
+
+        // 여기 도달하면(loaderReady==false, 또는 위 jmp가 실행됐어야
+        // 하는데 실행되지 않은 경우는 없음 - jmp는 절대 반환하지 않음)
+        // 정직하게 멈춘다. exitedBootServices==false면 아직 firmware가
+        // 살아있을 수도 있지만, 명세상 이 지점 이후 리턴은 금지이므로
+        // (run-uefi.sh의 기존 관례) 어느 경우든 hlt로 대기한다.
+        kRawSerialWrite("[T:hlt-fallback]");
+        for (;;) {
+            asm volatile("cli; hlt");
         }
     }
 

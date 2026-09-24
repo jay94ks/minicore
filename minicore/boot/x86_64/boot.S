@@ -111,6 +111,22 @@ boot_marker_pml4_addr:
     .quad pml4                  /* KERNEL_LMA 기준 물리주소(링크 타임 상수) */
 boot_marker_entry_addr:
     .quad long_mode_entry       /* 위와 동일 - SP-CC2B18C6 §3-3 정정대로 가상주소 아님 */
+/* [신규, SP-CC2B18C6 §3-3 추가 정정, 2026-09-24] higher_half_entry가
+ * kMain에 인자를 넘기려고 읽는 saved_start_info/saved_boot_protocol도
+ * 이 심볼과 마찬가지로 "movabs rax, offset saved_start_info"라는
+ * 링크 타임 절대주소(=이 필드 자신의 KERNEL_LMA 기준 물리주소, 실행
+ * 위치가 재배치돼도 바뀌지 않는 상수)로 읽힌다 - 즉 재배치된 실행
+ * 위치가 어디든, 항상 이 "원본(비재배치)" 주소를 읽고 쓴다. 그래서
+ * UEFI 스테이지 로더가 physicalBaseDelta/bootProtocol=2를 kMain에
+ * 전달하려면, 재배치한 사본이 아니라 바로 이 원본 물리주소에 값을
+ * 써야 한다(physicalBaseFound 탐색 시 이 주소가 포함된 원본 이미지
+ * 범위[KERNEL_LMA, KERNEL_LMA+imageSpan)와 재배치 목적지가 겹치지
+ * 않게 미리 배제해 둬야 그 스크래치 값이 재배치 복사에 덮어써지지
+ * 않는다 - main.cpp 참고). saved_boot_protocol은 이 필드 바로 뒤
+ * 4바이트(중간에 .align 없음, 위 선언 순서 그대로)라 별도 필드로
+ * 마커에 추가하지 않는다. */
+boot_marker_saved_start_info_addr:
+    .quad saved_start_info
 
 .align 8
 gdt32:

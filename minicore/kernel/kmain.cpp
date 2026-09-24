@@ -53,6 +53,13 @@ namespace {
 // 한다 - 별도 상수를 안 둔 건 boot.S가 인식 못하는 값을 보낼 방법이
 // 없어서(두 진입점만 존재) 대칭적인 분기가 오히려 불필요.
 constexpr kernel::uint32_t kBootProtocolMultiboot2 = 1;
+// [신규, PN-7FBF255A/SP-CC2B18C6] UEFI 스테이지 로더(minicore/boot/
+// x86_64/uefi/main.cpp)가 재배치 후 이 값으로 진입한다 - saved_start_info
+// 필드는 이 경로에서 부팅 정보 구조체 포인터가 아니라
+// physicalBaseDelta(actualPhysicalLoadBase - KERNEL_LMA) 그 자체다
+// (§3-1 제약상 항상 1GiB 미만이라 32비트에 들어맞음, 별도 구조체
+// 불필요 - §4).
+constexpr kernel::uint32_t kBootProtocolUefi = 2;
 
 void kLogPciDevice(const kernel::Pci::Device& dev) {
     kernel::Logger::info("  pci %x:%x.%x vendor=%x device=%x class=%x subclass=%x", dev.bus, dev.device, dev.function,
@@ -538,6 +545,23 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
                                        &bootInfo);
         memmap = gMb2MemmapBuffer;
         startInfoSize = mb2TotalSize;
+    } else if (bootProtocol == kBootProtocolUefi) {
+        // [PN-7FBF255A, SP-CC2B18C6] boot.S가 esi로 이미 kBootProtocolUefi를
+        // 넘긴 시점에서 startInfoAddr는 부팅 정보 구조체 포인터가 아니라
+        // physicalBaseDelta 그 자체다(§4, kBootProtocolUefi 선언부 주석
+        // 참고) - UEFI 스테이지 로더(main.cpp)가 직접 이 값을 saved_start_info
+        // 원본 물리주소에 써 뒀다.
+        physicalBaseDelta = static_cast<kernel::uint64_t>(startInfoAddr);
+        kernel::Logger::info("minicore: booted via UEFI direct boot (relocated, physicalBaseDelta=%llx)",
+                              physicalBaseDelta);
+        // [PN-7FBF255A 후속 과제, 아직 설계 안 됨] UEFI 스테이지 로더가
+        // 스캔한 실제 메모리맵을 커널에 넘기는 방법이 없어 memmap/
+        // memmapEntries를 기본값(nullptr/0)으로 남긴다 - 이 증분은
+        // physicalBaseDelta 배선까지만 검증한다(kernel::Logger::info가
+        // 이 경로에서도 정상 출력되는지가 1차 성공 신호). 이후
+        // PageFrameAllocator/Paging이 usable 메모리를 전혀 못 찾아
+        // 이 지점 이후 진행이 막힐 수 있음 - 실제 메모리맵 전달 방식은
+        // 별도 DC/질의 대상.
     } else {
         kernel::Logger::info("minicore: booted via Xen PVH (higher-half, long mode)");
         const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<kernel::uint64_t>(startInfoAddr));
