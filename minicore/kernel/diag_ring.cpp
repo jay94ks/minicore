@@ -69,6 +69,10 @@ const char* kEventName(uint8_t event) {
             return "BootTssLoadDone";
         case DiagRingEvent::BootBeforeSti:
             return "BootBeforeSti";
+        case DiagRingEvent::BootAfterStartApCores:
+            return "BootAfterStartApCores";
+        case DiagRingEvent::BootAfterTrampolineCopy:
+            return "BootAfterTrampolineCopy";
         default:
             return "?";
     }

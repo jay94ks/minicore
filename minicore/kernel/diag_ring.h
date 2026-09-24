@@ -44,6 +44,20 @@ enum class DiagRingEvent : uint8_t {
     BootGdtInitDone = 10,   // kmain()의 Gdt::init() 직후
     BootTssLoadDone = 11,   // kmain()의 Gdt::loadTssForThisCore() 직후
     BootBeforeSti = 12,     // kmain()의 asm("sti") 직전
+
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] 부팅 이정표 4번째 -
+    // 첫 인터럽트가 Smp::startApCores() *안에서* 발생했는지(이 이벤트가
+    // 크래시 덤프에 아예 안 찍힘) 아니면 그 *이후*(이 이벤트가 찍히고
+    // 그 rsp가 EnterIsr의 rsp와 같은 깊이거나 더 얕음)인지를 가르는
+    // 이분 분기점.
+    BootAfterStartApCores = 13,  // kmain()의 Smp::startApCores() 직후
+
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] BootAfterStartApCores
+    // 확인 결과 첫 인터럽트가 Smp::startApCores() 안에서 발생함이
+    // 확정됐다 - 그 안에서 유일하게 "시간이 걸리는" 지점인
+    // kCopyApTrampolineToRuntimeAddress()(memcpy) 전후로 한 번 더
+    // 이분한다.
+    BootAfterTrampolineCopy = 14,  // Smp::startApCores()의 kCopyApTrampolineToRuntimeAddress() 직후
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

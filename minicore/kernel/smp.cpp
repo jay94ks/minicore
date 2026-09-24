@@ -2,6 +2,7 @@
 
 #include "acpi.h"
 #include "async_task.h"
+#include "diag_ring.h"
 #include "gdt.h"
 #include "idt.h"
 #include "lapic.h"
@@ -144,6 +145,15 @@ namespace kernel {
 
 void Smp::startApCores() {
     kCopyApTrampolineToRuntimeAddress();
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] 첫 인터럽트가
+    // Smp::startApCores() 안에서 난다는 게 확정됐다(kmain.cpp의
+    // BootAfterStartApCores 이정표 참고) - 이 함수 안에서 유일하게
+    // "시간이 걸리는" 지점(memcpy)의 전후로 한 번 더 이분한다.
+    {
+        kernel::uint64_t bootRsp = 0;
+        asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
+        kDiagRingLog(DiagRingEvent::BootAfterTrampolineCopy, 0, 0, bootRsp);
+    }
 
     const uint32_t bspApicId = Lapic::id();
     const uint32_t cpuCount = Acpi::cpuCount();

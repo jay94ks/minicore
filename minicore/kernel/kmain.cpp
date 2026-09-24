@@ -932,6 +932,14 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     asm volatile("sti");
 
     kernel::Smp::startApCores();
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] 부팅 이정표 4/4 -
+    // 첫 인터럽트가 Smp::startApCores() 안에서 나는지 그 이후인지를
+    // 가르는 이분 분기점(diag_ring.h 주석 참고).
+    {
+        kernel::uint64_t bootRsp = 0;
+        asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
+        kernel::kDiagRingLog(kernel::DiagRingEvent::BootAfterStartApCores, 0, 0, bootRsp);
+    }
 
     // [순서 재배치, 2026-09-17, PN-9F8FF132, 설계자 지시] 이 두 호출
     // (Process::init()을 실제로 부르는 첫 지점)은 예전엔 Smp::
