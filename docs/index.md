@@ -102,7 +102,7 @@
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |
 | [SP-B26CDBDD](./SP-B26CDBDD.md) | CPU 가중치 스케줄링(vruntime) 및 프로세스 자원 사용량 계정 체계 — 설계 제안 | approved | 2026-09-17T12:44:21.601Z |
 | [SP-C2670F69](./SP-C2670F69.md) | AHCI(SATA 스토리지 컨트롤러) 드라이버 — 설계 제안 | approved | 2026-09-24T11:34:47.935Z |
-| [SP-CA3C3E57](./SP-CA3C3E57.md) | Channel/BridgeHandle 안전한 핸들 해석 — 세부 설계 (PN-CE6A04AB) | approved | 2026-09-17T03:17:05.229Z |
+| [SP-CA3C3E57](./SP-CA3C3E57.md) | Channel/BridgeHandle 안전한 핸들 해석 — 세부 설계 (PN-CE6A04AB) | approved | 2026-09-24T18:54:53.951Z |
 | [SP-CC1CF30E](./SP-CC1CF30E.md) | authmgr 커널 서비스(사용자 신원 관리, Key-Value DB) — 설계 제안 | approved | 2026-09-18T06:56:55.919Z |
 | [SP-CC2B18C6](./SP-CC2B18C6.md) | UEFI 직접 부팅 - 커널 물리 재배치(physicalBase) 설계 | approved | 2026-09-24T10:15:36.347Z |
 | [SP-CCACB192](./SP-CCACB192.md) | libjson — 커널/유저 공용 JSON 파서/직렬화 라이브러리 설계 제안 | approved | 2026-09-17T02:37:51.540Z |

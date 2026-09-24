@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CA3C3E57
   status: approved
-  updatedAt: 2026-09-17T03:17:05.229Z
+  updatedAt: 2026-09-24T18:54:53.951Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -125,6 +125,27 @@ void kFreeChannelId(Channel* channel) {
     gChannelTable[channel->tableIndex].ptr = nullptr;  // generation은 그대로 - 다음 재사용 때 +1
 }
 ```
+
+**[정정, 2026-09-25, minicore-3c 세션 - 실제 코드와 대조]** 위 §2 코드는
+제안 당시(2026-09-17) 시점 스케치이고, 이후 `PN-260D7D73`(완료,
+2026-09-22, commit c631b43)이 이 테이블의 포인터 소유 방식 자체를
+바꿨다 - 지금 `channel.cpp`의 실제 모습은:
+- `ChannelTableSlot::ptr`: `Channel*` → **`SharedPtr<Channel>`**.
+- `kAllocateChannelId(Channel*)` → **`kAllocateChannelId(const
+  SharedPtr<Channel>&)`**.
+- `kResolveChannelId()` 반환 타입: `Channel*` → **`SharedPtr<Channel>`**
+  (호출부가 그 SharedPtr을 들고 있는 동안 동시 Destroy가 메모리를
+  해제할 수 없다 - 이 문서 §1이 우려한 "`reinterpret_cast<Channel*>`로
+  검증 없이 역참조" 문제와는 별개로, resolve 이후 재잠금 구간의
+  use-after-free까지 추가로 막음).
+- `kFreeChannelId(Channel* channel)` + `channel->tableIndex` → **`kFreeChannelId(ChannelId id)`**로
+  시그니처 자체가 바뀌어, id에서 인덱스를 바로 역산한다 - `Channel::tableIndex`
+  필드는 더 이상 존재하지 않는다(코드베이스 전체 검색으로 확인, PCI
+  MSI-X의 동명 로컬 변수만 남음).
+
+세대 태그 슬롯 테이블이라는 **핵심 설계(§2의 결론)는 그대로 유효** -
+바뀐 건 슬롯이 쥔 소유권의 종류(raw → shared)뿐이다. 최신 정본은
+`channel.cpp`를 직접 참고(`PN-260D7D73` 본문에 배경 설명).
 
 **선형 탐색 발급 비용에 대한 메모**: `kAllocateChannelId`가 빈 슬롯을
 선형 탐색하는 건 `SP-9CB55C5B`의 `kAllocateProcessId`도 동일하게
