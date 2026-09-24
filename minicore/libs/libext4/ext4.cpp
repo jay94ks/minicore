@@ -364,19 +364,15 @@ bool Ext4Volume::mount(fs::BlockDevice* device) {
     groupCount_ = static_cast<kernel::uint32_t>(groupCount64);
 
     // 3) 그룹 디스크립터 테이블 - firstDataBlock+1 블록부터 groupCount_
-    // 개 연속 배치. [갱신, PN-59C253E9] 온디스크 stride는 INCOMPAT_64BIT
-    // 여부에 따라 32바이트(GroupDesc32) 또는 64바이트(GroupDesc64) -
-    // `GroupDesc64`의 앞 32바이트가 `GroupDesc32`와 완전히 동일한
-    // 레이아웃임이 이미 실측 확인됐으므로(ext4.h 주석 참고), 64바이트로
-    // 읽더라도 각 엔트리의 앞 32바이트만 뽑아 촘촘한 `GroupDesc32[]`로
-    // 압축해 저장한다 - `Ext4Driver::onExec()`(ext4_driver.cpp)의 기존
-    // 9개 op 핸들러는 전부 `GroupDesc32` 필드(blockBitmapLo/
-    // inodeBitmapLo/inodeTableLo/flags)만 쓰므로 이 압축 덕분에 손댈
-    // 필요가 없다. **주의**: 이 v1은 여전히 `blocksCountLo`(32비트)만
-    // 쓰므로 4G 블록을 넘는 실제 대용량 볼륨(`*Hi` 필드가 실제로
-    // 0이 아닌 경우)의 그룹 수/오프셋은 아직 정확하지 않을 수 있다 -
-    // "64바이트 포맷을 안전하게 파싱"하는 단계까지만이고 "4G 블록
-    // 초과 대용량 지원"은 여전히 후속(`kExt4Combine64()` 배선, 항목3).
+    // 개 연속 배치. 온디스크 stride는 INCOMPAT_64BIT 여부에 따라
+    // 32바이트(GroupDesc32) 또는 64바이트(GroupDesc64).
+    // [갱신, 2026-09-25, PN-36747363] 이전엔(PN-59C253E9) 64바이트로
+    // 읽은 각 엔트리의 앞 32바이트만 뽑아 촘촘한 GroupDesc32[]로
+    // 압축해 저장했다 - hi 필드를 버리는 손실 변환이라 4G 블록을
+    // 실제로 초과하는 그룹은 하나라도 있으면 안전을 위해 마운트 자체를
+    // 거부해야 했다. 이제 원본 stride 그대로(압축 없이) 보관하고,
+    // `groupInodeTableBlock()`이 필요할 때마다 hi 필드까지 합성한
+    // 진짜 64비트 주소를 계산해 주므로 그 안전장치가 필요 없어졌다.
     const kernel::uint32_t onDiskDescSize =
         (sb_.featureIncompat & kIncompat64Bit) ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
     const kernel::uint64_t gdtStartBlock = sb_.firstDataBlock + 1;
@@ -390,39 +386,29 @@ bool Ext4Volume::mount(fs::BlockDevice* device) {
         kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
         return false;
     }
-    if (onDiskDescSize == sizeof(GroupDesc32)) {
-        groupDescs_ = reinterpret_cast<GroupDesc32*>(gdtRawBuf);
-    } else {
-        // [안전장치, PN-59C253E9] 압축은 각 엔트리의 hi 필드(block/inode
-        // 비트맵·테이블의 상위 32비트 주소)를 버린다 - 이 v1은 여전히
-        // blocksCountLo 기준 32비트 주소 공간만 지원하므로, hi 필드가
-        // 실제로 0이 아닌 그룹이 하나라도 있으면(그 그룹의 실제 위치가
-        // 4G 블록을 넘는다는 뜻) 조용히 잘못된 주소로 읽는 대신 마운트
-        // 자체를 거부한다("64bit 포맷을 안전하게 파싱"까지만 지원,
-        // "4G 블록 초과 대용량 실제 지원"은 여전히 후속 - 위 주석 참고).
-        for (kernel::uint32_t g = 0; g < groupCount_; ++g) {
-            GroupDesc64 raw;
-            memcpy(&raw, gdtRawBuf + static_cast<kernel::uint64_t>(g) * onDiskDescSize, sizeof(raw));
-            if (raw.blockBitmapHi != 0 || raw.inodeBitmapHi != 0 || raw.inodeTableHi != 0) {
-                kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
-                return false;
-            }
-        }
-        auto* compacted = static_cast<GroupDesc32*>(
-            kernel::GenericSlabAllocator::alloc(groupCount_ * sizeof(GroupDesc32)));
-        if (!compacted) {
-            kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
-            return false;
-        }
-        for (kernel::uint32_t g = 0; g < groupCount_; ++g) {
-            memcpy(&compacted[g], gdtRawBuf + static_cast<kernel::uint64_t>(g) * onDiskDescSize, sizeof(GroupDesc32));
-        }
-        kernel::GenericSlabAllocator::free(gdtRawBuf, gdtBlocks * blockSize_);
-        groupDescs_ = compacted;
-    }
+    groupDescsRaw_ = gdtRawBuf;
+    groupDescStride_ = onDiskDescSize;
+    is64Bit_ = (onDiskDescSize == sizeof(GroupDesc64));
 
     device_ = device;
     return true;
+}
+
+uint64_t Ext4Volume::groupInodeTableBlock(uint32_t group) const {
+    if (group >= groupCount_ || !groupDescsRaw_) {
+        return 0;
+    }
+    // GroupDesc64의 앞 32바이트가 GroupDesc32와 완전히 동일한 레이아웃
+    // 임이 이미 실측 확인됐으므로(ext4.h 주석 참고), stride가 뭐든
+    // inodeTableLo는 항상 같은 오프셋에서 읽을 수 있다.
+    const uint8_t* descPtr = groupDescsRaw_ + static_cast<uint64_t>(group) * groupDescStride_;
+    uint32_t lo;
+    memcpy(&lo, descPtr + offsetof(GroupDesc32, inodeTableLo), sizeof(lo));
+    uint32_t hi = 0;
+    if (is64Bit_) {
+        memcpy(&hi, descPtr + offsetof(GroupDesc64, inodeTableHi), sizeof(hi));
+    }
+    return kExt4Combine64(sb_.featureIncompat, lo, hi);
 }
 
 }  // namespace ext4

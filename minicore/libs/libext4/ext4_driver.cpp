@@ -74,7 +74,12 @@ kernel::AsyncTask* kSubmitReadExtBlocks(fs::BlockDevice* device, uint32_t extBlo
 // inodeNum이 속한 그룹/inode 테이블 상의 정확한 바이트 위치를
 // 계산한다(ext4.cpp의 Ext4Volume::readInodeStruct와 동일 계산) -
 // 실패(inode 번호 범위 밖)면 false.
-bool kLocateInode(const SuperblockCore& sb, const GroupDesc32* groupDescs, uint32_t groupCount, uint32_t blockSize,
+// [갱신, 2026-09-25, PN-36747363] `groupDescs` 배열 포인터 대신
+// `Ext4Volume::groupInodeTableBlock()`을 쓴다 - INCOMPAT_64BIT
+// 볼륨에서 4G 블록을 실제로 초과하는 그룹의 inode 테이블 주소는
+// hi 필드까지 합성해야 정확한 64비트 값이 나오기 때문(예전
+// `GroupDesc32`로 압축된 뷰는 이 hi 필드를 이미 잃어버린 상태였다).
+bool kLocateInode(const SuperblockCore& sb, const Ext4Volume& volume, uint32_t groupCount, uint32_t blockSize,
                    uint32_t inodeNum, uint64_t* outBlockOffset, uint32_t* outByteOffsetInBlock,
                    uint32_t* outBlocksNeeded) {
     if (inodeNum == 0) {
@@ -86,7 +91,7 @@ bool kLocateInode(const SuperblockCore& sb, const GroupDesc32* groupDescs, uint3
     }
     const uint32_t indexInGroup = (inodeNum - 1) % sb.inodesPerGroup;
     const uint64_t byteOffsetInTable = static_cast<uint64_t>(indexInGroup) * sb.inodeSize;
-    *outBlockOffset = groupDescs[group].inodeTableLo + byteOffsetInTable / blockSize;
+    *outBlockOffset = volume.groupInodeTableBlock(group) + byteOffsetInTable / blockSize;
     *outByteOffsetInBlock = static_cast<uint32_t>(byteOffsetInTable % blockSize);
     *outBlocksNeeded = static_cast<uint32_t>(kCeilDiv(*outByteOffsetInBlock + sizeof(InodeCore), blockSize));
     return true;
@@ -261,7 +266,6 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
     const SuperblockCore& sb = volume_.superblockInfo();
     const uint32_t blockSize = volume_.blockSizeValue();
     const uint32_t groupCount = volume_.groupCountValue();
-    const GroupDesc32* groupDescs = volume_.groupDescsPtr();
     fs::BlockDevice* device = volume_.device();
 
     switch (op) {
@@ -293,7 +297,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 uint64_t inodeBlockOffset = 0;
                 uint32_t inodeByteOffset = 0;
                 uint32_t inodeBlocksNeeded = 0;
-                if (!kLocateInode(sb, groupDescs, groupCount, blockSize, currentInode, &inodeBlockOffset,
+                if (!kLocateInode(sb, volume_, groupCount, blockSize, currentInode, &inodeBlockOffset,
                                    &inodeByteOffset, &inodeBlocksNeeded)) {
                     failed = true;
                     break;
@@ -482,7 +486,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             uint64_t inodeBlockOffset = 0;
             uint32_t inodeByteOffset = 0;
             uint32_t inodeBlocksNeeded = 0;
-            if (!kLocateInode(sb, groupDescs, groupCount, blockSize, inodeNum, &inodeBlockOffset, &inodeByteOffset,
+            if (!kLocateInode(sb, volume_, groupCount, blockSize, inodeNum, &inodeBlockOffset, &inodeByteOffset,
                                &inodeBlocksNeeded)) {
                 args->result = kernel::ReadResult{0, kernel::VfsError::InvalidHandle};
                 break;
@@ -692,7 +696,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 uint64_t inodeBlockOffset = 0;
                 uint32_t inodeByteOffset = 0;
                 uint32_t inodeBlocksNeeded = 0;
-                if (!kLocateInode(sb, groupDescs, groupCount, blockSize, currentInode, &inodeBlockOffset,
+                if (!kLocateInode(sb, volume_, groupCount, blockSize, currentInode, &inodeBlockOffset,
                                    &inodeByteOffset, &inodeBlocksNeeded)) {
                     failed = true;
                     break;
@@ -866,7 +870,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             uint64_t targetBlockOffset = 0;
             uint32_t targetByteOffset = 0;
             uint32_t targetBlocksNeeded = 0;
-            if (!kLocateInode(sb, groupDescs, groupCount, blockSize, currentInode, &targetBlockOffset,
+            if (!kLocateInode(sb, volume_, groupCount, blockSize, currentInode, &targetBlockOffset,
                                &targetByteOffset, &targetBlocksNeeded)) {
                 args->error = kernel::VfsError::NotFound;
                 break;
@@ -916,7 +920,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             uint64_t inodeBlockOffset = 0;
             uint32_t inodeByteOffset = 0;
             uint32_t inodeBlocksNeeded = 0;
-            if (!kLocateInode(sb, groupDescs, groupCount, blockSize, dirInodeNum, &inodeBlockOffset,
+            if (!kLocateInode(sb, volume_, groupCount, blockSize, dirInodeNum, &inodeBlockOffset,
                                &inodeByteOffset, &inodeBlocksNeeded)) {
                 args->hasMore = false;
                 args->error = kernel::VfsError::InvalidHandle;
