@@ -131,4 +131,17 @@ WallClockTime Rtc::readWallClock() {
     return out;
 }
 
+uint32_t Rtc::toEpochSeconds(const WallClockTime& t) {
+    // Howard Hinnant의 `days_from_civil` - 1970-01-01 기준 날짜 일수.
+    int64_t y = t.year;
+    const uint32_t m = t.month;
+    y -= (m <= 2) ? 1 : 0;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const uint64_t yoe = static_cast<uint64_t>(y - era * 400);
+    const uint64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + t.day - 1;
+    const uint64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = era * 146097 + static_cast<int64_t>(doe) - 719468;
+    return static_cast<uint32_t>(days * 86400 + t.hour * 3600 + t.minute * 60 + t.second);
+}
+
 }  // namespace kernel

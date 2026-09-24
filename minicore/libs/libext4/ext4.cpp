@@ -360,6 +360,24 @@ bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t has
     return false;
 }
 
+void kExt4InitDirInode(InodeCore* inode, uint32_t blockSize, uint64_t firstBlock, uint32_t epochSeconds,
+                        uint16_t uid, uint16_t gid) {
+    memset(inode, 0, sizeof(InodeCore));
+    inode->mode = static_cast<uint16_t>(kModeDir | kDefaultDirPerm);
+    inode->uid = uid;
+    inode->sizeLo = blockSize;
+    inode->atime = epochSeconds;
+    inode->ctime = epochSeconds;
+    inode->mtime = epochSeconds;
+    inode->gid = gid;
+    inode->linksCount = 2;  // 자신의 "." + 부모 안의 새 엔트리(호출자가 부모 dirent를 추가할 때 셈)
+    inode->blocksLo = blockSize / 512;
+    inode->flags = kExtentsFl;
+    kExt4InitInlineExtentLeaf(inode->block);
+    kExt4AppendInlineExtent(inode->block, 0, firstBlock, 1);
+    inode->extraIsize = 32;  // 실제 mke2fs 이미지의 관례값과 동일(PN-FE718C87 실측 확인)
+}
+
 uint32_t kExt4ComputeSuperblockChecksum(const void* rawSuperblock1024Bytes) {
     // 실제 mkfs.ext4 이미지 2개(서로 다른 크기 8MB/64MB, 볼륨 라벨
     // 유무도 다름)의 s_checksum과 대조해 확인(PN-625E2804) - 그룹

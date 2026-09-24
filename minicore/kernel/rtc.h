@@ -31,6 +31,17 @@ public:
     // CMOS RTC를 읽어 현재 wall-clock 시각을 돌려준다 - 순수 하드웨어
     // 읽기(상태 변경 없음, 인터럽트/초기화 불필요), 언제든 호출 가능.
     static WallClockTime readWallClock();
+
+    // [신규, 2026-09-25, PN-FE718C87] 그레고리력 날짜/시각을 UNIX
+    // 에폭 초(1970-01-01 00:00:00 UTC 기준)로 변환 - Howard Hinnant의
+    // 잘 알려진 `days_from_civil` 알고리즘(공개된 표준 알고리즘, 이
+    // 프로젝트가 새로 고안한 게 아님 - libc++ `<chrono>` 등 여러
+    // 표준 구현이 쓰는 것과 동일)을 그대로 옮겼다. ext4의 inode
+    // 타임스탬프(atime/ctime/mtime, 순수 UNIX 에폭 32비트 초)를 채울
+    // 때 필요(FAT의 `kFatEncodeDate`류와 달리 ext4는 자체 인코딩
+    // 없이 에폭 초를 그대로 저장). 순수 함수(I/O 없음) - 실제 CMOS
+    // 읽기가 필요하면 `readWallClock()`을 먼저 부를 것.
+    static uint32_t toEpochSeconds(const WallClockTime& t);
 };
 
 }  // namespace kernel

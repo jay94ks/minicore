@@ -559,6 +559,31 @@ inline uint32_t kExt4DirRecLen(uint8_t nameLen) {
 bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t hasTailBytes, uint32_t inode,
                           const char* name, uint8_t nameLen, uint8_t fileType);
 
+constexpr uint16_t kModeDir = 0x4000;      // S_IFDIR
+constexpr uint16_t kModeRegular = 0x8000;  // S_IFREG - 파일 초기화 시 재사용할 수 있게 함께 정의
+constexpr uint16_t kDefaultDirPerm = 0755;
+constexpr uint16_t kDefaultFilePerm = 0644;
+
+// [신규, 2026-09-25, PN-FE718C87] 새로 할당된(비어 있는) inode를
+// "빈 디렉터리 하나, 데이터 블록 1개짜리" 상태로 채운다 - 실제
+// mke2fs+debugfs가 만든 새 디렉터리 inode와 mode/linksCount/sizeLo/
+// blocksLo/flags/times/block[60] 전부 1바이트도 안 틀리게 대조
+// 완료(PN-FE718C87 검증 기록 참고). firstBlock은 이미 할당된
+// (`kExt4AllocateBlockInGroup`) 이 디렉터리의 유일한 데이터 블록 -
+// 이 함수가 그 위에 `kExt4InitInlineExtentLeaf`+
+// `kExt4AppendInlineExtent`를 바로 적용한다(호출부가 따로 부를
+// 필요 없음). epochSeconds는 호출자가 `kernel::Rtc::readWallClock()`
+// +`Rtc::toEpochSeconds()`로 구해 넘긴다(이 라이브러리는
+// `kernel::Rtc`를 모른다 - 계층 분리 유지). uid/gid는 호출자가
+// 실제 호출 주체의 신원을 안다면 그 값을, 아직 모르면 0(root)을
+// 넘긴다. **체크섬(i_checksum_lo/hi)은 여기서 채우지 않는다** -
+// `kExt4ComputeInodeChecksum()`이 실제 온디스크 inodeSize 전체
+// 원시 바이트를 대상으로 별도로 계산해야 하므로(이 함수는 132바이트
+// `InodeCore`만 다룸), 그 계산과 osd2/checksumHi에 써넣는 건
+// 호출자 몫.
+void kExt4InitDirInode(InodeCore* inode, uint32_t blockSize, uint64_t firstBlock, uint32_t epochSeconds,
+                        uint16_t uid, uint16_t gid);
+
 // ---------------------------------------------------------------------
 // 4. Ext4Volume - 마운트 + mount()가 캐싱한 슈퍼블록/그룹 디스크립터
 // 상태의 읽기 전용 노출.
