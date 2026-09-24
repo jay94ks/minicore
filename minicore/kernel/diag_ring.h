@@ -33,6 +33,17 @@ enum class DiagRingEvent : uint8_t {
     DrainOnceTaskFound = 7,      // drainOnce()가 큐에서 task를 뽑은 직후(vector=task->subjectCode) - Cancelled 분기 이전
     DrainOnceCoroBranch = 8,     // drainOnce()가 coroHandle(코루틴) 분기를 선택한 시점 - 이 분기는 StackfulDispatchBegin이 절대 안 찍힘(정상)
     DrainOnceStackfulBranch = 9, // drainOnce()가 스택풀 분기를 선택한 시점(CR3 동기화 이전) - StackfulDispatchBegin보다 한 단계 이른 지점
+
+    // [신규, 2026-09-24, PN-61D908EB/PN-E4C6AF72] "첫 인터럽트 이전"
+    // 구간의 계측 공백을 메우기 위한 부팅 이정표 3종 - CS 오염이
+    // 이미 "첫 인터럽트 이전"임을 diag_ring으로 확정했지만, 그 구간
+    // 안에서 정확히 어디인지는 여전히 미상이었다(정적 코드 리뷰로
+    // gdt.cpp의 ltr 경로는 무죄로 확인됨, PN-61D908EB 참고). 이
+    // 이정표들의 `extra` 필드에 그 순간의 실제 rsp를 실어, 크래시
+    // 시점의 InterruptFrame 주소와 겹치거나 인접한지 직접 대조한다.
+    BootGdtInitDone = 10,   // kmain()의 Gdt::init() 직후
+    BootTssLoadDone = 11,   // kmain()의 Gdt::loadTssForThisCore() 직후
+    BootBeforeSti = 12,     // kmain()의 asm("sti") 직전
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

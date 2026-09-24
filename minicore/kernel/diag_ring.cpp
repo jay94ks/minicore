@@ -63,6 +63,12 @@ const char* kEventName(uint8_t event) {
             return "DrainCoroBranch";
         case DiagRingEvent::DrainOnceStackfulBranch:
             return "DrainStackfulBranch";
+        case DiagRingEvent::BootGdtInitDone:
+            return "BootGdtInitDone";
+        case DiagRingEvent::BootTssLoadDone:
+            return "BootTssLoadDone";
+        case DiagRingEvent::BootBeforeSti:
+            return "BootBeforeSti";
         default:
             return "?";
     }

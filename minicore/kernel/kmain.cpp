@@ -6,6 +6,7 @@
 #include "debug_session.h"
 #include "delayed_exec.h"
 #include "devmgr_service.h"
+#include "diag_ring.h"
 #include "fs_service.h"
 #include "dma_buffer.h"
 #include "gdt.h"
@@ -656,6 +657,17 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     }
 
     kernel::Gdt::init();
+    // [신규, 2026-09-24, PN-61D908EB/PN-E4C6AF72] "첫 인터럽트 이전"
+    // 구간의 계측 공백을 메우는 부팅 이정표 1/3 - 이 순간의 실제 rsp를
+    // 남겨 크래시 시점 InterruptFrame 주소(diag_ring 덤프의 rsp)와
+    // 겹치거나 인접한지 직접 대조한다. BSP 단일 호출이라 coreIndex는
+    // 항상 0(Scheduler::currentCoreIndex()는 아직 못 씀 - Scheduler::
+    // init()이 이 시점 이후에 옴).
+    {
+        kernel::uint64_t bootRsp = 0;
+        asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
+        kernel::kDiagRingLog(kernel::DiagRingEvent::BootGdtInitDone, 0, 0, bootRsp);
+    }
     kernel::Logger::info("minicore: GDT ready");
 
     kernel::Idt::init();
@@ -738,6 +750,12 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 반드시 이 둘 이후에 호출해야 한다(gdt.h 참고 - IST1을 #DF
     // 전용으로 채우고 ltr).
     kernel::Gdt::loadTssForThisCore();
+    // [신규, 2026-09-24, PN-61D908EB/PN-E4C6AF72] 부팅 이정표 2/3.
+    {
+        kernel::uint64_t bootRsp = 0;
+        asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
+        kernel::kDiagRingLog(kernel::DiagRingEvent::BootTssLoadDone, 0, 0, bootRsp);
+    }
     kernel::Logger::info("minicore: TSS/IST ready (core 0)");
 
     // PN-124C105B("syscall 명령 경로") - Lapic::id()로 코어 인덱스를
@@ -900,6 +918,16 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::Logger::info("minicore: PCI enumeration:");
     kernel::Pci::enumerate(kLogPciDevice);
 
+    // [신규, 2026-09-24, PN-61D908EB/PN-E4C6AF72] 부팅 이정표 3/3 -
+    // 이 시점부터는 Scheduler::currentCoreIndex()를 안전하게 쓸 수
+    // 있지만(Scheduler::initCoreIndexForThisCore()가 이미 지남),
+    // BSP를 가리키는 값이 사실상 항상 0이라 위 두 이정표와 동일하게
+    // 0을 그대로 쓴다.
+    {
+        kernel::uint64_t bootRsp = 0;
+        asm volatile("mov %%rsp, %0" : "=r"(bootRsp));
+        kernel::kDiagRingLog(kernel::DiagRingEvent::BootBeforeSti, 0, 0, bootRsp);
+    }
     // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
     asm volatile("sti");
 
