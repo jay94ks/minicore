@@ -26,7 +26,7 @@
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
-| [DC-F196028B](./DC-F196028B.md) | UEFI 직접 부팅 - 메모리맵/ACPI RSDP를 kMain에 전달하는 방법 | review | 2026-09-24T08:57:13.198Z |
+| [DC-F196028B](./DC-F196028B.md) | UEFI 직접 부팅 - 메모리맵/ACPI RSDP를 kMain에 전달하는 방법 | approved | 2026-09-24T09:43:10.521Z |
 | [DC-F367AD5D](./DC-F367AD5D.md) | 커널 정상 종료(clean shutdown/reboot) 경로 부재 - 설계 필요 | approved | 2026-09-23T08:45:47.135Z |
 | [DC-FB38F86F](./DC-FB38F86F.md) | Paging::mapPage() 중간 테이블 생성 동시성 보호 - 락 전략 결정 요청 | approved | 2026-09-17T05:38:21.741Z |
 | [DS-D4E5C451](./DS-D4E5C451.md) | Minicore 초기 설계 결정 확정 (빌드/부팅/커널서비스/라이선스) | approved | 2026-09-21T19:59:54.552Z |
