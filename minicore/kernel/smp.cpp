@@ -155,6 +155,7 @@ void Smp::startApCores() {
         kDiagRingLog(DiagRingEvent::BootAfterTrampolineCopy, 0, 0, bootRsp);
     }
     Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 5/5
+    Gdt::logTssDescriptorLowSnapshot(1, 0);  // GDT[0x38] 스냅샷 5/5
 
     const uint32_t bspApicId = Lapic::id();
     const uint32_t cpuCount = Acpi::cpuCount();

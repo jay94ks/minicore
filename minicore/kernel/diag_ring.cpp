@@ -75,6 +75,8 @@ const char* kEventName(uint8_t event) {
             return "BootAfterTrampolineCopy";
         case DiagRingEvent::IdtGateSnapshot:
             return "IdtGateSnapshot";
+        case DiagRingEvent::GdtEntrySnapshot:
+            return "GdtEntrySnapshot";
         default:
             return "?";
     }

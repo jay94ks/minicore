@@ -677,6 +677,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 발견(QEMU -d int 트레이스) 이후 gIdt 자체의 실행 중 손상 여부를
     // 좁히기 위한 계측.
     kernel::Idt::logGateSelectorSnapshot(0x22, 0);
+    kernel::Gdt::logTssDescriptorLowSnapshot(1, 0);  // GDT[0x38] 자체(core1 TSS) 스냅샷 1/5
     kernel::Logger::info("minicore: IDT ready");
 
     kLogBootInfo(bootInfo);
@@ -763,6 +764,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         kernel::kDiagRingLog(kernel::DiagRingEvent::BootTssLoadDone, 0, 0, bootRsp);
     }
     kernel::Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 2/5
+    kernel::Gdt::logTssDescriptorLowSnapshot(1, 0);  // GDT[0x38] 스냅샷 2/5
     kernel::Logger::info("minicore: TSS/IST ready (core 0)");
 
     // PN-124C105B("syscall 명령 경로") - Lapic::id()로 코어 인덱스를
@@ -936,6 +938,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         kernel::kDiagRingLog(kernel::DiagRingEvent::BootBeforeSti, 0, 0, bootRsp);
     }
     kernel::Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 3/5 - sti 직전, 마지막 안전 지점
+    kernel::Gdt::logTssDescriptorLowSnapshot(1, 0);  // GDT[0x38] 스냅샷 3/5
     // 반드시 sti 이후에 호출해야 한다(SMP AP 기동도 마찬가지 이유).
     asm volatile("sti");
 
@@ -949,6 +952,7 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         kernel::kDiagRingLog(kernel::DiagRingEvent::BootAfterStartApCores, 0, 0, bootRsp);
     }
     kernel::Idt::logGateSelectorSnapshot(0x22, 0);  // 스냅샷 4/5
+    kernel::Gdt::logTssDescriptorLowSnapshot(1, 0);  // GDT[0x38] 스냅샷 4/5
 
     // [순서 재배치, 2026-09-17, PN-9F8FF132, 설계자 지시] 이 두 호출
     // (Process::init()을 실제로 부르는 첫 지점)은 예전엔 Smp::

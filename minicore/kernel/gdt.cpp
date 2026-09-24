@@ -1,6 +1,7 @@
 #include "gdt.h"
 
 #include "acpi.h"
+#include "diag_ring.h"
 #include "lapic.h"
 #include "libkenv/types.h"
 
@@ -202,6 +203,15 @@ void Gdt::loadTssForThisCore() {
 
 void Gdt::setRsp0ForThisCore(uint64_t rsp0) {
     gTssPerCore[kCoreIndexForTss()].rsp0 = rsp0;
+}
+
+void Gdt::logTssDescriptorLowSnapshot(uint32_t tssCoreIndex, uint32_t loggingCoreIndex) {
+    if (tssCoreIndex >= kMaxCores) {
+        return;
+    }
+    const uint32_t qwordIndex = kFixedEntryCount + tssCoreIndex * 2;
+    kDiagRingLog(DiagRingEvent::GdtEntrySnapshot, loggingCoreIndex, tssSelectorForCore(tssCoreIndex), 0,
+                 gGdt[qwordIndex]);
 }
 
 bool Gdt::isAddressOnAnyIstStack(uint64_t addr, uint32_t coreIndex) {

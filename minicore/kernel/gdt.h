@@ -95,6 +95,14 @@ public:
     // 네임스페이스에 있어 다른 파일(deferred_destruction.cpp)이
     // 직접 볼 수 없으므로 이 accessor를 통해서만 물어볼 수 있다.
     static bool isAddressOnAnyIstStack(uint64_t addr, uint32_t coreIndex);
+
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72 진단 전용] gGdt가
+    // gdt.cpp의 익명 네임스페이스에 있어 외부에서 직접 못 보므로,
+    // coreIndex의 TSS 디스크립터 low qword(access/limit/base 하위
+    // 바이트를 담은 8바이트, tssSelectorForCore(coreIndex) 오프셋)를
+    // diag_ring에 스냅샷하는 전용 accessor - "GDT 엔트리 내용 자체가
+    // 실행 중 손상되는지"를 IDT 게이트와 별도로 직접 확인하기 위함.
+    static void logTssDescriptorLowSnapshot(uint32_t tssCoreIndex, uint32_t loggingCoreIndex);
 };
 
 }  // namespace kernel

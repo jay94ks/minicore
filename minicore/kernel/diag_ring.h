@@ -68,6 +68,14 @@ enum class DiagRingEvent : uint8_t {
     // selector 값. 같은 이벤트를 여러 지점에서 재사용하므로 어느
     // 지점인지는 diag_ring 덤프의 순서(seq)로 구분한다.
     IdtGateSnapshot = 15,
+
+    // [신규, 2026-09-25, PN-61D908EB/PN-E4C6AF72] IdtGateSnapshot과
+    // 같은 목적이나 대상이 IDT 게이트가 아니라 GDT 엔트리 자체(TSS
+    // 디스크립터 low qword) - "gIdt는 sti 직전까지 정상이었다"는
+    // 반증 이후, GDT[0x38] 자신의 실제 내용도 직접 대조하기 위함.
+    // `vector` 필드=조회한 셀렉터 값, `extra` 필드=그 GDT 엔트리의
+    // low qword 전체(8바이트).
+    GdtEntrySnapshot = 16,
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave
