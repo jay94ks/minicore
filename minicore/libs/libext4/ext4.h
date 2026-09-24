@@ -126,6 +126,26 @@ constexpr uint32_t kIncompat64Bit = 0x80;
 // 파서 코드 변경 불필요, 검사만 통과시키면 됨).
 constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents | kIncompatFlexBg;
 
+// [추가, PN-59C253E9] `*Lo`/`*Hi` 필드 쌍을 실제 64비트 값으로 합성 -
+// 리눅스 커널 `ext4_blocks_count()`/`ext4_r_blocks_count()`/
+// `ext4_free_blocks_count()`(fs/ext4/ext4.h `ext4_read_incompat_64bit_val`
+// 매크로) 관례 그대로: `INCOMPAT_64BIT`가 꺼져 있으면 `hi`는 아예
+// 온디스크에 유효한 값이 아니므로 무시하고 `lo`만 쓴다 - `hi`가
+// 우연히 0이 아닌 쓰레기여도(v1이 아직 hi를 쓰지 않는 볼륨 생성
+// 경로가 없어 실제로는 항상 0) 안전하게 무시한다.
+constexpr uint64_t kExt4Combine64(uint32_t featureIncompat, uint32_t lo, uint32_t hi) {
+    return (featureIncompat & kIncompat64Bit) ? ((static_cast<uint64_t>(hi) << 32) | lo)
+                                               : static_cast<uint64_t>(lo);
+}
+// 컴파일 타임 자체 검증 - 리눅스 커널 매크로(fs/ext4/ext4.h
+// `ext4_read_incompat_64bit_val`: `(64bit_set ? hi<<32 : 0) | lo`)와
+// 대조한 대표 케이스들.
+static_assert(kExt4Combine64(0, 0xFFFFFFFFu, 0xFFFFFFFFu) == 0xFFFFFFFFu,
+              "64BIT 꺼져 있으면 hi는 무시하고 lo만 써야 함");
+static_assert(kExt4Combine64(kIncompat64Bit, 0x00000001u, 0x00000001u) == 0x100000001ULL,
+              "64BIT 켜져 있으면 hi<<32|lo로 합성해야 함");
+static_assert(kExt4Combine64(kIncompat64Bit, 0, 0) == 0, "둘 다 0이면 0");
+
 // RO_COMPAT_METADATA_CSUM(0x400) - PN-1750A32F(SP-7A9CED3E §2.2 항목3)가
 // 다루는 대상. v1 마운트 허용 여부와는 무관(read-only compat 비트라
 // 몰라도 마운트 자체는 안전) - kExt4ComputeGroupDescChecksum()을 실제로
