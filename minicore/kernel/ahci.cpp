@@ -299,8 +299,26 @@ public:
                 kernel::AsyncTask* waitTask = nullptr;
                 {
                     kernel::PreemptionGuard guard;
+                    // [수정, 2026-09-24, PN-4859FDE9] 위 kSubscribeAhciInterrupt()가
+                    // 이미 겪은 것과 정확히 같은 위험 - preemptive=true는
+                    // IF가 이미 켜져 있으면 self-IPI(kAsyncDrainVector)가
+                    // 이 submit() 호출이 반환하기도 전에 곧바로 전달돼,
+                    // 지금 아직 실행 중인 이 코루틴(AhciCommandHandler::
+                    // onExec) 자신의 스택 프레임 위에서 drainOnce()가
+                    // 재귀적으로 실행된다 - 이 대기는 곧바로 co_await로
+                    // 블로킹할 뿐이라 즉시 실행될 필요가 없으므로(위
+                    // kSubscribeAhciInterrupt와 동일한 근거), preemptive=
+                    // false로 이 재진입 자체를 피한다. swap-in 완료
+                    // 체인(SwapInReadHandler::onExec → Scheduler::enqueue)
+                    // 이 이 재귀 재진입 도중 gNormalQueues[coreIndex]
+                    // 스핀락을 새게 만들어 다음 스케줄러 틱이 그 락을
+                    // 영원히 못 잡는 데드락을 일으키는 것을 실측으로
+                    // 확인/수정(PN-4859FDE9 - 데드락 재현 60-75초 창을
+                    // 175초+까지 확장해도 재현 안 됨 + gHeartbeat 카운터가
+                    // 계속 정상 증가함을 gdb로 직접 확인, 표준 4시나리오
+                    // PVH/GRUB SMP1/SMP4/SMP4+AHCI 전부 무회귀).
                     waitTask =
-                        kernel::AsyncTask::submit(waitSubjectCode, 0, &waitArgs, /*autoFree=*/false, /*preemptive=*/true);
+                        kernel::AsyncTask::submit(waitSubjectCode, 0, &waitArgs, /*autoFree=*/false, /*preemptive=*/false);
                     if (waitTask) {
                         waitTask->submitterTask =
                             kernel::TaskOwnerRef::capture(kernel::WeakPtr<kernel::Task>(kCurrentFsTask()));

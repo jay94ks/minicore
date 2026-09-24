@@ -629,47 +629,22 @@ void kReclaimScanCallback(void*) {
         kernel::SpinlockGuard guard(gLruLock);
         kReclaimScanPromotePass();
         kReclaimScanDemotePass();
-        // [보류, 2026-09-23, PN-4859FDE9 §7.2 5단계 - 실측으로 확정된
-        // 행 버그 발견, 활성화 보류] 아래 kReclaimScanReclaimPass()/
-        // SwapReclaimWriteHandler 자체(실제 스왑아웃 쓰기)는 실측으로
-        // 완전히 검증됐다 - mkswap 실제 이미지+실제 init/pubreg/authmgr
-        // 프로세스로 부팅해 5분+ 동안 58개 프레임을 실제로 스왑아웃
-        // 시켰고 전부 성공(ok=1, 손상/크래시 없음). 문제는 그 반대편,
-        // §4.2 스왑인(Paging::handlePageFault의 PAGE_SWAP_MARKER 분기 +
-        // SwapInReadHandler + Scheduler::parkFromISR)에서 발견됐다 -
-        // 스왑아웃된 프로세스가 그 페이지를 다시 건드려 실제로 폴트가
-        // 나는 순간(실측 재현: va=0x400000, slot=54, 매 실행 100%
-        // 재현) `Paging::handlePageFault`가 `kTrySubmitSwapIn()`까지
-        // 정확히 실행하고(로그로 확인) `idt.cpp`가 `Scheduler::
-        // parkFromISR(thread, frame)`를 부르는 지점까지도 도달하는데
-        // (그 직전 로그도 정상 출력됨 - frame 내용 자체는 정상,
-        // rip=0x400072/cs=0x23로 멀쩡한 ring3 코드 폴트), 그 뒤로는
-        // 커널 전체가 조용히 완전히 멎는다(패닉 로그 없음, 이후 어떤
-        // reclaim tick도, 어떤 로그도 다시 안 찍힘 - 재부팅도 안 되는
-        // -no-reboot 상태의 순수 정지, SMP1). #DB의
-        // kHandleUserBreakpointHit()이 정확히 같은 parkFromISR 패턴을
-        // 이미 프로덕션에서 검증받았음에도 #PF에서는 재현되는 걸 보아
-        // 두 IST 벡터(#DB=IST4/#PF=IST5) 사이에 아직 못 찾은 미묘한
-        // 차이가 있는 것으로 보인다. gdb로 실제 정지 지점을 잡으려는
-        // 시도는 이 정지 자체가 gdb 부착 시 타이밍이 크게 달라져(이
-        // 프로젝트에 이미 여러 번 기록된 heisenbug 패턴, PN-3DDF2797/
-        // PN-E4C6AF72와 동일 계열) 재현 자체가 극도로 느려지거나
-        // 재현되지 않아 결론을 못 냈다 - 다음 세션은 게스트 내부
-        // 저오버헤드 진단(진단 링 버퍼류, 이 프로젝트가 PN-E4C6AF72에서
-        // 이미 채택한 방식)으로 접근할 것을 권장한다.
-        //
-        // **읽기(스왑인) 없이 쓰기(스왑아웃)만 활성화하면 절대 안
-        // 된다**(이 계획 본문이 처음부터 명시한 제약 그대로 - 회수된
-        // 페이지를 다시 건드리는 순간 이 행 버그로 시스템 전체가
-        // 멎는다) - 그래서 위 §7.2 2/3/4단계(접근 감지+승격/강등)만
-        // 남기고 5단계(실제 회수) 자체를 호출하지 않는다. 관련 코드
-        // (kReclaimScanReclaimPass/SwapReclaimWriteHandler/
-        // Paging::markReclaimInProgress 등 4개 신규 메서드/
-        // kTrySubmitSwapIn/SwapInReadHandler/PAGE_RECLAIM_INPROGRESS/
-        // Paging::PageFaultOutcome::ParkForSwapIn)는 전부 컴파일된 채로
-        // 남겨 뒀다 - 다음 세션이 parkFromISR 버그만 고치면 이 줄
-        // 하나(kReclaimScanReclaimPass() 호출)만 다시 살리면 된다.
-        // kReclaimScanReclaimPass();
+        // [재활성화, 2026-09-24, PN-4859FDE9] §7.2 5단계(실제 회수)를
+        // 다시 켠다 - 이전에 발견된 swap-in 행 버그(스왑아웃된 페이지를
+        // 재접근하는 순간 시스템 전체가 조용히 멎던 것)의 근본 원인이
+        // `ahci.cpp`의 `AhciCommandHandler::onExec()`가 `WaitInterrupt`를
+        // `preemptive=true`로 제출하던 것으로 확인/수정됐다(그 함수
+        // 주석 참고) - IF가 이미 켜진 채 그 self-IPI가 즉시 전달돼
+        // 실행 중이던 코루틴 자신의 스택 프레임 위에서 drainOnce()가
+        // 재귀 실행되고, 그 안에서 이어지는 swap-in 완료 체인
+        // (SwapInReadHandler::onExec → Scheduler::enqueue)이
+        // gNormalQueues[coreIndex] 스핀락을 새게 만들어 다음 스케줄러
+        // 틱이 그 락을 영원히 못 잡는 데드락으로 이어졌다.
+        // `preemptive=false`로 바꿔 이 재진입 자체를 없애 해소 -
+        // 실측 검증(60-75초에 100% 재현되던 데드락이 175초+까지도
+        // 재현 안 됨, gHeartbeat 카운터 정상 증가 gdb로 확인, 표준
+        // 4시나리오 무회귀)으로 확정.
+        kReclaimScanReclaimPass();
     }
     kernel::DelayedExecutionQueue::schedule(kReclaimScanIntervalTicks, &kReclaimScanCallback, nullptr);
 }
