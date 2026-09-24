@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-24T10:43:03.081Z
+  updatedAt: 2026-09-24T15:33:07.307Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -1932,7 +1932,7 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   (2026-09-19).
 - **현재 상태**: 완전 해소(문서 정정).
 
-- **[점검 완료, 2026-09-20] `SP-CC1CF30E`(authmgr) - 코드 자체가 아직
+- **[점검 완료, 2026-09-20 - 아래 2026-09-24 갱신 참고] `SP-CC1CF30E`(authmgr) - 코드 자체가 아직
   없어 대조 불성립, 갭 없음**: `minicore/authmgr`/`minicore/libs/
   libkvdb`/`minicore/libs/libkcrypto` 전부 디렉터리 자체가 없음(glob
   확인). `PN-24A2B6F5`(계획)가 이 문서의 §1-B~§1-D 전 항목(sudo/su,
@@ -1945,6 +1945,21 @@ approved로 넘어가면 유력 후보 - 아직 review 상태라 대상 아님).
   아우르는 대규모 작업(다수의 "착수 세션이 구체화" 표시가 있는
   하위 결정 포함)이라 이 감사 틱의 범위 밖 - 실제 착수는 별도
   세션에서 신중하게.
+  **[갱신, 2026-09-24, minicore-3c 세션] 위 "코드 자체가 아직 없음"은
+  더 이상 사실이 아니다** - `minicore/authmgr/main.cpp`(스캐폴딩+
+  `kHandleRequest`+`LookupByUid`/`CreateUser`)와 `minicore/libs/
+  libkvdb`(v1 구현 완료, commit 3f2ba6b)가 실제로 존재한다(glob
+  재확인) - `libkcrypto`/`libkproto`만 여전히 없음(v1이 메모리 전용
+  이라 암호화 대상 자체가 없다는 §2/§9의 명시적 범위 축소와 일치,
+  갭 아님). `PN-24A2B6F5`가 이 진행 상황을 정확히 추적 중이며(가장
+  최근 갱신 2026-09-23) - pubreg→authmgr Ping조차 응답이 안 오는
+  미해결 E2E 미스터리가 남아 있어 `scheduled` 상태 유지가 정확하다.
+  **이 문서(RM-F2DAFF66) 관점의 결론은 그대로 "갭 없음"** - 구현이
+  설계에서 이탈한 지점을 찾지 못했고(오히려 §1-D의 read-through
+  캐시/discriminator 단일 채널 방침을 그대로 따름), 남은 문제는
+  "설계 대비 구현 누락"이 아니라 순수 실측 버그(IPC 무응답 원인
+  미상)이므로 이 감사 방법론의 대상이 아니다 - `PN-24A2B6F5`가
+  계속 추적.
 
 ### 1-P. `SP-ECC59BAE`(Running Task 강제 이관) - `onForcedMigration()`이 `onTick()`과 달리 freeze/디버그 정지 검사 없음 (코드 갭, `PN-6CE4DD35`로 등록, 시급성 낮음)
 
