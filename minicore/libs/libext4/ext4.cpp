@@ -311,6 +311,13 @@ uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, ui
     return crc;
 }
 
+uint32_t kExt4ComputeDirBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                       const void* dirBlockData, uint32_t blockSize) {
+    uint32_t seed = kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), &inodeNum, sizeof(inodeNum));
+    seed = kCrc32c(seed, &generation, sizeof(generation));
+    return kCrc32c(seed, dirBlockData, blockSize - static_cast<uint32_t>(sizeof(DirEntryTail)));
+}
+
 uint32_t kExt4ComputeSuperblockChecksum(const void* rawSuperblock1024Bytes) {
     // 실제 mkfs.ext4 이미지 2개(서로 다른 크기 8MB/64MB, 볼륨 라벨
     // 유무도 다름)의 s_checksum과 대조해 확인(PN-625E2804) - 그룹

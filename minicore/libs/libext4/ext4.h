@@ -494,6 +494,39 @@ constexpr uint8_t kFtDir = 2;
 
 constexpr uint32_t kMaxNameLen = 255;   // ext4 NAME_LEN
 
+// [신규, 2026-09-25, PN-FE718C87] RO_COMPAT_METADATA_CSUM 디렉터리
+// 리프 블록의 "가짜" 끝 엔트리 - 이 프로젝트가 새로 고안한 게 아니라
+// 리눅스 커널 그대로(`struct ext4_dir_entry_tail`, fs/ext4/ext4.h,
+// WSL2-Linux-Kernel 로컬 소스로 확인 - 자세한 경로는
+// reference_local_linux_kernel_source 메모리 참고). `DirEntry2Header`
+// 와 완전히 같은 8바이트 레이아웃(inode=0/recLen=12/nameLen=0/
+// fileType=0xDE로 채워 "평범한 빈 엔트리"처럼 보이게 위장)에 4바이트
+// 체크섬이 이어붙는다 - 그 4바이트는 이름이 없는(nameLen=0) 엔트리의
+// "이름" 자리를 그대로 재사용하는 것. 마지막 실제 엔트리의 recLen이
+// 이 12바이트를 정확히 남기도록 이미 계산돼 있어야 한다(호출자 책임).
+constexpr uint8_t kFtDirCsum = 0xDE;
+
+#pragma pack(push, 1)
+struct DirEntryTail {
+    DirEntry2Header header;  // inode=0, recLen=12, nameLen=0, fileType=kFtDirCsum
+    uint32_t checksum;
+};
+static_assert(sizeof(DirEntryTail) == 12, "DirEntryTail은 12바이트여야 함");
+#pragma pack(pop)
+
+// 디렉터리 리프 블록의 체크섬(det_checksum) 계산 - 리눅스 커널
+// fs/ext4/namei.c `ext4_dirblock_csum()`과 동일한 알고리즘(로컬 커널
+// 소스로 확인 + 실제 mke2fs 이미지 루트 디렉터리 블록의 진짜
+// det_checksum 값과 1바이트도 안 틀리게 대조 완료, PN-FE718C87) -
+// per-inode seed(`kExt4ComputeInodeChecksum()`과 동일한 유도: uuid
+// seed에 inode 번호+generation을 순서대로 이어붙임)로 블록 바이트 중
+// [0, blockSize - sizeof(DirEntryTail))까지만 해시한다 - tail 엔트리
+// 자신(12바이트, 체크섬 필드 포함)은 통째로 해시 범위 밖(체크섬
+// 필드만 0으로 간주하는 다른 체크섬류와 다른 관례 - 커널 소스가
+// 그렇게 계산함).
+uint32_t kExt4ComputeDirBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                       const void* dirBlockData, uint32_t blockSize);
+
 // ---------------------------------------------------------------------
 // 4. Ext4Volume - 마운트 + mount()가 캐싱한 슈퍼블록/그룹 디스크립터
 // 상태의 읽기 전용 노출.
