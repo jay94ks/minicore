@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CC2B18C6
   status: approved
-  updatedAt: 2026-09-24T08:23:05.063Z
+  updatedAt: 2026-09-24T08:43:59.302Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -381,6 +381,51 @@ QEMU `-d int` 예외 로그에는 트리플 폴트(v=08) 기록이 없어 크래
 보다는 어딘가에서(아마도 유효한 상태로) 조용히 멈췄을 가능성이
 높다 - gdb 라이브 연결로 정확한 정지 지점(RIP/CR3)을 확인하는 게
 다음 단계다(`PN-7FBF255A` 참고, 착수 세션 몫).
+
+#### [해소, 2026-09-24, 같은 날 gdb 라이브 조사로 규명+수정 완료] 위 saved_start_info 수정 이후에도 kMain 미도달했던 진짜 원인 - long_mode_entry가 gdt64 적재를 전제한다
+
+gdb를 QEMU gdbstub(`-s`)에 라이브로 attach해 CR3/RIP을 직접 확인한
+결과(commit `2e867f2`가 아니라 그 다음 조사), `mov cr3`+`jmp
+actualEntry` 자체는 정확한 값으로 성공했지만(레지스터 값이
+계산과 정확히 일치) `long_mode_entry`의 첫 명령들에서 곧바로
+멈췄다는 게 드러났다 - 원인 둘, 둘 다 실측으로 확정하고 수정:
+
+1. **GDT 미적재 #GP**: `long_mode_entry`는 `mov ax,0x10; mov
+   ds,ax; ...`로 세그먼트 레지스터를 재적재하는데, 이 코드는
+   `enable_long_mode`(32비트, `lgdt [gdt64_ptr]`을 미리 해 둠)를
+   거친 뒤 실행된다는 전제가 있다 - UEFI 로더는 그 32비트 준비
+   코드를 아예 건너뛰므로 GDTR이 여전히 UEFI 자신의 GDT를 가리켜
+   `mov ds,ax`가 #GP를 냈다(`-d int` 로그: `v=0d e=0010` - 에러
+   코드의 GDT 인덱스 필드가 정확히 2=오프셋0x10과 일치, 결정적
+   증거). **수정**: 마커에 `gdt64`(테이블 자체, limit=23은 엔트리
+   3개 고정이라 링크 타임 상수라서 마커 불필요)의 원본 주소를
+   5번째 필드로 추가, UEFI 로더가 CR3 전환 **전에**(스택 지역변수
+   `&gdtr`이 그 시점엔 UEFI 자신의 페이지테이블로 유효해야 하므로 -
+   GDTR 값 자체가 나중에 세그먼트 재적재 시점에야 역참조되므로
+   로드 자체는 아무 때나 해도 됨) `lgdt`로 재배치 보정된 gdt64를
+   직접 적재한다.
+2. **PD_HIGH 2MiB 정렬 위반 트리플 폴트**: 1번을 고친 뒤에도 여전히
+   멈췄다 - 이번엔 gdb로 RIP=`0xffffffff8010c000`(정확히
+   `higher_half_entry`가 속한 PT_LOAD 세그먼트의 시작 가상주소와
+   일치)에서 명령어 페치 자체가 실패(`v=08` 더블폴트 → 트리플폴트)
+   하는 걸 확인했다. 원인: `pdHigh[i] = i*2MiB + delta` 공식에서
+   huge page(PS=1) PDE는 물리 베이스의 하위 21비트가 반드시 0이어야
+   하는데, `delta`가 2MiB 정렬이 아니면(임의로 고른 `physicalBase`가
+   일반적으로 2MiB 경계에 있지 않으므로) 이 제약을 어겨 그 PDE
+   전체가 무효해진다. **수정**: physicalBase 탐색에 "physicalBase
+   ≡ KERNEL_LMA(mod 2MiB)" 정렬 조건을 추가(후보를 이 조건에 맞게
+   올림 정렬한 뒤 크기/1GiB/AP트램폴린/원본범위 등 기존 제약을 그
+   정렬된 값 기준으로 재확인).
+
+**두 수정을 함께 반영한 뒤 실제로 UEFI 경로가 `kMain`에 도달해
+`Logger::info`가 정상 출력되는 것을 최초로 확인했다**(commit
+`0865640`) - `"booted via UEFI direct boot (relocated,
+physicalBaseDelta=1800000)"`부터 GDT/IDT ready, direct physical
+map ready, page frame allocator ready, slab allocator ready까지
+출력 후 멈춘다(memmap 미전달로 `free_pages=0` - §4/§5가 이미
+"후속 과제"로 남겨 둔 부분이지 새 문제가 아니다). 이로써 이 설계
+문서(§1~§3-3)가 다루는 범위의 핵심 메커니즘(마커 기반 재배치 +
+CR3 전환 + 커널 진입)은 전부 실측 검증됐다.
 
 ## 3-old. [대체됨, 2026-09-24, QU-A2CABBC6 답변 반영 - 위 3-0~3-2가 정본]
 
