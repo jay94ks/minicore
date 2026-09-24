@@ -82,6 +82,13 @@ private:
     // 않고 마지막으로 할당한 자리 다음부터 이어서 찾는다(libswapfs의
     // allocateSlot과 동일한 방식, §3.4 문서 주석 그대로).
     uint32_t nextClusterScanHint_ = 2;
+    // [신규, 2026-09-25, PN-9C836E41] FSInfo의 freeCount 캐시 - mount()
+    // 가 온디스크 FSInfo 섹터에서 읽어 초기화하고(유효하지 않거나
+    // "모름"이면 kFsInfoUnknown 그대로 유지), 이후 클러스터를 할당/
+    // 해제할 때마다 갱신해 디스크에도 다시 써 준다(정확도가 필수는
+    // 아닌 순수 캐시/힌트 필드 - PN-9D6FE4B6가 이미 겪은 대로, 이걸
+    // 안 갱신하면 fsck.vfat가 매번 "값 불일치"로 auto-correct하게 됨).
+    uint32_t freeClusterCount_ = vfat::kFsInfoUnknown;
     OpenHandleEntry openHandles_[kMaxOpenHandles]{};
 };
 

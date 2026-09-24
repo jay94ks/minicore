@@ -277,6 +277,34 @@ struct ResolvedEntry {
 };
 
 // ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-9C836E41, SP-A658A124 §2/§3.1] FSInfo 섹터
+// (BPB의 fsInfoSector가 가리키는 섹터, FAT32 전용) - 빈 클러스터 수/
+// 다음 빈 클러스터 힌트를 캐싱해 두는 스펙 표준 구조체("FAT: General
+// Overview of On-Disk Format" 문서, Linux 커널
+// include/uapi/linux/msdos_fs.h의 struct fat_boot_fsinfo와 동일
+// 레이아웃) - 이 프로젝트가 새로 고안한 값이 아니다. freeCount/
+// nextFree 둘 다 0xFFFFFFFF면 "값을 모름"이라는 스펙 자체의 관례
+// (그 경우 §3.4 선형 스캔으로 되돌아가야 함) - kFsInfoUnknown 참고.
+// ---------------------------------------------------------------------
+#pragma pack(push, 1)
+struct FsInfo {
+    uint32_t leadSig;        // 오프셋 0 - 0x41615252("RRaA")
+    uint8_t reserved1[480];  // 오프셋 4~483
+    uint32_t strucSig;       // 오프셋 484 - 0x61417272("rrAa")
+    uint32_t freeCount;      // 오프셋 488 - 빈 클러스터 수(0xFFFFFFFF=모름)
+    uint32_t nextFree;       // 오프셋 492 - 다음 빈 클러스터 힌트(0xFFFFFFFF=모름)
+    uint8_t reserved2[12];   // 오프셋 496~507
+    uint32_t trailSig;       // 오프셋 508 - 0xAA550000
+};
+static_assert(sizeof(FsInfo) == 512, "FsInfo는 정확히 512바이트(섹터 하나)여야 함");
+#pragma pack(pop)
+
+constexpr uint32_t kFsInfoLeadSig = 0x41615252u;
+constexpr uint32_t kFsInfoStrucSig = 0x61417272u;
+constexpr uint32_t kFsInfoTrailSig = 0xAA550000u;
+constexpr uint32_t kFsInfoUnknown = 0xFFFFFFFFu;
+
+// ---------------------------------------------------------------------
 // 4. Fat32Volume - 읽기 전용 마운트 + 온디스크 레이아웃 상수 접근자.
 //
 // [범위 변경, 2026-09-22, PN-EBAEA67B, PN-9AE5BFE4(Ext4Driver)가 먼저
@@ -320,6 +348,11 @@ public:
     // clusterCount_+1까지 유효)과 다중 FAT 사본 동기화에 필요.
     uint32_t clusterCountValue() const { return clusterCount_; }
     uint32_t numFatsValue() const { return numFats_; }
+    // [신규, 2026-09-25, PN-9C836E41] BPB의 FSInfo 섹터 번호(볼륨
+    // 시작 기준 절대 섹터 - fatStartSector_/dataStartSector_와 같은
+    // 단위) - 0이면 이 볼륨엔 FSInfo가 없다는 뜻(스펙상 유효하지
+    // 않은 값, 호출자가 방어적으로 건너뛸 것).
+    uint32_t fsInfoSectorValue() const { return ext32_.fsInfoSector; }
     uint32_t fatSize32Value() const { return fatSize32_; }
 
 private:

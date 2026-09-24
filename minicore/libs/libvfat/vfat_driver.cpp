@@ -669,6 +669,37 @@ bool kSetFat32CleanShutdownBit(fs::BlockDevice* device, uint32_t bytesPerSector,
     return true;
 }
 
+// [신규, 2026-09-25, PN-9C836E41] 이미 읽어 온 FSInfo 섹터 원본
+// 바이트(sectorBuf, 최소 sizeof(FsInfo)=512바이트)를 제자리에서
+// 갱신하는 순수 함수(I/O 없음) - kFatEntryLocation류와 같은 이유로
+// 코루틴 여러 곳(Write/Mkdir의 클러스터 할당, Unlink/Rmdir의 클러스터
+// 해제)이 공유해야 하는데 그 호출부들은 서로 합성 불가능한 별개
+// 코루틴이라(파일 상단 문서 주석) I/O 오케스트레이션 자체는 각
+// 호출부에 그대로 중복하고, 순수 계산만 이렇게 뽑아 공유한다.
+// freeCountDelta는 음수(할당)/양수(해제) 모두 가능 - freeCount가
+// 이미 "모름"이면 건드리지 않는다(모르는 값에 델타를 더해봐야 여전히
+// 모르는 값이므로, 섣불리 임의의 숫자로 확정하지 않는 편이 안전).
+// newNextFreeOrUnknown이 kFsInfoUnknown이 아니면 nextFree를 그 값으로
+// 덮어쓴다. 시그니처 3개가 전부 일치하는 유효한 FSInfo가 아니면 아무
+// 것도 바꾸지 않고 false를 돌려줘 호출부가 디스크에 다시 쓰는 걸
+// 건너뛰게 한다(손상된/없는 FSInfo를 섣불리 "복구"하지 않음).
+bool kUpdateFsInfoBuffer(uint8_t* sectorBuf, kernel::int64_t freeCountDelta, uint32_t newNextFreeOrUnknown) {
+    FsInfo info;
+    memcpy(&info, sectorBuf, sizeof(info));
+    if (info.leadSig != kFsInfoLeadSig || info.strucSig != kFsInfoStrucSig || info.trailSig != kFsInfoTrailSig) {
+        return false;
+    }
+    if (info.freeCount != kFsInfoUnknown && freeCountDelta != 0) {
+        const kernel::int64_t updated = static_cast<kernel::int64_t>(info.freeCount) + freeCountDelta;
+        info.freeCount = (updated < 0) ? kFsInfoUnknown : static_cast<uint32_t>(updated);
+    }
+    if (newNextFreeOrUnknown != kFsInfoUnknown) {
+        info.nextFree = newNextFreeOrUnknown;
+    }
+    memcpy(sectorBuf, &info, sizeof(info));
+    return true;
+}
+
 }  // namespace
 
 bool Fat32Driver::mount(fs::BlockDevice* device, bool readOnly) {
@@ -677,6 +708,35 @@ bool Fat32Driver::mount(fs::BlockDevice* device, bool readOnly) {
     }
     mounted_ = true;
     readOnly_ = readOnly;
+
+    // [신규, 2026-09-25, PN-9C836E41] FSInfo 섹터를 읽어 nextClusterScanHint_/
+    // freeClusterCount_를 시드한다 - mount()는 Fat32Volume::mount()와
+    // 마찬가지로 진짜 kernel::Task 컨텍스트의 1회 준비 단계라 동기
+    // read가 안전하다(위 kSetFat32CleanShutdownBit과 동일한 근거).
+    // 실패/시그니처 불일치/값이 "모름"이면 그냥 기존 기본값
+    // (nextClusterScanHint_=2, freeClusterCount_=kFsInfoUnknown)을
+    // 유지한다 - FSInfo는 스펙상 순수 캐시라 없어도 안전.
+    const uint32_t fsInfoSector = volume_.fsInfoSectorValue();
+    const uint32_t bytesPerSector = volume_.bytesPerSectorValue();
+    const uint32_t devBlockSize = device->blockSize();
+    if (fsInfoSector != 0 && devBlockSize != 0 && bytesPerSector % devBlockSize == 0) {
+        const uint32_t blocksPerSector = bytesPerSector / devBlockSize;
+        SlabBuf fsInfoBuf(bytesPerSector);
+        if (fsInfoBuf &&
+            device->readBlocks(static_cast<uint64_t>(fsInfoSector) * blocksPerSector, blocksPerSector, fsInfoBuf.get())) {
+            FsInfo info;
+            memcpy(&info, fsInfoBuf.get(), sizeof(info));
+            if (info.leadSig == kFsInfoLeadSig && info.strucSig == kFsInfoStrucSig && info.trailSig == kFsInfoTrailSig) {
+                if (info.nextFree != kFsInfoUnknown && info.nextFree >= kFirstDataCluster &&
+                    info.nextFree <= volume_.clusterCountValue() + 1) {
+                    nextClusterScanHint_ = info.nextFree;
+                }
+                if (info.freeCount != kFsInfoUnknown && info.freeCount <= volume_.clusterCountValue()) {
+                    freeClusterCount_ = info.freeCount;
+                }
+            }
+        }
+    }
     // [신규, 2026-09-23, PN-547EF839] 쓰기 가능하게 마운트되는 순간
     // dirty로 표시한다(clean-shutdown 비트 클리어) - 읽기 전용
     // 마운트는 볼륨을 변경할 수 없으므로 건드리지 않는다. 이 호출이
@@ -724,6 +784,7 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
     const uint32_t bytesPerCluster = volume_.bytesPerClusterValue();
     const uint32_t fatStartSector = volume_.fatStartSectorValue();
     const uint32_t dataStartSector = volume_.dataStartSectorValue();
+    const uint32_t fsInfoSector = volume_.fsInfoSectorValue();
 
     switch (op) {
         case kernel::KernelFsOpCode::Open: {
@@ -1265,6 +1326,7 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
             // 2단계: writeEnd를 담기 모자라면 free 클러스터를 필요한
             // 만큼 할당·링크한다.
+            const uint32_t clustersBeforeAlloc = existingClusterCount;  // PN-9C836E41 - FSInfo freeCount 갱신용
             uint64_t existingCapacity = static_cast<uint64_t>(existingClusterCount) * bytesPerCluster;
             SlabBuf zeroBuf(bytesPerCluster);
             if (!zeroBuf) {
@@ -1457,6 +1519,39 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 tailCluster = newCluster;
                 ++existingClusterCount;
                 existingCapacity += bytesPerCluster;
+            }
+
+            // [신규, 2026-09-25, PN-9C836E41] 방금 이 Write() 호출이
+            // 실제로 클러스터를 할당했다면(실패 여부와 무관하게 부분
+            // 성공분까지 반영 - 이미 디스크에 EOC로 표시/링크까지 끝난
+            // 클러스터라 되돌리지 않는다) FSInfo의 freeCount/nextFree를
+            // 갱신한다 - 실패해도 그냥 시도만 하고 넘어간다(순수 캐시라
+            // 실패해도 안전, kSetFat32CleanShutdownBit과 동일한 태도).
+            if (existingClusterCount > clustersBeforeAlloc && fsInfoSector != 0) {
+                const uint32_t clustersAllocated = existingClusterCount - clustersBeforeAlloc;
+                SlabBuf fsInfoBuf(bytesPerSector);
+                if (fsInfoBuf) {
+                    fs::BlockIoResult fsInfoReadResult;
+                    kernel::AsyncTask* fsInfoReadTask =
+                        kSubmitReadSectors(device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoReadResult);
+                    if (fsInfoReadTask) {
+                        co_await kernel::AsyncTaskCoroAwaiter(fsInfoReadTask);
+                        if (fsInfoReadResult.ok &&
+                            kUpdateFsInfoBuffer(fsInfoBuf.get(), -static_cast<kernel::int64_t>(clustersAllocated),
+                                                 nextClusterScanHint_)) {
+                            fs::BlockIoResult fsInfoWriteResult;
+                            kernel::AsyncTask* fsInfoWriteTask = kSubmitWriteSectors(
+                                device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoWriteResult);
+                            if (fsInfoWriteTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(fsInfoWriteTask);
+                            }
+                        }
+                    }
+                }
+                if (freeClusterCount_ != kFsInfoUnknown) {
+                    freeClusterCount_ =
+                        (freeClusterCount_ >= clustersAllocated) ? (freeClusterCount_ - clustersAllocated) : kFsInfoUnknown;
+                }
             }
 
             if (failed) {
@@ -2360,6 +2455,35 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 }
             }
 
+            // [신규, 2026-09-25, PN-9C836E41] mkdir()이 새 디렉터리
+            // 자신의 클러스터 하나(newCluster)를 방금 성공적으로
+            // 할당·링크했다 - Write의 클러스터 할당과 동일한 이유로
+            // FSInfo freeCount/nextFree를 갱신(실패해도 무시, 순수
+            // 캐시).
+            if (fsInfoSector != 0) {
+                SlabBuf fsInfoBuf(bytesPerSector);
+                if (fsInfoBuf) {
+                    fs::BlockIoResult fsInfoReadResult;
+                    kernel::AsyncTask* fsInfoReadTask =
+                        kSubmitReadSectors(device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoReadResult);
+                    if (fsInfoReadTask) {
+                        co_await kernel::AsyncTaskCoroAwaiter(fsInfoReadTask);
+                        if (fsInfoReadResult.ok &&
+                            kUpdateFsInfoBuffer(fsInfoBuf.get(), -1, nextClusterScanHint_)) {
+                            fs::BlockIoResult fsInfoWriteResult;
+                            kernel::AsyncTask* fsInfoWriteTask = kSubmitWriteSectors(
+                                device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoWriteResult);
+                            if (fsInfoWriteTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(fsInfoWriteTask);
+                            }
+                        }
+                    }
+                }
+                if (freeClusterCount_ != kFsInfoUnknown) {
+                    freeClusterCount_ = (freeClusterCount_ >= 1) ? (freeClusterCount_ - 1) : kFsInfoUnknown;
+                }
+            }
+
             // [신규, 2026-09-25, PN-83AE8AE9] 이 mkdir() 호출 전체(새
             // 디렉터리의 "."/".." + 부모 안의 새 엔트리)가 공유할 단일
             // 생성 시각 - 아래 두 블록 모두에서 쓰므로 그 바깥(이 case
@@ -2794,6 +2918,8 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::NotEmpty;
                 break;
             }
+            uint32_t rmdirClustersFreed = 0;  // PN-9C836E41 - FSInfo freeCount 갱신용
+            const uint32_t rmdirFirstFreedCluster = leafMatched.firstCluster;
 
             {
                 // [갱신, 2026-09-23, PN-740005DF 항목3] 예전엔 짧은
@@ -2925,11 +3051,44 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                             break;
                         }
                     }
+                    if (!freeFailed) {
+                        ++rmdirClustersFreed;  // PN-9C836E41
+                    }
                     if (freeFailed || step != ChainStep::Next) {
                         break;
                     }
                     c = nextC;
                 }
+            }
+
+            // [신규, 2026-09-25, PN-9C836E41] 방금 해제한 클러스터 수만큼
+            // FSInfo freeCount를 늘리고, nextFree 힌트를 방금 해제한
+            // (그래서 지금 확실히 비어 있는) 첫 클러스터로 되돌린다 -
+            // Write/Mkdir의 할당 쪽과 대칭되는 갱신(실패해도 무시).
+            if (rmdirClustersFreed > 0 && fsInfoSector != 0) {
+                SlabBuf fsInfoBuf(bytesPerSector);
+                if (fsInfoBuf) {
+                    fs::BlockIoResult fsInfoReadResult;
+                    kernel::AsyncTask* fsInfoReadTask =
+                        kSubmitReadSectors(device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoReadResult);
+                    if (fsInfoReadTask) {
+                        co_await kernel::AsyncTaskCoroAwaiter(fsInfoReadTask);
+                        if (fsInfoReadResult.ok &&
+                            kUpdateFsInfoBuffer(fsInfoBuf.get(), static_cast<kernel::int64_t>(rmdirClustersFreed),
+                                                 rmdirFirstFreedCluster)) {
+                            fs::BlockIoResult fsInfoWriteResult;
+                            kernel::AsyncTask* fsInfoWriteTask = kSubmitWriteSectors(
+                                device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoWriteResult);
+                            if (fsInfoWriteTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(fsInfoWriteTask);
+                            }
+                        }
+                    }
+                }
+                if (freeClusterCount_ != kFsInfoUnknown) {
+                    freeClusterCount_ += rmdirClustersFreed;
+                }
+                nextClusterScanHint_ = rmdirFirstFreedCluster;
             }
 
             args->error = kernel::VfsError::None;
@@ -3131,6 +3290,8 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::InvalidArgument;  // Rmdir을 써야 함
                 break;
             }
+            uint32_t unlinkClustersFreed = 0;  // PN-9C836E41 - FSInfo freeCount 갱신용
+            const uint32_t unlinkFirstFreedCluster = leafMatched.firstCluster;
 
             {
                 // [갱신, 2026-09-23, PN-740005DF 항목3] 예전엔 짧은
@@ -3262,11 +3423,43 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                             break;
                         }
                     }
+                    if (!freeFailed) {
+                        ++unlinkClustersFreed;  // PN-9C836E41
+                    }
                     if (freeFailed || step != ChainStep::Next) {
                         break;
                     }
                     c = nextC;
                 }
+            }
+
+            // [신규, 2026-09-25, PN-9C836E41] Rmdir과 대칭되는 FSInfo
+            // 갱신 - 방금 해제한 클러스터 수만큼 freeCount를 늘리고
+            // nextFree 힌트를 그 첫 클러스터로 되돌린다(실패해도 무시).
+            if (unlinkClustersFreed > 0 && fsInfoSector != 0) {
+                SlabBuf fsInfoBuf(bytesPerSector);
+                if (fsInfoBuf) {
+                    fs::BlockIoResult fsInfoReadResult;
+                    kernel::AsyncTask* fsInfoReadTask =
+                        kSubmitReadSectors(device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoReadResult);
+                    if (fsInfoReadTask) {
+                        co_await kernel::AsyncTaskCoroAwaiter(fsInfoReadTask);
+                        if (fsInfoReadResult.ok &&
+                            kUpdateFsInfoBuffer(fsInfoBuf.get(), static_cast<kernel::int64_t>(unlinkClustersFreed),
+                                                 unlinkFirstFreedCluster)) {
+                            fs::BlockIoResult fsInfoWriteResult;
+                            kernel::AsyncTask* fsInfoWriteTask = kSubmitWriteSectors(
+                                device, bytesPerSector, fsInfoSector, 1, fsInfoBuf.get(), &fsInfoWriteResult);
+                            if (fsInfoWriteTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(fsInfoWriteTask);
+                            }
+                        }
+                    }
+                }
+                if (freeClusterCount_ != kFsInfoUnknown) {
+                    freeClusterCount_ += unlinkClustersFreed;
+                }
+                nextClusterScanHint_ = unlinkFirstFreedCluster;
             }
 
             args->error = kernel::VfsError::None;
