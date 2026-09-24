@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CC2B18C6
   status: approved
-  updatedAt: 2026-09-24T07:16:19.757Z
+  updatedAt: 2026-09-24T08:23:05.063Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -331,6 +331,56 @@ KERNEL_LMA)`와 완전히 같은 산수 - `long_mode_entry`도 그 PT_LOAD
 
 아래 §5도 이 정정을 반영해 갱신했다 - 착수 세션은 이 §3-3(정정판)
 그대로 구현하면 된다(추가 질의 불필요, 순수 사실 정정).
+
+#### [추가 정정, 2026-09-24, PN-7FBF255A 실제 구현 중 발견] saved_start_info/saved_boot_protocol도 원본(비재배치) 물리주소로 읽고 써야 한다 - long_mode_entry 마커와 같은 문제의 세 번째 사례
+
+UEFI 스테이지 로더를 실제로 구현하고 QEMU에서 첫 실측을 해 보니
+(commit `2e867f2`), ExitBootServices 이후 CR3 전환+jmp까지는
+raw-serial TEMP 진단으로 확인됐지만 `kMain`에 도달했다는 신호
+(`kernel::Logger::info` 출력)가 전혀 나타나지 않았다 - 원인을
+추적하다 `higher_half_entry`의 다음 두 줄을 다시 읽고서야 알아챈
+문제:
+
+```asm
+movabs rax, offset saved_start_info
+mov edi, [rax]
+movabs rax, offset saved_boot_protocol
+mov esi, [rax]
+```
+
+`saved_start_info`/`saved_boot_protocol`도 `long_mode_entry`와
+똑같이 `.boot.data`(§3-3 위 정정이 밝힌 대로 `VMA=LMA`) 안에 있다 -
+즉 `offset saved_start_info`는 **재배치 여부와 무관하게 항상 원본
+(KERNEL_LMA 기준) 물리주소 상수**로 평가된다. UEFI 스테이지 로더가
+physicalBaseDelta/bootProtocol을 kMain에 전달하려고 **재배치된
+사본**(`physicalBase + (원본주소 - KERNEL_LMA)`)에 값을 쓰면,
+`higher_half_entry`는 여전히 **원본 주소**를 읽으므로 그 값을 절대
+보지 못한다 - `pd_low`가 물리 0~1GiB를 identity map(§3-1)하기 때문에
+이 원본 주소 자체도 유효하게 매핑은 되지만, 거기 있는 건 UEFI가
+한 번도 쓰지 않은 값(파일의 원래 0 바이트 그대로이거나 무관한
+내용)이다.
+
+**올바른 해법**: `long_mode_entry`와 동일한 패턴 - 마커에
+`saved_start_info`의 원본 물리주소도 실어 보내고(3번째 필드,
+`saved_boot_protocol`은 바로 뒤 4바이트라 별도 필드 불필요), UEFI
+로더는 그 **원본 주소에 직접**(재배치 사본이 아니라) physicalBaseDelta/
+bootProtocol=2를 써야 한다. 이 두 필드는 4바이트 스칼라라 재배치
+대상이 아니라 순수 스크래치 통신 채널로 취급하는 게 맞다 - 원본
+주소가 [KERNEL_LMA, KERNEL_LMA+imageSpan) 범위 안에 있으므로,
+physicalBase 탐색 시 이 범위와 재배치 목적지가 겹치지 않게(§3-2
+1번 free-region 탐색에 이미 있던 AP 트램폴린 회피 조건과 같은
+패턴으로) 배제해야 재배치 memcpy가 이 스크래치 값을 덮어쓰는 사고를
+막을 수 있다.
+
+실제 구현(`minicore/boot/x86_64/boot.S`의 `boot_marker_saved_start_info_addr`
+필드, `minicore/boot/x86_64/uefi/main.cpp`)은 commit `2e867f2`에
+반영했다. **다만 이 정정을 반영한 이후에도 여전히 `kMain` 도달
+신호(Logger::info 출력)가 관찰되지 않았다** - 즉 이 문제 하나만이
+원인은 아니었거나, 아직 규명 못 한 다른 문제가 더 있다는 뜻이다.
+QEMU `-d int` 예외 로그에는 트리플 폴트(v=08) 기록이 없어 크래시
+보다는 어딘가에서(아마도 유효한 상태로) 조용히 멈췄을 가능성이
+높다 - gdb 라이브 연결로 정확한 정지 지점(RIP/CR3)을 확인하는 게
+다음 단계다(`PN-7FBF255A` 참고, 착수 세션 몫).
 
 ## 3-old. [대체됨, 2026-09-24, QU-A2CABBC6 답변 반영 - 위 3-0~3-2가 정본]
 
