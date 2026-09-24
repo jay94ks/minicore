@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-CC2B18C6
-  status: review
-  updatedAt: 2026-09-24T06:23:50.408Z
+  status: approved
+  updatedAt: 2026-09-24T06:38:27.991Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -374,7 +374,7 @@ GRUB(`Multiboot2Info::parse()`)/PVH 경로는 이 필드를 그냥 0으로
 - `QU-6778DA4C`(resolved) - "UEFI 경로만 별도로 처리" 확정 답변.
 - `QU-A2CABBC6`(resolved) - "기존 부팅 코드 재활용" 지시 - §3-0~3-2
   개정의 근거.
-- `QU-946C0859`(pending) - §5 미결 두 가지(진입점 발견 방법 + 경유
+- `QU-946C0859`(resolved) - §5 미결 두 가지(진입점 발견 방법 + 경유
   경로)를 매직 넘버 마커로 해소한 답변 - §3-3 참고.
 - `minicore/kernel/boot_info.h`/`multiboot2.h` - 이 설계가 재사용하는
   기존 BootInfo 통일 패턴.
