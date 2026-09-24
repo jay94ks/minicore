@@ -111,7 +111,7 @@
 | [SP-DABFCF9F](./SP-DABFCF9F.md) | QEMU gdb stub 기반 커널 디버깅 워크플로 — 설계 제안 | approved | 2026-09-16T04:15:01.976Z |
 | [SP-DE19BB1C](./SP-DE19BB1C.md) | 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안 | approved | 2026-09-16T16:41:25.580Z |
 | [SP-DF89897F](./SP-DF89897F.md) | 커널 로깅 인프라 추상화 — 설계 제안 | approved | 2026-09-16T02:32:42.138Z |
-| [SP-E35FD36C](./SP-E35FD36C.md) | USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안 | approved | 2026-09-15T17:56:39.202Z |
+| [SP-E35FD36C](./SP-E35FD36C.md) | USB 스택(호스트 컨트롤러 + 장치 열거) — 설계 제안 | approved | 2026-09-24T12:28:28.017Z |
 | [SP-E9B44929](./SP-E9B44929.md) | Syscall Group+Call 2단계 인코딩 — 설계 제안 | approved | 2026-09-21T01:06:39.333Z |
 | [SP-EAB162FC](./SP-EAB162FC.md) | 프로세스 신원 및 커널 서비스 권한(Capability) 체계 — 설계 제안 | approved | 2026-09-16T14:16:06.929Z |
 | [SP-ECC59BAE](./SP-ECC59BAE.md) | Running Task 강제 이관(선점형 로드밸런싱) — 설계 제안 | approved | 2026-09-16T02:55:51.632Z |
