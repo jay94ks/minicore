@@ -11,6 +11,7 @@
 //
 // GOP(그래픽 출력 프로토콜) 조회와 ExitBootServices() 핸드오프(체크
 // 리스트 4번 나머지 + 5번)는 여전히 다음 증분 몫이다.
+#include "efi/boot_info.h"
 #include "efi/elf.h"
 #include "efi/file.h"
 #include "efi/memory.h"
@@ -63,6 +64,26 @@ unsigned char gMemoryMapBuffer[kMemoryMapBufferCapacity];
 // 기반 PT_LOAD 세그먼트 복사)는 다음 증분 몫.
 constexpr unsigned long long kKernelElfBufferCapacity = 8 * 1024 * 1024;
 unsigned char gKernelElfBuffer[kKernelElfBufferCapacity];
+
+// [신규, DC-F196028B 설계자 답변("부팅 정보 구조체를 통합해")]
+// kMain에 넘길 부팅 정보 - UEFI 로더 자신의 정적 메모리(낮은 1GiB
+// 안, CR3 전환 이후에도 pd_low identity map으로 계속 역참조
+// 가능)에 산다. 재배치된 커널 이미지의 일부가 아니므로 물리주소
+// 계산에 physicalBaseDelta가 필요 없다 - 있는 그대로의 자기 주소를
+// saved_start_info에 실어 보낸다.
+UefiBootInfo gUefiBootInfo{};
+
+bool kGuidEquals(const EFI_GUID& a, const EFI_GUID& b) {
+    if (a.Data1 != b.Data1 || a.Data2 != b.Data2 || a.Data3 != b.Data3) {
+        return false;
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (a.Data4[i] != b.Data4[i]) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // [신규, PN-7FBF255A 체크리스트 5번 - UEFI 스테이지 로더 본체]
 // SP-CC2B18C6(approved)가 확정한 재배치 메커니즘 - linker.ld의
@@ -165,6 +186,30 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL* conOut = systemTable->ConOut;  // 아래에서 반복 참조 - nullptr일 수 있음, 매번 확인
     if (conOut) {
         kPrint(conOut, u"minicore: efi_main reached\r\n");
+    }
+
+    // [신규, DC-F196028B] ACPI RSDP - ConfigurationTable 순회는 순수
+    // 데이터 읽기라 BootServices 호출이 아니다(ExitBootServices
+    // 이후에도 안전하지만, 아직 값이 필요 없으므로 지금 미리 찾아
+    // gUefiBootInfo에 채워 둔다). ACPI 2.0 GUID를 우선하고 못 찾으면
+    // 1.0 GUID로 재시도(UEFI 명세 관례).
+    for (unsigned long long i = 0; i < systemTable->NumberOfTableEntries; ++i) {
+        const EFI_CONFIGURATION_TABLE& entry = systemTable->ConfigurationTable[i];
+        if (kGuidEquals(entry.VendorGuid, kEfiAcpi20TableGuid)) {
+            gUefiBootInfo.rsdpPaddr = reinterpret_cast<unsigned long long>(entry.VendorTable);
+            break;
+        }
+        if (gUefiBootInfo.rsdpPaddr == 0 && kGuidEquals(entry.VendorGuid, kEfiAcpiTableGuid)) {
+            gUefiBootInfo.rsdpPaddr = reinterpret_cast<unsigned long long>(entry.VendorTable);
+        }
+    }
+    if (conOut) {
+        kPrint(conOut, u"minicore: ACPI RSDP ");
+        kPrint(conOut, gUefiBootInfo.rsdpPaddr != 0 ? u"found=" : u"NOT FOUND");
+        if (gUefiBootInfo.rsdpPaddr != 0) {
+            kPrintUint64(conOut, gUefiBootInfo.rsdpPaddr);
+        }
+        kPrint(conOut, u"\r\n");
     }
 
     if (systemTable->BootServices) {
@@ -494,6 +539,14 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
 
             if (!physicalBaseSearchDone) {
                 physicalBaseSearchDone = true;
+                // [신규, DC-F196028B] 이 마지막(가장 최신) 메모리맵
+                // 스냅샷 자체를 kMain에 그대로 넘긴다 - gMemoryMapBuffer는
+                // UEFI 로더 자신의 정적 메모리라 ExitBootServices 이후에도
+                // (아무도 재사용/해제하지 않으므로) 그대로 유효하다.
+                gUefiBootInfo.memmapPaddr = reinterpret_cast<unsigned long long>(gMemoryMapBuffer);
+                gUefiBootInfo.memmapDescriptorSize = finalDescriptorSize;
+                gUefiBootInfo.memmapEntryCount =
+                    finalDescriptorSize > 0 ? static_cast<unsigned int>(finalMapSize / finalDescriptorSize) : 0;
                 if (loaderPreconditionsOk && finalDescriptorSize > 0) {
                     const unsigned long long entryCount = finalMapSize / finalDescriptorSize;
                     for (unsigned long long i = 0; i < entryCount; ++i) {
@@ -598,6 +651,7 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
             // (SP-CC2B18C6 §3-2). memsz > filesz인 나머지(.bss, boot.S의
             // pml4 등 5개 페이지테이블 포함)는 0으로 채운다.
             const unsigned long long delta = physicalBase - kKernelLma;
+            gUefiBootInfo.physicalBaseDelta = delta;
             for (unsigned int i = 0; i < gLoadSegmentCount; ++i) {
                 const LoadSegment& seg = gLoadSegments[i];
                 auto* dest = reinterpret_cast<unsigned char*>(physicalBase + (seg.paddr - kKernelLma));
@@ -642,19 +696,21 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                 pdHigh[i] = ((static_cast<unsigned long long>(i) * kPageSize2M) + delta) | kPagePresentWritableHuge;
             }
 
-            // [신규, SP-CC2B18C6 §3-3 추가 정정] higher_half_entry는
+            // [신규, SP-CC2B18C6 §3-3 추가 정정 + DC-F196028B 답변
+            // ("부팅 정보 구조체를 통합해") 반영] higher_half_entry는
             // "movabs rax, offset saved_start_info"라는 링크 타임
             // 절대주소(재배치 무관, 항상 원본 물리주소)로 kMain 인자를
             // 읽는다 - 그래서 재배치된 사본이 아니라 이 원본 주소에
-            // 직접 physicalBaseDelta/bootProtocol=2(kBootProtocolUefi,
-            // kmain.cpp와 반드시 일치)를 써야 한다. 위 physicalBase
-            // 탐색에서 이 원본 범위와 재배치 목적지가 겹치지 않게 이미
-            // 배제했으므로 이 쓰기가 방금 복사한 커널 바이트를 훼손하지
-            // 않는다. delta는 §3-1 제약(physicalBase+imageSpan<=1GiB)
-            // 덕에 항상 32비트에 들어맞는다.
+            // 직접 값을 써야 한다. 예전엔 physicalBaseDelta 스칼라를
+            // 그대로 여기 썼지만, memmap/RSDP까지 함께 넘겨야 해서
+            // 이제 gUefiBootInfo(자기 자신의 정적 메모리, 재배치 무관 -
+            // 낮은 1GiB 안이라 32비트에 들어맞음)의 물리주소를 대신
+            // 쓴다 - GRUB/PVH가 이미 이 채널로 자기 부팅정보구조체의
+            // "포인터"를 넘기던 것과 정확히 같은 패턴이라 boot.S
+            // 변경은 불필요하다.
             auto* rawSavedStartInfo = reinterpret_cast<unsigned int*>(gRawSavedStartInfoAddr);
             auto* rawSavedBootProtocol = reinterpret_cast<unsigned int*>(gRawSavedStartInfoAddr + 4);
-            *rawSavedStartInfo = static_cast<unsigned int>(delta);
+            *rawSavedStartInfo = static_cast<unsigned int>(reinterpret_cast<unsigned long long>(&gUefiBootInfo));
             *rawSavedBootProtocol = 2;  // kBootProtocolUefi - kmain.cpp와 일치시켜야 함
 
             // [신규, SP-CC2B18C6 §3-3 두 번째 추가 정정 - 실측으로 발견한

@@ -41,6 +41,7 @@
 #include "task.h"
 #include "timer.h"
 #include "tlb_shootdown.h"
+#include "uefi_boot_info.h"
 #include "user_record.h"
 #include "user_sync.h"
 #include "vfs_syscall.h"
@@ -265,6 +266,60 @@ kernel::uint64_t kComputeMaxUsablePhysAddr(const kernel::HvmMemmapEntry* memmap,
         }
     }
     return maxAddr;
+}
+
+// [신규, PN-7FBF255A/DC-F196028B] UEFI EFI_MEMORY_TYPE -> HvmMemmapType
+// (E820 스타일) 변환 - Multiboot2Info::parse의 kMapMemType과 같은
+// 패턴. ExitBootServices 이후 OS가 실제로 재사용 가능한 다섯
+// 타입(LoaderCode/Data, BootServicesCode/Data, ConventionalMemory)
+// 을 kUsable로 묶는다 - UEFI 명세 관례(리눅스 등 다른 OS도 이
+// 다섯 타입을 usable로 취급) 그대로.
+kernel::uint32_t kMapEfiMemType(kernel::uint32_t efiType) {
+    switch (static_cast<kernel::EfiMemoryType>(efiType)) {
+        case kernel::EfiMemoryType::kLoaderCode:
+        case kernel::EfiMemoryType::kLoaderData:
+        case kernel::EfiMemoryType::kBootServicesCode:
+        case kernel::EfiMemoryType::kBootServicesData:
+        case kernel::EfiMemoryType::kConventionalMemory:
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kUsable);
+        case kernel::EfiMemoryType::kAcpiReclaimMemory:
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kAcpiReclaimable);
+        case kernel::EfiMemoryType::kAcpiMemoryNvs:
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kAcpiNvs);
+        case kernel::EfiMemoryType::kUnusableMemory:
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kUnusable);
+        default:
+            return static_cast<kernel::uint32_t>(kernel::HvmMemmapType::kReserved);
+    }
+}
+
+// UEFI가 실측(2026-09-24, QEMU+OVMF)으로 126~129개 엔트리를 돌려주는
+// 걸 확인했다 - 실제 하드웨어는 메모리 단편화로 더 많을 수 있어
+// GRUB의 kMultiboot2MaxMemmapEntries(64)보다 넉넉히 잡는다
+// (DC-F196028B 실측 확인 절 참고).
+constexpr kernel::uint32_t kUefiMaxMemmapEntries = 256;
+
+// UEFI 스테이지 로더가 남겨 둔 원시 EFI_MEMORY_DESCRIPTOR 배열
+// (UefiBootInfo::memmapPaddr, UEFI 로더 자신의 정적 메모리 - 낮은
+// 1GiB identity map으로 재배치 이후에도 그대로 역참조 가능)을
+// HvmMemmapEntry로 변환한다 - Multiboot2Info::parse와 같은 역할.
+void kParseUefiMemmap(const kernel::UefiBootInfo& info, kernel::HvmMemmapEntry* outMemmap, kernel::uint32_t maxEntries,
+                      kernel::uint32_t* outCount) {
+    *outCount = 0;
+    if (info.memmapPaddr == 0 || info.memmapDescriptorSize == 0) {
+        return;
+    }
+    const auto* base = reinterpret_cast<const kernel::uint8_t*>(info.memmapPaddr);
+    for (kernel::uint32_t i = 0; i < info.memmapEntryCount && *outCount < maxEntries; ++i) {
+        const auto* desc =
+            reinterpret_cast<const kernel::EfiMemoryDescriptor*>(base + static_cast<kernel::uint64_t>(i) * info.memmapDescriptorSize);
+        kernel::HvmMemmapEntry& out = outMemmap[*outCount];
+        out.addr = desc->physicalStart;
+        out.size = desc->numberOfPages * 4096ULL;
+        out.type = kMapEfiMemType(desc->type);
+        out.reserved = 0;
+        ++(*outCount);
+    }
 }
 
 // 실제 첫 프로세스 기동(QA-26450C3E "유저랜드 준비", PN-16CA347D 6번
@@ -546,22 +601,24 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         memmap = gMb2MemmapBuffer;
         startInfoSize = mb2TotalSize;
     } else if (bootProtocol == kBootProtocolUefi) {
-        // [PN-7FBF255A, SP-CC2B18C6] boot.S가 esi로 이미 kBootProtocolUefi를
-        // 넘긴 시점에서 startInfoAddr는 부팅 정보 구조체 포인터가 아니라
-        // physicalBaseDelta 그 자체다(§4, kBootProtocolUefi 선언부 주석
-        // 참고) - UEFI 스테이지 로더(main.cpp)가 직접 이 값을 saved_start_info
-        // 원본 물리주소에 써 뒀다.
-        physicalBaseDelta = static_cast<kernel::uint64_t>(startInfoAddr);
-        kernel::Logger::info("minicore: booted via UEFI direct boot (relocated, physicalBaseDelta=%llx)",
-                              physicalBaseDelta);
-        // [PN-7FBF255A 후속 과제, 아직 설계 안 됨] UEFI 스테이지 로더가
-        // 스캔한 실제 메모리맵을 커널에 넘기는 방법이 없어 memmap/
-        // memmapEntries를 기본값(nullptr/0)으로 남긴다 - 이 증분은
-        // physicalBaseDelta 배선까지만 검증한다(kernel::Logger::info가
-        // 이 경로에서도 정상 출력되는지가 1차 성공 신호). 이후
-        // PageFrameAllocator/Paging이 usable 메모리를 전혀 못 찾아
-        // 이 지점 이후 진행이 막힐 수 있음 - 실제 메모리맵 전달 방식은
-        // 별도 DC/질의 대상.
+        // [PN-7FBF255A, SP-CC2B18C6, DC-F196028B 답변("부팅 정보
+        // 구조체를 통합해") 반영] boot.S가 esi로 kBootProtocolUefi를
+        // 넘긴 시점에서 startInfoAddr는 UefiBootInfo(uefi_boot_info.h)
+        // 구조체의 물리주소다 - UEFI 스테이지 로더(main.cpp)가 이
+        // 구조체를 채워 그 주소를 saved_start_info 원본 물리주소에
+        // 써 뒀다(재배치 무관 원본 채널, boot.S 변경 불필요 - 마커
+        // 필드를 더 늘리는 대신 이 구조체 하나로 통합).
+        static kernel::HvmMemmapEntry gUefiMemmapBuffer[kUefiMaxMemmapEntries];
+        const auto* uefiBootInfo =
+            reinterpret_cast<const kernel::UefiBootInfo*>(static_cast<kernel::uint64_t>(startInfoAddr));
+        physicalBaseDelta = uefiBootInfo->physicalBaseDelta;
+        rsdpPaddr = uefiBootInfo->rsdpPaddr;
+        kParseUefiMemmap(*uefiBootInfo, gUefiMemmapBuffer, kUefiMaxMemmapEntries, &memmapEntries);
+        memmap = gUefiMemmapBuffer;
+        startInfoSize = sizeof(kernel::UefiBootInfo);
+        kernel::Logger::info(
+            "minicore: booted via UEFI direct boot (relocated, physicalBaseDelta=%llx, rsdp=%llx)",
+            physicalBaseDelta, rsdpPaddr);
     } else {
         kernel::Logger::info("minicore: booted via Xen PVH (higher-half, long mode)");
         const auto* startInfo = reinterpret_cast<const kernel::HvmStartInfo*>(static_cast<kernel::uint64_t>(startInfoAddr));

@@ -87,6 +87,21 @@ struct EFI_BOOT_SERVICES {
     // 실제로 쓰는 다음 증분에서 추가).
 };
 
+// [신규, PN-7FBF255A/DC-F196028B - ACPI RSDP 전달] EFI_SYSTEM_TABLE의
+// ConfigurationTable 배열 원소 하나 - VendorGuid로 어떤 테이블인지
+// 식별하고(ACPI RSDP는 EFI_ACPI_20_TABLE_GUID 또는 그게 없으면
+// EFI_ACPI_TABLE_GUID) VendorTable이 그 테이블의 물리주소다.
+struct EFI_CONFIGURATION_TABLE {
+    EFI_GUID VendorGuid;
+    void* VendorTable;
+};
+
+// UEFI 명세 5.2.5.2 - ACPI 2.0+ RSDP를 가리키는 GUID(우선), 없으면
+// ACPI 1.0 GUID로 재시도(efi_main이 ConfigurationTable을 순회하며
+// 사용).
+constexpr EFI_GUID kEfiAcpi20TableGuid = {0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}};
+constexpr EFI_GUID kEfiAcpiTableGuid = {0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}};
+
 struct EFI_SYSTEM_TABLE {
     EFI_TABLE_HEADER Hdr;
     CHAR16* FirmwareVendor;
@@ -102,8 +117,10 @@ struct EFI_SYSTEM_TABLE {
     void* StdErr;            // 안 씀, 자리만 차지
     void* RuntimeServices;   // 안 씀, 자리만 차지
     EFI_BOOT_SERVICES* BootServices;
-    // NumberOfTableEntries/ConfigurationTable 이후는 아직 안 씀 -
-    // 선언하지 않는다.
+    // [신규, DC-F196028B] ACPI RSDP를 찾으려고 실제로 쓴다 - 그
+    // 뒤(SMBIOS 등 나머지 표준 GUID)는 여전히 관심 없음.
+    unsigned long long NumberOfTableEntries;
+    EFI_CONFIGURATION_TABLE* ConfigurationTable;
 };
 
 #endif  // MINICORE_BOOT_UEFI_EFI_SYSTEM_TABLE_H
