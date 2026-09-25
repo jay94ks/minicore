@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-25T10:32:46.359Z
+  updatedAt: 2026-09-25T10:37:56.325Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2251,9 +2251,40 @@ DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영�
 기존 점검과 같은 문서 - updatedAt만 갱신된 것으로 보여 재점검 생략)/
 `SP-E35FD36C`(USB 스택)/`SP-EAB162FC`(프로세스 신원/Capability
 체계)/`SP-CA3C3E57`(Channel/BridgeHandle 핸들 해석). 이 중
-**`SP-CA3C3E57`/`SP-EAB162FC` 2건은 이번 틱에 점검 완료(위 §2-추가2/
-§2-추가3 참고, 둘 다 갭 없음)**. **`SP-C2670F69`(AHCI)/`SP-E35FD36C`
-(USB)는 다음 틱 대상으로 남겨 둔다.**
+**4건 전부 이번 세션 안에서 점검 완료** - `SP-CA3C3E57`(갭 없음, §2-추가2)/
+`SP-EAB162FC`(갭 없음, §2-추가3)/`SP-C2670F69`(문서만 정정, §2-추가4)/
+`SP-E35FD36C`(구현 자체 없음, 해당 없음, §2-추가5). `document_list
+(status=approved)` 전수 재확인 결과 이 넷 이후 새로 approved 전환된
+SP/DC가 없음 - 다음 approved 전환 시까지 이 §3 스윕은 다시 건너뛴다
+(2026-09-21/22/23/24와 동일한 재소진 패턴).
+
+## §2-추가5. [점검 완료(해당 없음), 2026-09-25] `SP-E35FD36C`(USB 스택, approved) - 구현 자체가 아직 없음(이 방법론의 대상 아님)
+
+`docs git grep`/저장소 전수 검색으로 `XhciController`/`UsbCore`류
+클래스가 코드베이스 어디에도 없음을 확인 - USB 스택은 설계만 승인된
+채 착수 자체가 아직 시작되지 않았다. 이 문서(RM-F2DAFF66)의 방법론은
+"이미 부분적으로 구현된 목록에서 뒷부분이 조용히 누락되는 패턴"을
+잡는 것이라, 구현이 전혀 없는 문서에는 적용 대상이 성립하지 않는다
+(§4가 이미 정직하게 "미착수" 항목들을 스스로 추적 중이기도 함) -
+**"해당 없음"으로 기록, 실제 착수 시점에 이 방법론을 다시 적용할
+것**.
+
+## §2-추가4. [점검 완료, 2026-09-25] `SP-C2670F69`(AHCI 드라이버, approved) - 문서만 정정(코드 갭 아님)
+
+이 문서는 이미 자체 정정 각주(2026-09-24, minicore-3c - Process→
+KernelThread 흡수/파일 위치/Channel IPC 미사용/인터럽트 구독 경로
+4건)를 갖고 있었다. 이번 틱은 그 위에서 §4-A(2026-09-20, commit
+`ebac645`)가 "§3.5(NCQ)는 아직 미구현"이라고 적어 둔 것을 재확인했다 -
+
+**발견**: `PN-A401DDF9`(completed, 2026-09-22, commit `e634a81`)가
+§4-A 작성 시점 이후 실제로 NCQ를 구현했다(`minicore/kernel/ahci.h`/
+`ahci.cpp`에서 `configureNcq`/`_slotUsed`/`acquireSlot`/FPDMA QUEUED
+코드 직접 확인) - §4-A의 "미구현" 서술이 그 사이 낡아 버린 것뿐,
+실제 계획(`PN-A401DDF9`)은 이미 그 문서에 자기 완료 기록을 남겨 뒀고
+누락 없이 추적되고 있었다. **코드 갭이 아니라 "문서만 정정" 대상**
+- SP-C2670F69에 정정 각주 추가 완료(§3.5 절 바로 뒤). 실기기/QEMU
+NCQ 왕복 자체는 `PN-A8BE8BED`(scheduled, AllocDmaBuffer 커널 모드
+매핑) 해소 전까지 여전히 미검증 상태 - 이는 정정 각주에도 명시.
 
 **[2026-09-24, 추가 갱신] `DC-F196028B`(UEFI memmap/RSDP 전달 방식)도
 점검 완료 - 갭 없음.** 이 DC는 승인 답변("부팅 정보 구조체를
