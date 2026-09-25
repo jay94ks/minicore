@@ -90,6 +90,17 @@ enum class DiagRingEvent : uint8_t {
     // 한다 - 정확한 매핑은 scheduler.cpp의 호출부 주석 참고).
     SchedulerSyncRsp0Entry = 17,
     SchedulerSyncCr3Entry = 18,
+
+    // [신규, 2026-09-25, PN-6360E6E9] `kSyncCr3(X)`가 직전
+    // `kSyncRsp0ForDispatch(X)` 없이 단독으로 호출되는 세 지점(모두
+    // scheduler.cpp) 각각을 구분하기 위한 호출부 태그 - `Scheduler
+    // SyncCr3Entry`만으로는 그 인자가 어느 호출부에서 왔는지 알 수
+    // 없어(함수 내부 로깅이라 caller 정보가 없음), 이 이벤트를 그
+    // 호출 직전에 추가로 남겨 짝을 맞춘다. `vector` 필드=호출부
+    // ID(1=yieldCurrent 재개, 2=parkCurrent 재개, 3=kSyncCr3OnTaskStart),
+    // `extra` 필드=넘기려는 Task* 값(바로 다음 SchedulerSyncCr3Entry의
+    // extra와 같아야 정상 - 다르면 그 사이 무언가 값을 바꿨다는 뜻).
+    SchedulerSyncCr3CallSite = 19,
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

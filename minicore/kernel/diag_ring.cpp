@@ -81,6 +81,8 @@ const char* kEventName(uint8_t event) {
             return "SyncRsp0Entry";
         case DiagRingEvent::SchedulerSyncCr3Entry:
             return "SyncCr3Entry";
+        case DiagRingEvent::SchedulerSyncCr3CallSite:
+            return "SyncCr3CallSite";
         default:
             return "?";
     }

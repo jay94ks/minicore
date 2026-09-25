@@ -2302,6 +2302,9 @@ void Scheduler::yieldCurrent() {
     // 전혀 CR3를 건드리지 않아 "아직 실제로 발현되지 않은 세 번째
     // 공백"으로 남아 있었다(지금은 이 프로젝트의 어떤 ring3 코드도
     // yieldCurrent를 타지 않아 관찰되지 않았을 뿐이다).
+    // [신규, 2026-09-25, PN-6360E6E9] diag_ring.h SchedulerSyncCr3CallSite
+    // 문서 주석 참고 - 호출부 태그 1(yieldCurrent 재개).
+    kDiagRingLog(DiagRingEvent::SchedulerSyncCr3CallSite, coreIndex, 1, 0, reinterpret_cast<uint64_t>(current));
     kSyncCr3(current);
     kSyncFpu(current, coreIndex);
     kSyncDebugRegs(current);
@@ -2359,6 +2362,8 @@ void Scheduler::parkCurrent() {
     // 지점과 완전히 동일한 이유로 여기서도 CR3를 동기화한다(위
     // yieldCurrent() 주석 참고 - 이 함수가 첫 실제 소비자가 되기
     // 전까지는 아직 발현되지 않았던 공백이었다).
+    // [신규, 2026-09-25, PN-6360E6E9] 호출부 태그 2(parkCurrent 재개).
+    kDiagRingLog(DiagRingEvent::SchedulerSyncCr3CallSite, coreIndex, 2, 0, reinterpret_cast<uint64_t>(current));
     kSyncCr3(current);
     kSyncFpu(current, coreIndex);
     kSyncDebugRegs(current);
@@ -2625,6 +2630,13 @@ void Scheduler::handleFpuTrap() {
 extern "C" void kSyncCr3OnTaskStart() {
     kernel::Task* self = kernel::Scheduler::currentTask();
     if (self) {
+        // [신규, 2026-09-25, PN-6360E6E9] 호출부 태그 3(kSyncCr3OnTaskStart)
+        // - `self`는 다른 두 호출부(yieldCurrent/parkCurrent)와 달리
+        // 이 Task 자신이 보존한 지역 변수가 아니라 `gCurrentTask[coreIndex]`
+        // 를 새로 읽은 값이다 - 오염 경로가 다를 수 있어 구분해 둔다.
+        kernel::kDiagRingLog(kernel::DiagRingEvent::SchedulerSyncCr3CallSite,
+                             kernel::Scheduler::currentCoreIndex(), 3, 0,
+                             reinterpret_cast<kernel::uint64_t>(self));
         kernel::kSyncCr3(self);
         // SP-83A07867 §8/PN-F258698E - "Task가 태어나서 처음 실행되는
         // 지점"도 §3.2 갈래②의 세 곳 중 하나라 kSyncFpu를 그대로 같이
