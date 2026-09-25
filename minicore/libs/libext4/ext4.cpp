@@ -804,14 +804,16 @@ uint32_t kJbd2ParseDescriptorTags(const void* rawBlock, uint32_t blockLen, uint3
         memcpy(&flags, tagPtr + 4, 4);
         blockNrLow = kJbd2Be32(blockNrLow);
         flags = kJbd2Be32(flags);
+        uint32_t checksum = 0;
         if (csumV3) {
             memcpy(&blockNrHigh, tagPtr + 8, 4);
             blockNrHigh = kJbd2Be32(blockNrHigh);
-            // tagPtr+12의 4바이트 checksum(crc32c)은 아직 검증하지
-            // 않는다 - 순수 태그 목록 추출 범위 밖(리플레이 세션 몫).
+            memcpy(&checksum, tagPtr + 12, 4);
+            checksum = kJbd2Be32(checksum);
         }
         outTags[count].blockNr = (static_cast<uint64_t>(blockNrHigh) << 32) | blockNrLow;
         outTags[count].flags = flags;
+        outTags[count].checksum = checksum;
         ++count;
 
         pos += tagSize;
@@ -823,6 +825,79 @@ uint32_t kJbd2ParseDescriptorTags(const void* rawBlock, uint32_t blockLen, uint3
         }
     }
     return count;
+}
+
+uint32_t kJbd2ParseRevokeRecords(const void* rawBlock, uint32_t blockLen, uint32_t headerCount, bool is64Bit,
+                                   uint64_t* outBlockNrs, uint32_t maxRecords) {
+    const uint32_t recordLen = is64Bit ? 8u : 4u;
+    if (headerCount > blockLen) {
+        headerCount = blockLen;  // 손상 방어 - 절대 블록 경계를 넘어 읽지 않는다
+    }
+    const uint8_t* base = static_cast<const uint8_t*>(rawBlock);
+    uint32_t offset = sizeof(RevokeHeader);
+    uint32_t count = 0;
+    while (offset + recordLen <= headerCount && count < maxRecords) {
+        uint64_t blockNr;
+        if (is64Bit) {
+            uint32_t hi, lo;
+            memcpy(&hi, base + offset, 4);
+            memcpy(&lo, base + offset + 4, 4);
+            blockNr = (static_cast<uint64_t>(kJbd2Be32(hi)) << 32) | kJbd2Be32(lo);
+        } else {
+            uint32_t v;
+            memcpy(&v, base + offset, 4);
+            blockNr = kJbd2Be32(v);
+        }
+        outBlockNrs[count] = blockNr;
+        ++count;
+        offset += recordLen;
+    }
+    return count;
+}
+
+bool kJbd2VerifyBlockTailChecksum(uint32_t csumSeed, const void* rawBlock, uint32_t blockLen) {
+    if (blockLen < 4) {
+        return false;
+    }
+    // 원본을 훼손하지 않도록 임시 버퍼에 복사해 체크섬 필드만 0으로
+    // 만든 뒤 해시한다(ext4의 다른 metadata_csum류와 동일 관례 -
+    // "체크섬 필드 자신만 0, 나머지는 실제 값 그대로").
+    uint8_t tmp[4096];
+    if (blockLen > sizeof(tmp)) {
+        return false;  // v1 상한(현실적 저널 블록 크기 - 4096 초과는 없음)
+    }
+    memcpy(tmp, rawBlock, blockLen);
+    uint32_t provided;
+    memcpy(&provided, tmp + blockLen - 4, 4);
+    provided = kJbd2Be32(provided);
+    memset(tmp + blockLen - 4, 0, 4);
+    const uint32_t calculated = kCrc32c(csumSeed, tmp, blockLen);
+    return provided == calculated;
+}
+
+bool kJbd2VerifyCommitChecksum(uint32_t csumSeed, const void* rawBlock, uint32_t blockLen) {
+    if (blockLen < sizeof(CommitHeader)) {
+        return false;
+    }
+    uint8_t tmp[4096];
+    if (blockLen > sizeof(tmp)) {
+        return false;
+    }
+    memcpy(tmp, rawBlock, blockLen);
+    uint32_t provided;
+    memcpy(&provided, tmp + offsetof(CommitHeader, chksum), 4);
+    provided = kJbd2Be32(provided);
+    memset(tmp + offsetof(CommitHeader, chksum), 0, 4);
+    const uint32_t calculated = kCrc32c(csumSeed, tmp, blockLen);
+    return provided == calculated;
+}
+
+bool kJbd2VerifyTagChecksum(uint32_t csumSeed, uint32_t sequence, const void* blockData, uint32_t blockLen,
+                             uint32_t providedChecksum) {
+    const uint32_t seqBe = kJbd2Be32(sequence);
+    uint32_t seed2 = kCrc32c(csumSeed, &seqBe, sizeof(seqBe));
+    const uint32_t calculated = kCrc32c(seed2, blockData, blockLen);
+    return calculated == providedChecksum;
 }
 
 // blockOffset/blockCount는 ext4 자신의 블록 단위(blockSize_) - 장치의
@@ -838,6 +913,391 @@ static bool readExtBlocksImpl(fs::BlockDevice* device, uint32_t extBlockSize, ui
     const kernel::uint64_t lba = extBlockStart * devBlocksPerExtBlock;
     const kernel::uint32_t count = extBlockCount * devBlocksPerExtBlock;
     return device->readBlocks(lba, count, buf);
+}
+
+// [추가, 2026-09-26, PN-BC3A2F5F] readExtBlocksImpl의 쓰기 버전 - 저널
+// 리플레이가 복구된 블록을 실제 파일시스템 위치에 되돌려 쓰는 데 쓴다
+// (지금까지 Ext4Volume은 읽기 전용이라 이 방향이 필요 없었다).
+static bool writeExtBlocksImpl(fs::BlockDevice* device, uint32_t extBlockSize, uint64_t extBlockStart,
+                                uint32_t extBlockCount, const void* buf) {
+    const kernel::uint32_t devBlockSize = device->blockSize();
+    if (devBlockSize == 0 || extBlockSize % devBlockSize != 0) {
+        return false;
+    }
+    const kernel::uint32_t devBlocksPerExtBlock = extBlockSize / devBlockSize;
+    const kernel::uint64_t lba = extBlockStart * devBlocksPerExtBlock;
+    const kernel::uint32_t count = extBlockCount * devBlocksPerExtBlock;
+    return device->writeBlocks(lba, count, buf);
+}
+
+// slab 버퍼 RAII - libext4/libvfat의 다른 드라이버 파일들과 동일한
+// 관례(각 파일에 독립적으로 둔다 - ext4_driver.cpp의 동명 클래스
+// 문서 주석 참고, 작은 유틸리티라 공유 헤더로 뽑지 않는 이 코드베이스
+// 전반의 관행 그대로). Ext4Volume::mount()는 코루틴이 아니라 평범한
+// 함수라 "co_return 어느 경로로도" 같은 이유는 없지만, 이 리플레이
+// 함수처럼 여러 곳에서 break/continue로 빠져나가는 긴 루프 안에서
+// 수동 alloc/free 쌍을 매번 정확히 맞추는 실수를 막기 위해 그대로
+// 재사용한다.
+class SlabBuf {
+public:
+    explicit SlabBuf(uint32_t size)
+        : _size(size), _ptr(static_cast<uint8_t*>(kernel::GenericSlabAllocator::alloc(size))) {}
+    ~SlabBuf() {
+        if (_ptr) {
+            kernel::GenericSlabAllocator::free(_ptr, _size);
+        }
+    }
+    SlabBuf(const SlabBuf&) = delete;
+    SlabBuf& operator=(const SlabBuf&) = delete;
+    uint8_t* get() const { return _ptr; }
+    explicit operator bool() const { return _ptr != nullptr; }
+
+private:
+    uint32_t _size;
+    uint8_t* _ptr;
+};
+
+// [추가, 2026-09-26, PN-BC3A2F5F] 저널 inode(sb.journalInum)의
+// InodeCore를 읽는다 - ext4_driver.cpp의 kLocateInode(오프셋 계산)와
+// 동일한 산수를 그대로 재현(이 파일은 그 파일과 별개 번역 단위라
+// 공유 못 함 - 이 코드베이스의 작은 순수 함수 중복 관례 그대로).
+static bool kJbd2LocateJournalInode(fs::BlockDevice* device, const SuperblockCore& sb, const Ext4Volume& volume,
+                                     uint32_t groupCount, uint32_t blockSize, InodeCore* outInode) {
+    if (sb.journalInum == 0 || sb.inodesPerGroup == 0) {
+        return false;
+    }
+    const uint32_t group = (sb.journalInum - 1) / sb.inodesPerGroup;
+    if (group >= groupCount) {
+        return false;
+    }
+    const uint32_t indexInGroup = (sb.journalInum - 1) % sb.inodesPerGroup;
+    const uint64_t byteOffsetInTable = static_cast<uint64_t>(indexInGroup) * sb.inodeSize;
+    const uint64_t blockOffset = volume.groupInodeTableBlock(group) + byteOffsetInTable / blockSize;
+    const uint32_t byteOffsetInBlock = static_cast<uint32_t>(byteOffsetInTable % blockSize);
+    const uint32_t blocksNeeded = static_cast<uint32_t>(kCeilDiv(byteOffsetInBlock + sizeof(InodeCore), blockSize));
+    SlabBuf buf(blocksNeeded * blockSize);
+    if (!buf) {
+        return false;
+    }
+    if (!readExtBlocksImpl(device, blockSize, blockOffset, blocksNeeded, buf.get())) {
+        return false;
+    }
+    memcpy(outInode, buf.get() + byteOffsetInBlock, sizeof(InodeCore));
+    return true;
+}
+
+// 저널 논리 블록 하나(0..journalSuperblock.maxLen-1, journal inode
+// 자신의 파일 안에서의 블록 인덱스)를 읽는다 - depth==0 인라인
+// 익스텐트(최대 4개, kExt4ResolveInlineExtent)로만 저널 inode를
+// 해석한다(이 v1의 정직한 범위 제한 - 위 ext4.h 문서 주석 참고).
+static bool kJbd2ReadJournalBlock(fs::BlockDevice* device, uint32_t blockSize, const uint8_t journalBlock60[60],
+                                   uint32_t journalLogicalBlock, void* outBuf) {
+    uint64_t physicalBlock = 0;
+    if (!kExt4ResolveInlineExtent(journalBlock60, journalLogicalBlock, &physicalBlock)) {
+        return false;
+    }
+    return readExtBlocksImpl(device, blockSize, physicalBlock, 1, outBuf);
+}
+
+// [추가, 2026-09-26, PN-BC3A2F5F] 리보크 테이블 - Linux
+// jbd2_journal_set_revoke/test_revoke(해시 테이블)와 같은 의미론을
+// 훨씬 단순한 "선형 스캔 배열"로 구현한다(항목 수가 저널 전체
+// 블록 수(maxLen)를 절대 넘을 수 없어 현실적으로 작다는 전제 -
+// libswapfs badPages류 v1 단순화와 동일한 판단, RM-23F4B687 §4).
+struct RevokeEntry {
+    uint64_t blockNr;
+    uint32_t sequence;
+};
+
+// tid_gt(sequence, record->sequence) 판정 - Linux는 32비트 순환
+// 비교(tid_t wraparound)를 쓰지만, 이 v1은 단일 마운트 세션 안의
+// 작은 시퀀스 범위만 다루므로 평범한 정수 비교로 충분하다(현실적인
+// 저널 트랜잭션 수가 2^31을 넘을 일이 없음).
+static void kJbd2RevokeSet(RevokeEntry* table, uint32_t* count, uint32_t capacity, uint64_t blockNr,
+                            uint32_t sequence) {
+    for (uint32_t i = 0; i < *count; ++i) {
+        if (table[i].blockNr == blockNr) {
+            if (sequence > table[i].sequence) {
+                table[i].sequence = sequence;
+            }
+            return;
+        }
+    }
+    if (*count < capacity) {
+        table[*count].blockNr = blockNr;
+        table[*count].sequence = sequence;
+        ++(*count);
+    }
+}
+
+// jbd2_journal_test_revoke와 동일한 의미론: sequence(이 블록을 다시
+// 쓰려는 트랜잭션 번호)가 리보크 기록의 sequence보다 크면 리보크
+// 이후에 다시 쓰인 것이므로 리플레이해야 한다(리보크 아님) - 작거나
+// 같으면 리보크된 것으로 취급해 버린다.
+static bool kJbd2RevokeTest(const RevokeEntry* table, uint32_t count, uint64_t blockNr, uint32_t sequence) {
+    for (uint32_t i = 0; i < count; ++i) {
+        if (table[i].blockNr == blockNr) {
+            return !(sequence > table[i].sequence);
+        }
+    }
+    return false;
+}
+
+// [추가, 2026-09-26, PN-BC3A2F5F] jbd2 저널 리플레이 본체 - Linux
+// fs/jbd2/recovery.c의 do_one_pass()를 그대로 재현한 3-pass 구조
+// (SCAN → REVOKE → REPLAY, 위 ext4.h의 jbd2 절 문서 주석 참고).
+// `Ext4Volume::mount()`가 그룹 디스크립터 테이블까지 다 읽어 자기
+// 상태(groupInodeTableBlock() 등)가 완전히 준비된 뒤 호출한다(저널
+// inode 자체를 그 그룹 디스크립터로 찾아야 하므로) - 진짜
+// kernel::Task 컨텍스트의 1회 준비 단계라 동기 I/O가 안전하다는
+// 근거는 mount() 자신과 동일. 성공(리플레이할 게 없었거나 끝까지
+// 무사히 마침)이면 true, 저널이 없거나 읽는 도중 실패하거나
+// CSUM_V2/64BIT 단독처럼 이 v1이 모르는 조합을 만나면 false(호출자인
+// mount()가 안전하게 마운트를 거부한다).
+static bool kJbd2ReplayJournal(fs::BlockDevice* device, const SuperblockCore& sb, const Ext4Volume& volume,
+                                uint32_t groupCount, uint32_t fsBlockSize) {
+    if ((sb.featureCompat & kCompatHasJournal) == 0) {
+        return false;  // 저널 자체가 없음 - 리플레이 불가능, 정직하게 거부
+    }
+    InodeCore journalInode;
+    if (!kJbd2LocateJournalInode(device, sb, volume, groupCount, fsBlockSize, &journalInode)) {
+        return false;
+    }
+    if ((journalInode.flags & kExtentsFl) == 0) {
+        return false;  // v1: 레거시 간접 블록 저널 미지원(정직한 실패)
+    }
+
+    SlabBuf sbBuf(fsBlockSize);
+    if (!sbBuf || !kJbd2ReadJournalBlock(device, fsBlockSize, journalInode.block, 0, sbBuf.get())) {
+        return false;
+    }
+    JournalSuperblockV2 js;
+    if (!kJbd2ParseSuperblock(sbBuf.get(), fsBlockSize, &js)) {
+        return false;
+    }
+    if (js.blockSize != fsBlockSize) {
+        return false;  // v1 단순화 - 저널 자신의 블록 크기가 fs 블록 크기와 다른 조합은 실측 안 함
+    }
+    if (js.start == 0) {
+        return true;  // 저널이 비어 있음(클린 상태) - 리플레이할 트랜잭션 없음
+    }
+    const bool csumV3 = (js.featureIncompat & kJbd2FeatureIncompatCsumV3) != 0;
+    if (!csumV3 && (js.featureIncompat & (kJbd2FeatureIncompat64Bit | kJbd2FeatureIncompatCsumV2)) != 0) {
+        return false;  // kJbd2ParseDescriptorTags와 동일한 이유의 정직한 실패
+    }
+    const bool is64Bit = (js.featureIncompat & kJbd2FeatureIncompat64Bit) != 0;
+    const uint32_t csumSeed = csumV3 ? kJbd2ComputeCsumSeed(js.uuid) : 0;
+
+    const uint32_t maxTagsPerBlock = fsBlockSize / 8u;      // 최소 태그 크기(v1, 8바이트) 기준 상한
+    const uint32_t maxRevokesPerBlock = fsBlockSize / 4u;   // 최소 레코드 크기(4바이트) 기준 상한
+    SlabBuf blockBuf(fsBlockSize);
+    SlabBuf dataBuf(fsBlockSize);
+    auto* tags = static_cast<DescriptorTag*>(kernel::GenericSlabAllocator::alloc(maxTagsPerBlock * sizeof(DescriptorTag)));
+    auto* revokeBlockNrs =
+        static_cast<uint64_t*>(kernel::GenericSlabAllocator::alloc(maxRevokesPerBlock * sizeof(uint64_t)));
+    auto* revokeTable =
+        static_cast<RevokeEntry*>(kernel::GenericSlabAllocator::alloc(js.maxLen * sizeof(RevokeEntry)));
+    bool allocOk = blockBuf && dataBuf && tags && revokeBlockNrs && revokeTable;
+    uint32_t revokeCount = 0;
+
+    uint32_t endTransaction = 0;
+    bool ok = allocOk;
+
+    auto wrap = [&](uint32_t& b) {
+        if (b >= js.maxLen) {
+            b -= (js.maxLen - js.first);
+        }
+    };
+
+    for (int passIndex = 0; passIndex < 3 && ok; ++passIndex) {
+        const bool isScan = (passIndex == 0);
+        const bool isReplay = (passIndex == 2);
+
+        uint32_t nextLogBlock = js.start;
+        uint32_t nextCommitId = js.sequence;
+
+        while (true) {
+            if (!isScan && nextCommitId >= endTransaction) {
+                break;
+            }
+            if (!kJbd2ReadJournalBlock(device, fsBlockSize, journalInode.block, nextLogBlock, blockBuf.get())) {
+                ok = false;
+                break;
+            }
+            JournalHeader hdr;
+            memcpy(&hdr, blockBuf.get(), sizeof(hdr));
+            if (kJbd2Be32(hdr.magic) != kJbd2Magic) {
+                break;  // 로그의 실제 끝
+            }
+            const uint32_t blockType = kJbd2Be32(hdr.blockType);
+            const uint32_t sequence = kJbd2Be32(hdr.sequence);
+            if (sequence != nextCommitId) {
+                break;  // 기대한 트랜잭션 번호가 아님 - 여기서 로그가 끝난 것으로 간주
+            }
+
+            ++nextLogBlock;
+            wrap(nextLogBlock);
+
+            if (blockType == kJbd2BlockTypeDescriptor) {
+                if (isScan && csumV3 && !kJbd2VerifyBlockTailChecksum(csumSeed, blockBuf.get(), fsBlockSize)) {
+                    break;  // 손상된 디스크립터 블록 - 로그 끝으로 간주(v1 단순화)
+                }
+                const uint32_t tagCount =
+                    kJbd2ParseDescriptorTags(blockBuf.get(), fsBlockSize, js.featureIncompat, tags, maxTagsPerBlock);
+                if (!isReplay) {
+                    nextLogBlock += tagCount;
+                    wrap(nextLogBlock);
+                    continue;
+                }
+                for (uint32_t t = 0; t < tagCount && ok; ++t) {
+                    if (!kJbd2ReadJournalBlock(device, fsBlockSize, journalInode.block, nextLogBlock, dataBuf.get())) {
+                        ok = false;
+                        break;
+                    }
+                    ++nextLogBlock;
+                    wrap(nextLogBlock);
+                    const uint64_t targetBlockNr = tags[t].blockNr;
+                    if (kJbd2RevokeTest(revokeTable, revokeCount, targetBlockNr, nextCommitId)) {
+                        continue;  // 리보크됨 - 이 사본은 버리고 다음 태그로
+                    }
+                    if (csumV3 && !kJbd2VerifyTagChecksum(csumSeed, nextCommitId, dataBuf.get(), fsBlockSize,
+                                                           tags[t].checksum)) {
+                        ok = false;  // 데이터 블록 손상 - 안전하게 전체 리플레이 중단
+                        break;
+                    }
+                    if (tags[t].flags & kJbd2TagFlagEscape) {
+                        const uint32_t realMagicBe = kJbd2Be32(kJbd2Magic);
+                        memcpy(dataBuf.get(), &realMagicBe, sizeof(realMagicBe));
+                    }
+                    if (!writeExtBlocksImpl(device, fsBlockSize, targetBlockNr, 1, dataBuf.get())) {
+                        ok = false;
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if (blockType == kJbd2BlockTypeCommit) {
+                if (isScan) {
+                    if (csumV3 && !kJbd2VerifyCommitChecksum(csumSeed, blockBuf.get(), fsBlockSize)) {
+                        break;  // 커밋 체크섬 불일치 - 이 트랜잭션은 미완결로 간주
+                    }
+                }
+                ++nextCommitId;
+                continue;
+            }
+
+            if (blockType == kJbd2BlockTypeRevoke) {
+                if (isReplay) {
+                    continue;  // REPLAY 패스는 리보크 블록 자체를 건너뜀(REVOKE 패스가 이미 처리)
+                }
+                if (isScan) {
+                    if (csumV3 && !kJbd2VerifyBlockTailChecksum(csumSeed, blockBuf.get(), fsBlockSize)) {
+                        break;  // 손상된 리보크 블록 - 로그 끝으로 간주
+                    }
+                    continue;  // SCAN은 태그 파싱까지 필요 없음 - REVOKE 패스에서 실제로 채운다
+                }
+                // REVOKE 패스
+                RevokeHeader rh;
+                memcpy(&rh, blockBuf.get(), sizeof(rh));
+                const uint32_t byteCount = kJbd2Be32(rh.count);
+                const uint32_t n = kJbd2ParseRevokeRecords(blockBuf.get(), fsBlockSize, byteCount, is64Bit,
+                                                            revokeBlockNrs, maxRevokesPerBlock);
+                for (uint32_t i = 0; i < n; ++i) {
+                    kJbd2RevokeSet(revokeTable, &revokeCount, js.maxLen, revokeBlockNrs[i], nextCommitId);
+                }
+                continue;
+            }
+
+            break;  // 인식 못 한 블록 타입 - 로그 끝
+        }
+
+        if (isScan) {
+            endTransaction = nextCommitId;
+        }
+    }
+
+    // [추가, 2026-09-26, PN-BC3A2F5F] 성공적으로 리플레이를 마쳤으면
+    // Linux의 jbd2_journal_recover() 마지막 단계(저널 슈퍼블록 리셋 +
+    // ext4 슈퍼블록의 INCOMPAT_RECOVER 비트 해제)를 그대로 재현한다 -
+    // 이걸 안 하면 다음 마운트가 "여전히 리플레이 필요"로 보고 또
+    // 리플레이를 시도하는데, 이미 정상 파일시스템 위로 다시
+    // 리플레이하면 오히려 최신 데이터를 옛 저널 사본으로 덮어써
+    // 손상시킬 위험이 있다(실측으로 재확인: 클리어 안 하면 e2fsck -n/
+    // 읽기전용 재마운트가 계속 "recovering journal"로 본다).
+    if (ok) {
+        js.start = 0;
+        js.sequence = endTransaction + 1;
+        uint32_t rawStart = kJbd2Be32(js.start);
+        uint32_t rawSequence = kJbd2Be32(js.sequence);
+        memcpy(sbBuf.get() + offsetof(JournalSuperblockV2, start), &rawStart, sizeof(rawStart));
+        memcpy(sbBuf.get() + offsetof(JournalSuperblockV2, sequence), &rawSequence, sizeof(rawSequence));
+        // [실측으로 발견, 2026-09-26] CSUM_V3 저널은 저널 슈퍼블록
+        // 자신도 체크섬으로 보호된다(`journal_superblock_t::s_checksum`,
+        // 오프셋 0xFC=252, Linux `jbd2_superblock_csum()` - 그 필드
+        // 자신만 0으로 두고 정확히 1024바이트(sizeof(journal_superblock_t),
+        // 저널 블록 크기가 더 커도 이 1024바이트만) crc32c) - 이걸
+        // 안 고치면 s_start/s_sequence를 바꾼 다음 e2fsck가 즉시
+        // "journal superblock is corrupt"로 거부한다(실측 재현).
+        if (csumV3 && fsBlockSize >= 1024) {
+            constexpr uint32_t kJournalSbChecksumOffset = 252;
+            constexpr uint32_t kJournalSbChecksumSize = 1024;
+            uint32_t zero = 0;
+            memcpy(sbBuf.get() + kJournalSbChecksumOffset, &zero, sizeof(zero));
+            const uint32_t newChecksum = kCrc32c(0xFFFFFFFFu, sbBuf.get(), kJournalSbChecksumSize);
+            const uint32_t newChecksumBe = kJbd2Be32(newChecksum);
+            memcpy(sbBuf.get() + kJournalSbChecksumOffset, &newChecksumBe, sizeof(newChecksumBe));
+        }
+        uint64_t journalSbPhysical = 0;
+        if (kExt4ResolveInlineExtent(journalInode.block, 0, &journalSbPhysical)) {
+            ok = writeExtBlocksImpl(device, fsBlockSize, journalSbPhysical, 1, sbBuf.get());
+        } else {
+            ok = false;
+        }
+    }
+    if (ok) {
+        const kernel::uint32_t devBlockSize = device->blockSize();
+        const kernel::uint64_t sbStartBlock = kSuperblockOffset / devBlockSize;
+        const kernel::uint32_t sbByteOffsetInBlock = static_cast<kernel::uint32_t>(kSuperblockOffset % devBlockSize);
+        const kernel::uint32_t sbBlocksNeeded =
+            static_cast<kernel::uint32_t>(kCeilDiv(sbByteOffsetInBlock + sizeof(SuperblockCore), devBlockSize));
+        SlabBuf esbBuf(sbBlocksNeeded * devBlockSize);
+        if (!esbBuf || !device->readBlocks(sbStartBlock, sbBlocksNeeded, esbBuf.get())) {
+            ok = false;
+        } else {
+            uint32_t featureIncompat;
+            const uint32_t fiOffset = sbByteOffsetInBlock + static_cast<uint32_t>(offsetof(SuperblockCore, featureIncompat));
+            memcpy(&featureIncompat, esbBuf.get() + fiOffset, sizeof(featureIncompat));
+            featureIncompat &= ~kIncompatRecover;
+            memcpy(esbBuf.get() + fiOffset, &featureIncompat, sizeof(featureIncompat));
+            // [실측으로 발견, 2026-09-26] RO_COMPAT_METADATA_CSUM
+            // 볼륨은 슈퍼블록 자신도 체크섬으로 보호된다 - featureIncompat
+            // 만 고치고 s_checksum을 그대로 두면 "Superblock checksum
+            // does not match superblock"로 그 즉시 손상 취급된다(다음
+            // 마운트 시도로 바로 재현됨). featureRoCompat도 슈퍼블록
+            // 안에 있으므로 이 esbBuf에서 그대로 다시 읽는다.
+            uint32_t featureRoCompat;
+            const uint32_t frOffset = sbByteOffsetInBlock + static_cast<uint32_t>(offsetof(SuperblockCore, featureRoCompat));
+            memcpy(&featureRoCompat, esbBuf.get() + frOffset, sizeof(featureRoCompat));
+            if (featureRoCompat & kRoCompatMetadataCsum) {
+                const uint32_t newChecksum = kExt4ComputeSuperblockChecksum(esbBuf.get() + sbByteOffsetInBlock);
+                memcpy(esbBuf.get() + sbByteOffsetInBlock + kSuperblockChecksumOffset, &newChecksum,
+                       sizeof(newChecksum));
+            }
+            ok = device->writeBlocks(sbStartBlock, sbBlocksNeeded, esbBuf.get());
+        }
+    }
+
+    if (tags) {
+        kernel::GenericSlabAllocator::free(tags, maxTagsPerBlock * sizeof(DescriptorTag));
+    }
+    if (revokeBlockNrs) {
+        kernel::GenericSlabAllocator::free(revokeBlockNrs, maxRevokesPerBlock * sizeof(uint64_t));
+    }
+    if (revokeTable) {
+        kernel::GenericSlabAllocator::free(revokeTable, js.maxLen * sizeof(RevokeEntry));
+    }
+    return ok;
 }
 
 bool Ext4Volume::mount(fs::BlockDevice* device) {
@@ -888,9 +1348,14 @@ bool Ext4Volume::mount(fs::BlockDevice* device) {
     if ((sb_.featureIncompat & ~kSupportedIncompatMask) != 0) {
         return false;  // 이 v1이 모르는 incompat 비트 - 안전하게 마운트 거부
     }
-    if ((sb_.state & kStateValidFs) == 0) {
-        return false;  // 비정상 언마운트 - 저널 리플레이는 §2.2 후속, v1은 항상 거부
-    }
+    // [갱신, 2026-09-26, PN-BC3A2F5F] "비정상 언마운트면 무조건 거부"
+    // 하던 v1 안전장치를 저널 리플레이로 대체한다 - 저널 inode를
+    // 찾으려면 그룹 디스크립터 테이블(아래 3단계)까지 다 읽어야 하므로,
+    // 여기서는 플래그만 세우고 계속 진행한다(실제 리플레이 시도는
+    // 이 함수 끝, GDT 설정이 끝난 뒤). **[정정, 2026-09-26]** 신호는
+    // `state`의 kStateValidFs가 아니라 `featureIncompat`의
+    // kIncompatRecover다 - 위 ext4.h 문서 주석 참고(실측으로 바로잡음).
+    const bool needsRecovery = (sb_.featureIncompat & kIncompatRecover) != 0;
     if (sb_.inodesPerGroup == 0 || sb_.blocksPerGroup == 0 || sb_.inodeSize == 0) {
         return false;
     }
@@ -941,6 +1406,21 @@ bool Ext4Volume::mount(fs::BlockDevice* device) {
     is64Bit_ = (onDiskDescSize == sizeof(GroupDesc64));
 
     device_ = device;
+
+    // 4) [추가, 2026-09-26, PN-BC3A2F5F] 비정상 언마운트였다면 이제
+    // (그룹 디스크립터까지 다 준비된 뒤) 저널 리플레이를 실제로
+    // 시도한다 - 저널이 없거나(HAS_JOURNAL 미설정), 리플레이 도중
+    // 손상/미지원 조합을 만나면 정직하게 마운트를 거부한다(예전
+    // v1 안전장치와 동일한 실패 경로, 다만 이제 "시도라도 해 봤다"는
+    // 차이). 성공하면(리플레이할 게 없었던 경우 포함) 계속 진행 -
+    // 이 시점 이후 mount()의 나머지 호출자(Ext4Driver 등)는 파일시스템이
+    // 이미 클린 상태라고 가정해도 된다.
+    if (needsRecovery && !kJbd2ReplayJournal(device, sb_, *this, groupCount_, blockSize_)) {
+        kernel::GenericSlabAllocator::free(groupDescsRaw_, gdtBlocks * blockSize_);
+        groupDescsRaw_ = nullptr;
+        device_ = nullptr;
+        return false;
+    }
     return true;
 }
 

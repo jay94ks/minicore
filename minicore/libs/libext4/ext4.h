@@ -83,7 +83,13 @@ struct SuperblockCore {
     // mke2fs 기본 이미지의 "Directory Hash Seed"/"Default directory
     // hash" 덤프값과 옵셋까지 일치 확인(PN-9AA8B1EF, 아래 htree 절
     // 참고). 앞뒤 나머지는 여전히 이름 없는 배열로 건너뛴다.
-    uint8_t reservedBeforeHashSeed[32];  // 204~236 - preallocBlocks/preallocDirBlocks/reservedGdtBlocks/journalUuid/journalInum/journalDev/lastOrphan
+    // [분할, 2026-09-26, PN-BC3A2F5F] 위 132바이트 갭 중 journalInum만
+    // 저널 리플레이(§2.2 항목2)에 필요해 이름 있는 필드로 뽑아냈다 -
+    // 오프셋 224는 이미 위 주석에서 실측 확인된 값 그대로(저널 inode
+    // 번호 8과 일치) - 전후 나머지는 여전히 이름 없는 배열.
+    uint8_t reservedPreJournalInum[20];   // 204~224 - preallocBlocks/preallocDirBlocks/reservedGdtBlocks/journalUuid
+    uint32_t journalInum;                 // 224 - 저널 파일의 inode 번호(featureCompat의 kCompatHasJournal일 때만 유효, 보통 8)
+    uint8_t reservedAfterJournalInum[8];  // 228~236 - journalDev/lastOrphan
     uint32_t hashSeed[4];                // 236(0xEC)~252 - dx_hash_info 계산에 쓰는 4-word 시드
     uint8_t defHashVersion;              // 252(0xFC) - htree 기본 해시 알고리즘(1=DX_HASH_HALF_MD4)
     uint8_t reservedAfterHashVersion[83];  // 253~336 - jnlBackupType/descSize/defaultMountOpts/firstMetaBg/mkfsTime/jnlBlocks[17]
@@ -119,6 +125,25 @@ constexpr uint32_t kStateValidFs = 0x1;
 // 선언부 참고.
 constexpr uint32_t kSuperblockChecksumOffset = 0x3FC;
 
+// [추가, 2026-09-26, PN-BC3A2F5F] EXT4_FEATURE_COMPAT_HAS_JOURNAL -
+// Linux 커널 fs/ext4/ext4.h와 대조 확정(이 프로젝트가 새로 고안한
+// 값 아님). SuperblockCore::featureCompat에 이 비트가 있어야
+// journalInum이 유효하다 - 저널 리플레이(§2.2 항목2) 착수 조건.
+constexpr uint32_t kCompatHasJournal = 0x00000004;
+
+// [정정, 2026-09-26, PN-BC3A2F5F] 실측(실제 리눅스 커널로 마운트 중인
+// 이미지를 스냅샷 떠서 확인)으로 발견: "비정상 언마운트 → 리플레이
+// 필요"의 진짜 신호는 `SuperblockCore::state`의 kStateValidFs가 아니라
+// 이 incompat 비트다(로컬 커널 소스 fs/ext4/super.c의
+// `ext4_has_feature_journal_needs_recovery()`가 마운트 시점에 실제로
+// 검사하는 것도 이 비트 - `s_last_orphan!=0`과 OR로 묶여 있으나 orphan
+// 처리는 이 프로젝트 v1 범위 밖). kStateValidFs("정상 언마운트")는
+// 저널링 파일시스템에서는 청소 여부와 거의 무관하게 대체로 켜져 있어
+// (저널이 일관성을 보장하므로 fsck 강제가 불필요) 리플레이 필요
+// 여부의 신호로 쓸 수 없다는 게 실측으로 확인됐다 - 처음(§2.2 준비
+// 단계)에 kStateValidFs를 신호로 잘못 짚었던 걸 이번에 바로잡는다.
+constexpr uint32_t kIncompatRecover = 0x00000004;
+
 constexpr uint32_t kIncompatFiletype = 0x2;
 constexpr uint32_t kIncompatExtents = 0x40;
 constexpr uint32_t kIncompatFlexBg = 0x200;
@@ -145,7 +170,12 @@ constexpr uint32_t kIncompat64Bit = 0x80;
 // 합성해 주므로, 이 안전장치는 더 이상 필요 없어 제거했다 - 4G 블록을
 // 실제로 초과하는 대용량 볼륨도 이제 정확한 64비트 주소로 inode 테이블에
 // 접근한다(§2.2 항목4 나머지 해소).
-constexpr uint32_t kSupportedIncompatMask = kIncompatFiletype | kIncompatExtents | kIncompatFlexBg | kIncompat64Bit;
+// [갱신, 2026-09-26, PN-BC3A2F5F] kIncompatRecover 추가 - 비정상
+// 언마운트 이미지는 이 비트가 켜진 채로 들어오는 게 정상이라(바로 위
+// 문서 주석 참고) 허용 목록에 없으면 리플레이를 시도하기도 전에
+// 무조건 거부하게 된다.
+constexpr uint32_t kSupportedIncompatMask =
+    kIncompatFiletype | kIncompatExtents | kIncompatFlexBg | kIncompat64Bit | kIncompatRecover;
 
 // [추가, PN-59C253E9] `*Lo`/`*Hi` 필드 쌍을 실제 64비트 값으로 합성 -
 // 리눅스 커널 `ext4_blocks_count()`/`ext4_r_blocks_count()`/
@@ -527,6 +557,33 @@ inline bool kExt4AppendInlineExtent(uint8_t block60[kExtentInlineBytes], uint32_
     ++header.entries;
     memcpy(block60, &header, sizeof(header));
     return true;
+}
+
+// [추가, 2026-09-26, PN-BC3A2F5F] logicalBlock(파일 안에서 몇 번째
+// 블록인지)이 속한 인라인 익스텐트를 찾아 실제 물리 블록 번호로
+// 바꾼다 - 저널 리플레이가 저널 inode(보통 8번)의 데이터 블록을
+// 찾는 데 쓴다. `kExt4AppendInlineExtent`와 마찬가지로 depth==0
+// 인라인 리프(최대 4개 익스텐트)만 지원 - depth>0(익스텐트 트리
+// 확장, PN-81C6322C §5)이 필요한 저널은 이 v1 범위 밖(정직하게
+// false, RM-23F4B687 §4 취지). 순수 함수(I/O 없음).
+inline bool kExt4ResolveInlineExtent(const uint8_t block60[kExtentInlineBytes], uint32_t logicalBlock,
+                                      uint64_t* outPhysicalBlock) {
+    ExtentHeader header;
+    memcpy(&header, block60, sizeof(header));
+    if (header.magic != kExtentMagic || header.depth != 0) {
+        return false;
+    }
+    for (uint16_t i = 0; i < header.entries && i < kExtentInlineMaxEntries; ++i) {
+        Extent ext;
+        memcpy(&ext, block60 + sizeof(ExtentHeader) + i * sizeof(Extent), sizeof(ext));
+        const uint32_t len = ext.len & ~kExtentUninitLenBit;
+        if (logicalBlock >= ext.block && logicalBlock < ext.block + len) {
+            const uint64_t physicalStart = (static_cast<uint64_t>(ext.startHi) << 32) | ext.startLo;
+            *outPhysicalBlock = physicalStart + (logicalBlock - ext.block);
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------
@@ -1155,8 +1212,13 @@ constexpr uint32_t kJbd2TagFlagLastTag = 8;   // 이 태그가 디스크립터 �
 // 정규화된 태그 하나 - v1(8바이트)/v3(16바이트) 두 온디스크 포맷
 // 중 무엇으로 읽었는지와 무관하게 호출자에게는 이 형태로 준다.
 struct DescriptorTag {
-    uint64_t blockNr;  // 대상 파일시스템 블록 번호(v1은 항상 32비트 범위, v3는 blocknrHigh 결합)
-    uint32_t flags;    // kJbd2TagFlag* 비트마스크(호스트 엔디안)
+    uint64_t blockNr;   // 대상 파일시스템 블록 번호(v1은 항상 32비트 범위, v3는 blocknrHigh 결합)
+    uint32_t flags;     // kJbd2TagFlag* 비트마스크(호스트 엔디안)
+    // [추가, 2026-09-26, PN-BC3A2F5F] CSUM_V3 태그의 32비트 crc32c
+    // 체크섬(호스트 엔디안) - v1 태그는 이 필드가 애초에 없으므로
+    // 항상 0(호출부가 CSUM_V3 여부로 이미 분기해야 하므로 0을
+    // "체크섬 없음"과 혼동할 일이 없다 - v1은 어차피 검증 생략).
+    uint32_t checksum;
 };
 
 // 디스크립터 블록(JournalHeader로 시작, blockType==
@@ -1172,6 +1234,50 @@ struct DescriptorTag {
 // 상태 변경도 하지 않는다(태그 목록만 뽑아낼 뿐 리플레이가 아니다).
 uint32_t kJbd2ParseDescriptorTags(const void* rawBlock, uint32_t blockLen, uint32_t featureIncompat,
                                    DescriptorTag* outTags, uint32_t maxTags);
+
+// ---------------------------------------------------------------------
+// [추가, 2026-09-26, PN-BC3A2F5F] 저널 리플레이(§2.2 항목2) 본 작업 -
+// Linux 커널 fs/jbd2/recovery.c(do_one_pass, scan_revoke_records)/
+// revoke.c(jbd2_journal_set_revoke/test_revoke)와 대조 확정한 순수
+// 함수들. 리플레이 알고리즘 자체(3-pass: SCAN → REVOKE → REPLAY)는
+// Ext4Volume::mount()가 조립한다(그 함수가 이미 기존 group descriptor
+// 테이블 읽기 등에 쓰는 것과 같은 "진짜 kernel::Task 컨텍스트의
+// 1회 준비 단계라 동기 I/O 안전" 근거 그대로 - onExec 코루틴이 아님).
+// ---------------------------------------------------------------------
+
+// 리보크 블록(RevokeHeader로 시작) 하나에서 실제 블록 번호 배열을
+// 뽑는다 - `header.count`(그 블록에서 실제 쓰인 바이트 수, 헤더
+// 포함)만큼만 훑고, 레코드 폭은 64BIT incompat 여부로 4/8바이트
+// (빅엔디안)가 갈린다(Linux `scan_revoke_records`와 동일). 순수 함수
+// (I/O 없음) - 순서는 온디스크 그대로(호출부가 시퀀스 번호와 함께
+// revoke 테이블에 넣을 것).
+uint32_t kJbd2ParseRevokeRecords(const void* rawBlock, uint32_t blockLen, uint32_t headerCount, bool is64Bit,
+                                   uint64_t* outBlockNrs, uint32_t maxRecords);
+
+// CSUM_V2/V3 저널의 체크섬 시드 - `crc32c(0xFFFFFFFF, journalUuid, 16)`
+// (Linux `journal->j_csum_seed` 초기화, fs/jbd2/journal.c와 동일).
+inline uint32_t kJbd2ComputeCsumSeed(const uint8_t journalUuid[16]) { return kCrc32c(0xFFFFFFFFu, journalUuid, 16); }
+
+// 디스크립터/리보크 블록 공용 꼬리 체크섬(`jbd2_journal_block_tail`,
+// 블록 마지막 4바이트) 검증 - 체크섬 필드 자신은 0으로 간주하고
+// 나머지 블록 전체를 해시한다(Linux `jbd2_descriptor_block_csum_verify`
+// 와 동일 공식, ext4의 다른 metadata_csum류와 같은 "체크섬 필드
+// 자신만 0" 관례). csumSeed는 위 kJbd2ComputeCsumSeed()의 결과.
+bool kJbd2VerifyBlockTailChecksum(uint32_t csumSeed, const void* rawBlock, uint32_t blockLen);
+
+// 커밋 블록 체크섬(`CommitHeader::chksum[0]`) 검증 - 그 필드만 0으로
+// 간주하고 블록 전체를 해시(Linux `jbd2_commit_block_csum_verify`와
+// 동일). 체크섬 기능이 꺼진 저널(v1)에서는 호출부가 아예 부르지
+// 않을 것 - 이 함수 자신은 항상 검증을 시도한다.
+bool kJbd2VerifyCommitChecksum(uint32_t csumSeed, const void* rawBlock, uint32_t blockLen);
+
+// 리플레이 대상 데이터 블록 하나의 CSUM_V3 태그 체크섬 검증 -
+// `crc32c(crc32c(csumSeed, sequence_be32), blockData)`를 태그의
+// 32비트 체크섬과 비교(Linux `jbd2_block_tag_csum_verify`의 CSUM_V3
+// 분기와 동일 - v1/CSUM_V2는 이 프로젝트가 지원하지 않으므로 호출
+// 안 함).
+bool kJbd2VerifyTagChecksum(uint32_t csumSeed, uint32_t sequence, const void* blockData, uint32_t blockLen,
+                             uint32_t providedChecksum);
 
 // ---------------------------------------------------------------------
 // 3.7 쿼터 파일 온디스크 포맷 "quota v2"(vfsv0/vfsv1, PN-D168A778 준비
