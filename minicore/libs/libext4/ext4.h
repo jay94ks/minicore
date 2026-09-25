@@ -625,6 +625,71 @@ bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t has
 bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* name, uint8_t nameLen,
                           uint8_t* outFileType);
 
+// [신규, 2026-09-25, PN-9AA8B1EF 준비 작업 - htree 리프 분할] 리프가
+// 꽉 찼을 때 두 블록으로 나누는 지점을 고르는 순수 계산 - 리눅스 커널
+// `fs/ext4/namei.c`의 `do_split()`가 쓰는 것과 동일한 알고리즘(이
+// 프로젝트가 새로 고안한 게 아니다, WSL2-Linux-Kernel 로컬 소스 확인):
+// 호출부가 이미 해시 오름차순으로 정렬해 둔 각 엔트리의 (hash, size)
+// 배열을 받아, **뒤에서부터** slack 없는 "정확한 필요 크기"(size)를
+// 누적하며 그 합이 블록의 절반을 넘기 직전까지 옮길 개수(move)를
+// 정한다 - 활성 엔트리 총합이 애초에 블록 절반을 안 넘으면(드묾, 원
+// 커널 주석 "just split it in half by count") 개수 기준 반절로
+// 대체한다. `hash2`(분할 경계 해시, 새 블록의 첫 엔트리 해시)와
+// `continued`(경계에서 같은 해시가 걸쳐 있는지 - dx_root에 넣을
+// 인덱스 해시를 `hash2+continued`로 보정하는 데 씀, 아래
+// `kExt4DxComputeSplitPoint` 호출부가 처리)까지 함께 낸다.
+struct DxSplitPoint {
+    uint32_t splitIndex;  // [0, splitIndex)는 기존 블록에 남고 [splitIndex, count)는 새 블록으로
+    uint32_t hash2;       // 새 블록의 첫 엔트리 해시(분할 경계)
+    bool continued;       // hash2가 splitIndex-1 엔트리와 같은 해시를 공유하는지
+};
+
+inline bool kExt4DxComputeSplitPoint(const uint32_t* hashesAscending, const uint32_t* sizesSameOrder,
+                                       uint32_t count, uint32_t usableBlockSize, DxSplitPoint* outSplit) {
+    if (count < 2) {
+        return false;  // 최소 두 엔트리는 있어야 의미 있게 나뉜다
+    }
+    const uint32_t half = usableBlockSize / 2;
+    uint32_t sizeAcc = 0;
+    uint32_t move = 0;
+    kernel::int32_t i = static_cast<kernel::int32_t>(count) - 1;
+    for (; i >= 0; --i) {
+        if (sizeAcc + sizesSameOrder[i] / 2 > half) {
+            break;
+        }
+        sizeAcc += sizesSameOrder[i];
+        ++move;
+    }
+    const uint32_t split = (i >= 0) ? (count - move) : (count / 2);
+    if (split == 0 || split >= count) {
+        return false;  // 방어적 - 실제로 꽉 찬 리프에서는 일어나지 않아야 정상
+    }
+    outSplit->splitIndex = split;
+    outSplit->hash2 = hashesAscending[split];
+    outSplit->continued = (hashesAscending[split - 1] == outSplit->hash2);
+    return true;
+}
+
+// [신규, 2026-09-25, PN-9AA8B1EF 준비 작업 - htree 리프 분할] dx_root/
+// dx_node 블록 끝의 `dx_tail` 체크섬(`dt_checksum`, RO_COMPAT_METADATA_
+// CSUM 볼륨 전용) - 리눅스 커널 `fs/ext4/namei.c`의 `ext4_dx_csum()`과
+// 동일한 알고리즘(WSL2-Linux-Kernel 로컬 소스 확인). **`kExt4ComputeDirBlockChecksum`
+// 과는 별개의 다른 체크섬 위치/공식**이다 - 실측으로 처음 확인한
+// 중요한 함정: dx_tail은 `countOffset + limit*8`(디스크에 기록된
+// dx_countlimit::limit 기준, 즉 그 인덱스 블록의 "최대 용량" 자리)에
+// 있지, `countOffset + count*8`(현재 실제 엔트리 개수까지의 자리 -
+// count < limit이 흔한 정상 상태)이 아니다 - 해시 대상 범위는
+// count 기준(`size = countOffset + count*8`)이지만 체크섬 필드
+// 자체의 물리적 위치는 limit 기준이라는 게 서로 다르다. 또한
+// `dt_reserved`(체크섬 앞의 4바이트)는 다른 체크섬류처럼 0으로
+// 간주하지 않고 **디스크에 실제로 있는 값 그대로** 해시에 포함시킨다
+// (체크섬 필드 자신만 0으로 간주). 실제 `mke2fs -O metadata_csum`
+// 이미지의 진짜 dx_root 블록(count=50, limit=123) 대상으로 host-side
+// 표준 프로그램으로 재현해 실제 `dt_checksum` 값과 1바이트도 안 틀리게
+// 일치 확인.
+uint32_t kExt4ComputeDxTailChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                     const void* blockData, uint32_t countOffset, uint32_t count, uint32_t limit);
+
 // ---------------------------------------------------------------------
 // [신규, 2026-09-25, PN-9AA8B1EF 2단계] htree(해시 인덱스 디렉터리)
 // 쓰기 지원 - 리눅스 커널 fs/ext4/hash.c의 half_md4 해시(WSL2-Linux-Kernel

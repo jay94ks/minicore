@@ -362,6 +362,23 @@ uint32_t kExt4ComputeDirBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum,
     return kCrc32c(seed, dirBlockData, blockSize - static_cast<uint32_t>(sizeof(DirEntryTail)));
 }
 
+uint32_t kExt4ComputeDxTailChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                     const void* blockData, uint32_t countOffset, uint32_t count, uint32_t limit) {
+    const uint8_t* raw = static_cast<const uint8_t*>(blockData);
+    uint32_t seed = kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), &inodeNum, sizeof(inodeNum));
+    seed = kCrc32c(seed, &generation, sizeof(generation));
+    const uint32_t hashSize = countOffset + count * 8u;
+    uint32_t crc = kCrc32c(seed, raw, hashSize);
+    // dx_tail은 count가 아니라 limit 기준 오프셋에 있다(위 ext4.h 문서
+    // 주석 참고) - dt_reserved는 실제 온디스크 값 그대로 해시하고,
+    // dt_checksum 필드 자신만 0으로 간주한다.
+    const uint32_t tailOffset = countOffset + limit * 8u;
+    crc = kCrc32c(crc, raw + tailOffset, 4);
+    const uint32_t dummyChecksum = 0;
+    crc = kCrc32c(crc, &dummyChecksum, sizeof(dummyChecksum));
+    return crc;
+}
+
 bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t hasTailBytes, uint32_t inode,
                           const char* name, uint8_t nameLen, uint8_t fileType) {
     const uint32_t reclenNeeded = kExt4DirRecLen(nameLen);
