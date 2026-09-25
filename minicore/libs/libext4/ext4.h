@@ -1063,6 +1063,130 @@ struct QuotaV2Info {
 static_assert(sizeof(QuotaV2Info) == 24, "QuotaV2Info는 24바이트");
 #pragma pack(pop)
 
+// ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-D168A778] quota v2 레코드 radix-tree
+// (`fs/quota/quota_tree.c`) - 이전 준비 작업이 "실제 사용량이 기록된
+// 이미지가 없어 검증 못함, 범위 밖"으로 남겨 뒀던 부분. 이번엔 실제
+// `quota` 패키지를 설치(WSL, sudo apt-get install quota)하고 loop
+// mount + `setquota`로 uid 0(root, quotacheck가 자동 기록)/1001/1002
+// 세 사용자의 실제 레코드가 채워진 이미지를 만들어 1바이트 단위까지
+// 대조 완료 - 세 레코드 전부(ihardlimit/isoftlimit/curinodes/
+// bhardlimit/bsoftlimit/curspace/btime/itime 8개 필드) `repquota`
+// 출력과 정확히 일치.
+//
+// **트리 구조 실측 결과**: 쿼터 파일의 두 번째 1024바이트 블록
+// (파일 블록 인덱스 `kQtreeTreeOff`=1)이 루트 인덱스 노드 - 1024바이트
+// 블록 기준 `epb`(entries per block)=256(4바이트 참조 256개)이고
+// `kQtreeDepth(1024)`=4단계 인덱스 홉(레벨 0~3, 각 레벨에서 id의
+// 해당 바이트로 다음 파일 블록 인덱스를 찾음) 뒤에야 실제 리프
+// 블록에 도달한다 - id=0(root)/1001/1002 전부 상위 두 레벨(레벨0/1)
+// 에서는 인덱스 0을 공유(전부 65536 미만)하고, 레벨2에서 갈라짐
+// (root는 0, 1001·1002는 `(id>>8)&0xFF`=3으로 동일) - 레벨3
+// (`id&0xFF`)에서는 root=0, 1001=233, 1002=234로 서로 다른 슬롯을
+// 쓰지만, **실측 결과 셋 다 결국 같은 리프 블록(파일 블록 인덱스
+// 5)을 가리켰다** - `QuotaV2Info::freeEntry`가 가리키는 "빈 자리
+// 있는 블록"을 재사용하는 할당 정책 때문으로 보인다(쓰기 경로 고유
+// 동작 - 이 갭 자체는 읽기 전용 순회 로직과 무관, 그냥 "인덱스가
+// 갈라져도 같은 리프를 공유할 수 있다"는 사실만 알면 충분).
+//
+// v1은 순수 계산 함수만 제공한다(단계별 인덱스 계산, 리프 엔트리
+// 파싱/탐색) - 여러 블록을 오가는 실제 I/O 순회는 아직 이 순수
+// 함수들을 쓸 실제 소비자(예: uid별 쿼터 조회 syscall)가 없어
+// ext4_driver.cpp에 배선하지 않는다(불필요한 추상화를 미리 만들지
+// 않는다는 이 프로젝트의 원칙) - 실제 소비자가 생기면 Open/Read
+// 케이스의 익스텐트 순회(`kLookupExtent`+`NeedChild` 루프)와 동일한
+// 패턴으로 그 소비자 쪽에서 조립할 것.
+// ---------------------------------------------------------------------
+constexpr uint32_t kQtreeTreeOff = 1;  // QT_TREEOFF - 쿼터 파일의 두 번째 블록(파일 블록 인덱스 1)부터 트리 루트
+
+// 1024바이트 블록 기준 리프 엔트리 하나(quota v2r1, e2fsprogs/커널
+// 공용 온디스크 레코드) - id(4)+pad(4) 뒤에 8바이트 정수 8개가
+// 이어진다. 실측(uid 0/1001/1002 세 레코드 전부)으로 필드 순서
+// 확정: ihardlimit → isoftlimit → curinodes → bhardlimit →
+// bsoftlimit → curspace(바이트 단위, 블록 수 아님) → btime → itime.
+#pragma pack(push, 1)
+struct QuotaV2DiskDqblk {
+    uint32_t id;
+    uint32_t pad;
+    uint64_t ihardlimit;
+    uint64_t isoftlimit;
+    uint64_t curinodes;
+    uint64_t bhardlimit;
+    uint64_t bsoftlimit;
+    uint64_t curspace;
+    uint64_t btime;
+    uint64_t itime;
+};
+static_assert(sizeof(QuotaV2DiskDqblk) == 72, "QuotaV2DiskDqblk는 72바이트여야 함");
+
+// 리프 블록 맨 앞 16바이트(`qt_disk_dqdbheader`) - entries가 그
+// 블록에 실제로 들어 있는(=유효한) `QuotaV2DiskDqblk` 레코드 개수
+// (블록 앞쪽부터 그 개수만큼 유효하다고 실측으로 확인 - PN-D168A778).
+struct QtreeLeafHeader {
+    uint32_t nextFree;
+    uint32_t prevFree;
+    uint16_t entries;
+    uint16_t pad1;
+    uint32_t pad2;
+};
+static_assert(sizeof(QtreeLeafHeader) == 16, "QtreeLeafHeader는 16바이트여야 함");
+#pragma pack(pop)
+
+// 트리 인덱스 홉 수(`fs/quota/quota_tree.c`의 `qtree_depth()`와 동일
+// 계산 - "블록당 4바이트 참조 개수(epb)를 계속 곱해 2^32를 넘기는
+// 데 필요한 횟수") - 1024바이트 블록이면 epb=256, 256^4=2^32라 4를
+// 돌려준다(실측 확인).
+inline uint32_t kQtreeDepth(uint32_t blockSize) {
+    const uint32_t epb = blockSize / sizeof(uint32_t);
+    uint64_t entries = epb;
+    uint32_t depth = 1;
+    while (entries < (uint64_t{1} << 32)) {
+        entries *= epb;
+        ++depth;
+    }
+    return depth;
+}
+
+// 트리 레벨 하나(0-based, 0=루트 바로 다음 홉)에서 id가 가리키는
+// 그 레벨 배열의 상대 인덱스 - `__get_index(id, depth)`와 동일한
+// 계산(최상위 자리부터 `level`번째 자리를 뽑음: `(totalDepth-level-1)`
+// 번 `id /= epb`한 뒤 `id % epb`). 실측(uid 1001=0x3E9)으로 확인:
+// level0=0, level1=0, level2=(1001>>8)&0xFF=3, level3=1001&0xFF=233
+// (epb=256일 때는 나눗셈이 바이트 시프트와 결과가 같지만, 이 함수는
+// 일반적인 나눗셈으로 계산해 epb가 256이 아닌 블록 크기에서도 맞다).
+inline uint32_t kQtreeGetIndex(uint32_t id, uint32_t level, uint32_t totalDepth, uint32_t epb) {
+    uint32_t remaining = id;
+    for (uint32_t i = 0; i < totalDepth - level - 1; ++i) {
+        remaining /= epb;
+    }
+    return remaining % epb;
+}
+
+// 리프 블록 하나(blockSize바이트, 이미 디스크에서 읽어 옴)에서 id가
+// 일치하는 레코드를 찾는다 - 블록 맨 앞 `QtreeLeafHeader::entries`
+// 개수만큼만 유효하다고 보고 순서대로 스캔(실측 확인 - 이 프로젝트
+// 순회 범위에서는 뒤쪽에 가비지가 남아 있어도 entries 카운트 밖은
+// 안 본다). 찾으면 outEntry를 채우고 true, 못 찾으면 false.
+inline bool kQtreeFindEntryInLeaf(const uint8_t* leafBlockData, uint32_t blockSize, uint32_t id,
+                                   QuotaV2DiskDqblk* outEntry) {
+    QtreeLeafHeader header;
+    memcpy(&header, leafBlockData, sizeof(header));
+    uint32_t offset = sizeof(QtreeLeafHeader);
+    for (uint16_t i = 0; i < header.entries; ++i) {
+        if (offset + sizeof(QuotaV2DiskDqblk) > blockSize) {
+            break;  // 손상 방어
+        }
+        QuotaV2DiskDqblk entry;
+        memcpy(&entry, leafBlockData + offset, sizeof(entry));
+        if (entry.id == id) {
+            *outEntry = entry;
+            return true;
+        }
+        offset += sizeof(QuotaV2DiskDqblk);
+    }
+    return false;
+}
+
 }  // namespace ext4
 
 #endif  // MINICORE_LIBEXT4_EXT4_H
