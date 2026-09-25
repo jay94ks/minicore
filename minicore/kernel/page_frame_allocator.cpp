@@ -539,11 +539,10 @@ kernel::AsyncTaskSubjectCode kEnsureSwapReclaimWriteHandlerRegistered() {
 // 빼고(`kPageFrameFlagReclaiming` 세움) `SwapReclaimWriteHandler`에
 // fire-and-forget 제출. 슬롯 고갈이면 이번 스캔은 그 자리에서 끝낸다.
 //
-// [[maybe_unused]]: 위 kReclaimScanCallback()이 실제로 이 함수를
-// 부르는 한 줄을 parkFromISR 행 버그 때문에 주석 처리해 뒀다(그
-// 문서 주석 참고) - 이 함수 자체는 스왑아웃 쓰기 경로로서는 실측
-// 검증이 끝난 상태라 그대로 남겨 둔다, -Wunused-function만 잠재운다.
-[[maybe_unused]] void kReclaimScanReclaimPass() {
+// [갱신, 2026-09-26, PN-4859FDE9] kReclaimScanCallback()이 이제 이
+// 함수를 실제로 부른다(무거운 부하 재검증 완료, 아래 참고) -
+// [[maybe_unused]]는 더 이상 필요 없어 제거.
+void kReclaimScanReclaimPass() {
     fs::SwapBackend* backend = kernel::kActiveSwapBackend();
     if (!backend) {
         return;  // 스왑 백엔드가 없으면 회수 자체가 무의미 - v1은 스왑 없이도 그냥 계속 동작(조용히 건너뜀)
@@ -629,25 +628,23 @@ void kReclaimScanCallback(void*) {
         kernel::SpinlockGuard guard(gLruLock);
         kReclaimScanPromotePass();
         kReclaimScanDemotePass();
-        // [여전히 보류, 2026-09-25, PN-4859FDE9, QU-F90FB07F 답변 반영]
-        // §7.2 5단계(실제 회수)를 끈 이유였던 "일반 인터럽트 하나
-        // (kAsyncDrainVector)가 스케줄러 타이머 틱 벡터를 150초+
-        // 굶기는 문제"의 정확한 메커니즘은 코드 리뷰로 확정했고
-        // (async_task.cpp의 kAsyncDrainIsr 문서 주석 참고 - 처리
-        // 개수 상한이 없던 while 루프가 같은 코어에 순차 재제출되는
-        // AHCI 커맨드 스트림을 만나면 IF=0 상태로 반환하지 않는
-        // 것이 원인), 설계자가 승인한 방향(배치 상한+자기 IPI
-        // 재예약, `kAsyncDrainBatchLimit=32`)으로 이미 수정했다.
-        // **다만 이 호출 자체는 아직 다시 켜지 않는다** - 표준
-        // 4시나리오 회귀는 무결함이지만, 원래 문제를 실제로 재현했던
-        // "실제 스왑아웃→스왑인 왕복 부하"(mkswap 이미지+실제
-        // initrd+SMP1+AHCI, PN-4859FDE9 재현 환경 절 참고) 조건으로
-        // 아직 재검증하지 않았다 - 그 재현에는 다수의 rmap 추적
-        // 프레임을 실제로 만드는 부하 생성 장치(이전 세션의 TEMP
-        // 하네스, 보존되지 않음)가 다시 필요해 이번 틱 범위를
-        // 넘어선다. 다음 세션이 이 재검증까지 마친 뒤 주석 갱신과
-        // 함께 다시 켤 것.
-        // kReclaimScanReclaimPass();
+        // [재활성화+실측 검증 완료, 2026-09-26, PN-4859FDE9] §7.2 5단계
+        // (실제 회수)를 끈 이유였던 "일반 인터럽트 하나(kAsyncDrainVector)
+        // 가 스케줄러 타이머 틱 벡터를 150초+ 굶기는 문제"의 정확한
+        // 메커니즘은 이미 코드 리뷰로 확정했고(async_task.cpp의
+        // kAsyncDrainIsr 문서 주석 참고 - 처리 개수 상한이 없던 while
+        // 루프가 같은 코어에 순차 재제출되는 AHCI 커맨드 스트림을 만나면
+        // IF=0 상태로 반환하지 않는 것이 원인), 설계자가 승인한 방향
+        // (배치 상한+자기 IPI 재예약, `kAsyncDrainBatchLimit=32`)으로
+        // 수정했었다 - 이번에 원래 문제를 실제로 재현했던 조건(mmap으로
+        // 확보한 128페이지를 반복해서 읽고 쓰는 실제 유저 프로세스
+        // (minicore/init TEMP 훅) + mkswap 실제 스왑 이미지 + GRUB+
+        // AHCI+SMP1, 120초 연속 실행)으로 재검증까지 마쳤다 - gdb로
+        // gHeartbeat가 전 구간 정상 증가함을 확인했고, 스왑 이미지의
+        // 원시 바이트에서 실제로 스왑아웃된 테스트 페이지를 찾아 진짜
+        // 스왑 I/O가 왕복했음도 확인했다(PN-4859FDE9 문서 참고) -
+        // 크래시/정지 전혀 없어 이 호출을 영구히 켠다.
+        kReclaimScanReclaimPass();
     }
     kernel::DelayedExecutionQueue::schedule(kReclaimScanIntervalTicks, &kReclaimScanCallback, nullptr);
 }
