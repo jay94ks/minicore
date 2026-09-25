@@ -421,6 +421,58 @@ private:
     uint32_t fatSize32_ = 0;
 };
 
+// ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-5481287C 준비 5단계 - "캐시 버퍼 통합"의
+// 첫 조각] Fat16Volume - FAT12/FAT16 공용 읽기 전용 마운트. 두 폭을
+// 하나의 클래스로 묶은 이유: §3.2 판별 로직(clusterCount 기준)과
+// §3.3 고정 루트 디렉터리 영역 계산이 두 폭 모두 완전히 동일하고,
+// 다른 건 엔트리 폭(12비트 팩 vs 16비트 고정)뿐이라 - onExec 쪽에서
+// entryWidth()로 분기해 kFat12EntryGet/Put 또는 kFat16EntryGet/Put을
+// 고르기만 하면 된다(Fat32Volume과 마찬가지로 mount()와 읽기 전용
+// 접근자만 - 실제 파일 연산은 아직 없는 Fat16Driver 몫, 여전히 훨씬
+// 큰 후속 작업).
+// ---------------------------------------------------------------------
+enum class FatEntryWidth { Fat12, Fat16 };
+
+class Fat16Volume {
+public:
+    // 부트 섹터를 읽어 시그니처/BPB를 확인하고, §3.2 클러스터 수
+    // 계산(고정 루트 영역까지 뺀 데이터 영역 기준)으로 FAT12/FAT16
+    // 여부를 재확인한다(fileSystemType 문자열은 신뢰하지 않음 -
+    // Fat32Volume::mount()와 동일한 이유). clusterCount가 FAT32
+    // 범위(65525 이상)면 이 클래스의 대상이 아니므로 거부.
+    bool mount(fs::BlockDevice* device);
+
+    FatEntryWidth entryWidth() const { return entryWidth_; }
+    fs::BlockDevice* device() const { return device_; }
+    uint32_t bytesPerSectorValue() const { return bpb_.bytesPerSector; }
+    uint32_t sectorsPerClusterValue() const { return bpb_.sectorsPerCluster; }
+    uint32_t bytesPerClusterValue() const { return bytesPerCluster_; }
+    uint32_t fatStartSectorValue() const { return fatStartSector_; }
+    uint32_t fatSizeSectorsValue() const { return fatSizeSectors_; }
+    uint32_t numFatsValue() const { return numFats_; }
+    // FAT12/16 전용 고정 루트 디렉터리 영역(§3.3) - FAT32에는 이
+    // 개념 자체가 없어 Fat32Volume엔 대응 접근자가 없다.
+    uint32_t rootDirStartSectorValue() const { return rootDirStartSector_; }
+    uint32_t rootDirSectorCountValue() const { return rootDirSectorCount_; }
+    uint32_t dataStartSectorValue() const { return dataStartSector_; }
+    uint32_t clusterCountValue() const { return clusterCount_; }
+
+private:
+    fs::BlockDevice* device_ = nullptr;
+    BpbCommon bpb_{};
+    Fat16Extended ext16_{};
+    FatEntryWidth entryWidth_ = FatEntryWidth::Fat16;
+    uint32_t bytesPerCluster_ = 0;
+    uint32_t fatStartSector_ = 0;
+    uint32_t fatSizeSectors_ = 0;
+    uint32_t numFats_ = 0;
+    uint32_t rootDirStartSector_ = 0;
+    uint32_t rootDirSectorCount_ = 0;
+    uint32_t dataStartSector_ = 0;
+    uint32_t clusterCount_ = 0;
+};
+
 }  // namespace vfat
 
 #endif  // MINICORE_LIBVFAT_VFAT_H

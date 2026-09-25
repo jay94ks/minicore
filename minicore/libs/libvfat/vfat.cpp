@@ -95,4 +95,91 @@ bool Fat32Volume::mount(fs::BlockDevice* device) {
     return true;
 }
 
+bool Fat16Volume::mount(fs::BlockDevice* device) {
+    if (!device) {
+        return false;
+    }
+    const kernel::uint32_t devBlockSize = device->blockSize();
+    if (devBlockSize == 0) {
+        return false;
+    }
+
+    // 1) 부트 섹터 - Fat32Volume::mount()와 동일한 방식, 다만
+    // Fat32Extended 대신 Fat16Extended(kFat16ExtendedOffset=36)를 읽는다.
+    const kernel::uint32_t bootSectorBytes = 512;
+    const kernel::uint32_t blocksNeeded =
+        static_cast<kernel::uint32_t>(kCeilDiv(bootSectorBytes, devBlockSize));
+    auto* buf = static_cast<uint8_t*>(kernel::GenericSlabAllocator::alloc(blocksNeeded * devBlockSize));
+    if (!buf) {
+        return false;
+    }
+    if (!device->readBlocks(0, blocksNeeded, buf)) {
+        kernel::GenericSlabAllocator::free(buf, blocksNeeded * devBlockSize);
+        return false;
+    }
+
+    uint16_t signature = 0;
+    memcpy(&signature, buf + kBootSectorSignatureOffset, sizeof(signature));
+    if (signature != kBootSectorSignature) {
+        kernel::GenericSlabAllocator::free(buf, blocksNeeded * devBlockSize);
+        return false;  // 이 포맷 아님
+    }
+    memcpy(&bpb_, buf, sizeof(bpb_));
+    memcpy(&ext16_, buf + kFat16ExtendedOffset, sizeof(ext16_));
+    kernel::GenericSlabAllocator::free(buf, blocksNeeded * devBlockSize);
+
+    // 2) BPB 기본 유효성 - Fat32Volume::mount()와 동일한 검사, 다만
+    // fatSize16(BpbCommon 자신의 필드)이 FAT12/16의 FAT 크기다.
+    if (bpb_.bytesPerSector == 0 || (bpb_.bytesPerSector & (bpb_.bytesPerSector - 1)) != 0) {
+        return false;
+    }
+    if (bpb_.sectorsPerCluster == 0 || (bpb_.sectorsPerCluster & (bpb_.sectorsPerCluster - 1)) != 0) {
+        return false;
+    }
+    if (bpb_.numFats == 0 || bpb_.fatSize16 == 0 || bpb_.rootEntryCount == 0) {
+        return false;
+    }
+
+    // 3) §3.2 클러스터 수 기반 포맷 재확인(fileSystemType 문자열은
+    // 신뢰하지 않음) - FAT32와 달리 고정 루트 디렉터리 영역까지 뺀
+    // 뒤에야 데이터 영역/클러스터 수가 나온다(§3.3).
+    const uint32_t totalSectors = (bpb_.totalSectors32 != 0) ? bpb_.totalSectors32 : bpb_.totalSectors16;
+    const uint32_t fatSectors = static_cast<uint32_t>(bpb_.numFats) * bpb_.fatSize16;
+    uint32_t rootDirStartSector = 0;
+    uint32_t rootDirSectorCount = 0;
+    kFatFixedRootDirLocation(bpb_.reservedSectorCount, bpb_.numFats, bpb_.fatSize16, bpb_.rootEntryCount,
+                              bpb_.bytesPerSector, &rootDirStartSector, &rootDirSectorCount);
+    const uint32_t nonDataSectors = bpb_.reservedSectorCount + fatSectors + rootDirSectorCount;
+    if (totalSectors <= nonDataSectors) {
+        return false;
+    }
+    const uint32_t dataSectors = totalSectors - nonDataSectors;
+    const uint32_t clusterCount = dataSectors / bpb_.sectorsPerCluster;
+    FatEntryWidth width;
+    if (clusterCount < 4085) {
+        width = FatEntryWidth::Fat12;
+    } else if (clusterCount < 65525) {
+        width = FatEntryWidth::Fat16;
+    } else {
+        return false;  // FAT32 범위 - Fat32Volume 몫
+    }
+
+    // 4) 장치 블록 크기와의 정합성 - Fat32Volume::mount()와 동일 제약.
+    if (bpb_.bytesPerSector % devBlockSize != 0) {
+        return false;
+    }
+
+    entryWidth_ = width;
+    fatStartSector_ = bpb_.reservedSectorCount;
+    fatSizeSectors_ = bpb_.fatSize16;
+    numFats_ = bpb_.numFats;
+    rootDirStartSector_ = rootDirStartSector;
+    rootDirSectorCount_ = rootDirSectorCount;
+    dataStartSector_ = rootDirStartSector + rootDirSectorCount;
+    bytesPerCluster_ = static_cast<uint32_t>(bpb_.sectorsPerCluster) * bpb_.bytesPerSector;
+    clusterCount_ = clusterCount;
+    device_ = device;
+    return true;
+}
+
 }  // namespace vfat
