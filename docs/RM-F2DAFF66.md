@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-25T10:37:56.325Z
+  updatedAt: 2026-09-25T17:33:28.973Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -57,6 +57,64 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
    "문서만 정정"으로 기록.
 
 ## §1. 확정된 발견 (완료)
+
+### 1-X. `SP-2AAD7C8D` §5 - Mmap/Munmap/Brk syscall이 "구현 완료"(PN-012E8C1A)로 기록됐으나 부팅 경로에 전혀 배선 안 됨 (코드 갭, 완전 해소, commit d67b9eb)
+
+`PN-012E8C1A` 항목4가 2026-09-16에 "완료"로 기록하며 "TEMP 스캐폴딩으로
+mmap→munmap→brk 왕복 전부 성공 확인"이라고 적어 뒀으나, 실제로는
+`registerAddressSpaceSyscallEndpoints()`(address_space.cpp)를 부팅
+경로(`kmain.cpp`) 어디서도 부른 적이 없어 이 세 syscall이 발행된 지
+10일 넘게 완전히 죽어 있었다(`AsyncCallbackRegistry::resolve()`가
+항상 실패 → `AsyncTaskState::Failed`) - `git log -S`로 이 함수 이름이
+`kmain.cpp` 히스토리에 단 한 번도 등장한 적이 없음을 확인. PN-012E8C1A의
+TEMP 스캐폴딩이 이 등록 호출 자체도 임시로 넣었다가, 원복 과정에서
+영구히 남아야 했던 이 한 줄까지 함께 되돌린 것으로 보인다 -
+`Task::numaNode`/`OpenFlags` 사례와 같은 "확정된 설계가 조용히 빠짐"
+패턴이지만, 이번엔 "TEMP 검증 자체가 진짜였는데 그 검증에 쓰인 영구
+배선 한 줄만 실수로 같이 원복됨"이라는 새로운 하위 유형.
+
+**부수 발견**: 세 핸들러(MmapHandler/MunmapHandler/BrkHandler)가 호출자
+식별에 각 Args 구조체 전용 `process` 필드(호출자가 직접 채우는 방식,
+"실제 ring3 trap 스텁이 생기면 채워줄 것"이라던 가정)를 쓰고 있었는데,
+그 트랩 스텁은 끝내 안 생겼고 그 사이 이 프로젝트 전체가
+`task->submitterTask.lock()` → `kOwnerProcessOf()`로 수렴했다 - 이번에
+표준 관례로 교체(그 필드 자체는 제거).
+
+**실측 검증**(이 커널 최초의 실제 Mmap/Munmap/Brk 유저랜드 왕복 -
+`userland/libs/libmc/address_space.h` 신설): `minicore/init`에 TEMP
+훅으로 실제 ring3 `mc::submit`/`mc::wait` 왕복 - Mmap 성공(실제 페이지
+매핑+쓰기/읽기 확인)/Munmap 성공/Brk 조회 성공. **Brk 성장은 실패했으나
+이건 새 버그가 아니라 MapleTree v1의 이미 알려진 한계 3번을 실제로
+처음 발현시킨 것**(§2-Y 참고, `PN-38D17292`로 이미 추적 중).
+
+## 참고
+- `PN-012E8C1A` - 완료 처리는 유지, 이 발견에 대한 정정 각주 추가.
+- `PN-38D17292` - Brk 성장 실패의 근본 원인(멀티레벨 분할 미완성),
+  이번에 "이론적 8-VMA 한계"가 아니라 "실제 brk() 성장 경로에서도
+  발현"함을 실측으로 처음 확인.
+
+### 1-Y. `PN-38D17292`(MapleTree 멀티레벨 분할 미완성)가 이론적 한계를 넘어 실제 `resizeAnonymousRegion()`(Brk 성장) 경로에서도 발현함을 첫 실측 확인 (코드 갭 아님 - 이미 추적 중인 후속 과제의 영향 범위 갱신)
+
+위 1-X 검증 중, 코드가 하나뿐인 상태(heap VMA 하나만 등록)에서도 실제
+프로세스(코드+데이터+스택 세그먼트가 이미 여러 VMA를 차지)에 대해
+`Brk` 성장을 요청하면 `MapleTree::insertIntoLeaf()`의 "요청 범위가 이
+노드/리프의 기존 슬롯 경계를 넘어선다"는 거부 조건(`end >
+spans[i].upper`)에 걸려 `resizeAnonymousRegion()`이 실패함을 실측
+확인했다 - `erase()` 자체는 인접 gap을 정상적으로 병합하지만, 병합
+결과가 미치는 범위가 "이 리프가 속한 노드의 경계"까지로 제한되고,
+그 경계가 code/stack 세그먼트 등 다른 VMA들의 존재로 인해 heap
+바로 다음 위치에 형성될 수 있다는 것 - 이전까지는 "프로세스당 최대
+8개의 서로 떨어진 VMA"라는 개수 기준으로만 이 한계를 설명해 왔는데,
+이번 실측으로 **VMA 개수와 무관하게, brk() 성장이 다른 VMA와 인접한
+노드 경계를 넘어서기만 해도 실패할 수 있다**는 더 넓은 영향 범위가
+드러났다. `PN-38D17292`가 이미 이 근본 원인(멀티레벨 분할 미완성)을
+추적 중이므로 새 계획은 만들지 않고, 그 계획 본문에 이 실측 사례를
+추가해 우선순위 판단 자료로 남긴다.
+
+## 참고
+- `PN-38D17292` - 이 갭의 근본 원인을 추적 중인 기존 계획, 이번 실측
+  사례 추가.
+- 1-X(위) - 이 발견을 이끈 Mmap/Munmap/Brk 배선 복구 작업.
 
 ### 1-W. `SP-0C7A4F3B`(Power 서브시스템) §1 항목5 - "ACPI 전원 버튼(SCI) 트리거"가 확정된 설계이나 실제 부팅 경로에서는 비활성 (코드 갭 아님 - 알려진 비활성화, 완전 추적됨)
 
