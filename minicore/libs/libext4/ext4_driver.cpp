@@ -3,6 +3,7 @@
 #include "block_device.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
+#include "mutex_core.h"
 #include "process.h"
 #include "rtc.h"
 
@@ -86,6 +87,42 @@ kernel::AsyncTask* kSubmitWriteExtBlocks(fs::BlockDevice* device, uint32_t extBl
     return device->submitWriteBlocks(extBlockStart * devBlocksPerExtBlock, buf,
                                       extBlockCount * devBlocksPerExtBlock, outResult);
 }
+
+// [신규, 2026-09-26, PN-D168A778 curspace 실시간 갱신] 여러 코어가 동시에
+// 서로 다른 파일에 쓰기를 제출해도 같은 uid의 쿼터 리프 레코드를 향한
+// read-modify-write가 겹치면 갱신 유실(lost update)이 난다 - 그 RMW
+// 구간(트리 재순회 + curspace 계산 + 되쓰기) 전체를 감싸는 상호배제가
+// 필요하다. **`kernel::AsyncMutex`(mutex_core.h)를 그대로 쓸 수 없다** -
+// 그 YieldingPolicy는 경합 시 raw `kernel::AsyncTask::yield()`를 부르는데,
+// 이 `onExec`은 진짜 코루틴(`AsyncExecCoro`, 파일 맨 위 문서 주석 참고)
+// 이라 raw yield()를 그 안에서 부르면 무한 대기가 난다(async_task.h의
+// `AsyncTaskCoroYield` 문서 주석 + PN-A0CEF82D/QU-CC8A31F6이 ahci.cpp에서
+// 실측으로 이미 겪은 것과 정확히 같은 함정 - 코루틴 onExec 안에서는
+// 반드시 `co_await AsyncTaskCoroYield{}`로 리액터에 양보해야 한다).
+// 그래서 `MutexCore`(정책 없는 원시 코어, tryAcquire()/release()만
+// 노출)만 재사용하고, 경합 시 재시도는 호출부가 코루틴 안에서 직접
+// `co_await kernel::AsyncTaskCoroYield{}`로 돌린다(아래 사용부 참고).
+kernel::MutexCore gQuotaCurspaceMutexCore;
+
+// tryAcquire() 성공 이후 생성해 무조건 release()를 보장하는 RAII 래퍼 -
+// MutexCore 자체는 (BasicMutex와 달리) lock()/unlock() 짝이 아니라
+// tryAcquire()/release() 짝이라 mutex_core.h의 LockGuard<T>를 그대로
+// 못 쓴다(그 템플릿은 인자 없는 lock()/unlock()을 가정). 임계구역
+// 안에 조기 `break`가 여러 개 있어도(아래 사용부의 do-while(false))
+// 소멸자가 스택 언와인딩만으로 정확히 한 번 불린다(SlabBuf와 동일한
+// 근거 - 이 코드베이스가 C++ 예외를 안 써도 성립).
+class MutexCoreReleaseGuard {
+public:
+    explicit MutexCoreReleaseGuard(kernel::MutexCore& core) : _core(core) {}
+    ~MutexCoreReleaseGuard() {
+        _core.release([] {});
+    }
+    MutexCoreReleaseGuard(const MutexCoreReleaseGuard&) = delete;
+    MutexCoreReleaseGuard& operator=(const MutexCoreReleaseGuard&) = delete;
+
+private:
+    kernel::MutexCore& _core;
+};
 
 // inodeNum이 속한 그룹/inode 테이블 상의 정확한 바이트 위치를
 // 계산한다(ext4.cpp의 Ext4Volume::readInodeStruct와 동일 계산) -
@@ -1792,6 +1829,213 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         args->error = kernel::VfsError::InvalidArgument;
                         break;
                     }
+                }
+            }
+
+            // 6) 사용자 쿼터 curspace 실시간 갱신 - PN-D168A778 "남은
+            //    범위" 중 사용량 갱신 부분. **삽입은 여전히 범위 밖**
+            //    (이 uid가 이미 온디스크 트리에 있을 때만 갱신, 없으면
+            //    기존 "무제한 관례" 그대로 건드리지 않는다 - 새 uid를
+            //    위한 리프 삽입/분할은 htree 리프 분할(PN-9AA8B1EF)과
+            //    같은 급의 별도 설계가 필요한 후속 과제). 위 §1 하드
+            //    리밋 검사와 같은 트리를 다시 순회한다 - 그 블록의
+            //    지역 변수는 그 do-while(false) 스코프 밖이라 재사용할
+            //    수 없고, 파일 맨 위 문서 주석이 이미 밝힌 대로 이
+            //    onExec은 진짜 코루틴이라 순회 로직을 별도 함수로 뽑아
+            //    공유할 수도 없다(의도된 중복, Open/Stat의 경로 탐색
+            //    중복과 같은 이유). **실패해도 이 쓰기 자체는 이미
+            //    성공했으므로 args->error/bytesWritten을 건드리지
+            //    않는다** - 다음 `quotacheck`가 재동기화할 수 있는
+            //    회계 오차일 뿐, 쓰기 실패로 취급하지 않는다.
+            //
+            //    **동시성**: 서로 다른 코어가 동시에 다른 파일에 쓰기를
+            //    제출해도 같은 uid의 쿼터 리프 레코드를 향한 RMW가
+            //    겹치면 갱신 유실이 난다 - `gQuotaCurspaceMutexCore`
+            //    (파일 위쪽 선언, `MutexCore` 원시 코어)로 이 구간
+            //    전체를 감싼다. `kernel::AsyncMutex`를 쓰지 않는 이유는
+            //    그 선언부 문서 주석 참고(YieldingPolicy가 raw
+            //    `AsyncTask::yield()`를 불러 진짜 코루틴인 이 onExec
+            //    안에서는 무한 대기가 남).
+            if (blocksAllocatedCount > 0 && sb.usrQuotaInum != 0) {
+                kernel::Uid writerUid = kernel::kRootUid;
+                bool haveWriterUid = false;
+                kernel::SharedPtr<kernel::Task> submitter = task->submitterTask.lock();
+                kernel::SharedPtr<kernel::Process> submitterProcess;
+                if (submitter) {
+                    submitterProcess = kernel::kOwnerProcessOf(submitter.get());
+                }
+                if (submitterProcess) {
+                    writerUid = submitterProcess->uid;
+                    haveWriterUid = true;
+                }
+                if (haveWriterUid) {
+                    while (!gQuotaCurspaceMutexCore.tryAcquire()) {
+                        co_await kernel::AsyncTaskCoroYield{};
+                    }
+                    MutexCoreReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutexCore);
+                    do {
+                        uint64_t qInodeBlockOffset = 0;
+                        uint32_t qInodeByteOffset = 0;
+                        uint32_t qInodeBlocksNeeded = 0;
+                        if (!kLocateInode(sb, volume_, groupCount, blockSize, sb.usrQuotaInum, &qInodeBlockOffset,
+                                          &qInodeByteOffset, &qInodeBlocksNeeded)) {
+                            break;
+                        }
+                        SlabBuf qInodeBuf(qInodeBlocksNeeded * blockSize);
+                        if (!qInodeBuf) {
+                            break;
+                        }
+                        {
+                            fs::BlockIoResult qInodeIo;
+                            kernel::AsyncTask* qInodeTask = kSubmitReadExtBlocks(
+                                device, blockSize, qInodeBlockOffset, qInodeBlocksNeeded, qInodeBuf.get(), &qInodeIo);
+                            if (!qInodeTask) {
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qInodeTask);
+                            if (!qInodeIo.ok) {
+                                break;
+                            }
+                        }
+                        InodeCore qInode;
+                        memcpy(&qInode, qInodeBuf.get() + qInodeByteOffset, sizeof(qInode));
+
+                        const uint32_t qblocksPerFsBlock = blockSize / kQuotaBlockSize;
+                        const uint32_t qDepth = kQtreeDepth(kQuotaBlockSize);
+                        const uint32_t qEpb = kQuotaBlockSize / sizeof(uint32_t);
+                        uint32_t curQBlock = kQtreeTreeOff;
+                        SlabBuf qFsBlockBuf(blockSize);
+                        if (!qFsBlockBuf) {
+                            break;
+                        }
+
+                        bool giveUp = false;
+                        for (uint32_t level = 0; level < qDepth; ++level) {
+                            const uint32_t fsBlockIdx = curQBlock / qblocksPerFsBlock;
+                            const uint32_t byteOffInFsBlock = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                            uint64_t qPhysAbs = 0;
+                            ExtentLookup qLookup = kLookupExtent(qInode.block, fsBlockIdx, &qPhysAbs);
+                            uint32_t qDepthGuard = 5;
+                            SlabBuf qExtentNodeBuf(blockSize);
+                            while (qLookup == ExtentLookup::NeedChild && qDepthGuard > 0) {
+                                if (!qExtentNodeBuf) {
+                                    qLookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                fs::BlockIoResult qExIo;
+                                kernel::AsyncTask* qExTask =
+                                    kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qExtentNodeBuf.get(), &qExIo);
+                                if (!qExTask) {
+                                    qLookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(qExTask);
+                                if (!qExIo.ok) {
+                                    qLookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                qLookup = kLookupExtent(qExtentNodeBuf.get(), fsBlockIdx, &qPhysAbs);
+                                --qDepthGuard;
+                            }
+                            if (qLookup != ExtentLookup::Found) {
+                                giveUp = true;
+                                break;
+                            }
+
+                            fs::BlockIoResult qReadIo;
+                            kernel::AsyncTask* qReadTask =
+                                kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qFsBlockBuf.get(), &qReadIo);
+                            if (!qReadTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qReadTask);
+                            if (!qReadIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+
+                            const uint32_t idx = kQtreeGetIndex(writerUid, level, qDepth, qEpb);
+                            uint32_t next = 0;
+                            memcpy(&next, qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), sizeof(next));
+                            if (next == 0) {
+                                giveUp = true;  // 트리에 없는 uid - 삽입은 범위 밖, 그냥 건너뜀
+                                break;
+                            }
+                            curQBlock = next;
+                        }
+                        if (giveUp) {
+                            break;
+                        }
+
+                        const uint32_t leafFsBlockIdx = curQBlock / qblocksPerFsBlock;
+                        const uint32_t leafByteOff = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                        uint64_t leafPhysAbs = 0;
+                        ExtentLookup leafLookup = kLookupExtent(qInode.block, leafFsBlockIdx, &leafPhysAbs);
+                        uint32_t leafDepthGuard = 5;
+                        SlabBuf leafExtentNodeBuf(blockSize);
+                        while (leafLookup == ExtentLookup::NeedChild && leafDepthGuard > 0) {
+                            if (!leafExtentNodeBuf) {
+                                leafLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult leafExIo;
+                            kernel::AsyncTask* leafExTask = kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1,
+                                                                                  leafExtentNodeBuf.get(), &leafExIo);
+                            if (!leafExTask) {
+                                leafLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(leafExTask);
+                            if (!leafExIo.ok) {
+                                leafLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            leafLookup = kLookupExtent(leafExtentNodeBuf.get(), leafFsBlockIdx, &leafPhysAbs);
+                            --leafDepthGuard;
+                        }
+                        if (leafLookup != ExtentLookup::Found) {
+                            break;
+                        }
+
+                        fs::BlockIoResult leafReadIo;
+                        kernel::AsyncTask* leafReadTask =
+                            kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafReadIo);
+                        if (!leafReadTask) {
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(leafReadTask);
+                        if (!leafReadIo.ok) {
+                            break;
+                        }
+
+                        QuotaV2DiskDqblk dqblk;
+                        uint32_t dqblkByteOffset = 0;
+                        if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize, writerUid, &dqblk,
+                                                    &dqblkByteOffset)) {
+                            break;  // 삽입은 범위 밖 - 트리에 없으면 그냥 건너뜀
+                        }
+                        // [주의] §1 하드 리밋 검사는 이 락 밖에서 스냅샷
+                        // 값으로 한 번만 확인했다 - 그 사이 다른 코어가
+                        // 같은 uid로 먼저 커밋했을 수 있어, 여기서는 그
+                        // 검사를 다시 하지 않고 최신값 위에 이번 증분만
+                        // 더한다(하드 리밋 재초과 가능성은 이 실시간
+                        // 회계 증분의 알려진 v1 한계 - 완전한 강제는
+                        // 삽입까지 포함하는 후속 과제, 위 "여전히 범위
+                        // 밖" 참고).
+                        dqblk.curspace += static_cast<uint64_t>(blocksAllocatedCount) * blockSize;
+                        memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
+
+                        fs::BlockIoResult leafWriteIo;
+                        kernel::AsyncTask* leafWriteTask =
+                            kSubmitWriteExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafWriteIo);
+                        if (!leafWriteTask) {
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(leafWriteTask);
+                        // 실패해도(leafWriteIo.ok==false) 위 문서 주석
+                        // 그대로 이 쓰기 자체의 성공/실패에 영향 없음.
+                    } while (false);
                 }
             }
 

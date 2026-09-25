@@ -141,6 +141,25 @@ private:
 using Mutex = BasicMutex<ParkingPolicy>;        // §2를 대체(시그니처 동일)
 using AsyncMutex = BasicMutex<YieldingPolicy>;  // §10을 대체(시그니처 동일)
 
+// [신규, 2026-09-26, PN-D168A778 curspace 실시간 갱신] libkenv/spinlock.h의
+// SpinlockGuard와 같은 RAII 관례를 Mutex/AsyncMutex/ReentrantMutex/
+// ReentrantAsyncMutex(전부 인자 없는 lock()/unlock() 시그니처를 공유)에도
+// 그대로 적용한 얇은 템플릿 래퍼 - 코루틴 안에서 여러 개의 조기 `break`/
+// `return`으로 빠져나가는 임계구역을 다룰 때 매 탈출 경로마다 수동
+// unlock()을 빼먹을 위험을 없앤다(스택 언와인딩만으로 소멸자가 불리므로
+// C++ 예외를 안 쓰는 이 커널에서도 그대로 성립).
+template <typename Lockable>
+class LockGuard {
+public:
+    explicit LockGuard(Lockable& lockable) : _lockable(lockable) { _lockable.lock(); }
+    ~LockGuard() { _lockable.unlock(); }
+    LockGuard(const LockGuard&) = delete;
+    LockGuard& operator=(const LockGuard&) = delete;
+
+private:
+    Lockable& _lockable;
+};
+
 // [신규, 2026-09-22, PN-4D60D49C, SP-0666DB3C §16 확정 설계] 재진입
 // Mutex/AsyncMutex - §13의 Mutex/AsyncMutex(위)와 완전히 별개인 타입
 // (컴파일 타임에 재진입 지원 여부 강제, §16.1). 항상 소유자를

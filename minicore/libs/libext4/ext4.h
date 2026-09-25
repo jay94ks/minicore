@@ -1444,8 +1444,13 @@ inline uint32_t kQtreeGetIndex(uint32_t id, uint32_t level, uint32_t totalDepth,
 // 개수만큼만 유효하다고 보고 순서대로 스캔(실측 확인 - 이 프로젝트
 // 순회 범위에서는 뒤쪽에 가비지가 남아 있어도 entries 카운트 밖은
 // 안 본다). 찾으면 outEntry를 채우고 true, 못 찾으면 false.
+// [갱신, 2026-09-26, PN-D168A778 curspace 실시간 갱신] `outByteOffset`
+// (기본 nullptr, 기존 호출부는 그대로 무영향)을 주면 그 레코드가
+// 리프 블록 안에서 시작하는 바이트 오프셋도 함께 돌려준다 - 읽기
+// 전용 하드 리밋 검사는 필요 없지만, curspace를 실제로 고쳐 쓰려면
+// 같은 자리에 되써야 하므로 필요.
 inline bool kQtreeFindEntryInLeaf(const uint8_t* leafBlockData, uint32_t blockSize, uint32_t id,
-                                   QuotaV2DiskDqblk* outEntry) {
+                                   QuotaV2DiskDqblk* outEntry, uint32_t* outByteOffset = nullptr) {
     QtreeLeafHeader header;
     memcpy(&header, leafBlockData, sizeof(header));
     uint32_t offset = sizeof(QtreeLeafHeader);
@@ -1457,6 +1462,9 @@ inline bool kQtreeFindEntryInLeaf(const uint8_t* leafBlockData, uint32_t blockSi
         memcpy(&entry, leafBlockData + offset, sizeof(entry));
         if (entry.id == id) {
             *outEntry = entry;
+            if (outByteOffset) {
+                *outByteOffset = offset;
+            }
             return true;
         }
         offset += sizeof(QuotaV2DiskDqblk);
