@@ -2595,7 +2595,703 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             break;
         }
         case kernel::KernelFsOpCode::Unlink: {
-            static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw)->error = kernel::VfsError::PermissionDenied;
+            // [구현, 2026-09-25, PN-FE718C87] Rmdir과 거의 동일한 구조
+            // (부모 탐색 → leaf 검색 → free → 부모 엔트리 제거)지만
+            // 다른 점 셋: (1) 대상이 파일이어야 함(디렉터리면 거부,
+            // Rmdir을 써야 함), (2) "비어있는지" 확인이 없음, (3) 대상
+            // 삭제가 부모의 linksCount에 영향을 주지 않음(".."은
+            // 디렉터리만 가지므로 부모 inode를 아예 다시 쓸 필요가
+            // 없음) - Rmdir과 합성 불가 제약(파일 상단 문서 주석)으로
+            // 공유 못 해 부모 탐색 부분은 그대로 중복.
+            auto* args = static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw);
+            if (readOnly_) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
+            uint32_t parentLen = 0, leafStart = 0, leafLen = 0;
+            if (!kSplitParentAndLeaf(args->relPath, args->relPathLen, &parentLen, &leafStart, &leafLen)) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+
+            // 1) 부모 디렉터리 inode 번호를 찾는다 - Mkdir/Rmdir/Open과
+            //    동일한 패턴(합성 불가로 함수 공유 불가, 의도적 중복).
+            uint32_t parentInodeNum = kRootInodeNumber;
+            bool parentIsDir = true;
+            bool parentFailed = false;
+            {
+                uint32_t pos = 0;
+                while (pos < parentLen && !parentFailed) {
+                    while (pos < parentLen && args->relPath[pos] == '/') {
+                        ++pos;
+                    }
+                    if (pos >= parentLen) {
+                        break;
+                    }
+                    const uint32_t segStart = pos;
+                    while (pos < parentLen && args->relPath[pos] != '/') {
+                        ++pos;
+                    }
+                    const uint32_t segLen = pos - segStart;
+                    if (!parentIsDir) {
+                        parentFailed = true;
+                        break;
+                    }
+
+                    uint64_t segInodeBlockOffset = 0;
+                    uint32_t segInodeByteOffset = 0;
+                    uint32_t segInodeBlocksNeeded = 0;
+                    if (!kLocateInode(sb, volume_, groupCount, blockSize, parentInodeNum, &segInodeBlockOffset,
+                                       &segInodeByteOffset, &segInodeBlocksNeeded)) {
+                        parentFailed = true;
+                        break;
+                    }
+                    SlabBuf segInodeBuf(segInodeBlocksNeeded * blockSize);
+                    if (!segInodeBuf) {
+                        parentFailed = true;
+                        break;
+                    }
+                    {
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(
+                            device, blockSize, segInodeBlockOffset, segInodeBlocksNeeded, segInodeBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            parentFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            parentFailed = true;
+                            break;
+                        }
+                    }
+                    InodeCore segInode;
+                    memcpy(&segInode, segInodeBuf.get() + segInodeByteOffset, sizeof(segInode));
+                    if (!kIsDirMode(segInode.mode)) {
+                        parentFailed = true;
+                        break;
+                    }
+
+                    const uint64_t segDirSize = segInode.sizeLo | (static_cast<uint64_t>(segInode.sizeHigh) << 32);
+                    const uint32_t segDirBlockCount = static_cast<uint32_t>(kCeilDiv(segDirSize, blockSize));
+                    bool foundSeg = false;
+                    for (uint32_t logicalBlock = 0; logicalBlock < segDirBlockCount && !foundSeg; ++logicalBlock) {
+                        uint64_t nodeValue = 0;
+                        ExtentLookup lookup;
+                        if (segInode.flags & kExtentsFl) {
+                            lookup = kLookupExtent(segInode.block, logicalBlock, &nodeValue);
+                            uint32_t depthGuard = 5;
+                            SlabBuf extentNodeBuf(blockSize);
+                            while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                                if (!extentNodeBuf) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                fs::BlockIoResult ioResult;
+                                kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(device, blockSize, nodeValue, 1,
+                                                                                  extentNodeBuf.get(), &ioResult);
+                                if (!ioTask) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                                if (!ioResult.ok) {
+                                    lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                                --depthGuard;
+                            }
+                        } else {
+                            const uint32_t pointersPerBlock = blockSize / sizeof(uint32_t);
+                            const auto* rootBlocks = reinterpret_cast<const uint32_t*>(segInode.block);
+                            const IndirectResolution res = kResolveIndirect(logicalBlock, pointersPerBlock);
+                            if (res.level == IndirectLevel::OutOfRange) {
+                                lookup = ExtentLookup::Hole;
+                            } else if (res.level == IndirectLevel::Direct) {
+                                nodeValue = rootBlocks[res.index0];
+                                lookup = nodeValue == 0 ? ExtentLookup::Hole : ExtentLookup::Found;
+                            } else {
+                                uint32_t indices[3];
+                                uint32_t hops;
+                                uint32_t currentBlockNum;
+                                if (res.level == IndirectLevel::Single) {
+                                    indices[0] = res.index0;
+                                    hops = 1;
+                                    currentBlockNum = rootBlocks[12];
+                                } else if (res.level == IndirectLevel::Double) {
+                                    indices[0] = res.index0;
+                                    indices[1] = res.index1;
+                                    hops = 2;
+                                    currentBlockNum = rootBlocks[13];
+                                } else {
+                                    indices[0] = res.index0;
+                                    indices[1] = res.index1;
+                                    indices[2] = res.index2;
+                                    hops = 3;
+                                    currentBlockNum = rootBlocks[14];
+                                }
+                                if (currentBlockNum == 0) {
+                                    lookup = ExtentLookup::Hole;
+                                } else {
+                                    lookup = ExtentLookup::Found;
+                                    for (uint32_t h = 0; h < hops; ++h) {
+                                        SlabBuf indBuf(blockSize);
+                                        if (!indBuf) {
+                                            lookup = ExtentLookup::Invalid;
+                                            break;
+                                        }
+                                        fs::BlockIoResult ioResult;
+                                        kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(
+                                            device, blockSize, currentBlockNum, 1, indBuf.get(), &ioResult);
+                                        if (!ioTask) {
+                                            lookup = ExtentLookup::Invalid;
+                                            break;
+                                        }
+                                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                                        if (!ioResult.ok) {
+                                            lookup = ExtentLookup::Invalid;
+                                            break;
+                                        }
+                                        const uint32_t nextPtr =
+                                            reinterpret_cast<const uint32_t*>(indBuf.get())[indices[h]];
+                                        if (nextPtr == 0) {
+                                            lookup = ExtentLookup::Hole;
+                                            break;
+                                        }
+                                        if (h + 1 == hops) {
+                                            nodeValue = nextPtr;
+                                        } else {
+                                            currentBlockNum = nextPtr;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (lookup != ExtentLookup::Found) {
+                            continue;
+                        }
+                        SlabBuf dataBuf(blockSize);
+                        if (!dataBuf) {
+                            parentFailed = true;
+                            break;
+                        }
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, dataBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            parentFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            parentFailed = true;
+                            break;
+                        }
+                        uint32_t matchedInode = 0;
+                        uint8_t matchedType = 0;
+                        if (kScanDirBlockForName(dataBuf.get(), blockSize, args->relPath + segStart, segLen,
+                                                  &matchedInode, &matchedType)) {
+                            parentInodeNum = matchedInode;
+                            parentIsDir = (matchedType == kFtDir);
+                            foundSeg = true;
+                        }
+                    }
+                    if (!foundSeg) {
+                        parentFailed = true;
+                    }
+                }
+            }
+            if (parentFailed || !parentIsDir) {
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+
+            // 2) 부모 자신의 inode 구조체를 읽는다(132바이트 core만 -
+            //    Unlink는 부모를 다시 쓰지 않으므로 inodeSize 전체는
+            //    불필요, Rmdir과 다른 점).
+            uint64_t parentInodeBlockOffset = 0;
+            uint32_t parentInodeByteOffset = 0;
+            uint32_t parentInodeBlocksNeeded = 0;
+            if (!kLocateInode(sb, volume_, groupCount, blockSize, parentInodeNum, &parentInodeBlockOffset,
+                               &parentInodeByteOffset, &parentInodeBlocksNeeded)) {
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+            SlabBuf parentInodeBuf(parentInodeBlocksNeeded * blockSize);
+            if (!parentInodeBuf) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+            {
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(
+                    device, blockSize, parentInodeBlockOffset, parentInodeBlocksNeeded, parentInodeBuf.get(), &ioResult);
+                if (!ioTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                if (!ioResult.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+            InodeCore parentInode;
+            memcpy(&parentInode, parentInodeBuf.get() + parentInodeByteOffset, sizeof(parentInode));
+            if (!kIsDirMode(parentInode.mode) || !(parentInode.flags & kExtentsFl)) {
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+
+            const uint64_t parentDirSize = parentInode.sizeLo | (static_cast<uint64_t>(parentInode.sizeHigh) << 32);
+            const uint32_t parentDirBlockCount = static_cast<uint32_t>(kCeilDiv(parentDirSize, blockSize));
+            const bool metadataCsum = (sb.featureRoCompat & kRoCompatMetadataCsum) != 0;
+
+            // 3) 부모의 데이터 블록들을 순회해 leaf 이름을 찾는다.
+            uint32_t targetInodeNum = 0;
+            uint8_t targetFileType = 0;
+            bool leafFound = false;
+            uint64_t leafBlockAbs = 0;
+            {
+                bool ioFailed = false;
+                SlabBuf scanBuf(blockSize);
+                if (!scanBuf) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                for (uint32_t logicalBlock = 0; logicalBlock < parentDirBlockCount && !leafFound; ++logicalBlock) {
+                    uint64_t nodeValue = 0;
+                    ExtentLookup lookup = kLookupExtent(parentInode.block, logicalBlock, &nodeValue);
+                    uint32_t depthGuard = 5;
+                    SlabBuf extentNodeBuf(blockSize);
+                    while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                        if (!extentNodeBuf) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult exIo;
+                        kernel::AsyncTask* exTask =
+                            kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &exIo);
+                        if (!exTask) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(exTask);
+                        if (!exIo.ok) {
+                            lookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                        --depthGuard;
+                    }
+                    if (lookup != ExtentLookup::Found) {
+                        continue;
+                    }
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask =
+                        kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, scanBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    if (kScanDirBlockForName(scanBuf.get(), blockSize, args->relPath + leafStart, leafLen,
+                                              &targetInodeNum, &targetFileType)) {
+                        leafFound = true;
+                        leafBlockAbs = nodeValue;
+                    }
+                }
+                if (ioFailed) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+            if (!leafFound) {
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+            if (targetFileType == kFtDir) {
+                args->error = kernel::VfsError::InvalidArgument;  // Rmdir을 써야 함
+                break;
+            }
+
+            // 4) 대상 inode를 읽는다(132바이트 core만 - 레코드를
+            //    다시 쓰지 않고 0으로 지울 것이므로 충분).
+            uint64_t targetInodeBlockOffset = 0;
+            uint32_t targetInodeByteOffset = 0;
+            uint32_t targetInodeBlocksNeeded = 0;
+            if (!kLocateInode(sb, volume_, groupCount, blockSize, targetInodeNum, &targetInodeBlockOffset,
+                               &targetInodeByteOffset, &targetInodeBlocksNeeded)) {
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+            SlabBuf targetInodeBuf(targetInodeBlocksNeeded * blockSize);
+            if (!targetInodeBuf) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+            {
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(device, blockSize, targetInodeBlockOffset,
+                                                                  targetInodeBlocksNeeded, targetInodeBuf.get(), &ioResult);
+                if (!ioTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                if (!ioResult.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+            InodeCore targetInode;
+            memcpy(&targetInode, targetInodeBuf.get() + targetInodeByteOffset, sizeof(targetInode));
+            if (kIsDirMode(targetInode.mode) || !(targetInode.flags & kExtentsFl)) {
+                // v1은 익스텐트 기반 "파일"만 지원(디렉터리는 이미
+                // 위에서 걸러짐 - 방어적 재확인. 레거시 간접 블록
+                // 파일도 범위 밖 - Mkdir/Rmdir과 동일한 관례).
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
+            const uint64_t targetSize = targetInode.sizeLo | (static_cast<uint64_t>(targetInode.sizeHigh) << 32);
+            const uint32_t targetBlockCountLogical = static_cast<uint32_t>(kCeilDiv(targetSize, blockSize));
+
+            // 5) 대상의 물리 블록 번호들을 모은다(인라인 익스텐트
+            //    리프만 지원 - depth>0(진짜 트리, NeedChild)이 나오면
+            //    v1 범위 밖으로 거부한다, Write의 "5개 이상 익스텐트"
+            //    미구현과 동일한 경계).
+            uint64_t targetBlockAbs[kExtentInlineMaxEntries] = {};
+            uint32_t targetBlockCount = 0;
+            {
+                bool unsupported = false;
+                for (uint32_t logicalBlock = 0; logicalBlock < targetBlockCountLogical && !unsupported;
+                     ++logicalBlock) {
+                    uint64_t nodeValue = 0;
+                    const ExtentLookup lookup = kLookupExtent(targetInode.block, logicalBlock, &nodeValue);
+                    if (lookup == ExtentLookup::NeedChild || lookup == ExtentLookup::Invalid) {
+                        unsupported = true;
+                        break;
+                    }
+                    if (lookup != ExtentLookup::Found) {
+                        continue;
+                    }
+                    if (targetBlockCount >= kExtentInlineMaxEntries) {
+                        unsupported = true;
+                        break;
+                    }
+                    targetBlockAbs[targetBlockCount++] = nodeValue;
+                }
+                if (unsupported) {
+                    args->error = kernel::VfsError::PermissionDenied;
+                    break;
+                }
+            }
+
+            const bool is64Bit = (sb.featureIncompat & kIncompat64Bit) != 0;
+            const uint32_t descSize = is64Bit ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
+            const uint64_t gdtStartBlock = static_cast<uint64_t>(sb.firstDataBlock) + 1;
+
+            // 6) 대상의 데이터 블록들을 전부 free한다.
+            {
+                bool ioFailed = false;
+                for (uint32_t i = 0; i < targetBlockCount && !ioFailed; ++i) {
+                    const uint64_t abs = targetBlockAbs[i];
+                    const uint32_t group = static_cast<uint32_t>((abs - sb.firstDataBlock) / sb.blocksPerGroup);
+                    const uint32_t relIndex = static_cast<uint32_t>((abs - sb.firstDataBlock) % sb.blocksPerGroup);
+                    const uint64_t bitmapBlock = volume_.groupBlockBitmapBlock(group);
+                    uint64_t gdBlockOffset = 0;
+                    uint32_t gdByteOffset = 0;
+                    kLocateGroupDesc(gdtStartBlock, descSize, blockSize, group, &gdBlockOffset, &gdByteOffset);
+
+                    SlabBuf bitmapBuf(blockSize);
+                    SlabBuf gdBuf(blockSize);
+                    if (!bitmapBuf || !gdBuf) {
+                        ioFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult bmIo;
+                    kernel::AsyncTask* bmTask =
+                        kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, bitmapBuf.get(), &bmIo);
+                    if (!bmTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(bmTask);
+                    if (!bmIo.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult gdIo;
+                    kernel::AsyncTask* gdTask =
+                        kSubmitReadExtBlocks(device, blockSize, gdBlockOffset, 1, gdBuf.get(), &gdIo);
+                    if (!gdTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(gdTask);
+                    if (!gdIo.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    if (!kExt4FreeBlockInGroup(sb.uuid, group, sb.blocksPerGroup, sb.featureRoCompat, is64Bit,
+                                                bitmapBuf.get(), gdBuf.get() + gdByteOffset, relIndex)) {
+                        ioFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult wBmIo;
+                    kernel::AsyncTask* wBmTask =
+                        kSubmitWriteExtBlocks(device, blockSize, bitmapBlock, 1, bitmapBuf.get(), &wBmIo);
+                    if (!wBmTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(wBmTask);
+                    if (!wBmIo.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult wGdIo;
+                    kernel::AsyncTask* wGdTask =
+                        kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset, 1, gdBuf.get(), &wGdIo);
+                    if (!wGdTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(wGdTask);
+                    if (!wGdIo.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                }
+                if (ioFailed) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+
+            // 7) 대상 inode 자체를 free(비트맵+그룹 디스크립터) -
+            //    bg_used_dirs_count는 파일이라 건드리지 않는다(Rmdir과
+            //    다른 점).
+            {
+                const uint32_t group = (targetInodeNum - 1) / sb.inodesPerGroup;
+                const uint32_t relIndex = (targetInodeNum - 1) % sb.inodesPerGroup;
+                const uint64_t bitmapBlock = volume_.groupInodeBitmapBlock(group);
+                uint64_t gdBlockOffset = 0;
+                uint32_t gdByteOffset = 0;
+                kLocateGroupDesc(gdtStartBlock, descSize, blockSize, group, &gdBlockOffset, &gdByteOffset);
+
+                SlabBuf bitmapBuf(blockSize);
+                SlabBuf gdBuf(blockSize);
+                if (!bitmapBuf || !gdBuf) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                fs::BlockIoResult bmIo;
+                kernel::AsyncTask* bmTask = kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, bitmapBuf.get(), &bmIo);
+                if (!bmTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(bmTask);
+                if (!bmIo.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                fs::BlockIoResult gdIo;
+                kernel::AsyncTask* gdTask = kSubmitReadExtBlocks(device, blockSize, gdBlockOffset, 1, gdBuf.get(), &gdIo);
+                if (!gdTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(gdTask);
+                if (!gdIo.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                if (!kExt4FreeInodeInGroup(sb.uuid, group, sb.inodesPerGroup, sb.featureRoCompat, is64Bit,
+                                            bitmapBuf.get(), gdBuf.get() + gdByteOffset, relIndex)) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                fs::BlockIoResult wBmIo;
+                kernel::AsyncTask* wBmTask = kSubmitWriteExtBlocks(device, blockSize, bitmapBlock, 1, bitmapBuf.get(), &wBmIo);
+                if (!wBmTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(wBmTask);
+                if (!wBmIo.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                fs::BlockIoResult wGdIo;
+                kernel::AsyncTask* wGdTask = kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset, 1, gdBuf.get(), &wGdIo);
+                if (!wGdTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(wGdTask);
+                if (!wGdIo.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+
+            // 7b) [Rmdir 실측(e2fsck)으로 이미 발견된 교훈 재적용] 대상
+            //     inode의 온디스크 레코드 자체를 0으로 지운다 - 안
+            //     지우면 e2fsck의 Pass 1이 비트맵과 무관하게 이 inode를
+            //     여전히 살아있는 파일로 오인한다.
+            {
+                uint64_t freeInodeBlockOffset = 0;
+                uint32_t freeInodeByteOffset = 0;
+                uint32_t freeInodeBlocksNeededProbe = 0;
+                if (!kLocateInode(sb, volume_, groupCount, blockSize, targetInodeNum, &freeInodeBlockOffset,
+                                   &freeInodeByteOffset, &freeInodeBlocksNeededProbe)) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                const uint32_t freeInodeBlocksNeeded = static_cast<uint32_t>(
+                    kCeilDiv(static_cast<uint64_t>(freeInodeByteOffset) + sb.inodeSize, blockSize));
+                SlabBuf freeInodeBlockBuf(freeInodeBlocksNeeded * blockSize);
+                if (!freeInodeBlockBuf) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                {
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(device, blockSize, freeInodeBlockOffset,
+                                                                      freeInodeBlocksNeeded, freeInodeBlockBuf.get(),
+                                                                      &ioResult);
+                    if (!ioTask) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                }
+                memset(freeInodeBlockBuf.get() + freeInodeByteOffset, 0, sb.inodeSize);
+                {
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask = kSubmitWriteExtBlocks(device, blockSize, freeInodeBlockOffset,
+                                                                       freeInodeBlocksNeeded, freeInodeBlockBuf.get(),
+                                                                       &ioResult);
+                    if (!ioTask) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                }
+            }
+
+            // 8) 부모 블록에서 엔트리 제거 + 체크섬 갱신 + 씀(부모
+            //    inode 자체는 linksCount 변화가 없으므로 다시 쓸
+            //    필요 없음 - Rmdir과 다른 점).
+            SlabBuf parentBlockBuf(blockSize);
+            if (!parentBlockBuf) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+            {
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask =
+                    kSubmitReadExtBlocks(device, blockSize, leafBlockAbs, 1, parentBlockBuf.get(), &ioResult);
+                if (!ioTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                if (!ioResult.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+            uint8_t removedFileType = 0;
+            if (!kExt4RemoveDirEntry(parentBlockBuf.get(), blockSize, args->relPath + leafStart,
+                                       static_cast<uint8_t>(leafLen), &removedFileType)) {
+                args->error = kernel::VfsError::NotFound;  // 방어적 처리(이론상 불가능 - 3단계에서 이미 확인)
+                break;
+            }
+            if (metadataCsum) {
+                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, /*generation=*/0,
+                                                                     parentBlockBuf.get(), blockSize);
+                memcpy(parentBlockBuf.get() + blockSize - sizeof(uint32_t), &csum, sizeof(csum));
+            }
+            {
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask =
+                    kSubmitWriteExtBlocks(device, blockSize, leafBlockAbs, 1, parentBlockBuf.get(), &ioResult);
+                if (!ioTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                if (!ioResult.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
+
+            // 9) 슈퍼블록 전역 free 카운터 되돌림(+블록개수/+1 inode).
+            {
+                const uint64_t sbBlockOffset = sb.firstDataBlock;
+                const uint32_t sbByteOffsetInBlock = static_cast<uint32_t>(kSuperblockOffset % blockSize);
+                const uint32_t sbBlocksNeeded = static_cast<uint32_t>(
+                    kCeilDiv(static_cast<uint64_t>(sbByteOffsetInBlock) + kSuperblockOffset, blockSize));
+                SlabBuf sbBuf(sbBlocksNeeded * blockSize);
+                if (!sbBuf) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                {
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask =
+                        kSubmitReadExtBlocks(device, blockSize, sbBlockOffset, sbBlocksNeeded, sbBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                }
+                uint8_t* rawSb = sbBuf.get() + sbByteOffsetInBlock;
+                if (!kExt4AdjustSuperblockFreeBlocks(rawSb, static_cast<kernel::int64_t>(targetBlockCount),
+                                                       sb.featureIncompat, sb.featureRoCompat) ||
+                    !kExt4AdjustSuperblockFreeInodes(rawSb, 1, sb.featureRoCompat)) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                {
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask = kSubmitWriteExtBlocks(device, blockSize, sbBlockOffset,
+                                                                       sbBlocksNeeded, sbBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        break;
+                    }
+                }
+            }
+
+            args->error = kernel::VfsError::None;
             break;
         }
 
