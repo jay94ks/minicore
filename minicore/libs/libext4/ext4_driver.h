@@ -26,14 +26,16 @@
 // 정수 식별자라(FAT류와 달리) `FileHandle::value`에 inode 번호를
 // 그대로 담는다 - 별도 open-handle 테이블이 필요 없다(무상태).
 //
-// **[갱신, 2026-09-25, PN-FE718C87]** `Mkdir`은 이제 실제로 구현돼
-// 있다(이 커널 최초의 실제 디스크 쓰기 오퍼레이션 - 조립 순서/롤백
-// 정책 등은 ext4_driver.cpp의 Mkdir 케이스 문서 주석과 PN-FE718C87
-// 계획 본문 참고). `Write`/`Rmdir`/`Unlink`는 여전히 미구현으로
-// `VfsError::PermissionDenied`를 반환한다 - 특히 `Write`는 5개
-// 이상의 익스텐트가 필요한 파일의 실제 온디스크 트리 확장/분할
-// (SP-7A9CED3E §5)이 여전히 미결이라 그 갭이 해소될 때까지 막아
-// 둔다.
+// **[갱신, 2026-09-25, PN-FE718C87]** `Mkdir`/`Rmdir`/`Unlink`는
+// 이제 전부 실제로 구현돼 있다(이 커널 최초의 실제 디스크 쓰기
+// 오퍼레이션들 - 조립 순서/롤백 정책/실측 검증 기록은
+// ext4_driver.cpp의 각 케이스 문서 주석과 PN-FE718C87 계획 본문
+// 참고). 셋 다 익스텐트 기반 "인라인 리프"(depth==0, ≤4개 익스텐트)
+// 만 지원 - 레거시 간접 블록이거나 진짜 익스텐트 트리(NeedChild)가
+// 필요한 대상은 v1 범위 밖으로 거부한다. `Write`만 여전히 미구현으로
+// `VfsError::PermissionDenied`를 반환한다 - 5개 이상의 익스텐트가
+// 필요한 파일의 실제 온디스크 트리 확장/분할(SP-7A9CED3E §5)이
+// 여전히 미결이라 그 갭이 해소될 때까지 막아 둔다.
 namespace ext4 {
 
 class Ext4Driver : public kernel::FileSystemDriver {
