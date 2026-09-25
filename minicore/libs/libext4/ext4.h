@@ -1187,7 +1187,23 @@ static_assert(sizeof(QuotaV2Info) == 24, "QuotaV2Info는 24바이트");
 // 케이스의 익스텐트 순회(`kLookupExtent`+`NeedChild` 루프)와 동일한
 // 패턴으로 그 소비자 쪽에서 조립할 것.
 // ---------------------------------------------------------------------
-constexpr uint32_t kQtreeTreeOff = 1;  // QT_TREEOFF - 쿼터 파일의 두 번째 블록(파일 블록 인덱스 1)부터 트리 루트
+// [신규, 2026-09-25, PN-D168A778 실제 소비자 배선 중 실측으로 발견]
+// quota v2 트리가 쓰는 "블록" 크기(`V2_DQBLKSIZE_BITS=10`, 즉
+// 1024바이트)는 **이 ext4 파일시스템 자체의 블록 크기(`blockSize`,
+// 4096일 수도 있음)와 완전히 무관하게 항상 1024로 고정**이다 - 이전
+// 준비 작업 세션들은 마침 1024바이트 블록 이미지로만 검증해 이 둘이
+// 같은 값인 것처럼 보였을 뿐, 이번에 4096바이트 블록 이미지
+// (`mke2fs` 기본값)로 재현하자 실제로 어긋남을 실측으로 발견했다 -
+// 쿼터 파일의 익스텐트는 여전히 `blockSize`(4096) 단위로 매핑되므로,
+// 쿼터 "블록" 인덱스 N을 실제로 읽으려면 파일시스템 블록 인덱스
+// `N / (blockSize/kQuotaBlockSize)`를 찾아 그 블록 안의 바이트 오프셋
+// `(N % (blockSize/kQuotaBlockSize)) * kQuotaBlockSize`에서 1024바이트를
+// 잘라 써야 한다(실제 소비자 쪽, ext4_driver.cpp가 이 변환을 수행).
+// `kQtreeDepth`/`kQtreeGetIndex`의 `epb`도 항상 `kQuotaBlockSize/4`
+// (=256)를 써야 한다 - `blockSize/4`가 아니다.
+constexpr uint32_t kQuotaBlockSize = 1024;
+
+constexpr uint32_t kQtreeTreeOff = 1;  // QT_TREEOFF - 쿼터 파일의 두 번째 "쿼터 블록"(kQuotaBlockSize 단위, 파일시스템 블록 아님)부터 트리 루트
 
 // 1024바이트 블록 기준 리프 엔트리 하나(quota v2r1, e2fsprogs/커널
 // 공용 온디스크 레코드) - id(4)+pad(4) 뒤에 8바이트 정수 8개가

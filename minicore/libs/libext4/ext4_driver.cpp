@@ -3,6 +3,7 @@
 #include "block_device.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
+#include "process.h"
 #include "rtc.h"
 
 // [실측으로 발견, 2026-09-22, PN-9AE5BFE4] `Ext4Volume`의 무상태 함수
@@ -354,7 +355,7 @@ bool Ext4Driver::remount(bool writable) {
     return true;
 }
 
-kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
+kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw) {
     const auto op = *static_cast<const kernel::KernelFsOpCode*>(argsRaw);
     const SuperblockCore& sb = volume_.superblockInfo();
     const uint32_t blockSize = volume_.blockSizeValue();
@@ -842,6 +843,207 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             const uint32_t descSize = is64Bit ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
             const uint64_t gdtStartBlock = static_cast<uint64_t>(sb.firstDataBlock) + 1;
             const uint32_t anchorGroup = (inodeNum - 1) / sb.inodesPerGroup;
+
+            // [신규, 2026-09-25, PN-D168A778, QU-D4357E88 답변 "kSetuid() 이후
+            // 실제 쓰기 경로에 한도 체크로 연결"] 사용자 쿼터 하드 리밋 검사 -
+            // 이 쓰기가 실제로 새 블록을 할당해야 할 때만(순수 덮어쓰기는
+            // 검사 불필요) 제출자(`kSetuid()`가 바꾼 `Process::uid`)의 쿼터
+            // 레코드를 온디스크 quota v2 radix-tree에서 실제로 조회해
+            // `bhardlimit`을 넘는지 확인한다 - 못 찾거나(트리에 그 uid가
+            // 없음 = 무제한 관례) `bhardlimit==0`(무제한 관례)이면 통과.
+            // **사용량(`curspace`) 갱신/트리 삽입은 이 증분 범위 밖**이다 -
+            // 온디스크에 이미 기록된(quotacheck 등 외부 도구가 마지막으로
+            // 남긴) 사용량만 기준으로 판단하며, 이 커널 자신의 쓰기가
+            // `curspace`에 반영되지는 않는다(그 실시간 회계 자체가 트리
+            // 리프 갱신/새 uid 삽입까지 포함하는 훨씬 큰 후속 작업 -
+            // PN-D168A778 "남은 범위" 참고, htree 리프 분할과 같은 급의
+            // 별도 설계 필요). 아무 소비자도 없어 미리 만들지 않는다는
+            // 원칙과 달리, 이번엔 설계자가 명시적으로 "온전한 기능"을
+            // 요청했으나 위 이유로 하드 리밋 체크까지만 이번 틱 범위로
+            // 좁혔다.
+            const uint32_t existingBlockCountForQuota = static_cast<uint32_t>(kCeilDiv(existingSize, blockSize));
+            const uint32_t additionalBlocksForQuota =
+                blocksNeededTotal > existingBlockCountForQuota ? blocksNeededTotal - existingBlockCountForQuota : 0;
+            bool quotaExceeded = false;
+            if (additionalBlocksForQuota > 0 && sb.usrQuotaInum != 0) {
+                kernel::Uid writerUid = kernel::kRootUid;
+                bool haveWriterUid = false;
+                kernel::SharedPtr<kernel::Task> submitter = task->submitterTask.lock();
+                kernel::SharedPtr<kernel::Process> submitterProcess;
+                if (submitter) {
+                    submitterProcess = kernel::kOwnerProcessOf(submitter.get());
+                }
+                if (submitterProcess) {
+                    writerUid = submitterProcess->uid;
+                    haveWriterUid = true;
+                }
+                if (haveWriterUid) {
+                    do {
+                        uint64_t qInodeBlockOffset = 0;
+                        uint32_t qInodeByteOffset = 0;
+                        uint32_t qInodeBlocksNeeded = 0;
+                        if (!kLocateInode(sb, volume_, groupCount, blockSize, sb.usrQuotaInum, &qInodeBlockOffset,
+                                          &qInodeByteOffset, &qInodeBlocksNeeded)) {
+                            break;
+                        }
+                        SlabBuf qInodeBuf(qInodeBlocksNeeded * blockSize);
+                        if (!qInodeBuf) {
+                            break;
+                        }
+                        {
+                            fs::BlockIoResult qInodeIo;
+                            kernel::AsyncTask* qInodeTask = kSubmitReadExtBlocks(
+                                device, blockSize, qInodeBlockOffset, qInodeBlocksNeeded, qInodeBuf.get(), &qInodeIo);
+                            if (!qInodeTask) {
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qInodeTask);
+                            if (!qInodeIo.ok) {
+                                break;
+                            }
+                        }
+                        InodeCore qInode;
+                        memcpy(&qInode, qInodeBuf.get() + qInodeByteOffset, sizeof(qInode));
+
+                        // 쿼터 파일 "블록"(`kQuotaBlockSize`=1024바이트)은 이
+                        // 파일시스템 자체의 블록 크기(`blockSize`, 예 4096)와
+                        // 무관하게 고정 - 실제 파일시스템 블록으로 변환해
+                        // 읽어야 한다(`ext4.h`의 `kQuotaBlockSize` 문서 주석
+                        // 참고 - 이번 배선 중 실측으로 처음 발견).
+                        const uint32_t qblocksPerFsBlock = blockSize / kQuotaBlockSize;
+                        const uint32_t qDepth = kQtreeDepth(kQuotaBlockSize);
+                        const uint32_t qEpb = kQuotaBlockSize / sizeof(uint32_t);
+                        uint32_t curQBlock = kQtreeTreeOff;
+                        SlabBuf qFsBlockBuf(blockSize);
+                        if (!qFsBlockBuf) {
+                            break;
+                        }
+
+                        bool giveUp = false;
+                        for (uint32_t level = 0; level < qDepth; ++level) {
+                            const uint32_t fsBlockIdx = curQBlock / qblocksPerFsBlock;
+                            const uint32_t byteOffInFsBlock = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                            uint64_t qPhysAbs = 0;
+                            ExtentLookup qLookup = kLookupExtent(qInode.block, fsBlockIdx, &qPhysAbs);
+                            uint32_t qDepthGuard = 5;
+                            SlabBuf qExtentNodeBuf(blockSize);
+                            while (qLookup == ExtentLookup::NeedChild && qDepthGuard > 0) {
+                                if (!qExtentNodeBuf) {
+                                    qLookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                fs::BlockIoResult qExIo;
+                                kernel::AsyncTask* qExTask =
+                                    kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qExtentNodeBuf.get(), &qExIo);
+                                if (!qExTask) {
+                                    qLookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(qExTask);
+                                if (!qExIo.ok) {
+                                    qLookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                qLookup = kLookupExtent(qExtentNodeBuf.get(), fsBlockIdx, &qPhysAbs);
+                                --qDepthGuard;
+                            }
+                            if (qLookup != ExtentLookup::Found) {
+                                giveUp = true;
+                                break;
+                            }
+
+                            fs::BlockIoResult qReadIo;
+                            kernel::AsyncTask* qReadTask =
+                                kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qFsBlockBuf.get(), &qReadIo);
+                            if (!qReadTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qReadTask);
+                            if (!qReadIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+
+                            const uint32_t idx = kQtreeGetIndex(writerUid, level, qDepth, qEpb);
+                            uint32_t next = 0;
+                            memcpy(&next, qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), sizeof(next));
+                            if (next == 0) {
+                                giveUp = true;  // 트리에 없는 uid - 무제한 관례
+                                break;
+                            }
+                            curQBlock = next;
+                        }
+                        if (giveUp) {
+                            break;
+                        }
+
+                        // curQBlock은 이제 인덱스 값이 아니라 리프 "쿼터 블록"
+                        // 번호 그 자체 - 한 번 더 읽어야 실제 레코드가 나온다
+                        // (인덱스 레벨의 마지막 값이 리프가 아니라 리프를
+                        // "가리키는" 포인터임을 실측으로 확인).
+                        const uint32_t leafFsBlockIdx = curQBlock / qblocksPerFsBlock;
+                        const uint32_t leafByteOff = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                        uint64_t leafPhysAbs = 0;
+                        ExtentLookup leafLookup = kLookupExtent(qInode.block, leafFsBlockIdx, &leafPhysAbs);
+                        uint32_t leafDepthGuard = 5;
+                        SlabBuf leafExtentNodeBuf(blockSize);
+                        while (leafLookup == ExtentLookup::NeedChild && leafDepthGuard > 0) {
+                            if (!leafExtentNodeBuf) {
+                                leafLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult leafExIo;
+                            kernel::AsyncTask* leafExTask = kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1,
+                                                                                  leafExtentNodeBuf.get(), &leafExIo);
+                            if (!leafExTask) {
+                                leafLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(leafExTask);
+                            if (!leafExIo.ok) {
+                                leafLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            leafLookup = kLookupExtent(leafExtentNodeBuf.get(), leafFsBlockIdx, &leafPhysAbs);
+                            --leafDepthGuard;
+                        }
+                        if (leafLookup != ExtentLookup::Found) {
+                            break;
+                        }
+
+                        fs::BlockIoResult leafReadIo;
+                        kernel::AsyncTask* leafReadTask =
+                            kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafReadIo);
+                        if (!leafReadTask) {
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(leafReadTask);
+                        if (!leafReadIo.ok) {
+                            break;
+                        }
+
+                        QuotaV2DiskDqblk dqblk;
+                        if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize, writerUid, &dqblk)) {
+                            break;
+                        }
+                        if (dqblk.bhardlimit == 0) {
+                            break;  // 0 = 무제한 관례
+                        }
+                        const uint64_t hardLimitBytes = dqblk.bhardlimit * static_cast<uint64_t>(kQuotaBlockSize);
+                        const uint64_t projectedBytes =
+                            dqblk.curspace + static_cast<uint64_t>(additionalBlocksForQuota) * blockSize;
+                        if (projectedBytes > hardLimitBytes) {
+                            quotaExceeded = true;
+                        }
+                    } while (false);
+                }
+            }
+            if (quotaExceeded) {
+                args->bytesWritten = 0;
+                args->error = kernel::VfsError::NoSpace;
+                break;
+            }
 
             // 2) 쓰기 범위를 담기 모자라면 블록을 하나씩 할당해
             //    익스텐트를 늘린다. depth==0(인라인)이면 inode.block
