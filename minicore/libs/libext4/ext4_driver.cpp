@@ -4069,11 +4069,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             const uint32_t targetDirBlockCount = static_cast<uint32_t>(kCeilDiv(targetDirSize, blockSize));
 
             // 5) 대상이 비어있는지 확인("."/".." 외 엔트리가 하나라도
-            //    있으면 NotEmpty) - 동시에 이후 free에 쓸 물리 블록
-            //    번호들을 전부 모아 둔다(최대 4개 - 인라인 익스텐트
-            //    한도, kExtentInlineMaxEntries).
-            uint64_t targetBlockAbs[kExtentInlineMaxEntries] = {};
-            uint32_t targetBlockCount = 0;
+            //    있으면 NotEmpty).
             bool targetEmpty = true;
             {
                 bool ioFailed = false;
@@ -4090,9 +4086,6 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     // 없음, kExtentInlineMaxEntries<=4개 리프 엔트리뿐).
                     if (lookup != ExtentLookup::Found) {
                         continue;
-                    }
-                    if (targetBlockCount < kExtentInlineMaxEntries) {
-                        targetBlockAbs[targetBlockCount++] = nodeValue;
                     }
                     fs::BlockIoResult ioResult;
                     kernel::AsyncTask* ioTask =
@@ -4124,14 +4117,30 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             const uint32_t descSize = is64Bit ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
             const uint64_t gdtStartBlock = static_cast<uint64_t>(sb.firstDataBlock) + 1;
 
-            // 6) 대상의 데이터 블록들을 전부 free한다(비트맵+그룹
-            //    디스크립터 read-modify-write, 블록마다 그룹이 다를
-            //    수 있으므로 매번 새로 읽는다 - 최대 4개뿐이라 부담
-            //    없음).
+            // 6) [버그 수정, 2026-09-26, PN-36D73AB3 실측 발견] 대상의
+            //    데이터 블록을 논리 블록 단위로 다시 찾아(위 5단계는
+            //    "비어있는지"만 확인하고 물리 주소는 더 이상 저장해 두지
+            //    않는다) 그 자리에서 바로 free한다 - 예전엔 물리 블록
+            //    주소를 targetBlockAbs[kExtentInlineMaxEntries](=4)
+            //    배열에 모아 뒀는데, 이 상수는 "블록 개수"가 아니라
+            //    "인라인 익스텐트 슬롯 개수"라 디렉터리가 4블록(16KB)을
+            //    넘으면 그 이후 블록의 물리 주소를 배열에 못 담아 그냥
+            //    누락시켰다(에러조차 없이 블록을 영영 못 돌려받는 조용한
+            //    누수 - Unlink의 "명시적 거부"보다 더 나쁜 형태였다).
+            //    depth>0(NeedChild)은 위 5단계에서 이미 "Found 아니면
+            //    건너뜀"으로 스킵되므로(Mkdir이 만드는 디렉터리는 항상
+            //    depth==0) 사실상 도달하지 않지만, 방어적으로 그대로
+            //    둔다.
+            uint32_t targetBlockCount = 0;
             {
                 bool ioFailed = false;
-                for (uint32_t i = 0; i < targetBlockCount && !ioFailed; ++i) {
-                    const uint64_t abs = targetBlockAbs[i];
+                for (uint32_t logicalBlock = 0; logicalBlock < targetDirBlockCount && !ioFailed; ++logicalBlock) {
+                    uint64_t nodeValue = 0;
+                    const ExtentLookup lookup = kLookupExtent(targetInode.block, logicalBlock, &nodeValue);
+                    if (lookup != ExtentLookup::Found) {
+                        continue;
+                    }
+                    const uint64_t abs = nodeValue;
                     const uint32_t group =
                         static_cast<uint32_t>((abs - sb.firstDataBlock) / sb.blocksPerGroup);
                     const uint32_t relIndex =
@@ -4200,6 +4209,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         ioFailed = true;
                         break;
                     }
+                    ++targetBlockCount;
                 }
                 if (ioFailed) {
                     args->error = kernel::VfsError::InvalidArgument;
@@ -4386,6 +4396,40 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
 
             // 9) 부모 inode의 linksCount-1(Mkdir의 +1을 정확히
             //    되돌림) + 체크섬 재계산 + 씀.
+            //    [버그 수정, 2026-09-26, PN-36D73AB3 실측 발견 - 이번
+            //    블록 상한 수정과는 별개, 훨씬 오래된 기존 버그]
+            //    `parentInodeBuf`는 2단계에서 딱 한 번 읽어 둔 스냅샷을
+            //    그대로 들고 있다 - 부모와 대상 inode가 같은
+            //    4096바이트 inode 테이블 블록을 공유하는 흔한 경우
+            //    (예: 부모가 root(2)이고 대상이 inode 3~16 범위, inode
+            //    256바이트 기준 블록당 16개), 그 사이 7b단계가 대상
+            //    inode 슬롯을 0으로 지워 그 블록을 이미 다시 써 뒀는데
+            //    이 스냅샷을 그대로 이 자리에서 다시 쓰면 7b의 그
+            //    지우기를 고스란히 되돌려 버린다 - 실측으로 확인
+            //    (`e2fsck -fn`이 "Unconnected directory inode"로 보고,
+            //    `debugfs stat`로 대상 inode 레코드가 전혀 안 지워진
+            //    채 그대로임을 직접 확인, 1블록짜리 최소 디렉터리에서도
+            //    100% 재현 - 이번에 새로 만든 코드가 아니라 원래부터
+            //    있던 결함). 쓰기 직전에 이 블록을 다시 읽어 최신
+            //    상태(7b의 지우기 포함) 위에 linksCount 패치만 얹는다 -
+            //    `parentInode.linksCount`(2단계에서 읽은 원래 값)는
+            //    그 사이 아무도 부모 자신의 슬롯을 건드리지 않았으므로
+            //    여전히 정확하다.
+            {
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask = kSubmitReadExtBlocks(device, blockSize, parentInodeBlockOffset,
+                                                                  parentInodeBlocksNeeded, parentInodeBuf.get(),
+                                                                  &ioResult);
+                if (!ioTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                if (!ioResult.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
             parentInode.linksCount = static_cast<uint16_t>(parentInode.linksCount - 1);
             memcpy(parentInodeBuf.get() + parentInodeByteOffset, &parentInode, sizeof(parentInode));
             if (metadataCsum) {
@@ -4830,15 +4874,27 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             const uint64_t targetSize = targetInode.sizeLo | (static_cast<uint64_t>(targetInode.sizeHigh) << 32);
             const uint32_t targetBlockCountLogical = static_cast<uint32_t>(kCeilDiv(targetSize, blockSize));
 
-            // 5) 대상의 물리 블록 번호들을 모은다(인라인 익스텐트
-            //    리프만 지원 - depth>0(진짜 트리, NeedChild)이 나오면
-            //    v1 범위 밖으로 거부한다, Write의 "5개 이상 익스텐트"
-            //    미구현과 동일한 경계).
-            uint64_t targetBlockAbs[kExtentInlineMaxEntries] = {};
+            const bool is64Bit = (sb.featureIncompat & kIncompat64Bit) != 0;
+            const uint32_t descSize = is64Bit ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
+            const uint64_t gdtStartBlock = static_cast<uint64_t>(sb.firstDataBlock) + 1;
+
+            // 5+6) [버그 수정, 2026-09-26, PN-36D73AB3 실측 발견] 대상의
+            //      물리 블록을 찾아 그 자리에서 바로 free한다 - 예전엔
+            //      물리 블록 주소를 targetBlockAbs[kExtentInlineMaxEntries]
+            //      (=4)배열에 전부 모았다가 이 루프가 끝난 뒤 별도
+            //      루프에서 한꺼번에 free했는데, 그 상수는 "블록 개수"가
+            //      아니라 "인라인 익스텐트 슬롯 개수"(온디스크 포맷
+            //      상수)라 실제 익스텐트가 1개뿐인 완전히 연속된
+            //      파일이라도 4블록(16KB)을 넘으면 무조건 거부됐다(실측
+            //      확인). 두 루프를 하나로 합쳐 이 인위적 상한을 없앤다 -
+            //      depth>0(진짜 트리, NeedChild)만 여전히 거부한다(Write
+            //      경로의 "5개 이상 익스텐트" 미구현과 같은 성격의 v1
+            //      경계, 이건 그대로 유지 - 이 커밋의 범위 밖).
             uint32_t targetBlockCount = 0;
             {
                 bool unsupported = false;
-                for (uint32_t logicalBlock = 0; logicalBlock < targetBlockCountLogical && !unsupported;
+                bool ioFailed = false;
+                for (uint32_t logicalBlock = 0; logicalBlock < targetBlockCountLogical && !unsupported && !ioFailed;
                      ++logicalBlock) {
                     uint64_t nodeValue = 0;
                     const ExtentLookup lookup = kLookupExtent(targetInode.block, logicalBlock, &nodeValue);
@@ -4849,27 +4905,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     if (lookup != ExtentLookup::Found) {
                         continue;
                     }
-                    if (targetBlockCount >= kExtentInlineMaxEntries) {
-                        unsupported = true;
-                        break;
-                    }
-                    targetBlockAbs[targetBlockCount++] = nodeValue;
-                }
-                if (unsupported) {
-                    args->error = kernel::VfsError::PermissionDenied;
-                    break;
-                }
-            }
-
-            const bool is64Bit = (sb.featureIncompat & kIncompat64Bit) != 0;
-            const uint32_t descSize = is64Bit ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
-            const uint64_t gdtStartBlock = static_cast<uint64_t>(sb.firstDataBlock) + 1;
-
-            // 6) 대상의 데이터 블록들을 전부 free한다.
-            {
-                bool ioFailed = false;
-                for (uint32_t i = 0; i < targetBlockCount && !ioFailed; ++i) {
-                    const uint64_t abs = targetBlockAbs[i];
+                    const uint64_t abs = nodeValue;
                     const uint32_t group = static_cast<uint32_t>((abs - sb.firstDataBlock) / sb.blocksPerGroup);
                     const uint32_t relIndex = static_cast<uint32_t>((abs - sb.firstDataBlock) % sb.blocksPerGroup);
                     const uint64_t bitmapBlock = volume_.groupBlockBitmapBlock(group);
@@ -4936,6 +4972,11 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         ioFailed = true;
                         break;
                     }
+                    ++targetBlockCount;
+                }
+                if (unsupported) {
+                    args->error = kernel::VfsError::PermissionDenied;
+                    break;
                 }
                 if (ioFailed) {
                     args->error = kernel::VfsError::InvalidArgument;
