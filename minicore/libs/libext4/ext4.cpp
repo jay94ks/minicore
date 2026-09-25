@@ -434,6 +434,66 @@ bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* 
     return false;
 }
 
+uint32_t kExt4ComputeExtentBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                          const void* extentBlockData, uint32_t blockSize) {
+    (void)blockSize;
+    const auto* raw = static_cast<const uint8_t*>(extentBlockData);
+    ExtentHeader header;
+    memcpy(&header, raw, sizeof(header));
+    const uint32_t tailOffset =
+        static_cast<uint32_t>(sizeof(ExtentHeader)) + static_cast<uint32_t>(header.max) * sizeof(Extent);
+    uint32_t seed = kCrc32c(kCrc32c(0xFFFFFFFFu, uuid, 16), &inodeNum, sizeof(inodeNum));
+    seed = kCrc32c(seed, &generation, sizeof(generation));
+    return kCrc32c(seed, raw, tailOffset);
+}
+
+bool kExt4GrowExtentTreeToDepth1(uint8_t block60[kExtentInlineBytes], uint8_t* newBlockData, uint32_t blockSize,
+                                  uint64_t newBlockAbs) {
+    ExtentHeader oldHeader;
+    memcpy(&oldHeader, block60, sizeof(oldHeader));
+    if (oldHeader.magic != kExtentMagic || oldHeader.depth != 0) {
+        return false;
+    }
+
+    // 1) 새 블록에 인라인 영역을 통째로 복사 + 나머지는 0.
+    memcpy(newBlockData, block60, kExtentInlineBytes);
+    memset(newBlockData + kExtentInlineBytes, 0, blockSize - kExtentInlineBytes);
+
+    // 2) 새 블록 헤더의 max를 블록 전체 용량으로 재설정.
+    ExtentHeader newBlockHeader;
+    memcpy(&newBlockHeader, newBlockData, sizeof(newBlockHeader));
+    newBlockHeader.max = static_cast<uint16_t>(kExt4ExtentBlockMaxEntries(blockSize));
+    memcpy(newBlockData, &newBlockHeader, sizeof(newBlockHeader));
+
+    // 3) 첫 익스텐트의 ee_block을 새 인덱스 엔트리의 ei_block으로
+    //    이어받는다(엔트리가 하나도 없는 빈 파일에서 성장하는 극단
+    //    경우는 0으로 - 실무상 거의 없음, 인라인 리프가 꽉 차려면
+    //    이미 최소 1개 이상의 엔트리가 있어야 하므로).
+    Extent firstExtent{};
+    if (oldHeader.entries > 0) {
+        memcpy(&firstExtent, block60 + sizeof(ExtentHeader), sizeof(firstExtent));
+    }
+
+    ExtentHeader idxHeader{};
+    idxHeader.magic = kExtentMagic;
+    idxHeader.entries = 1;
+    idxHeader.max = kExtentInlineMaxEntries;
+    idxHeader.depth = 1;
+    idxHeader.generation = oldHeader.generation;
+    memcpy(block60, &idxHeader, sizeof(idxHeader));
+
+    ExtentIdx idx{};
+    idx.block = firstExtent.block;
+    idx.leafLo = static_cast<uint32_t>(newBlockAbs & 0xFFFFFFFFu);
+    idx.leafHi = static_cast<uint16_t>(newBlockAbs >> 32);
+    idx.unused = 0;
+    memcpy(block60 + sizeof(ExtentHeader), &idx, sizeof(idx));
+    // 나머지 36바이트(옛 익스텐트 #2~#4가 있던 자리)는 의도적으로
+    // 그대로 둔다 - 실제 리눅스 커널도 지우지 않는다(eh_entries=1이
+    // 그 바이트들을 무효로 만들 뿐).
+    return true;
+}
+
 void kExt4InitDirInode(InodeCore* inode, uint32_t blockSize, uint64_t firstBlock, uint32_t epochSeconds,
                         uint16_t uid, uint16_t gid) {
     memset(inode, 0, sizeof(InodeCore));

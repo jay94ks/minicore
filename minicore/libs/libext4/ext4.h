@@ -585,6 +585,80 @@ bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t has
 bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* name, uint8_t nameLen,
                           uint8_t* outFileType);
 
+// ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-81C6322C] 인라인 리프(depth==0, inode->block의
+// 60바이트)가 4개 엔트리로 꽉 찼을 때 실제 온디스크 익스텐트 트리를
+// depth==1로 승격 - 리눅스 커널 fs/ext4/extents.c
+// `ext4_ext_grow_indepth()`와 동일한 알고리즘(이 프로젝트가 새로
+// 고안한 게 아니다, WSL2-Linux-Kernel 로컬 소스 확인 - 자세한 경로는
+// reference_local_linux_kernel_source 메모리 참고). `kExt4InsertDirEntry`
+// 부류와 달리 "5개 이상 익스텐트" 자체는 이 함수 범위가 아니고, 이
+// 함수는 딱 한 번의 depth 0→1 전환만 담당한다(전환 후 새 리프
+// 블록에 실제로 엔트리를 추가하는 건 호출자가 이어서
+// `kExt4AppendInlineExtent`를 그 블록 버퍼에 대고 부르면 됨 - 그
+// 함수는 버퍼 자신의 `header.max` 필드로 용량을 판단하므로 60바이트
+// 인라인이든 전체 블록 리프든 그대로 재사용 가능, 별도 함수 불필요).
+// ---------------------------------------------------------------------
+
+// [신규, 2026-09-25, PN-81C6322C] metadata_csum 볼륨의 익스텐트
+// 트리 블록(리프/인덱스 공용, 인라인 루트 제외) 끝에 붙는 체크섬
+// 꼬리 - 리눅스 커널 `struct ext4_extent_tail`(4바이트, checksum
+// 하나뿐)과 동일. 오프셋은 항상 "그 블록이 담을 수 있는 최대
+// 엔트리 수(eh_max)만큼 다 찼다고 가정한 위치"(`sizeof(ExtentHeader)
+// + eh_max*sizeof(Extent)`) - 실제 엔트리 개수(eh_entries)와 무관하게
+// 고정이다(디렉터리 블록의 DirEntryTail이 recLen 체인 끝에 붙는 것과
+// 달리, 이쪽은 항상 같은 자리).
+#pragma pack(push, 1)
+struct ExtentTail {
+    uint32_t checksum;
+};
+static_assert(sizeof(ExtentTail) == 4, "ExtentTail은 4바이트여야 함");
+#pragma pack(pop)
+
+// 블록 하나(전체 blockSize)가 리프든 인덱스든 담을 수 있는 최대
+// 엔트리 수 - Extent/ExtentIdx 둘 다 12바이트라 공식이 같다(리눅스
+// 커널 `ext4_ext_space_block()`/`ext4_ext_space_block_idx()`가 실제로
+// 동일한 공식을 씀, WSL2-Linux-Kernel 로컬 소스 확인). 체크섬 꼬리
+// (4바이트)를 위한 별도 차감은 없다 - 블록 크기가 12로 나눠떨어지지
+// 않는 나머지 공간(예: 1024바이트 블록이면 1024-12-84*12=4바이트)에
+// 정확히 들어맞기 때문(리눅스 커널 주석이 이 성질을 명시적으로 전제).
+inline uint32_t kExt4ExtentBlockMaxEntries(uint32_t blockSize) {
+    return (blockSize - static_cast<uint32_t>(sizeof(ExtentHeader))) / static_cast<uint32_t>(sizeof(Extent));
+}
+
+// 익스텐트 트리 블록(리프/인덱스 공용) 체크섬 계산 - inode/디렉터리
+// 블록 체크섬과 동일한 per-inode seed 유도(uuid seed에 inode 번호+
+// generation을 순서대로 이어붙임, 리눅스 커널 `ext4_extent_block_csum()`
+// 확인). 해시 범위는 [0, tailOffset)만 - tailOffset은 그 블록
+// 버퍼 자신의 헤더에 이미 쓰여 있는 eh_max로 계산한다(호출 전에
+// eh_max를 올바른 값으로 맞춰 둘 것 - `kExt4GrowExtentTreeToDepth1`이
+// 이미 그렇게 한다).
+uint32_t kExt4ComputeExtentBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
+                                          const void* extentBlockData, uint32_t blockSize);
+
+// 인라인 리프(block60, depth==0 유효 상태여야 함)를 depth==1 인덱스
+// 노드로 승격한다:
+//   1) newBlockData(전체 blockSize바이트, 호출자가 이미 할당해 둔
+//      newBlockAbs에 대응하는 버퍼) 시작 60바이트에 인라인 영역을
+//      통째로 복사(헤더+최대 4개 엔트리 그대로), 나머지는 0으로.
+//   2) 그 새 블록 헤더의 max를 블록 전체 용량(kExt4ExtentBlockMaxEntries)
+//      으로 다시 씀(entries/depth/magic/generation은 복사된 값 그대로
+//      - 보통 depth=0, entries=4).
+//   3) 인라인 영역(block60) 자신을 인덱스 노드로 다시 씀 - 헤더
+//      (entries=1, max=`kExtentInlineMaxEntries`, depth=1) + 인덱스
+//      엔트리 1개(예전 첫 익스텐트의 ee_block을 그대로 ei_block으로,
+//      newBlockAbs를 가리킴). **나머지 36바이트는 의도적으로 건드리지
+//      않는다**(리눅스 커널도 그대로 - eh_entries=1이 그 바이트들을
+//      무효로 만들 뿐 지우지 않음, 실측 검증 완료 시 기록).
+// 체크섬(newBlockData의 tail)은 이 함수가 채우지 않는다 - eh_max를
+// 고친 뒤에도 호출자가 새 데이터 엔트리를 마저 추가할 수 있으므로
+// (호출자가 이어서 `kExt4AppendInlineExtent(newBlockData, ...)`를
+// 부른 다음에야 최종 내용이 확정됨), 체크섬 계산은 그 다음 호출자
+// 몫(`kExt4ComputeExtentBlockChecksum`). block60이 이미 유효한
+// depth==0 리프가 아니면 아무것도 바꾸지 않고 false.
+bool kExt4GrowExtentTreeToDepth1(uint8_t block60[kExtentInlineBytes], uint8_t* newBlockData, uint32_t blockSize,
+                                  uint64_t newBlockAbs);
+
 constexpr uint16_t kModeDir = 0x4000;      // S_IFDIR
 constexpr uint16_t kModeRegular = 0x8000;  // S_IFREG - 파일 초기화 시 재사용할 수 있게 함께 정의
 constexpr uint16_t kDefaultDirPerm = 0755;

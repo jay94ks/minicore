@@ -844,171 +844,569 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
             const uint32_t anchorGroup = (inodeNum - 1) / sb.inodesPerGroup;
 
             // 2) 쓰기 범위를 담기 모자라면 블록을 하나씩 할당해
-            //    익스텐트를 늘린다(마지막 익스텐트와 물리적으로 이어
-            //    지면 그 len만 늘리고, 아니면 새 익스텐트 엔트리를
-            //    추가 - kExt4AppendInlineExtent가 4개 초과 시 실패
-            //    하면 방금 할당한 블록을 되돌리고 v1 범위 밖으로 거부).
+            //    익스텐트를 늘린다. depth==0(인라인)이면 inode.block
+            //    자체에 늘리고, 4개가 꽉 차면 실제로 트리를 depth==1로
+            //    승격(`kExt4GrowExtentTreeToDepth1` - 리눅스 커널
+            //    `ext4_ext_grow_indepth()`와 동일 알고리즘, PN-81C6322C)
+            //    한 뒤 새로 생긴 리프 블록에 이어서 추가한다. depth==1
+            //    상태에서는 그 리프 블록(디스크에서 매번 다시 읽음)에
+            //    직접 추가하고, 그 리프마저 꽉 차면(1024바이트 블록
+            //    기준 84개 엔트리 - 이 프로젝트의 현실적 파일 크기에서
+            //    사실상 도달하지 않음, 더 깊은 분할/형제 리프는
+            //    PN-81C6322C 범위 밖) PermissionDenied로 정직하게
+            //    거부한다.
             uint32_t blocksAllocatedCount = 0;
             bool allocFailed = false;
             kernel::VfsError allocFailReason = kernel::VfsError::NoSpace;
             while (!allocFailed) {
                 ExtentHeader curHeader;
                 memcpy(&curHeader, inode.block, sizeof(curHeader));
-                Extent lastEntry{};
-                bool hasEntry = curHeader.entries > 0;
-                uint32_t curLogicalBlocks = 0;
-                if (hasEntry) {
-                    memcpy(&lastEntry, inode.block + sizeof(ExtentHeader) + (curHeader.entries - 1) * sizeof(Extent),
-                           sizeof(lastEntry));
-                    curLogicalBlocks = lastEntry.block + lastEntry.len;
-                }
-                if (curLogicalBlocks >= blocksNeededTotal) {
-                    break;  // 이미 충분함
+
+                if (curHeader.depth == 0) {
+                    Extent lastEntry{};
+                    bool hasEntry = curHeader.entries > 0;
+                    uint32_t curLogicalBlocks = 0;
+                    if (hasEntry) {
+                        memcpy(&lastEntry,
+                               inode.block + sizeof(ExtentHeader) + (curHeader.entries - 1) * sizeof(Extent),
+                               sizeof(lastEntry));
+                        curLogicalBlocks = lastEntry.block + lastEntry.len;
+                    }
+                    if (curLogicalBlocks >= blocksNeededTotal) {
+                        break;  // 이미 충분함
+                    }
+
+                    // 데이터 블록 하나 할당.
+                    uint64_t dataBlockAbs = 0;
+                    {
+                        SlabBuf blockBitmapBuf(blockSize);
+                        SlabBuf blockGdBuf(blockSize);
+                        if (!blockBitmapBuf || !blockGdBuf) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        bool ioFailed = false;
+                        bool allocated = false;
+                        for (uint32_t offset = 0; offset < groupCount; ++offset) {
+                            const uint32_t group = (anchorGroup + offset) % groupCount;
+                            const uint64_t bitmapBlock = volume_.groupBlockBitmapBlock(group);
+                            uint64_t gdBlockOffset = 0;
+                            uint32_t gdByteOffset = 0;
+                            kLocateGroupDesc(gdtStartBlock, descSize, blockSize, group, &gdBlockOffset,
+                                              &gdByteOffset);
+
+                            fs::BlockIoResult bmIo;
+                            kernel::AsyncTask* bmTask =
+                                kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, blockBitmapBuf.get(), &bmIo);
+                            if (!bmTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(bmTask);
+                            if (!bmIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult gdIo;
+                            kernel::AsyncTask* gdTask =
+                                kSubmitReadExtBlocks(device, blockSize, gdBlockOffset, 1, blockGdBuf.get(), &gdIo);
+                            if (!gdTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(gdTask);
+                            if (!gdIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            uint32_t relIndex = 0;
+                            if (!kExt4AllocateBlockInGroup(sb.uuid, group, sb.blocksPerGroup, sb.featureRoCompat,
+                                                            is64Bit, blockBitmapBuf.get(),
+                                                            blockGdBuf.get() + gdByteOffset, &relIndex)) {
+                                continue;
+                            }
+                            fs::BlockIoResult wBmIo;
+                            kernel::AsyncTask* wBmTask =
+                                kSubmitWriteExtBlocks(device, blockSize, bitmapBlock, 1, blockBitmapBuf.get(), &wBmIo);
+                            if (!wBmTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wBmTask);
+                            if (!wBmIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult wGdIo;
+                            kernel::AsyncTask* wGdTask =
+                                kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset, 1, blockGdBuf.get(), &wGdIo);
+                            if (!wGdTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wGdTask);
+                            if (!wGdIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            dataBlockAbs = static_cast<uint64_t>(sb.firstDataBlock) +
+                                          static_cast<uint64_t>(group) * sb.blocksPerGroup + relIndex;
+                            allocated = true;
+                            break;
+                        }
+                        if (ioFailed) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        if (!allocated) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::NoSpace;
+                            break;
+                        }
+                    }
+
+                    const uint64_t lastPhysStart =
+                        (static_cast<uint64_t>(lastEntry.startHi) << 32) | lastEntry.startLo;
+                    const bool canExtend = hasEntry && (lastPhysStart + lastEntry.len == dataBlockAbs) &&
+                                            (lastEntry.len < 0x7FFFu);
+                    if (canExtend) {
+                        lastEntry.len = static_cast<uint16_t>(lastEntry.len + 1);
+                        memcpy(inode.block + sizeof(ExtentHeader) + (curHeader.entries - 1) * sizeof(Extent),
+                               &lastEntry, sizeof(lastEntry));
+                        ++blocksAllocatedCount;
+                        continue;
+                    }
+                    if (kExt4AppendInlineExtent(inode.block, curLogicalBlocks, dataBlockAbs, 1)) {
+                        ++blocksAllocatedCount;
+                        continue;
+                    }
+
+                    // 인라인 리프(4개)가 꽉 참 - depth 1로 승격한다.
+                    // 트리 구조용 블록을 하나 더 할당(위와 동일한
+                    // 그룹 스캔 - 의도적 중복, 파일 상단 문서 주석의
+                    // 합성 불가 제약 때문).
+                    uint64_t growBlockAbs = 0;
+                    {
+                        SlabBuf growBitmapBuf(blockSize);
+                        SlabBuf growGdBuf(blockSize);
+                        if (!growBitmapBuf || !growGdBuf) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        bool ioFailed = false;
+                        bool allocated = false;
+                        for (uint32_t offset = 0; offset < groupCount; ++offset) {
+                            const uint32_t group = (anchorGroup + offset) % groupCount;
+                            const uint64_t bitmapBlock = volume_.groupBlockBitmapBlock(group);
+                            uint64_t gdBlockOffset = 0;
+                            uint32_t gdByteOffset = 0;
+                            kLocateGroupDesc(gdtStartBlock, descSize, blockSize, group, &gdBlockOffset,
+                                              &gdByteOffset);
+
+                            fs::BlockIoResult bmIo;
+                            kernel::AsyncTask* bmTask =
+                                kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, growBitmapBuf.get(), &bmIo);
+                            if (!bmTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(bmTask);
+                            if (!bmIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult gdIo;
+                            kernel::AsyncTask* gdTask =
+                                kSubmitReadExtBlocks(device, blockSize, gdBlockOffset, 1, growGdBuf.get(), &gdIo);
+                            if (!gdTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(gdTask);
+                            if (!gdIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            uint32_t relIndex = 0;
+                            if (!kExt4AllocateBlockInGroup(sb.uuid, group, sb.blocksPerGroup, sb.featureRoCompat,
+                                                            is64Bit, growBitmapBuf.get(),
+                                                            growGdBuf.get() + gdByteOffset, &relIndex)) {
+                                continue;
+                            }
+                            fs::BlockIoResult wBmIo;
+                            kernel::AsyncTask* wBmTask =
+                                kSubmitWriteExtBlocks(device, blockSize, bitmapBlock, 1, growBitmapBuf.get(), &wBmIo);
+                            if (!wBmTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wBmTask);
+                            if (!wBmIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult wGdIo;
+                            kernel::AsyncTask* wGdTask =
+                                kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset, 1, growGdBuf.get(), &wGdIo);
+                            if (!wGdTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wGdTask);
+                            if (!wGdIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            growBlockAbs = static_cast<uint64_t>(sb.firstDataBlock) +
+                                          static_cast<uint64_t>(group) * sb.blocksPerGroup + relIndex;
+                            allocated = true;
+                            break;
+                        }
+                        if (ioFailed) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        if (!allocated) {
+                            // 트리 성장용 블록을 못 구함 - 이미 할당해
+                            // 둔 dataBlockAbs를 되돌린다(orphan 방지).
+                            const uint32_t rbGroup = static_cast<uint32_t>(
+                                (dataBlockAbs - sb.firstDataBlock) / sb.blocksPerGroup);
+                            const uint32_t rbRelIndex = static_cast<uint32_t>(
+                                (dataBlockAbs - sb.firstDataBlock) % sb.blocksPerGroup);
+                            const uint64_t rbBitmapBlock = volume_.groupBlockBitmapBlock(rbGroup);
+                            uint64_t rbGdBlockOffset = 0;
+                            uint32_t rbGdByteOffset = 0;
+                            kLocateGroupDesc(gdtStartBlock, descSize, blockSize, rbGroup, &rbGdBlockOffset,
+                                              &rbGdByteOffset);
+                            SlabBuf rbBitmapBuf(blockSize);
+                            SlabBuf rbGdBuf(blockSize);
+                            if (rbBitmapBuf && rbGdBuf) {
+                                fs::BlockIoResult rbBmIo;
+                                kernel::AsyncTask* rbBmTask = kSubmitReadExtBlocks(
+                                    device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rbBmIo);
+                                if (rbBmTask) {
+                                    co_await kernel::AsyncTaskCoroAwaiter(rbBmTask);
+                                }
+                                fs::BlockIoResult rbGdIo;
+                                kernel::AsyncTask* rbGdTask = kSubmitReadExtBlocks(
+                                    device, blockSize, rbGdBlockOffset, 1, rbGdBuf.get(), &rbGdIo);
+                                if (rbGdTask) {
+                                    co_await kernel::AsyncTaskCoroAwaiter(rbGdTask);
+                                }
+                                kExt4FreeBlockInGroup(sb.uuid, rbGroup, sb.blocksPerGroup, sb.featureRoCompat,
+                                                       is64Bit, rbBitmapBuf.get(), rbGdBuf.get() + rbGdByteOffset,
+                                                       rbRelIndex);
+                                fs::BlockIoResult rwBmIo;
+                                kernel::AsyncTask* rwBmTask = kSubmitWriteExtBlocks(
+                                    device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rwBmIo);
+                                if (rwBmTask) {
+                                    co_await kernel::AsyncTaskCoroAwaiter(rwBmTask);
+                                }
+                                fs::BlockIoResult rwGdIo;
+                                kernel::AsyncTask* rwGdTask = kSubmitWriteExtBlocks(
+                                    device, blockSize, rbGdBlockOffset, 1, rbGdBuf.get(), &rwGdIo);
+                                if (rwGdTask) {
+                                    co_await kernel::AsyncTaskCoroAwaiter(rwGdTask);
+                                }
+                            }
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::NoSpace;
+                            break;
+                        }
+                    }
+                    if (allocFailed) {
+                        break;
+                    }
+
+                    SlabBuf growLeafBuf(blockSize);
+                    if (!growLeafBuf ||
+                        !kExt4GrowExtentTreeToDepth1(inode.block, growLeafBuf.get(), blockSize, growBlockAbs)) {
+                        // 이론상 불가능(depth==0임을 이미 확인) - 순수
+                        // 방어 경로라 orphan 롤백은 생략한다.
+                        allocFailed = true;
+                        allocFailReason = kernel::VfsError::PermissionDenied;
+                        break;
+                    }
+                    // 이제 inode.block은 depth==1(인덱스 1개, growBlockAbs
+                    // 를 가리킴), growLeafBuf는 옛 인라인 4개 엔트리를
+                    // 그대로 물려받은 리프(max가 블록 용량으로 갱신됨).
+                    // 아까 할당해 둔 dataBlockAbs를 이 새 리프에 마저
+                    // 추가한다(84 vs 5이므로 항상 성공 보장).
+                    {
+                        ExtentHeader leafHeaderNow;
+                        memcpy(&leafHeaderNow, growLeafBuf.get(), sizeof(leafHeaderNow));
+                        Extent leafLast{};
+                        memcpy(&leafLast,
+                               growLeafBuf.get() + sizeof(ExtentHeader) + (leafHeaderNow.entries - 1) * sizeof(Extent),
+                               sizeof(leafLast));
+                        const uint64_t leafLastPhysStart =
+                            (static_cast<uint64_t>(leafLast.startHi) << 32) | leafLast.startLo;
+                        const uint32_t leafLastLogicalEnd = leafLast.block + leafLast.len;
+                        if (leafLastPhysStart + leafLast.len == dataBlockAbs && leafLast.len < 0x7FFFu) {
+                            leafLast.len = static_cast<uint16_t>(leafLast.len + 1);
+                            memcpy(growLeafBuf.get() + sizeof(ExtentHeader) +
+                                       (leafHeaderNow.entries - 1) * sizeof(Extent),
+                                   &leafLast, sizeof(leafLast));
+                        } else {
+                            kExt4AppendInlineExtent(growLeafBuf.get(), leafLastLogicalEnd, dataBlockAbs, 1);
+                        }
+                    }
+                    if (metadataCsum) {
+                        const uint32_t csum = kExt4ComputeExtentBlockChecksum(sb.uuid, inodeNum, inode.generation,
+                                                                                growLeafBuf.get(), blockSize);
+                        const uint32_t tailOffset = static_cast<uint32_t>(sizeof(ExtentHeader)) +
+                                                     kExt4ExtentBlockMaxEntries(blockSize) * sizeof(Extent);
+                        memcpy(growLeafBuf.get() + tailOffset, &csum, sizeof(csum));
+                    }
+                    {
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitWriteExtBlocks(device, blockSize, growBlockAbs, 1, growLeafBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                    }
+                    blocksAllocatedCount += 2;  // growBlockAbs(메타데이터) + dataBlockAbs(데이터)
+                    continue;
                 }
 
-                uint64_t newBlockAbs = 0;
-                {
-                    SlabBuf blockBitmapBuf(blockSize);
-                    SlabBuf blockGdBuf(blockSize);
-                    if (!blockBitmapBuf || !blockGdBuf) {
+                if (curHeader.depth == 1 && curHeader.entries == 1) {
+                    ExtentIdx idx;
+                    memcpy(&idx, inode.block + sizeof(ExtentHeader), sizeof(idx));
+                    const uint64_t leafBlockAbs = (static_cast<uint64_t>(idx.leafHi) << 32) | idx.leafLo;
+
+                    SlabBuf leafBuf(blockSize);
+                    if (!leafBuf) {
                         allocFailed = true;
                         allocFailReason = kernel::VfsError::InvalidArgument;
                         break;
                     }
-                    bool ioFailed = false;
-                    bool allocated = false;
-                    for (uint32_t offset = 0; offset < groupCount; ++offset) {
-                        const uint32_t group = (anchorGroup + offset) % groupCount;
-                        const uint64_t bitmapBlock = volume_.groupBlockBitmapBlock(group);
-                        uint64_t gdBlockOffset = 0;
-                        uint32_t gdByteOffset = 0;
-                        kLocateGroupDesc(gdtStartBlock, descSize, blockSize, group, &gdBlockOffset, &gdByteOffset);
+                    {
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadExtBlocks(device, blockSize, leafBlockAbs, 1, leafBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                    }
+                    ExtentHeader leafHeader;
+                    memcpy(&leafHeader, leafBuf.get(), sizeof(leafHeader));
+                    Extent leafLast{};
+                    bool leafHasEntry = leafHeader.entries > 0;
+                    uint32_t curLogicalBlocks = 0;
+                    if (leafHasEntry) {
+                        memcpy(&leafLast,
+                               leafBuf.get() + sizeof(ExtentHeader) + (leafHeader.entries - 1) * sizeof(Extent),
+                               sizeof(leafLast));
+                        curLogicalBlocks = leafLast.block + leafLast.len;
+                    }
+                    if (curLogicalBlocks >= blocksNeededTotal) {
+                        break;  // 이미 충분함
+                    }
 
-                        fs::BlockIoResult bmIo;
-                        kernel::AsyncTask* bmTask =
-                            kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, blockBitmapBuf.get(), &bmIo);
-                        if (!bmTask) {
-                            ioFailed = true;
+                    uint64_t dataBlockAbs = 0;
+                    {
+                        SlabBuf blockBitmapBuf(blockSize);
+                        SlabBuf blockGdBuf(blockSize);
+                        if (!blockBitmapBuf || !blockGdBuf) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
                             break;
                         }
-                        co_await kernel::AsyncTaskCoroAwaiter(bmTask);
-                        if (!bmIo.ok) {
-                            ioFailed = true;
+                        bool ioFailed = false;
+                        bool allocated = false;
+                        for (uint32_t offset = 0; offset < groupCount; ++offset) {
+                            const uint32_t group = (anchorGroup + offset) % groupCount;
+                            const uint64_t bitmapBlock = volume_.groupBlockBitmapBlock(group);
+                            uint64_t gdBlockOffset = 0;
+                            uint32_t gdByteOffset = 0;
+                            kLocateGroupDesc(gdtStartBlock, descSize, blockSize, group, &gdBlockOffset,
+                                              &gdByteOffset);
+
+                            fs::BlockIoResult bmIo;
+                            kernel::AsyncTask* bmTask =
+                                kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, blockBitmapBuf.get(), &bmIo);
+                            if (!bmTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(bmTask);
+                            if (!bmIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult gdIo;
+                            kernel::AsyncTask* gdTask =
+                                kSubmitReadExtBlocks(device, blockSize, gdBlockOffset, 1, blockGdBuf.get(), &gdIo);
+                            if (!gdTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(gdTask);
+                            if (!gdIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            uint32_t relIndex = 0;
+                            if (!kExt4AllocateBlockInGroup(sb.uuid, group, sb.blocksPerGroup, sb.featureRoCompat,
+                                                            is64Bit, blockBitmapBuf.get(),
+                                                            blockGdBuf.get() + gdByteOffset, &relIndex)) {
+                                continue;
+                            }
+                            fs::BlockIoResult wBmIo;
+                            kernel::AsyncTask* wBmTask =
+                                kSubmitWriteExtBlocks(device, blockSize, bitmapBlock, 1, blockBitmapBuf.get(), &wBmIo);
+                            if (!wBmTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wBmTask);
+                            if (!wBmIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult wGdIo;
+                            kernel::AsyncTask* wGdTask =
+                                kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset, 1, blockGdBuf.get(), &wGdIo);
+                            if (!wGdTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wGdTask);
+                            if (!wGdIo.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            dataBlockAbs = static_cast<uint64_t>(sb.firstDataBlock) +
+                                          static_cast<uint64_t>(group) * sb.blocksPerGroup + relIndex;
+                            allocated = true;
                             break;
                         }
-                        fs::BlockIoResult gdIo;
-                        kernel::AsyncTask* gdTask =
-                            kSubmitReadExtBlocks(device, blockSize, gdBlockOffset, 1, blockGdBuf.get(), &gdIo);
-                        if (!gdTask) {
-                            ioFailed = true;
+                        if (ioFailed) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
                             break;
                         }
-                        co_await kernel::AsyncTaskCoroAwaiter(gdTask);
-                        if (!gdIo.ok) {
-                            ioFailed = true;
+                        if (!allocated) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::NoSpace;
                             break;
                         }
-                        uint32_t relIndex = 0;
-                        if (!kExt4AllocateBlockInGroup(sb.uuid, group, sb.blocksPerGroup, sb.featureRoCompat,
-                                                        is64Bit, blockBitmapBuf.get(), blockGdBuf.get() + gdByteOffset,
-                                                        &relIndex)) {
-                            continue;
-                        }
-                        fs::BlockIoResult wBmIo;
-                        kernel::AsyncTask* wBmTask =
-                            kSubmitWriteExtBlocks(device, blockSize, bitmapBlock, 1, blockBitmapBuf.get(), &wBmIo);
-                        if (!wBmTask) {
-                            ioFailed = true;
-                            break;
-                        }
-                        co_await kernel::AsyncTaskCoroAwaiter(wBmTask);
-                        if (!wBmIo.ok) {
-                            ioFailed = true;
-                            break;
-                        }
-                        fs::BlockIoResult wGdIo;
-                        kernel::AsyncTask* wGdTask =
-                            kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset, 1, blockGdBuf.get(), &wGdIo);
-                        if (!wGdTask) {
-                            ioFailed = true;
-                            break;
-                        }
-                        co_await kernel::AsyncTaskCoroAwaiter(wGdTask);
-                        if (!wGdIo.ok) {
-                            ioFailed = true;
-                            break;
-                        }
-                        newBlockAbs = static_cast<uint64_t>(sb.firstDataBlock) +
-                                      static_cast<uint64_t>(group) * sb.blocksPerGroup + relIndex;
-                        allocated = true;
-                        break;
                     }
-                    if (ioFailed) {
+
+                    const uint64_t leafLastPhysStart =
+                        (static_cast<uint64_t>(leafLast.startHi) << 32) | leafLast.startLo;
+                    const bool leafCanExtend = leafHasEntry && (leafLastPhysStart + leafLast.len == dataBlockAbs) &&
+                                                (leafLast.len < 0x7FFFu);
+                    bool appended = false;
+                    if (leafCanExtend) {
+                        leafLast.len = static_cast<uint16_t>(leafLast.len + 1);
+                        memcpy(leafBuf.get() + sizeof(ExtentHeader) + (leafHeader.entries - 1) * sizeof(Extent),
+                               &leafLast, sizeof(leafLast));
+                        appended = true;
+                    } else if (kExt4AppendInlineExtent(leafBuf.get(), curLogicalBlocks, dataBlockAbs, 1)) {
+                        appended = true;
+                    }
+                    if (!appended) {
+                        // 리프마저 꽉 참(1024바이트 블록 기준 84개) -
+                        // 더 깊은 분할/형제 리프는 PN-81C6322C 범위
+                        // 밖으로 정직하게 거부, 방금 할당한 블록은
+                        // 되돌린다(orphan 방지).
+                        const uint32_t rbGroup = static_cast<uint32_t>(
+                            (dataBlockAbs - sb.firstDataBlock) / sb.blocksPerGroup);
+                        const uint32_t rbRelIndex = static_cast<uint32_t>(
+                            (dataBlockAbs - sb.firstDataBlock) % sb.blocksPerGroup);
+                        const uint64_t rbBitmapBlock = volume_.groupBlockBitmapBlock(rbGroup);
+                        uint64_t rbGdBlockOffset = 0;
+                        uint32_t rbGdByteOffset = 0;
+                        kLocateGroupDesc(gdtStartBlock, descSize, blockSize, rbGroup, &rbGdBlockOffset,
+                                          &rbGdByteOffset);
+                        SlabBuf rbBitmapBuf(blockSize);
+                        SlabBuf rbGdBuf(blockSize);
+                        if (rbBitmapBuf && rbGdBuf) {
+                            fs::BlockIoResult rbBmIo;
+                            kernel::AsyncTask* rbBmTask =
+                                kSubmitReadExtBlocks(device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rbBmIo);
+                            if (rbBmTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(rbBmTask);
+                            }
+                            fs::BlockIoResult rbGdIo;
+                            kernel::AsyncTask* rbGdTask =
+                                kSubmitReadExtBlocks(device, blockSize, rbGdBlockOffset, 1, rbGdBuf.get(), &rbGdIo);
+                            if (rbGdTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(rbGdTask);
+                            }
+                            kExt4FreeBlockInGroup(sb.uuid, rbGroup, sb.blocksPerGroup, sb.featureRoCompat, is64Bit,
+                                                   rbBitmapBuf.get(), rbGdBuf.get() + rbGdByteOffset, rbRelIndex);
+                            fs::BlockIoResult rwBmIo;
+                            kernel::AsyncTask* rwBmTask =
+                                kSubmitWriteExtBlocks(device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rwBmIo);
+                            if (rwBmTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(rwBmTask);
+                            }
+                            fs::BlockIoResult rwGdIo;
+                            kernel::AsyncTask* rwGdTask =
+                                kSubmitWriteExtBlocks(device, blockSize, rbGdBlockOffset, 1, rbGdBuf.get(), &rwGdIo);
+                            if (rwGdTask) {
+                                co_await kernel::AsyncTaskCoroAwaiter(rwGdTask);
+                            }
+                        }
                         allocFailed = true;
-                        allocFailReason = kernel::VfsError::InvalidArgument;
+                        allocFailReason = kernel::VfsError::PermissionDenied;
                         break;
                     }
-                    if (!allocated) {
-                        allocFailed = true;
-                        allocFailReason = kernel::VfsError::NoSpace;
-                        break;
+                    if (metadataCsum) {
+                        const uint32_t csum = kExt4ComputeExtentBlockChecksum(sb.uuid, inodeNum, inode.generation,
+                                                                                leafBuf.get(), blockSize);
+                        const uint32_t tailOffset =
+                            static_cast<uint32_t>(sizeof(ExtentHeader)) + leafHeader.max * sizeof(Extent);
+                        memcpy(leafBuf.get() + tailOffset, &csum, sizeof(csum));
                     }
+                    {
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitWriteExtBlocks(device, blockSize, leafBlockAbs, 1, leafBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            allocFailed = true;
+                            allocFailReason = kernel::VfsError::InvalidArgument;
+                            break;
+                        }
+                    }
+                    ++blocksAllocatedCount;
+                    continue;
                 }
 
-                const uint64_t lastPhysStart =
-                    (static_cast<uint64_t>(lastEntry.startHi) << 32) | lastEntry.startLo;
-                const bool canExtend = hasEntry && (lastPhysStart + lastEntry.len == newBlockAbs) &&
-                                        (lastEntry.len < 0x7FFFu);
-                if (canExtend) {
-                    lastEntry.len = static_cast<uint16_t>(lastEntry.len + 1);
-                    memcpy(inode.block + sizeof(ExtentHeader) + (curHeader.entries - 1) * sizeof(Extent), &lastEntry,
-                           sizeof(lastEntry));
-                } else if (!kExt4AppendInlineExtent(inode.block, curLogicalBlocks, newBlockAbs, 1)) {
-                    // 4개 초과 - v1 범위 밖. 방금 할당한 블록을 되돌린다
-                    // (orphan 블록 방지 - Mkdir의 롤백과 동일한 이유).
-                    const uint32_t rbGroup =
-                        static_cast<uint32_t>((newBlockAbs - sb.firstDataBlock) / sb.blocksPerGroup);
-                    const uint32_t rbRelIndex =
-                        static_cast<uint32_t>((newBlockAbs - sb.firstDataBlock) % sb.blocksPerGroup);
-                    const uint64_t rbBitmapBlock = volume_.groupBlockBitmapBlock(rbGroup);
-                    uint64_t rbGdBlockOffset = 0;
-                    uint32_t rbGdByteOffset = 0;
-                    kLocateGroupDesc(gdtStartBlock, descSize, blockSize, rbGroup, &rbGdBlockOffset, &rbGdByteOffset);
-                    SlabBuf rbBitmapBuf(blockSize);
-                    SlabBuf rbGdBuf(blockSize);
-                    if (rbBitmapBuf && rbGdBuf) {
-                        fs::BlockIoResult rbBmIo;
-                        kernel::AsyncTask* rbBmTask =
-                            kSubmitReadExtBlocks(device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rbBmIo);
-                        if (rbBmTask) {
-                            co_await kernel::AsyncTaskCoroAwaiter(rbBmTask);
-                        }
-                        fs::BlockIoResult rbGdIo;
-                        kernel::AsyncTask* rbGdTask =
-                            kSubmitReadExtBlocks(device, blockSize, rbGdBlockOffset, 1, rbGdBuf.get(), &rbGdIo);
-                        if (rbGdTask) {
-                            co_await kernel::AsyncTaskCoroAwaiter(rbGdTask);
-                        }
-                        kExt4FreeBlockInGroup(sb.uuid, rbGroup, sb.blocksPerGroup, sb.featureRoCompat, is64Bit,
-                                               rbBitmapBuf.get(), rbGdBuf.get() + rbGdByteOffset, rbRelIndex);
-                        fs::BlockIoResult rwBmIo;
-                        kernel::AsyncTask* rwBmTask =
-                            kSubmitWriteExtBlocks(device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rwBmIo);
-                        if (rwBmTask) {
-                            co_await kernel::AsyncTaskCoroAwaiter(rwBmTask);
-                        }
-                        fs::BlockIoResult rwGdIo;
-                        kernel::AsyncTask* rwGdTask =
-                            kSubmitWriteExtBlocks(device, blockSize, rbGdBlockOffset, 1, rbGdBuf.get(), &rwGdIo);
-                        if (rwGdTask) {
-                            co_await kernel::AsyncTaskCoroAwaiter(rwGdTask);
-                        }
-                    }
-                    allocFailed = true;
-                    allocFailReason = kernel::VfsError::PermissionDenied;
-                    break;
-                }
-                ++blocksAllocatedCount;
+                // depth>1이거나 인덱스 엔트리가 1개가 아님 - 이
+                // 드라이버가 한 번도 만든 적 없는 모양(범위 밖).
+                allocFailed = true;
+                allocFailReason = kernel::VfsError::PermissionDenied;
+                break;
             }
             if (allocFailed) {
                 args->bytesWritten = 0;
@@ -1037,7 +1435,29 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                     remaining < (blockSize - offsetInBlock) ? remaining : (blockSize - offsetInBlock);
 
                 uint64_t nodeValue = 0;
-                const ExtentLookup lookup = kLookupExtent(inode.block, logicalBlock, &nodeValue);
+                ExtentLookup lookup = kLookupExtent(inode.block, logicalBlock, &nodeValue);
+                uint32_t depthGuard = 5;
+                SlabBuf extentNodeBuf(blockSize);
+                while (lookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                    if (!extentNodeBuf) {
+                        lookup = ExtentLookup::Invalid;
+                        break;
+                    }
+                    fs::BlockIoResult exIo;
+                    kernel::AsyncTask* exTask =
+                        kSubmitReadExtBlocks(device, blockSize, nodeValue, 1, extentNodeBuf.get(), &exIo);
+                    if (!exTask) {
+                        lookup = ExtentLookup::Invalid;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(exTask);
+                    if (!exIo.ok) {
+                        lookup = ExtentLookup::Invalid;
+                        break;
+                    }
+                    lookup = kLookupExtent(extentNodeBuf.get(), logicalBlock, &nodeValue);
+                    --depthGuard;
+                }
                 if (lookup != ExtentLookup::Found) {
                     // 2단계에서 이미 충분히 확장했으므로 이론상 불가능.
                     writeIoFailed = true;
@@ -1079,10 +1499,19 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
 
             // 4) 파일 크기가 늘었으면 반영 + mtime 갱신 + inode 레코드
             //    다시 씀(체크섬 포함).
+            // [실측(e2fsck)으로 발견된 갭, PN-81C6322C] i_blocks(blocksLo)
+            // 는 "논리 데이터 블록 수"가 아니라 "이 inode가 실제로
+            // 점유한 물리 블록 총합"이다 - 트리가 depth 1로 성장하면
+            // 그 리프/인덱스 메타데이터 블록 자체도 여기 포함돼야
+            // 한다(리눅스 커널과 동일). `blocksNeededTotal`(파일 크기
+            // 기준 논리 블록 수)로 다시 계산하면 이 메타데이터 블록을
+            // 빼먹는다 - `blocksAllocatedCount`(2단계에서 실제로 새로
+            // 소비한 블록 수, 데이터+트리 성장 블록 전부 포함)를 기존
+            // 값에 더하는 것이 정확하다.
             if (writeEnd > existingSize) {
                 inode.sizeLo = static_cast<uint32_t>(writeEnd & 0xFFFFFFFFu);
                 inode.sizeHigh = static_cast<uint32_t>(writeEnd >> 32);
-                inode.blocksLo = blocksNeededTotal * (blockSize / 512);
+                inode.blocksLo = inode.blocksLo + blocksAllocatedCount * (blockSize / 512);
             }
             inode.mtime = kernel::Rtc::toEpochSeconds(kernel::Rtc::readWallClock());
             memcpy(inodeBlockBuf.get() + inodeByteOffset, &inode, sizeof(inode));
