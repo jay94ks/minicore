@@ -319,6 +319,20 @@ bool kExt4FreeInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t i
                             uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
                             uint8_t* groupDescBuf, uint32_t relIndex);
 
+// [신규, 2026-09-25, PN-FE718C87 - PN-4C67E1ED 실측(e2fsck)으로 발견된
+// 갭] bg_used_dirs_count(그 그룹 안의 "디렉터리" inode 개수 - 일반
+// 파일은 세지 않음) 조정 - `kExt4AllocateInodeInGroup()`은 할당하는
+// inode가 디렉터리인지 일반 파일인지 모르는 범용 할당자라 이 값을
+// 대신 다뤄줄 수 없다(그래서 별도 함수). 호출자(Mkdir/Rmdir 구현부,
+// ext4_driver.cpp)가 "지금 만들거나 지우는 게 디렉터리다"를 이미
+// 알고 있을 때만 delta(+1/-1)를 넘겨 부른다. 결과가 음수가 되면
+// (버그 방어) 아무것도 바꾸지 않고 false. **실측(PN-4C67E1ED)**: 이
+// 갱신 없이 실제 Mkdir을 태우면 e2fsck가 "Directories count wrong
+// for group #0"으로 정확히 잡아낸다(그 외 실제 데이터/체크섬/링크
+// 카운트는 전부 정상이었음 - 이 카운터 하나만의 문제).
+bool kExt4AdjustGroupDescUsedDirs(const uint8_t uuid[16], uint32_t groupNum, uint32_t featureRoCompat, bool is64Bit,
+                                    uint8_t* groupDescBuf, kernel::int64_t delta);
+
 // 슈퍼블록의 전역 free 블록/inode 수를 blocksDelta/inodesDelta만큼
 // 조정(양수=증가/음수=감소)하고, RO_COMPAT_METADATA_CSUM이면 s_checksum
 // 도 재계산한다 - `kExt4ComputeSuperblockChecksum()`과 동일하게

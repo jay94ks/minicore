@@ -1389,6 +1389,13 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                                                     &newInodeRelIndex)) {
                         continue;
                     }
+                    // Mkdir이므로 항상 디렉터리 inode - bg_used_dirs_count
+                    // 도 함께 갱신(kExt4AllocateInodeInGroup은 inode
+                    // 종류를 모르는 범용 할당자라 이 값을 대신 못 다룸,
+                    // ext4.h의 kExt4AdjustGroupDescUsedDirs 문서 주석
+                    // 참고 - PN-4C67E1ED 실측으로 발견된 갭).
+                    kExt4AdjustGroupDescUsedDirs(sb.uuid, group, sb.featureRoCompat, is64Bit,
+                                                  inodeGdBuf.get() + inodeGdByteOffset, /*delta=*/1);
 
                     fs::BlockIoResult wBmIo;
                     kernel::AsyncTask* wBmTask =
@@ -1522,6 +1529,10 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                     kExt4FreeInodeInGroup(sb.uuid, newInodeGroup, sb.inodesPerGroup, sb.featureRoCompat, is64Bit,
                                            inodeBitmapBuf.get(), inodeGdBuf.get() + inodeGdByteOffset,
                                            newInodeRelIndex);
+                    // 위에서 +1 했던 bg_used_dirs_count도 함께 되돌린다
+                    // (이 inode 할당 자체를 통째로 취소하는 것이므로).
+                    kExt4AdjustGroupDescUsedDirs(sb.uuid, newInodeGroup, sb.featureRoCompat, is64Bit,
+                                                  inodeGdBuf.get() + inodeGdByteOffset, /*delta=*/-1);
                     fs::BlockIoResult rwBmIo;
                     kernel::AsyncTask* rwBmTask =
                         kSubmitWriteExtBlocks(device, blockSize, inodeBitmapBlock, 1, inodeBitmapBuf.get(), &rwBmIo);

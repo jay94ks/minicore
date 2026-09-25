@@ -205,10 +205,38 @@ bool kExt4FreeBlockInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t b
 bool kExt4AllocateInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t inodesPerGroup,
                                 uint32_t featureRoCompat, bool is64Bit, uint8_t* bitmapBuf,
                                 uint8_t* groupDescBuf, uint32_t* outRelIndex) {
-    return kExt4ToggleBitInGroup(uuid, groupNum, inodesPerGroup, featureRoCompat, is64Bit, bitmapBuf,
-                                  groupDescBuf, offsetof(GroupDesc32, freeInodesCountLo),
-                                  offsetof(GroupDesc64, freeInodesCountHi), offsetof(GroupDesc32, inodeBitmapCsumLo),
-                                  offsetof(GroupDesc64, inodeBitmapCsumHi), /*allocating=*/true, outRelIndex);
+    if (!kExt4ToggleBitInGroup(uuid, groupNum, inodesPerGroup, featureRoCompat, is64Bit, bitmapBuf, groupDescBuf,
+                                offsetof(GroupDesc32, freeInodesCountLo), offsetof(GroupDesc64, freeInodesCountHi),
+                                offsetof(GroupDesc32, inodeBitmapCsumLo), offsetof(GroupDesc64, inodeBitmapCsumHi),
+                                /*allocating=*/true, outRelIndex)) {
+        return false;
+    }
+    // [신규, 2026-09-25, PN-FE718C87 - PN-4C67E1ED 실측(e2fsck)으로
+    // 발견된 갭] bg_itable_unused(그 그룹의 inode 테이블 끝에서부터
+    // "한 번도 안 쓰여 반드시 0으로 채워져 있다고 보장되는" inode
+    // 개수 - mke2fs/e2fsck가 그 구간을 안 읽어도 되게 해주는 최적화
+    // 힌트, 리눅스 커널 fs/ext4/ialloc.c `ext4_new_inode()`와 동일한
+    // 조건) 갱신을 빼먹으면, 방금 할당한 inode가 여전히 "미사용
+    // 꼬리 구간 안"이라고 잘못 표시된 채로 남는다. 1-based 그룹
+    // 상대 inode 번호(ino)가 (inodesPerGroup - 현재 unused값)를
+    // 넘으면(=미사용 꼬리 구간을 침범하면) unused를 (inodesPerGroup
+    // - ino)로 줄인다. **실측(PN-4C67E1ED)**: 이 갱신 없이 실제
+    // Mkdir을 태워 e2fsck -fn을 돌리면 "Group descriptor 0 has
+    // invalid unused inodes count"부터 그 inode를 "unused 영역에
+    // 있다"고 오판해 디렉터리 엔트리/블록 비트맵/부모 링크 카운트
+    // 까지 전부 연쇄로 틀렸다고 보고한다(단일 근본 원인의 연쇄
+    // 증상이었음, 실제 데이터 자체는 멀쩡했다).
+    const uint32_t ino = *outRelIndex + 1;
+    const uint32_t unusedLoOffset = offsetof(GroupDesc32, itableUnusedLo);
+    const uint32_t unusedHiOffset = offsetof(GroupDesc64, itableUnusedHi);
+    const uint32_t unused = kReadGroupDescFreeCount(groupDescBuf, unusedLoOffset, unusedHiOffset, is64Bit);
+    if (ino > inodesPerGroup - unused) {
+        kWriteGroupDescFreeCount(groupDescBuf, unusedLoOffset, unusedHiOffset, is64Bit, inodesPerGroup - ino);
+        if (featureRoCompat & kRoCompatMetadataCsum) {
+            kRecomputeGroupDescChecksum(uuid, groupNum, is64Bit, groupDescBuf);
+        }
+    }
+    return true;
 }
 
 bool kExt4FreeInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t inodesPerGroup,
@@ -218,6 +246,22 @@ bool kExt4FreeInodeInGroup(const uint8_t uuid[16], uint32_t groupNum, uint32_t i
                                   groupDescBuf, offsetof(GroupDesc32, freeInodesCountLo),
                                   offsetof(GroupDesc64, freeInodesCountHi), offsetof(GroupDesc32, inodeBitmapCsumLo),
                                   offsetof(GroupDesc64, inodeBitmapCsumHi), /*allocating=*/false, &relIndex);
+}
+
+bool kExt4AdjustGroupDescUsedDirs(const uint8_t uuid[16], uint32_t groupNum, uint32_t featureRoCompat, bool is64Bit,
+                                    uint8_t* groupDescBuf, kernel::int64_t delta) {
+    const uint32_t loOffset = offsetof(GroupDesc32, usedDirsCountLo);
+    const uint32_t hiOffset = offsetof(GroupDesc64, usedDirsCountHi);
+    const uint32_t current = kReadGroupDescFreeCount(groupDescBuf, loOffset, hiOffset, is64Bit);
+    const kernel::int64_t updated = static_cast<kernel::int64_t>(current) + delta;
+    if (updated < 0) {
+        return false;
+    }
+    kWriteGroupDescFreeCount(groupDescBuf, loOffset, hiOffset, is64Bit, static_cast<uint32_t>(updated));
+    if (featureRoCompat & kRoCompatMetadataCsum) {
+        kRecomputeGroupDescChecksum(uuid, groupNum, is64Bit, groupDescBuf);
+    }
+    return true;
 }
 
 bool kExt4AdjustSuperblockFreeBlocks(void* rawSuperblock1024Bytes, kernel::int64_t blocksDelta,

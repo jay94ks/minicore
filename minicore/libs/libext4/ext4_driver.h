@@ -20,19 +20,20 @@
 // (flatten)된 버전으로 실제로 I/O까지 수행한다(QEMU 실측 검증
 // 완료) - `Ext4Volume`의 동기 래퍼를 그대로 썼다가 실측으로 확인된
 // 무한 대기(`QU-FF7044DA`)를 피하기 위함. 자세한 이유/메커니즘은
-// ext4_driver.cpp 상단 문서 주석 참고. `Write`/`Mkdir`/`Rmdir`/
-// `Unlink`만 libext4 1차 증분 자체의 쓰기 경로 미구현으로 여전히
-// 명시적 실패(PermissionDenied)를 반환한다.
+// ext4_driver.cpp 상단 문서 주석 참고.
 //
 // FileHandle 인코딩: ext4는 inode 번호 자체가 재조회 가능한 단일
 // 정수 식별자라(FAT류와 달리) `FileHandle::value`에 inode 번호를
 // 그대로 담는다 - 별도 open-handle 테이블이 필요 없다(무상태).
 //
-// `Write`/`Mkdir`/`Rmdir`/`Unlink` op는 위 코루틴 문제와 별개로도
-// `libext4` 1차 증분 자체가 아직 쓰기 경로를 구현하지 않아
-// (SP-7A9CED3E §5의 익스텐트 트리 분할 알고리즘 등 미결 사항)
-// `LiveFs`의 v1 축소 범위와 동일하게 `VfsError::PermissionDenied`로
-// 명시적으로 거부한다.
+// **[갱신, 2026-09-25, PN-FE718C87]** `Mkdir`은 이제 실제로 구현돼
+// 있다(이 커널 최초의 실제 디스크 쓰기 오퍼레이션 - 조립 순서/롤백
+// 정책 등은 ext4_driver.cpp의 Mkdir 케이스 문서 주석과 PN-FE718C87
+// 계획 본문 참고). `Write`/`Rmdir`/`Unlink`는 여전히 미구현으로
+// `VfsError::PermissionDenied`를 반환한다 - 특히 `Write`는 5개
+// 이상의 익스텐트가 필요한 파일의 실제 온디스크 트리 확장/분할
+// (SP-7A9CED3E §5)이 여전히 미결이라 그 갭이 해소될 때까지 막아
+// 둔다.
 namespace ext4 {
 
 class Ext4Driver : public kernel::FileSystemDriver {
