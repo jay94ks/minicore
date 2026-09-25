@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-24T15:33:07.307Z
+  updatedAt: 2026-09-25T10:32:46.359Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2193,7 +2193,67 @@ AI가 스스로 승인 처리할 수 없어 보류 - `SP-A21DD889`에서도 동�
 `DC-91ABD922`(이 설계를 촉발한 결정 문서, 역시 review)도 §8의 답변
 전부 받아 내용상 종결됐다는 점에서 동일한 상태.
 
+## §2-추가2. [점검 완료, 2026-09-25] `SP-CA3C3E57`(Channel/BridgeHandle 안전한 핸들 해석 세부 설계, approved) - 갭 없음
+
+이 문서는 이미 2026-09-25 이전 시점에 다른 세션(minicore-3c)이 자체적으로
+"§0 재확인" 각주(§2/실제 코드 대조)를 남겨 둔 상태였다 - 이번 틱은 그
+위에서 나머지 미확인 지점(§6.1의 후속 작업 `PN-18FDBFF3`, §6-A/§6-A.2의
+`DontDeref<T>`/`ObserverPtr<T>` 실제 구현 여부)까지 마저 소스 대조했다.
+
+1. `DontDeref<T>`/`ObserverPtr<T>` 둘 다 `minicore/libs/libkenv/shared_ptr.h`
+   에 실제로 구현돼 있음(`docs git grep` 확인) - 설계 그대로 `operator*`/
+   `operator->`가 `DontDeref<T>`에는 없고 `ObserverPtr<T>`에는 있음.
+2. `Channel::owner`(channel.h) - §6.1 원안은 `DontDeref<Process>`를
+   제안했으나 실제 코드는 **`DontDeref<Task>`**다. 이는 설계 누락이
+   아니라 `PN-260D7D73`/`SP-43331889` §3-1(devmgr/fs가 Process 없는
+   KernelThread로 흡수됨)에 따라 "소유자 판정을 Process 동일성 대신
+   제출자 Task 동일성으로" 바꾼 **후속 결정에 의한 의도적 변경**(문서만
+   낡음, 코드 갭 아님) - channel.h 자체 문서 주석에 이미 그 경위가
+   적혀 있어 추적 가능.
+3. `PN-18FDBFF3`(§6.1 타입 승격 후속) - `completed` 확인, commit
+   `f454faf`로 실제 구현+`g++ -fsyntax-only`로 역참조 컴파일 에러
+   재현까지 검증됐음을 그 계획 본문에서 확인.
+
+**결론: 갭 없음** - 이 SP가 확정한 설계(세대 태그 슬롯 테이블/
+DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영돼
+있고, 유일한 표면적 불일치(Process→Task)는 별도로 이미 추적된 후속
+결정일 뿐이다. 원본 문서(SP-CA3C3E57)에는 이미 §0 각주가 있어 추가
+정정 불필요.
+
+## §2-추가3. [점검 완료, 2026-09-25] `SP-EAB162FC`(프로세스 신원 및 커널 서비스 권한/Capability 체계, approved) - 갭 없음
+
+이 문서가 확정한 항목들을 실제 소스와 대조:
+
+1. `ProcessRole{Normal, KernelService}` - `process.h`에 정확히 그
+   enum과 `Process::role` 필드 존재, `process.cpp`에서 실제로
+   `caller.role == ProcessRole::KernelService` 검사에 쓰이고 있음.
+2. `ProcessStartFlags{resurrect, essential, respawn}` +
+   `Process::startFlags`/`consecutiveFailures` - 전부 `process.h`에
+   설계 그대로 존재(필드명까지 일치).
+3. §6.3/§6.4의 재스폰 로직(`scheduler.cpp`, 프로세스 종료 처리부) -
+   `essential==true`면 `kPanic("Essential service died")`로 즉시
+   패닉, `resurrect==true && respawn!=null`이면 `kResurrectIntervalMinutes()`
+   로 계산한 분 단위 백오프(5회마다 1분씩 증가, 최대 10분)를 실제
+   타이머 틱(100Hz)으로 환산해 `DelayedExecutionQueue::schedule()`에
+   예약 - 설계가 §6.4에서 "아직 이 프로젝트에 지연 실행 인프라
+   자체가 없다"며 열어 둔 뒤 별도 후속(`PN-BEC8FB65`→`SP-F15B4A63`)
+   으로 분리했던 그 인프라가 실제로 만들어져(`delayed_exec.h`의
+   `DelayedExecutionQueue` 클래스 확인) 여기 정확히 연결돼 있음.
+
+**결론: 갭 없음** - 문서 자체에 이미 devmgr/fs 역할 관련 자기 정정
+각주(2026-09-24)가 있어 그 부분은 별도 처리 불필요.
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
+
+**[2026-09-25, 갱신] `document_list(status=approved)` 재확인 결과
+`DC-F196028B` 이후 approved로 전환된 SP 4건 발견** -
+`SP-C2670F69`(AHCI 드라이버)/`SP-9DD4F3EA`(재확인, 이미 §2에 있던
+기존 점검과 같은 문서 - updatedAt만 갱신된 것으로 보여 재점검 생략)/
+`SP-E35FD36C`(USB 스택)/`SP-EAB162FC`(프로세스 신원/Capability
+체계)/`SP-CA3C3E57`(Channel/BridgeHandle 핸들 해석). 이 중
+**`SP-CA3C3E57`/`SP-EAB162FC` 2건은 이번 틱에 점검 완료(위 §2-추가2/
+§2-추가3 참고, 둘 다 갭 없음)**. **`SP-C2670F69`(AHCI)/`SP-E35FD36C`
+(USB)는 다음 틱 대상으로 남겨 둔다.**
 
 **[2026-09-24, 추가 갱신] `DC-F196028B`(UEFI memmap/RSDP 전달 방식)도
 점검 완료 - 갭 없음.** 이 DC는 승인 답변("부팅 정보 구조체를
