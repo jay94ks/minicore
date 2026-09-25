@@ -573,6 +573,18 @@ inline uint32_t kExt4DirRecLen(uint8_t nameLen) {
 bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t hasTailBytes, uint32_t inode,
                           const char* name, uint8_t nameLen, uint8_t fileType);
 
+// [신규, 2026-09-25, PN-FE718C87 - Rmdir/Unlink] 디렉터리 블록에서
+// name과 일치하는 엔트리를 찾아 inode=0으로 표시(지연 삭제 - 리눅스
+// 커널과 동일한 관례). **이전 엔트리 recLen으로 흡수하는 백워드
+// 병합은 v1 범위 밖**(`kExt4InsertDirEntry`가 이미 "삭제된(inode==0)
+// 엔트리는 recLen 그대로 통째로 재사용"을 전제하므로, 병합 없이
+// 지워도 다음 삽입이 그 자리를 그대로 되찾아 쓸 수 있다는 것이
+// 구조적 전제다(실측 검증은 PN-FE718C87 Rmdir 배선의 실제 e2fsck
+// 대조로 확인할 것). 찾아서 지웠으면 outFileType에 원래 fileType을
+// 채우고 true, 못 찾았으면 아무것도 바꾸지 않고 false.
+bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* name, uint8_t nameLen,
+                          uint8_t* outFileType);
+
 constexpr uint16_t kModeDir = 0x4000;      // S_IFDIR
 constexpr uint16_t kModeRegular = 0x8000;  // S_IFREG - 파일 초기화 시 재사용할 수 있게 함께 정의
 constexpr uint16_t kDefaultDirPerm = 0755;

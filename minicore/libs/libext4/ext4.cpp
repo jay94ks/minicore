@@ -404,6 +404,36 @@ bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t has
     return false;
 }
 
+bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* name, uint8_t nameLen,
+                          uint8_t* outFileType) {
+    uint32_t offset = 0;
+    while (offset + sizeof(DirEntry2Header) <= blockSize) {
+        auto* entry = reinterpret_cast<DirEntry2Header*>(dirBlockData + offset);
+        if (entry->recLen < sizeof(DirEntry2Header) || offset + entry->recLen > blockSize) {
+            break;  // 손상 방어
+        }
+        if (entry->inode != 0 && entry->nameLen == nameLen) {
+            const char* entryName = reinterpret_cast<const char*>(dirBlockData + offset + sizeof(DirEntry2Header));
+            bool matches = true;
+            for (uint32_t i = 0; i < nameLen; ++i) {
+                if (entryName[i] != name[i]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                if (outFileType) {
+                    *outFileType = entry->fileType;
+                }
+                entry->inode = 0;
+                return true;
+            }
+        }
+        offset += entry->recLen;
+    }
+    return false;
+}
+
 void kExt4InitDirInode(InodeCore* inode, uint32_t blockSize, uint64_t firstBlock, uint32_t epochSeconds,
                         uint16_t uid, uint16_t gid) {
     memset(inode, 0, sizeof(InodeCore));
