@@ -2092,36 +2092,169 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::PermissionDenied;
                 break;
             }
-            if (parentInode.flags & kIndexFl) {
-                // [신규, 2026-09-25, PN-9AA8B1EF] 부모가 htree(해시
-                // 인덱스) 디렉터리면 정직하게 거부한다 - "플래그만
-                // 지우고 계속 진행"은 실측(e2fsck)으로 안전하지
-                // 않음이 확인됐다(htree 루트 블록의 ".." recLen이
-                // 블록 끝까지 이어지는 등 일반 디렉터리 블록 규약과
-                // 다른 레이아웃이라, 재해석만으로도 손상으로 잡힘 -
-                // 자세한 근거는 ext4.h의 kIndexFl 문서 주석 참고).
-                // 이 구조를 아예 건드리지 않으므로 실제 리눅스
-                // 커널/e2fsck 양쪽에서 계속 완전히 정상으로 읽힌다.
-                args->error = kernel::VfsError::PermissionDenied;
-                break;
-            }
+            // [갱신, 2026-09-25, PN-9AA8B1EF 2단계] "플래그만 지우고
+            // 계속 진행"은 실측(e2fsck)으로 안전하지 않음이 확인됐다
+            // (htree 루트 블록의 ".." recLen이 블록 끝까지 이어지는 등
+            // 일반 디렉터리 블록 규약과 다른 레이아웃이라, 재해석만
+            // 으로도 손상으로 잡힘 - 자세한 근거는 ext4.h의 kIndexFl
+            // 문서 주석 참고) - 그래서 일반 전체 스캔(아래 3항목)은
+            // htree 부모의 블록(특히 dx_root가 숨어 있는 논리 블록 0)
+            // 을 절대 건드리지 않는다. 대신 해시로 대상 리프 **하나만**
+            // 찾아 그 안에 자리가 있으면 삽입 - 리프가 꽉 차 분할이
+            // 필요한 경우는 여전히 v1 범위 밖(정직하게 NoSpace).
+            const bool isHtreeParent = (parentInode.flags & kIndexFl) != 0;
 
             const uint64_t parentDirSize = parentInode.sizeLo | (static_cast<uint64_t>(parentInode.sizeHigh) << 32);
             const uint32_t parentDirBlockCount = static_cast<uint32_t>(kCeilDiv(parentDirSize, blockSize));
             const bool metadataCsum = (sb.featureRoCompat & kRoCompatMetadataCsum) != 0;
             const uint32_t hasTailBytes = metadataCsum ? sizeof(DirEntryTail) : 0;
 
-            // 3) 부모의 데이터 블록들을 한 번 순회해 (a) 동명 엔트리
-            //    존재 여부와 (b) 삽입 가능한 블록을 동시에 찾는다 -
-            //    존재 여부는 뒤쪽 블록에 중복이 있을 수 있으므로 후보를
-            //    찾아도 스캔을 계속한다. 삽입 가능성은 스크래치 복사본
-            //    위에서만 시험한다(실제 inode 번호는 아직 없음 - 자리가
-            //    있는지만 먼저 확인해 불필요한 블록/inode 소비를
-            //    피한다).
+            // 3) 부모의 데이터 블록에서 (a) 동명 엔트리 존재 여부와
+            //    (b) 삽입 가능한 블록을 찾는다. 일반 디렉터리는 전체
+            //    블록을 순회(first-fit)하고, htree 디렉터리는 이름의
+            //    해시로 dx_root가 가리키는 리프 **하나만** 본다(ext4.h
+            //    kExt4DxRootFindLeafBlock 문서 주석 참고 - 다른 리프/
+            //    dx_root 자체는 절대 안 건드림). 삽입 가능성은 스크래치
+            //    복사본 위에서만 시험한다(실제 inode 번호는 아직 없음).
             bool leafExists = false;
             bool haveCandidate = false;
             uint64_t candidateBlockAbs = 0;
-            {
+            if (isHtreeParent) {
+                bool htreeFailed = false;
+                SlabBuf rootBuf(blockSize);
+                SlabBuf scanBuf(blockSize);
+                SlabBuf scratchBuf(blockSize);
+                if (!rootBuf || !scanBuf || !scratchBuf) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                do {
+                    uint64_t rootAbs = 0;
+                    ExtentLookup rootLookup = kLookupExtent(parentInode.block, /*logicalBlock=*/0, &rootAbs);
+                    uint32_t depthGuard = 5;
+                    SlabBuf extentNodeBuf(blockSize);
+                    while (rootLookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                        if (!extentNodeBuf) {
+                            rootLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult exIo;
+                        kernel::AsyncTask* exTask =
+                            kSubmitReadExtBlocks(device, blockSize, rootAbs, 1, extentNodeBuf.get(), &exIo);
+                        if (!exTask) {
+                            rootLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(exTask);
+                        if (!exIo.ok) {
+                            rootLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        rootLookup = kLookupExtent(extentNodeBuf.get(), 0, &rootAbs);
+                        --depthGuard;
+                    }
+                    if (rootLookup != ExtentLookup::Found) {
+                        htreeFailed = true;
+                        break;
+                    }
+                    {
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadExtBlocks(device, blockSize, rootAbs, 1, rootBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            htreeFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+                    // dx_root_info.hashVersion이 half_md4(=1)가 아니면
+                    // 정직하게 미지원(legacy/tea/siphash - 실측 이미지
+                    // 없음, ext4.h kExt4HalfMd4Hash 문서 주석 참고).
+                    DxRootInfo rootInfo;
+                    memcpy(&rootInfo, rootBuf.get() + 24, sizeof(rootInfo));
+                    if (rootInfo.hashVersion != kDxHashHalfMd4) {
+                        args->error = kernel::VfsError::PermissionDenied;
+                        htreeFailed = true;
+                        break;
+                    }
+                    const uint32_t hash =
+                        kExt4HalfMd4Hash(args->relPath + leafStart, leafLen, sb.hashSeed);
+                    uint32_t leafLogicalBlock = 0;
+                    if (!kExt4DxRootFindLeafBlock(rootBuf.get(), blockSize, hash, &leafLogicalBlock)) {
+                        // indirectLevels!=0(dx_node 중간 레벨) 또는
+                        // 알 수 없는 레이아웃 - v1 범위 밖.
+                        args->error = kernel::VfsError::PermissionDenied;
+                        htreeFailed = true;
+                        break;
+                    }
+
+                    uint64_t leafAbs = 0;
+                    ExtentLookup leafLookup = kLookupExtent(parentInode.block, leafLogicalBlock, &leafAbs);
+                    depthGuard = 5;
+                    SlabBuf leafExtentNodeBuf(blockSize);
+                    while (leafLookup == ExtentLookup::NeedChild && depthGuard > 0) {
+                        if (!leafExtentNodeBuf) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult exIo;
+                        kernel::AsyncTask* exTask =
+                            kSubmitReadExtBlocks(device, blockSize, leafAbs, 1, leafExtentNodeBuf.get(), &exIo);
+                        if (!exTask) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(exTask);
+                        if (!exIo.ok) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        leafLookup = kLookupExtent(leafExtentNodeBuf.get(), leafLogicalBlock, &leafAbs);
+                        --depthGuard;
+                    }
+                    if (leafLookup != ExtentLookup::Found) {
+                        htreeFailed = true;
+                        break;
+                    }
+                    {
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadExtBlocks(device, blockSize, leafAbs, 1, scanBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            htreeFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+                    uint32_t existingInode = 0;
+                    uint8_t existingType = 0;
+                    if (kScanDirBlockForName(scanBuf.get(), blockSize, args->relPath + leafStart, leafLen,
+                                              &existingInode, &existingType)) {
+                        leafExists = true;
+                        break;
+                    }
+                    memcpy(scratchBuf.get(), scanBuf.get(), blockSize);
+                    if (kExt4InsertDirEntry(scratchBuf.get(), blockSize, hasTailBytes, 0xFFFFFFFFu,
+                                              args->relPath + leafStart, static_cast<uint8_t>(leafLen), kFtDir)) {
+                        haveCandidate = true;
+                        candidateBlockAbs = leafAbs;
+                    }
+                } while (false);
+                if (htreeFailed && args->error == kernel::VfsError::None) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                }
+                if (htreeFailed) {
+                    break;
+                }
+            } else {
                 bool ioFailed = false;
                 SlabBuf scanBuf(blockSize);
                 SlabBuf scratchBuf(blockSize);
@@ -2196,7 +2329,9 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 break;
             }
             if (!haveCandidate) {
-                args->error = kernel::VfsError::NoSpace;
+                if (args->error == kernel::VfsError::None) {
+                    args->error = kernel::VfsError::NoSpace;
+                }
                 break;
             }
 
@@ -2572,8 +2707,18 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::NoSpace;
                 break;
             }
+            // [수정, 2026-09-25, PN-9AA8B1EF htree 실측 검증 중 발견]
+            // generation을 0으로 고정하면 실제 리눅스 커널이 만든
+            // 부모 디렉터리(generation이 진짜 랜덤값)에 쓸 때 체크섬이
+            // 어긋난다 - e2fsck가 "directory passes checks but fails
+            // checksum"으로 잡아냄(구조 자체는 정확했음). 부모 자신의
+            // 실제 generation을 써야 한다(이 드라이버가 새로 만든
+            // 디렉터리는 자기 inode의 generation을 0으로 남겨 두므로
+            // 그 경우엔 이 값도 우연히 0 - 이번 수정으로 동작이 안
+            // 바뀜, 실제 커널 생성 디렉터리에 쓰는 htree 경로가 그
+            // 차이를 처음 실측으로 드러냄).
             if (metadataCsum) {
-                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, /*generation=*/0,
+                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, parentInode.generation,
                                                                      parentBlockBuf.get(), blockSize);
                 memcpy(parentBlockBuf.get() + blockSize - sizeof(uint32_t), &csum, sizeof(csum));
             }
@@ -3345,7 +3490,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 break;
             }
             if (metadataCsum) {
-                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, /*generation=*/0,
+                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, parentInode.generation,
                                                                      parentBlockBuf.get(), blockSize);
                 memcpy(parentBlockBuf.get() + blockSize - sizeof(uint32_t), &csum, sizeof(csum));
             }
@@ -4073,7 +4218,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 break;
             }
             if (metadataCsum) {
-                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, /*generation=*/0,
+                const uint32_t csum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum, parentInode.generation,
                                                                      parentBlockBuf.get(), blockSize);
                 memcpy(parentBlockBuf.get() + blockSize - sizeof(uint32_t), &csum, sizeof(csum));
             }

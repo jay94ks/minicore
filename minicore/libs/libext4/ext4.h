@@ -77,7 +77,16 @@ struct SuperblockCore {
     // 실제 64와 일치)/mkfsTime(오프셋264, 실제 생성 시각과 초 단위까지
     // 일치)/checksumType/kbytesWritten 등 여러 앵커 필드로 이 132바이트
     // 갭의 시작/끝 오프셋 자체도 함께 실측 검증했다.
-    uint8_t reservedJournalAndHashFields[132];
+    // [분할, 2026-09-25, PN-9AA8B1EF] 이 132바이트 갭 중 hashSeed(오프셋
+    // 236=0xEC, 16바이트)/defHashVersion(오프셋 252=0xFC, 1바이트)만
+    // htree 해시 계산에 필요해 이름 있는 필드로 뽑아냈다 - 실제
+    // mke2fs 기본 이미지의 "Directory Hash Seed"/"Default directory
+    // hash" 덤프값과 옵셋까지 일치 확인(PN-9AA8B1EF, 아래 htree 절
+    // 참고). 앞뒤 나머지는 여전히 이름 없는 배열로 건너뛴다.
+    uint8_t reservedBeforeHashSeed[32];  // 204~236 - preallocBlocks/preallocDirBlocks/reservedGdtBlocks/journalUuid/journalInum/journalDev/lastOrphan
+    uint32_t hashSeed[4];                // 236(0xEC)~252 - dx_hash_info 계산에 쓰는 4-word 시드
+    uint8_t defHashVersion;              // 252(0xFC) - htree 기본 해시 알고리즘(1=DX_HASH_HALF_MD4)
+    uint8_t reservedAfterHashVersion[83];  // 253~336 - jnlBackupType/descSize/defaultMountOpts/firstMetaBg/mkfsTime/jnlBlocks[17]
     uint32_t blocksCountHi;      // 336 - INCOMPAT_64BIT일 때만 유효
     uint32_t rBlocksCountHi;     // 340
     uint32_t freeBlocksCountHi;  // 344
@@ -615,6 +624,87 @@ bool kExt4InsertDirEntry(uint8_t* dirBlockData, uint32_t blockSize, uint32_t has
 // 채우고 true, 못 찾았으면 아무것도 바꾸지 않고 false.
 bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* name, uint8_t nameLen,
                           uint8_t* outFileType);
+
+// ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-9AA8B1EF 2단계] htree(해시 인덱스 디렉터리)
+// 쓰기 지원 - 리눅스 커널 fs/ext4/hash.c의 half_md4 해시(WSL2-Linux-Kernel
+// 로컬 소스 확인, CLAUDE.md 규칙4 - 이 프로젝트가 새로 고안한 알고리즘
+// 아님) + dx_root 파싱만 v1 범위(depth==0, dx_node 중간 레벨 없음 -
+// `DxRootInfo::indirectLevels != 0`이면 이 절 전체가 적용 대상 밖).
+//
+// **v1 스코프**: 대상 리프에 이미 자리가 있으면(=`kExt4InsertDirEntry`
+// 성공) 그 리프 블록만 갱신 - dx_root/dx_entries는 전혀 안 건드린다.
+// 리프가 꽉 차 분할이 필요한 경우(리프 분할+dx_entries 삽입, 필요하면
+// dx_node 자체 재귀 분할)는 **여전히 v1 범위 밖**이라 정직하게 실패
+// 반환 - 레거시 간접 블록/depth>1 익스텐트 트리 초과와 동일한 "v1
+// 미지원, 손대지 않음" 관례(위 kIndexFl 문서 주석의 1단계와 동일
+// 원칙, 이번엔 "완전 거부"가 아니라 "여유 있는 리프만 허용"으로
+// 범위가 넓어진 것).
+//
+// **실측 검증**(2026-09-25, 실제 리눅스 커널 loop mount로 800개
+// 파일을 넣어 htree 변환시킨 뒤 - `mke2fs` 기본값, 4096바이트 블록,
+// half_md4 서명, depth==0(8개 리프), Directory Hash Seed 실측값
+// 사용): Python으로 먼저 half_md4를 재현해 5개 샘플 파일명
+// (file_0001/0002/0100/0400/0800.txt)의 해시가 실제 dx_root의
+// dx_entries가 가리키는 리프 블록 범위와 정확히 일치함을 5/5 확인
+// (예: file_0001.txt 해시 0x4539186e -> [0x26667080,0x4e52ff72)
+// 구간 -> 논리 블록 5 -> 실제로 그 물리 블록 안에서 파일명 발견).
+// ---------------------------------------------------------------------
+
+constexpr uint32_t kDxHashLegacy = 0;
+constexpr uint32_t kDxHashHalfMd4 = 1;
+constexpr uint32_t kDxHashTea = 2;
+constexpr uint32_t kDxHashLegacyUnsigned = 3;
+constexpr uint32_t kDxHashHalfMd4Unsigned = 4;
+constexpr uint32_t kDxHashTeaUnsigned = 5;
+
+#pragma pack(push, 1)
+// dx_root 블록의 "." + ".." 가짜 엔트리 바로 뒤(오프싯 24)에 오는
+// 헤더 - 리눅스 커널 `struct dx_root::info`와 동일(8바이트).
+struct DxRootInfo {
+    uint32_t reservedZero;
+    uint8_t hashVersion;
+    uint8_t infoLength;     // 항상 8(이 구조체 자신의 크기)
+    uint8_t indirectLevels; // 0=dx_root가 리프를 직접 가리킴(v1이 다루는 유일한 경우)
+    uint8_t unusedFlags;
+};
+static_assert(sizeof(DxRootInfo) == 8, "DxRootInfo는 8바이트");
+
+// dx_entries 배열의 원소(8바이트) - 배열의 **첫 원소만 예외**로
+// `hash` 4바이트가 실제로는 `struct dx_countlimit{limit;count;}`
+// (각 2바이트 u16)로 재해석된다(리눅스 커널과 동일한 union 관례) -
+// 그 첫 원소의 `block` 필드는 정상적으로 "해시 0부터 시작하는 첫
+// 리프"를 가리킨다.
+struct DxEntry {
+    uint32_t hash;
+    uint32_t block;
+};
+static_assert(sizeof(DxEntry) == 8, "DxEntry는 8바이트");
+#pragma pack(pop)
+
+// [순수 함수] half_md4(서명 있는 char 변형, `DX_HASH_HALF_MD4`=1 -
+// 이 필드가 정확히 이 값인 htree만 v1이 다룬다, unsigned/legacy/tea/
+// siphash 변형은 실측 이미지가 없어 정직하게 미지원) - 리눅스 커널
+// `fs/ext4/hash.c`의 `half_md4_transform`+`str2hashbuf_signed`+
+// `__ext4fs_dirhash`(DX_HASH_HALF_MD4 분기)를 그대로 재현. `seed`가
+// 전부 0이면(슈퍼블록 hashSeed 미설정) 기본 MD4 IV를 쓴다. 반환값은
+// `hinfo->hash`(최하위 비트는 항상 0으로 정리됨, 커널과 동일)만 -
+// minorHash는 v1이 쓰지 않아(단일 32비트 해시 비교로 충분, 커널도
+// 32비트 해시가 같을 때만 minorHash로 추가 구분하는데 이 프로젝트
+// 규모의 디렉터리에서 해시 충돌 자체가 실측 안 됨) 반환하지 않는다.
+uint32_t kExt4HalfMd4Hash(const char* name, uint32_t nameLen, const uint32_t seed[4]);
+
+// dx_root 블록(rootBlockData, blockSize바이트, 이미 읽어 온 것)을
+// 파싱해 주어진 해시가 속한 리프의 **논리 블록 번호**(호출자가 이미
+// 이 디렉터리의 익스텐트 트리로 논리->물리 변환을 하고 있으므로,
+// 물리 변환은 이 함수 책임이 아니다)를 찾는다. dx_entries는 hash
+// 오름차순으로 정렬돼 있다는 온디스크 불변조건(리눅스 커널이 항상
+// 유지)을 그대로 이용해 "이 hash보다 큰 첫 엔트리 직전 엔트리"를
+// 고른다(그 앞 엔트리가 담당하는 구간에 hash가 포함됨 - 첫 엔트리는
+// 항상 암묵적으로 해시 0부터 시작). `indirectLevels != 0`(dx_node
+// 중간 레벨 존재, v1 범위 밖)이거나 매직/카운트가 이상하면 false.
+bool kExt4DxRootFindLeafBlock(const uint8_t* rootBlockData, uint32_t blockSize, uint32_t hash,
+                                uint32_t* outLeafLogicalBlock);
 
 // ---------------------------------------------------------------------
 // [신규, 2026-09-25, PN-81C6322C] 인라인 리프(depth==0, inode->block의

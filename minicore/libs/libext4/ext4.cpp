@@ -434,6 +434,167 @@ bool kExt4RemoveDirEntry(uint8_t* dirBlockData, uint32_t blockSize, const char* 
     return false;
 }
 
+namespace {
+
+inline uint32_t kRol32(uint32_t x, uint32_t s) {
+    return (x << s) | (x >> (32 - s));
+}
+
+inline uint32_t kHalfMd4F(uint32_t x, uint32_t y, uint32_t z) {
+    return z ^ (x & (y ^ z));
+}
+inline uint32_t kHalfMd4G(uint32_t x, uint32_t y, uint32_t z) {
+    return (x & y) + ((x ^ y) & z);
+}
+inline uint32_t kHalfMd4H(uint32_t x, uint32_t y, uint32_t z) {
+    return x ^ y ^ z;
+}
+
+}  // namespace
+
+uint32_t kExt4HalfMd4Hash(const char* name, uint32_t nameLen, const uint32_t seed[4]) {
+    uint32_t buf[4] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476};
+    if (seed && (seed[0] || seed[1] || seed[2] || seed[3])) {
+        buf[0] = seed[0];
+        buf[1] = seed[1];
+        buf[2] = seed[2];
+        buf[3] = seed[3];
+    }
+
+    constexpr uint32_t kK1 = 0;
+    constexpr uint32_t kK2 = 0x5A827999u;  // 013240474631(8진) == 이 값
+    constexpr uint32_t kK3 = 0x6ED9EBA1u;  // 015666365641(8진) == 이 값
+
+    uint32_t remaining = nameLen;
+    const char* p = name;
+    while (remaining > 0) {
+        // str2hashbuf_signed(p, remaining, in, 8) - signed char로 부호 확장.
+        // [중요] pad는 커널 원본처럼 "클램프 전" 길이(remaining)로
+        // 계산해야 한다 - 32바이트 넘는 이름의 두 번째 청크부터는
+        // pad 계산에 쓰는 길이(remaining)와 실제 소비 바이트 수(take)
+        // 가 달라진다(첫 32바이트 청크 소비 후 remaining은 그 다음
+        // 청크의 "남은 길이"로 갱신되고, pad는 매번 그 시점의
+        // remaining으로 다시 계산됨 - 이름이 32바이트 이하인 흔한
+        // 경우는 remaining==take라 이 구분이 드러나지 않으므로,
+        // 실측 검증(5개 짧은 파일명)이 못 잡아낸 경로 - 커널 소스
+        // 재대조로 잡음).
+        uint32_t in[8];
+        const uint32_t take = remaining > 32 ? 32 : remaining;
+        uint32_t pad = (remaining & 0xFFu) | ((remaining & 0xFFu) << 8);
+        pad = pad | (pad << 16);
+        int slotsLeft = 8;
+        uint32_t val = pad;
+        for (uint32_t i = 0; i < take; ++i) {
+            const kernel::int8_t signedByte = static_cast<kernel::int8_t>(p[i]);
+            val = static_cast<uint32_t>(static_cast<kernel::int32_t>(signedByte)) + (val << 8);
+            if ((i % 4) == 3) {
+                in[8 - slotsLeft] = val;
+                val = pad;
+                --slotsLeft;
+            }
+        }
+        --slotsLeft;
+        if (slotsLeft >= 0) {
+            in[8 - 1 - slotsLeft] = val;
+            --slotsLeft;
+        }
+        while (slotsLeft >= 0) {
+            in[8 - 1 - slotsLeft] = pad;
+            --slotsLeft;
+        }
+
+        uint32_t a = buf[0], b = buf[1], c = buf[2], d = buf[3];
+        // Round 1
+        a = kRol32(a + kHalfMd4F(b, c, d) + (in[0] + kK1), 3);
+        d = kRol32(d + kHalfMd4F(a, b, c) + (in[1] + kK1), 7);
+        c = kRol32(c + kHalfMd4F(d, a, b) + (in[2] + kK1), 11);
+        b = kRol32(b + kHalfMd4F(c, d, a) + (in[3] + kK1), 19);
+        a = kRol32(a + kHalfMd4F(b, c, d) + (in[4] + kK1), 3);
+        d = kRol32(d + kHalfMd4F(a, b, c) + (in[5] + kK1), 7);
+        c = kRol32(c + kHalfMd4F(d, a, b) + (in[6] + kK1), 11);
+        b = kRol32(b + kHalfMd4F(c, d, a) + (in[7] + kK1), 19);
+        // Round 2
+        a = kRol32(a + kHalfMd4G(b, c, d) + (in[1] + kK2), 3);
+        d = kRol32(d + kHalfMd4G(a, b, c) + (in[3] + kK2), 5);
+        c = kRol32(c + kHalfMd4G(d, a, b) + (in[5] + kK2), 9);
+        b = kRol32(b + kHalfMd4G(c, d, a) + (in[7] + kK2), 13);
+        a = kRol32(a + kHalfMd4G(b, c, d) + (in[0] + kK2), 3);
+        d = kRol32(d + kHalfMd4G(a, b, c) + (in[2] + kK2), 5);
+        c = kRol32(c + kHalfMd4G(d, a, b) + (in[4] + kK2), 9);
+        b = kRol32(b + kHalfMd4G(c, d, a) + (in[6] + kK2), 13);
+        // Round 3
+        a = kRol32(a + kHalfMd4H(b, c, d) + (in[3] + kK3), 3);
+        d = kRol32(d + kHalfMd4H(a, b, c) + (in[7] + kK3), 9);
+        c = kRol32(c + kHalfMd4H(d, a, b) + (in[2] + kK3), 11);
+        b = kRol32(b + kHalfMd4H(c, d, a) + (in[6] + kK3), 15);
+        a = kRol32(a + kHalfMd4H(b, c, d) + (in[1] + kK3), 3);
+        d = kRol32(d + kHalfMd4H(a, b, c) + (in[5] + kK3), 9);
+        c = kRol32(c + kHalfMd4H(d, a, b) + (in[0] + kK3), 11);
+        b = kRol32(b + kHalfMd4H(c, d, a) + (in[4] + kK3), 15);
+
+        buf[0] += a;
+        buf[1] += b;
+        buf[2] += c;
+        buf[3] += d;
+
+        remaining -= take;
+        p += take;
+        if (take < 32) {
+            break;  // str2hashbuf가 이미 나머지를 pad로 채워 처리 완료
+        }
+    }
+
+    uint32_t hash = buf[1];
+    hash &= ~1u;
+    return hash;
+}
+
+bool kExt4DxRootFindLeafBlock(const uint8_t* rootBlockData, uint32_t blockSize, uint32_t hash,
+                                uint32_t* outLeafLogicalBlock) {
+    // "." 엔트리(12바이트) + ".." 엔트리(12바이트, recLen은 블록
+    // 끝까지지만 실제 구조는 여기서 끝남) 뒤에 DxRootInfo가 온다.
+    constexpr uint32_t kDotDotFakeEntriesBytes = 24;
+    if (blockSize < kDotDotFakeEntriesBytes + sizeof(DxRootInfo) + sizeof(DxEntry)) {
+        return false;
+    }
+    DxRootInfo info;
+    memcpy(&info, rootBlockData + kDotDotFakeEntriesBytes, sizeof(info));
+    if (info.indirectLevels != 0 || info.infoLength < sizeof(DxRootInfo)) {
+        return false;  // dx_node 중간 레벨 존재 또는 알 수 없는 레이아웃 - v1 범위 밖
+    }
+    const uint32_t entriesOffset = kDotDotFakeEntriesBytes + info.infoLength;
+    if (entriesOffset + sizeof(DxEntry) > blockSize) {
+        return false;
+    }
+    // 첫 dx_entry의 hash 4바이트는 실제로 dx_countlimit{limit;count}.
+    uint16_t limit = 0;
+    uint16_t count = 0;
+    memcpy(&limit, rootBlockData + entriesOffset, sizeof(limit));
+    memcpy(&count, rootBlockData + entriesOffset + sizeof(limit), sizeof(count));
+    if (count == 0 || count > limit) {
+        return false;
+    }
+    if (entriesOffset + static_cast<uint32_t>(count) * sizeof(DxEntry) > blockSize) {
+        return false;
+    }
+    // 첫 원소(index 0)는 block 필드만 유효(해시 0부터 시작하는 첫
+    // 리프) - 나머지는 hash 오름차순 정렬을 전제로 순차 탐색해 hash가
+    // 속하는 마지막(<=hash인) 엔트리를 고른다.
+    DxEntry first;
+    memcpy(&first, rootBlockData + entriesOffset, sizeof(first));
+    uint32_t chosenBlock = first.block;
+    for (uint16_t i = 1; i < count; ++i) {
+        DxEntry entry;
+        memcpy(&entry, rootBlockData + entriesOffset + static_cast<uint32_t>(i) * sizeof(DxEntry), sizeof(entry));
+        if (entry.hash > hash) {
+            break;
+        }
+        chosenBlock = entry.block;
+    }
+    *outLeafLogicalBlock = chosenBlock;
+    return true;
+}
+
 uint32_t kExt4ComputeExtentBlockChecksum(const uint8_t uuid[16], uint32_t inodeNum, uint32_t generation,
                                           const void* extentBlockData, uint32_t blockSize) {
     (void)blockSize;
