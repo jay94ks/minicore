@@ -142,6 +142,39 @@ inline void kFat12EntryPut(uint8_t* fat, uint32_t cluster, uint16_t value) {
     }
 }
 
+// [신규, 2026-09-25, PN-5481287C 준비 작업 3 - "FAT 엔트리 폭 제네릭화"]
+// FAT16 엔트리 - FAT12와 달리 바이트 경계에 맞는 평범한 16비트 LE
+// 정수라 패킹이 필요 없다(섹터 크기가 항상 2의 배수라 엔트리가 섹터
+// 경계를 걸치는 문제 자체가 없음 - FAT12처럼 홀수 클러스터 처리가
+// 필요 없는 이유). 폭별 EOC(체인 끝)/bad-cluster 마커 값은 이
+// 프로젝트가 새로 고안한 값이 아니다 - Linux 커널
+// `include/uapi/linux/msdos_fs.h`(`BAD_FAT12`=0xFF7/`BAD_FAT16`=0xFFF7,
+// `EOF_FAT12`=0xFFF/`EOF_FAT16`=0xFFFF, `MAX_FAT12`=0xFF4/
+// `MAX_FAT16`=0xFFF4)와 대조해 확인(EocMin은 fatgen103 관례대로
+// BadCluster+1 = 실제 마지막 유효 클러스터 값 다음). 위 FAT32
+// `kFatEocMin`/`kFatBadCluster`와 같은 패턴.
+//
+// 실측 검증: `mkfs.fat -F 16`(20MB, bytesPerSector=512/
+// sectorsPerCluster=4/fatSize16=40) 실제 이미지에서 클러스터 체인을
+// 만든 뒤(20KiB 파일, 클러스터 3→4→...→12) FAT16[0]=0xFFF8(미디어
+// 디스크립터+예약)/FAT16[1]=0xFFFF(볼륨 dirty 비트 예약 엔트리) 확인 -
+// 둘 다 아래 kFat16EocMin(0xFFF8) 이상이라 EOC로 정확히 분류됨.
+constexpr uint16_t kFat16EocMin = 0xFFF8u;
+constexpr uint16_t kFat16BadCluster = 0xFFF7u;
+constexpr uint16_t kFat12EocMin = 0x0FF8u;
+constexpr uint16_t kFat12BadCluster = 0x0FF7u;
+
+inline uint16_t kFat16EntryGet(const uint8_t* fat, uint32_t cluster) {
+    const uint32_t off = cluster * 2u;
+    return static_cast<uint16_t>(fat[off] | (fat[off + 1] << 8));
+}
+
+inline void kFat16EntryPut(uint8_t* fat, uint32_t cluster, uint16_t value) {
+    const uint32_t off = cluster * 2u;
+    fat[off] = static_cast<uint8_t>(value & 0xFF);
+    fat[off + 1] = static_cast<uint8_t>(value >> 8);
+}
+
 // ---------------------------------------------------------------------
 // [신규, 2026-09-25, PN-5481287C 준비 작업 2] §3.3 FAT12/16 전용 고정
 // 크기 루트 디렉터리 영역 - FAT32(루트도 일반 클러스터 체인)와 달리
