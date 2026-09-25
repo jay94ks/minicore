@@ -409,6 +409,37 @@ uint32_t kExt4ComputeInodeChecksum(const uint8_t uuid[16], uint32_t inodeNum, ui
 uint32_t kExt4ComputeSuperblockChecksum(const void* rawSuperblock1024Bytes);
 
 constexpr uint32_t kExtentsFl = 0x80000;
+
+// [신규, 2026-09-25, PN-9AA8B1EF] EXT4_INDEX_FL - 이 디렉터리가 htree
+// (해시 인덱스) 구조를 쓰고 있다는 inode 플래그. 이 프로젝트는 htree
+// 인덱스를 직접 만들거나 갱신하지 않는다(`SP-7A9CED3E` §5가 명시적으로
+// "정확한 정책은 구현 세션이 확인"으로 미뤄 둔 지점).
+//
+// **[실측 반박, 2026-09-25] "플래그만 지우고 계속 진행"은 안전하지
+// 않다** - 처음엔 이 플래그를 지워 "htree 인덱스 없는 평범한
+// 디렉터리로 격하"시키면 되리라 가정했으나, 실제 리눅스 커널로
+// 만든 진짜 htree 루트 블록(블록 0)으로 실측한 결과 `e2fsck -fn`이
+// "directory corrupted"로 거부했다. 원인: htree 루트 블록의 ".."
+// 엔트리는 recLen이 블록 끝(1024)까지 그대로 이어지고(그 안에
+// dx_root_info/dx_entries가 숨어 있음) - metadata_csum 리프 블록의
+// 표준 규약(마지막 12바이트는 항상 DirEntryTail을 위해 비워 둠)을
+// 따르지 않는다. 이는 htree 루트만의 별도 체크섬 배치 규약
+// (dx_entries 배열 끝에 붙는 `dx_tail`, 일반 디렉터리 블록의
+// DirEntryTail과는 다른 구조)이기 때문 - 그래서 플래그만 지우고
+// 내용을 그대로 두면, e2fsck가 "이제 이건 평범한 디렉터리 블록"
+// 이라는 전제로 재검사하면서 "마지막 엔트리가 tail 자리를 안 남김"
+// 을 손상으로 잡아낸다(이 프로젝트가 실제로 그 블록을 건드렸는지와
+// 무관 - 그냥 재해석만으로도 발생).
+//
+// **v1 정책(확정)**: 이 플래그가 켜진 디렉터리는 새 엔트리를 넣지
+// 않고 정직하게 `PermissionDenied`로 거부한다(레거시 간접 블록/
+// depth>1 익스텐트 트리 초과와 동일한 "v1 미지원, 손대지 않음"
+// 관례) - htree 구조를 전혀 건드리지 않으므로 실제 리눅스 커널/
+// e2fsck 양쪽에서 계속 완전히 정상으로 읽힌다. 인덱스를 실제로
+// 유지/갱신하는 전체 htree 쓰기 지원은 이 플래그 검사를 대체하는
+// 훨씬 큰 후속 작업(진짜 해시 계산 + 리프 분할 + dx_node 갱신)이
+// 필요하다 - PN-9AA8B1EF 계획 본문 참고.
+constexpr uint32_t kIndexFl = 0x1000;
 constexpr uint16_t kExtentMagic = 0xF30A;
 constexpr uint32_t kExtentUninitLenBit = 0x8000;  // ee_len 최상위 비트 - uninitialized 익스텐트
 

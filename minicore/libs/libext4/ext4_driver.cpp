@@ -2092,6 +2092,19 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::PermissionDenied;
                 break;
             }
+            if (parentInode.flags & kIndexFl) {
+                // [신규, 2026-09-25, PN-9AA8B1EF] 부모가 htree(해시
+                // 인덱스) 디렉터리면 정직하게 거부한다 - "플래그만
+                // 지우고 계속 진행"은 실측(e2fsck)으로 안전하지
+                // 않음이 확인됐다(htree 루트 블록의 ".." recLen이
+                // 블록 끝까지 이어지는 등 일반 디렉터리 블록 규약과
+                // 다른 레이아웃이라, 재해석만으로도 손상으로 잡힘 -
+                // 자세한 근거는 ext4.h의 kIndexFl 문서 주석 참고).
+                // 이 구조를 아예 건드리지 않으므로 실제 리눅스
+                // 커널/e2fsck 양쪽에서 계속 완전히 정상으로 읽힌다.
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
 
             const uint64_t parentDirSize = parentInode.sizeLo | (static_cast<uint64_t>(parentInode.sizeHigh) << 32);
             const uint32_t parentDirBlockCount = static_cast<uint32_t>(kCeilDiv(parentDirSize, blockSize));
