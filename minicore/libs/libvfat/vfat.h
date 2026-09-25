@@ -142,6 +142,27 @@ inline void kFat12EntryPut(uint8_t* fat, uint32_t cluster, uint16_t value) {
     }
 }
 
+// ---------------------------------------------------------------------
+// [신규, 2026-09-25, PN-5481287C 준비 작업 2] §3.3 FAT12/16 전용 고정
+// 크기 루트 디렉터리 영역 - FAT32(루트도 일반 클러스터 체인)와 달리
+// FAT12/16의 루트는 FAT 영역 바로 뒤에 오는 고정 섹터 범위다(fatgen103
+// 문서 관례, 이 프로젝트가 새로 고안한 계산이 아니다). 순수 계산
+// 함수만 여기 있고, 아직 어디서도 호출되지 않는다(Fat16Driver 자체는
+// 여전히 훨씬 큰 후속 작업).
+//
+// 실측 검증: `mkfs.fat -F 12`(2MB, bytesPerSector=512/reservedSectorCount=1/
+// numFats=2/fatSize16=3/rootEntryCount=512) 실제 이미지에서 계산 결과
+// (시작 섹터 7, 32섹터)가 정확히 일치 - 그 범위를 직접 읽어 실제로
+// 넣은 파일(HELLO.TXT/WORLD.BIN/SUBDIR)의 LFN+8.3 엔트리와 볼륨
+// 레이블 엔트리를 바이트 단위로 확인.
+inline void kFatFixedRootDirLocation(uint16_t reservedSectorCount, uint8_t numFats, uint32_t fatSizeSectors,
+                                      uint16_t rootEntryCount, uint16_t bytesPerSector, uint32_t* outStartSector,
+                                      uint32_t* outSectorCount) {
+    *outStartSector = static_cast<uint32_t>(reservedSectorCount) + static_cast<uint32_t>(numFats) * fatSizeSectors;
+    const uint32_t rootDirBytes = static_cast<uint32_t>(rootEntryCount) * 32u;
+    *outSectorCount = (rootDirBytes + bytesPerSector - 1u) / bytesPerSector;
+}
+
 // [신규, 2026-09-23, PN-547EF839, SP-A658A124 §2 후속 증분 항목6] FAT[1]
 // (예약 엔트리) 상위 비트의 볼륨 dirty 관례 - 이 프로젝트가 새로
 // 고안한 값이 아니다. Microsoft "FAT: General Overview of On-Disk
