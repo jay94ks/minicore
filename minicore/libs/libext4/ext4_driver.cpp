@@ -2448,7 +2448,436 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                                               args->relPath + leafStart, static_cast<uint8_t>(leafLen), kFtDir)) {
                         haveCandidate = true;
                         candidateBlockAbs = leafAbs;
+                        break;
                     }
+
+                    // [신규, 2026-09-25, PN-9AA8B1EF 3단계] 대상 리프가
+                    // 꽉 찼다 - 실제로 분할한다(리눅스 커널 do_split()과
+                    // 동일 알고리즘, ext4.h kExt4DxComputeSplitPoint/
+                    // kExt4ComputeDxTailChecksum 문서 주석 참고). 부모
+                    // 자신의 익스텐트 트리가 depth>0(진짜 트리)이면 이
+                    // 증분 범위 밖 - 정직하게 거부.
+                    ExtentHeader parentExtHeader;
+                    memcpy(&parentExtHeader, parentInode.block, sizeof(parentExtHeader));
+                    if (parentExtHeader.depth != 0) {
+                        args->error = kernel::VfsError::PermissionDenied;
+                        htreeFailed = true;
+                        break;
+                    }
+
+                    // 1) 리프의 살아있는 엔트리 전부 + 각각의 해시를 모은다.
+                    struct DxLeafEntryInfo {
+                        uint32_t hash;
+                        uint16_t offset;
+                        uint8_t nameLen;
+                    };
+                    constexpr uint32_t kMaxLeafEntries = 512;
+                    SlabBuf entryInfoBuf(kMaxLeafEntries * sizeof(DxLeafEntryInfo));
+                    if (!entryInfoBuf) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+                    auto* entryInfos = reinterpret_cast<DxLeafEntryInfo*>(entryInfoBuf.get());
+                    uint32_t entryCount = 0;
+                    {
+                        uint32_t off = 0;
+                        const uint32_t searchLimit = blockSize - hasTailBytes;
+                        while (off + sizeof(DirEntry2Header) <= searchLimit && entryCount < kMaxLeafEntries) {
+                            DirEntry2Header hdr;
+                            memcpy(&hdr, scanBuf.get() + off, sizeof(hdr));
+                            if (hdr.recLen < sizeof(DirEntry2Header) || off + hdr.recLen > searchLimit) {
+                                break;
+                            }
+                            if (hdr.inode != 0) {
+                                entryInfos[entryCount].hash = kExt4HalfMd4Hash(
+                                    reinterpret_cast<const char*>(scanBuf.get() + off + sizeof(DirEntry2Header)),
+                                    hdr.nameLen, sb.hashSeed);
+                                entryInfos[entryCount].offset = static_cast<uint16_t>(off);
+                                entryInfos[entryCount].nameLen = hdr.nameLen;
+                                ++entryCount;
+                            }
+                            off += hdr.recLen;
+                        }
+                    }
+                    // 2) 해시 오름차순 정렬(삽입 정렬 - 항목 수가 최대
+                    //    수백 개뿐이라 충분히 빠름, STL 불필요).
+                    for (uint32_t a = 1; a < entryCount; ++a) {
+                        DxLeafEntryInfo key = entryInfos[a];
+                        uint32_t b = a;
+                        while (b > 0 && entryInfos[b - 1].hash > key.hash) {
+                            entryInfos[b] = entryInfos[b - 1];
+                            --b;
+                        }
+                        entryInfos[b] = key;
+                    }
+                    if (entryCount < 2) {
+                        // 이론상 불가능(꽉 찬 리프인데 엔트리가 1개 이하일
+                        // 순 없음) - 방어적 처리.
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+                    // 3) 분할 지점 계산.
+                    SlabBuf hashesBuf(entryCount * sizeof(uint32_t));
+                    SlabBuf sizesBuf(entryCount * sizeof(uint32_t));
+                    if (!hashesBuf || !sizesBuf) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+                    auto* hashesArr = reinterpret_cast<uint32_t*>(hashesBuf.get());
+                    auto* sizesArr = reinterpret_cast<uint32_t*>(sizesBuf.get());
+                    for (uint32_t a = 0; a < entryCount; ++a) {
+                        hashesArr[a] = entryInfos[a].hash;
+                        sizesArr[a] = kExt4DirRecLen(entryInfos[a].nameLen);
+                    }
+                    const uint32_t usableLeafSize = blockSize - hasTailBytes;
+                    DxSplitPoint splitPoint;
+                    if (!kExt4DxComputeSplitPoint(hashesArr, sizesArr, entryCount, usableLeafSize, &splitPoint)) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+
+                    // 4) dx_root가 꽉 찼으면(count>=limit) 정직하게 거부 -
+                    //    dx_node 중간 레벨 생성은 v1 범위 밖.
+                    constexpr uint32_t kDotDotFakeEntriesBytesLocal = 24;
+                    const uint32_t entriesOffset = kDotDotFakeEntriesBytesLocal + rootInfo.infoLength;
+                    uint16_t dxLimit = 0;
+                    uint16_t dxCount = 0;
+                    memcpy(&dxLimit, rootBuf.get() + entriesOffset, sizeof(dxLimit));
+                    memcpy(&dxCount, rootBuf.get() + entriesOffset + sizeof(dxLimit), sizeof(dxCount));
+                    if (dxCount >= dxLimit) {
+                        args->error = kernel::VfsError::NoSpace;
+                        htreeFailed = true;
+                        break;
+                    }
+                    // 분할 대상 리프를 가리키는 현재 dx_entry 슬롯을
+                    // 찾는다(새 슬롯을 그 바로 뒤에 삽입).
+                    uint32_t origSlotIdx = 0;
+                    bool foundOrigSlot = false;
+                    for (uint16_t idx = 0; idx < dxCount; ++idx) {
+                        DxEntry e;
+                        memcpy(&e, rootBuf.get() + entriesOffset + static_cast<uint32_t>(idx) * sizeof(DxEntry),
+                               sizeof(e));
+                        if (e.block == leafLogicalBlock) {
+                            origSlotIdx = idx;
+                            foundOrigSlot = true;
+                            break;
+                        }
+                    }
+                    if (!foundOrigSlot) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+
+                    // 5) 새 리프 블록 하나 할당(Write 케이스의 그룹 스캔과
+                    //    동일 패턴, PN-9AA8B1EF 3단계 준비 계획 4번 참고).
+                    const bool is64BitLocal = (sb.featureIncompat & kIncompat64Bit) != 0;
+                    const uint32_t descSizeLocal = is64BitLocal ? sizeof(GroupDesc64) : sizeof(GroupDesc32);
+                    const uint64_t gdtStartBlockLocal = static_cast<uint64_t>(sb.firstDataBlock) + 1;
+                    const uint32_t anchorGroupLocal = (parentInodeNum - 1) / sb.inodesPerGroup;
+                    uint64_t newLeafAbs = 0;
+                    {
+                        SlabBuf blockBitmapBuf(blockSize);
+                        SlabBuf blockGdBuf(blockSize);
+                        if (!blockBitmapBuf || !blockGdBuf) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                        bool ioFailed2 = false;
+                        bool allocated2 = false;
+                        for (uint32_t off2 = 0; off2 < groupCount; ++off2) {
+                            const uint32_t group2 = (anchorGroupLocal + off2) % groupCount;
+                            const uint64_t bitmapBlock2 = volume_.groupBlockBitmapBlock(group2);
+                            uint64_t gdBlockOffset2 = 0;
+                            uint32_t gdByteOffset2 = 0;
+                            kLocateGroupDesc(gdtStartBlockLocal, descSizeLocal, blockSize, group2, &gdBlockOffset2,
+                                              &gdByteOffset2);
+
+                            fs::BlockIoResult bmIo2;
+                            kernel::AsyncTask* bmTask2 =
+                                kSubmitReadExtBlocks(device, blockSize, bitmapBlock2, 1, blockBitmapBuf.get(), &bmIo2);
+                            if (!bmTask2) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(bmTask2);
+                            if (!bmIo2.ok) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            fs::BlockIoResult gdIo2;
+                            kernel::AsyncTask* gdTask2 =
+                                kSubmitReadExtBlocks(device, blockSize, gdBlockOffset2, 1, blockGdBuf.get(), &gdIo2);
+                            if (!gdTask2) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(gdTask2);
+                            if (!gdIo2.ok) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            uint32_t relIndex2 = 0;
+                            if (!kExt4AllocateBlockInGroup(sb.uuid, group2, sb.blocksPerGroup, sb.featureRoCompat,
+                                                            is64BitLocal, blockBitmapBuf.get(),
+                                                            blockGdBuf.get() + gdByteOffset2, &relIndex2)) {
+                                continue;
+                            }
+                            fs::BlockIoResult wBmIo2;
+                            kernel::AsyncTask* wBmTask2 = kSubmitWriteExtBlocks(device, blockSize, bitmapBlock2, 1,
+                                                                                 blockBitmapBuf.get(), &wBmIo2);
+                            if (!wBmTask2) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wBmTask2);
+                            if (!wBmIo2.ok) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            fs::BlockIoResult wGdIo2;
+                            kernel::AsyncTask* wGdTask2 = kSubmitWriteExtBlocks(device, blockSize, gdBlockOffset2, 1,
+                                                                                 blockGdBuf.get(), &wGdIo2);
+                            if (!wGdTask2) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(wGdTask2);
+                            if (!wGdIo2.ok) {
+                                ioFailed2 = true;
+                                break;
+                            }
+                            newLeafAbs = static_cast<uint64_t>(sb.firstDataBlock) +
+                                         static_cast<uint64_t>(group2) * sb.blocksPerGroup + relIndex2;
+                            allocated2 = true;
+                            break;
+                        }
+                        if (ioFailed2) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                        if (!allocated2) {
+                            args->error = kernel::VfsError::NoSpace;
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+                    if (htreeFailed) {
+                        break;
+                    }
+
+                    // 6) 새로 삽입할 파일이 어느 쪽으로 가는지 결정(실제
+                    //    do_split()과 동일 - hash가 hash2 이상이면 새
+                    //    블록).
+                    const uint32_t newFileHash =
+                        kExt4HalfMd4Hash(args->relPath + leafStart, leafLen, sb.hashSeed);
+                    const bool newFileGoesToNewLeaf = newFileHash >= splitPoint.hash2;
+
+                    // 7) 두 블록을 각각 재포장 - own-size로 다시 쓰되
+                    //    마지막 엔트리만 그 블록 끝(usableLeafSize)까지
+                    //    확장한다. 재포장 대상 절반에 새 파일이 들어갈
+                    //    경우 그 자리도 함께 예약해 크기 초과를 방어한다.
+                    SlabBuf oldLeafBuf(blockSize);
+                    SlabBuf newLeafBuf(blockSize);
+                    if (!oldLeafBuf || !newLeafBuf) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+                    memset(oldLeafBuf.get(), 0, blockSize);
+                    memset(newLeafBuf.get(), 0, blockSize);
+                    // 각 절반을 own-size로 순서대로 다시 쓰고, 마지막
+                    // 엔트리의 recLen만 그 블록 끝(usableLeafSize)까지
+                    // 확장한다 - 새로 삽입할 파일 자리는 별도 처리 없이
+                    // 그 슬랙에 자연히 포함되고(마지막 엔트리가 own-size
+                    // 보다 커진 만큼이 곧 슬랙이므로), 뒤이은
+                    // `kExt4InsertDirEntry` 실측 확인(바로 아래)이 그
+                    // 슬랙을 정상적으로 찾아 채운다 - `do_split()`의
+                    // `dx_pack_dirents`와 동일한 효과.
+                    auto packHalfFinal = [&](uint32_t startIdx, uint32_t endIdx, uint8_t* destBuf) -> bool {
+                        uint32_t destOff = 0;
+                        for (uint32_t i = startIdx; i < endIdx; ++i) {
+                            const DxLeafEntryInfo& info = entryInfos[i];
+                            const uint32_t rl = kExt4DirRecLen(info.nameLen);
+                            if (destOff + rl > usableLeafSize) {
+                                return false;
+                            }
+                            DirEntry2Header srcHdr;
+                            memcpy(&srcHdr, scanBuf.get() + info.offset, sizeof(srcHdr));
+                            DirEntry2Header dstHdr;
+                            dstHdr.inode = srcHdr.inode;
+                            dstHdr.nameLen = srcHdr.nameLen;
+                            dstHdr.fileType = srcHdr.fileType;
+                            dstHdr.recLen = (i + 1 == endIdx) ? static_cast<uint16_t>(usableLeafSize - destOff)
+                                                                : static_cast<uint16_t>(rl);
+                            memcpy(destBuf + destOff, &dstHdr, sizeof(dstHdr));
+                            memcpy(destBuf + destOff + sizeof(dstHdr),
+                                   scanBuf.get() + info.offset + sizeof(srcHdr), info.nameLen);
+                            destOff += dstHdr.recLen;
+                        }
+                        return true;
+                    };
+                    if (!packHalfFinal(0, splitPoint.splitIndex, oldLeafBuf.get()) ||
+                        !packHalfFinal(splitPoint.splitIndex, entryCount, newLeafBuf.get())) {
+                        args->error = kernel::VfsError::InvalidArgument;
+                        htreeFailed = true;
+                        break;
+                    }
+                    // 새 파일이 들어갈 쪽에 실제로 자리가 있는지(재포장
+                    // 후 마지막 엔트리의 슬랙 크기) 미리 확인 - 계산이
+                    // 맞다면 항상 성공해야 하지만 방어적으로 검사한다.
+                    {
+                        uint8_t* targetBuf = newFileGoesToNewLeaf ? newLeafBuf.get() : oldLeafBuf.get();
+                        SlabBuf probeBuf(blockSize);
+                        if (!probeBuf) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                        memcpy(probeBuf.get(), targetBuf, blockSize);
+                        if (!kExt4InsertDirEntry(probeBuf.get(), blockSize, hasTailBytes, 0xFFFFFFFFu,
+                                                   args->relPath + leafStart, static_cast<uint8_t>(leafLen), kFtDir)) {
+                            // 이론상 불가능(분할 계산이 맞다면 반드시 자리가
+                            // 있어야 함) - 방어적 처리.
+                            args->error = kernel::VfsError::NoSpace;
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+
+                    // 8) 두 리프 블록의 체크섬을 갱신하고 디스크에 쓴다.
+                    if (metadataCsum) {
+                        const uint32_t oldCsum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum,
+                                                                                parentInode.generation,
+                                                                                oldLeafBuf.get(), blockSize);
+                        memcpy(oldLeafBuf.get() + blockSize - sizeof(uint32_t), &oldCsum, sizeof(oldCsum));
+                        const uint32_t newCsum = kExt4ComputeDirBlockChecksum(sb.uuid, parentInodeNum,
+                                                                                parentInode.generation,
+                                                                                newLeafBuf.get(), blockSize);
+                        memcpy(newLeafBuf.get() + blockSize - sizeof(uint32_t), &newCsum, sizeof(newCsum));
+                    }
+                    {
+                        fs::BlockIoResult wIo;
+                        kernel::AsyncTask* wTask =
+                            kSubmitWriteExtBlocks(device, blockSize, leafAbs, 1, oldLeafBuf.get(), &wIo);
+                        if (!wTask) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(wTask);
+                        if (!wIo.ok) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+                    {
+                        fs::BlockIoResult wIo;
+                        kernel::AsyncTask* wTask =
+                            kSubmitWriteExtBlocks(device, blockSize, newLeafAbs, 1, newLeafBuf.get(), &wIo);
+                        if (!wTask) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(wTask);
+                        if (!wIo.ok) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+
+                    // 9) dx_root에 새 dx_entry 삽입(분할된 원래 리프를
+                    //    가리키던 슬롯 바로 뒤) - 뒤 슬롯들을 한 칸씩
+                    //    민다.
+                    for (uint32_t idx = dxCount; idx > origSlotIdx + 1; --idx) {
+                        DxEntry moved;
+                        memcpy(&moved, rootBuf.get() + entriesOffset + (idx - 1) * sizeof(DxEntry), sizeof(moved));
+                        memcpy(rootBuf.get() + entriesOffset + idx * sizeof(DxEntry), &moved, sizeof(moved));
+                    }
+                    DxEntry newDxEntry;
+                    newDxEntry.hash = splitPoint.hash2 + (splitPoint.continued ? 1u : 0u);
+                    newDxEntry.block = parentDirBlockCount;  // 새 논리 블록 번호(파일 끝에 이어붙임)
+                    memcpy(rootBuf.get() + entriesOffset + (origSlotIdx + 1) * sizeof(DxEntry), &newDxEntry,
+                           sizeof(newDxEntry));
+                    const uint16_t newDxCount = static_cast<uint16_t>(dxCount + 1);
+                    memcpy(rootBuf.get() + entriesOffset + sizeof(dxLimit), &newDxCount, sizeof(newDxCount));
+                    if (metadataCsum) {
+                        const uint32_t dxCsum = kExt4ComputeDxTailChecksum(
+                            sb.uuid, parentInodeNum, parentInode.generation, rootBuf.get(), entriesOffset,
+                            newDxCount, dxLimit);
+                        const uint32_t dxTailOffset = entriesOffset + static_cast<uint32_t>(dxLimit) * sizeof(DxEntry);
+                        memcpy(rootBuf.get() + dxTailOffset + sizeof(uint32_t), &dxCsum, sizeof(dxCsum));
+                    }
+                    {
+                        fs::BlockIoResult wIo;
+                        kernel::AsyncTask* wTask =
+                            kSubmitWriteExtBlocks(device, blockSize, rootAbs, 1, rootBuf.get(), &wIo);
+                        if (!wTask) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(wTask);
+                        if (!wIo.ok) {
+                            args->error = kernel::VfsError::InvalidArgument;
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+
+                    // 10) 부모(htree 디렉터리 자신)의 익스텐트에 새 리프
+                    //     블록을 이어붙이고 크기를 늘린다 - Write 케이스의
+                    //     익스텐트 확장(canExtend)/신규 익스텐트 추가
+                    //     (kExt4AppendInlineExtent)와 동일 패턴(4개
+                    //     인라인 슬롯이 이미 꽉 찼으면 depth 1 승격이
+                    //     필요하나 이 증분 범위 밖 - 정직하게 거부).
+                    {
+                        ExtentHeader curParentHeader;
+                        memcpy(&curParentHeader, parentInode.block, sizeof(curParentHeader));
+                        bool extended = false;
+                        if (curParentHeader.entries > 0) {
+                            Extent lastEntry{};
+                            memcpy(&lastEntry,
+                                   parentInode.block + sizeof(ExtentHeader) +
+                                       (curParentHeader.entries - 1) * sizeof(Extent),
+                                   sizeof(lastEntry));
+                            const uint64_t lastPhysStart =
+                                (static_cast<uint64_t>(lastEntry.startHi) << 32) | lastEntry.startLo;
+                            if (lastPhysStart + lastEntry.len == newLeafAbs && lastEntry.len < 0x7FFFu) {
+                                lastEntry.len = static_cast<uint16_t>(lastEntry.len + 1);
+                                memcpy(parentInode.block + sizeof(ExtentHeader) +
+                                           (curParentHeader.entries - 1) * sizeof(Extent),
+                                       &lastEntry, sizeof(lastEntry));
+                                extended = true;
+                            }
+                        }
+                        if (!extended && !kExt4AppendInlineExtent(parentInode.block, parentDirBlockCount, newLeafAbs, 1)) {
+                            args->error = kernel::VfsError::PermissionDenied;
+                            htreeFailed = true;
+                            break;
+                        }
+                    }
+                    // 11) 부모 inode 크기 갱신(다음 9단계의 linksCount 갱신과
+                    //     함께 한 번에 디스크에 쓰인다 - parentInode는 이미
+                    //     메모리 구조체라 여기서 값만 바꿔 두면 된다).
+                    {
+                        const uint64_t newSize =
+                            (parentInode.sizeLo | (static_cast<uint64_t>(parentInode.sizeHigh) << 32)) + blockSize;
+                        parentInode.sizeLo = static_cast<uint32_t>(newSize & 0xFFFFFFFFu);
+                        parentInode.sizeHigh = static_cast<uint32_t>(newSize >> 32);
+                    }
+
+                    haveCandidate = true;
+                    candidateBlockAbs = newFileGoesToNewLeaf ? newLeafAbs : leafAbs;
                 } while (false);
                 if (htreeFailed && args->error == kernel::VfsError::None) {
                     args->error = kernel::VfsError::InvalidArgument;
