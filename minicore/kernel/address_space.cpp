@@ -423,28 +423,34 @@ bool KernelAddressSpaceManager::unmapRegion(uint64_t addr, uint64_t length) {
 
 namespace {
 
-// 세 핸들러 전부 channel.cpp의 OpenChannelHandler 관례를 그대로
-// 따른다 - 실제 대기가 필요 없는 순수 동기 작업(AsyncTask::yield()
-// 없이 onExec 안에서 즉시 끝남)이라 가장 단순한 형태다. **호출자
-// 식별은 반드시 args->process를 쓴다 - Scheduler::currentTask()가
-// 아니다**(실측으로 발견한 버그, 2026-09-16): onExec()이 실제로
-// 실행되는 시점은 리액터가 idle 컨텍스트(PN-FEAAF154 이후
-// gCurrentTask[coreIndex]==nullptr)에서 실행 큐를 드레인하는
-// 순간이라, 그 안에서 새로 Scheduler::currentTask()를 부르면
-// null이거나 완전히 엉뚱한 Task를 가리켜 GPF로 이어진다(address_space.h
-// 의 MmapArgs 문서 주석 참고 - channel.cpp의 기존 핸들러들은 애초에
-// 호출자 정보가 필요 없어 이 문제를 겪지 않았을 뿐이다).
+// [정정, 2026-09-26, RM-F2DAFF66 실측 발견] 세 핸들러 전부 channel.cpp의
+// OpenChannelHandler 관례를 그대로 따른다 - 실제 대기가 필요 없는
+// 순수 동기 작업(AsyncTask::yield() 없이 onExec 안에서 즉시 끝남)이라
+// 가장 단순한 형태다. **호출자 식별은 `task->submitterTask.lock()` →
+// `kOwnerProcessOf(Task*)`(process.h §4, dma_buffer.cpp/pnp.cpp/
+// ext4_driver.cpp 등이 이미 쓰는 표준 관례)를 쓴다 - `Scheduler::
+// currentTask()`가 아니다**(실측으로 발견한 버그, 2026-09-16): onExec()
+// 이 실제로 실행되는 시점은 리액터가 idle 컨텍스트(PN-FEAAF154 이후
+// gCurrentTask[coreIndex]==nullptr)에서 실행 큐를 드레인하는 순간이라,
+// 그 안에서 새로 Scheduler::currentTask()를 부르면 null이거나 완전히
+// 엉뚱한 Task를 가리켜 GPF로 이어진다(channel.cpp의 기존 핸들러들은
+// 애초에 호출자 정보가 필요 없어 이 문제를 겪지 않았을 뿐이다). 원래
+// Args 구조체 자신이 갖던 `process` 필드(호출자가 직접 채우는 방식)는
+// 그 필드를 채워 줄 ring3 trap 스텁이 끝내 없어 죽은 경로였다 -
+// address_space.h의 MmapArgs 문서 주석(원문 역사 기록) 참고, 이번에
+// 표준 관례로 교체.
 class MmapHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<MmapArgs*>(argsRaw);
-        if (args->length == 0 || !args->process) {
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        SharedPtr<Process> process = submitter ? kOwnerProcessOf(submitter.get()) : SharedPtr<Process>();
+        if (args->length == 0 || !process) {
             args->error = AddressSpaceError::InvalidArgument;
             co_return;
         }
         uint64_t outAddr = 0;
-        if (!args->process->addressSpace.mapRegion(args->length, args->prot, VmaBacking::Anonymous, 0,
-                                                     &outAddr)) {
+        if (!process->addressSpace.mapRegion(args->length, args->prot, VmaBacking::Anonymous, 0, &outAddr)) {
             args->error = AddressSpaceError::OutOfMemory;
             co_return;
         }
@@ -457,13 +463,15 @@ public:
 
 class MunmapHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<MunmapArgs*>(argsRaw);
-        if (args->length == 0 || !args->process) {
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        SharedPtr<Process> process = submitter ? kOwnerProcessOf(submitter.get()) : SharedPtr<Process>();
+        if (args->length == 0 || !process) {
             args->error = AddressSpaceError::InvalidArgument;
             co_return;
         }
-        if (!args->process->addressSpace.unmapRegion(args->addr, args->length)) {
+        if (!process->addressSpace.unmapRegion(args->addr, args->length)) {
             args->error = AddressSpaceError::NotMapped;
         }
         co_return;
@@ -482,9 +490,11 @@ public:
 // 그걸 다시 만들 방법이 없다 - v1 제약, clamp로 처리).
 class BrkHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask*, void* argsRaw) override {
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<BrkArgs*>(argsRaw);
-        Process* process = args->process;
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        SharedPtr<Process> processShared = submitter ? kOwnerProcessOf(submitter.get()) : SharedPtr<Process>();
+        Process* process = processShared.get();
         if (!process) {
             args->error = AddressSpaceError::InvalidArgument;
             co_return;

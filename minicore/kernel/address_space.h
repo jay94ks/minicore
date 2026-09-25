@@ -223,19 +223,26 @@ constexpr SyscallEndpointId kSyscallEndpointMmap = kMakeSyscallEndpointId(4, 0);
 constexpr SyscallEndpointId kSyscallEndpointMunmap = kMakeSyscallEndpointId(4, 1);
 constexpr SyscallEndpointId kSyscallEndpointBrk = kMakeSyscallEndpointId(4, 2);
 
-// **`process` 필드는 세 Args 구조체 전부에 공통** - onExec()이 실행되는
-// 시점의 `Scheduler::currentTask()`는 "이 syscall을 제출한 UserThread"가
-// 아니다(실측으로 발견, 2026-09-16 - PN-FEAAF154 이후 리액터가 idle
-// 컨텍스트(gCurrentTask==nullptr)에서 실행 큐를 드레인하므로, onExec
-// 안에서 새로 Scheduler::currentTask()를 부르면 null이거나 완전히
-// 엉뚱한 Task를 가리킨다 - channel.cpp의 기존 핸들러들이 이 문제를
-// 겪지 않은 건 그것들이 애초에 호출자 정보가 필요 없었기 때문이다).
-// 그래서 제출자 자신이(= submit() 호출 시점엔 아직 currentTask()가
-// 정확하다) 이 필드를 미리 채워야 한다 - 실제 ring3 syscall trap
-// 스텁이 생기면 그 스텁이 트랩 처리 시점(그때도 currentTask()가
-// 정확함)에 채우게 된다.
+// [정정, 2026-09-26, RM-F2DAFF66 실측 발견] 원안(아래 원문 주석은
+// 역사 기록으로 남긴다)은 "호출자가 제출 시점에 자기 Process*를 직접
+// 채운다"는 별도 `process` 필드를 세 Args 구조체 모두에 뒀으나, 그
+// 필드를 실제로 채우는 "ring3 syscall trap 스텁"은 끝내 만들어지지
+// 않았고, 그 사이 이 프로젝트 전체(dma_buffer.cpp/pnp.cpp/
+// ext4_driver.cpp 등)가 `task->submitterTask.lock()` →
+// `kOwnerProcessOf(Task*)`(process.h §4)로 "이 syscall을 제출한
+// Process"를 얻는 단일 관례로 수렴했다 - `Syscall::submit()`이
+// `AsyncTask::submitterTask`를 자동으로 채워 주므로 개별 Args 구조체가
+// 자기만의 `process` 필드를 따로 가질 필요가 애초에 없다. 세 핸들러
+// (address_space.cpp의 MmapHandler/MunmapHandler/BrkHandler)를 이
+// 관례로 옮기고 이 필드는 제거한다 - 새 설계가 아니라 이미 확정된
+// 기존 관례를 뒤늦게 적용하는 정정.
+//
+// [원문, 역사 기록용] "process 필드는 세 Args 구조체 전부에 공통 -
+// onExec()이 실행되는 시점의 Scheduler::currentTask()는 '이 syscall을
+// 제출한 UserThread'가 아니다(실측으로 발견, 2026-09-16) - 그래서
+// 제출자 자신이 이 필드를 미리 채워야 한다 - 실제 ring3 syscall trap
+// 스텁이 생기면 그 스텁이 트랩 처리 시점에 채우게 된다."
 struct MmapArgs {
-    Process* process = nullptr;  // in - 호출자가 채움(위 문서 주석 참고)
     uint64_t hintAddr = 0;  // v1은 참고만 하고 무시 - findGap이 항상 위치를 정한다(§5 "Fixed 힌트 강제는 후속")
     uint64_t length = 0;
     uint32_t prot = 0;   // Paging::PAGE_* 조합(Vma::prot과 동일한 관례) - PAGE_USER는 핸들러가 자동으로 더함
@@ -246,7 +253,6 @@ struct MmapArgs {
 };
 
 struct MunmapArgs {
-    Process* process = nullptr;  // in - 위 MmapArgs 문서 주석 참고
     uint64_t addr = 0;
     uint64_t length = 0;
     // out
@@ -254,7 +260,6 @@ struct MunmapArgs {
 };
 
 struct BrkArgs {
-    Process* process = nullptr;  // in - 위 MmapArgs 문서 주석 참고
     uint64_t newBrk = 0;  // 0이면 "현재 brk 조회"(성장/축소 없이 currentBrk만 채워 반환)
     // out
     uint64_t currentBrk = 0;

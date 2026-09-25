@@ -895,6 +895,19 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kernel::UserSyncService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: mutex/semaphore create/destroy/lock/unlock/wait/post syscall endpoints registered");
 
+    // [실측으로 발견한 갭 수정, 2026-09-26, RM-F2DAFF66] SP-2AAD7C8D §5/
+    // PN-012E8C1A 항목4(Mmap/Munmap/Brk, RM-48E1E610 17-19번)가 "구현
+    // 완료"로 기록돼 있었으나, 실제 핸들러 등록 함수
+    // `registerAddressSpaceSyscallEndpoints()`(address_space.cpp)를
+    // 부팅 경로 어디서도 부르지 않아 이 세 syscall이 지금까지 완전히
+    // 죽어 있었다(`AsyncCallbackRegistry::resolve()`가 항상 실패 ->
+    // `AsyncTaskState::Failed`) - PN-012E8C1A가 검증에 쓴 TEMP
+    // 스캐폴딩이 이 등록 호출 자체도 임시로 넣었다가, 원복 과정에서
+    // 영구히 남아야 했던 이 한 줄까지 함께 되돌린 것으로 보인다. 위와
+    // 같은 이유(BSP에서 한 번만)로 여기 추가한다.
+    kernel::registerAddressSpaceSyscallEndpoints();
+    kernel::Logger::info("minicore: mmap/munmap/brk syscall endpoints registered");
+
     // 전역 IDT 등록이라 BSP에서 한 번만(위 registerSyscallEndpoints와
     // 같은 이유).
     kernel::TlbShootdown::init();
