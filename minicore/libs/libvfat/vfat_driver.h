@@ -92,6 +92,42 @@ private:
     OpenHandleEntry openHandles_[kMaxOpenHandles]{};
 };
 
+// [신규, 2026-09-25, PN-5481287C 준비 6단계] Fat16Driver - FAT12/FAT16
+// 공용 읽기 전용(v1) 어댑터. `Fat32Driver`와 완전히 같은 관례(mount()만
+// `Fat16Volume`을 직접 호출하는 준비 단계, onExec은 평탄화된 코루틴)를
+// 따르되 두 가지가 다르다:
+// 1) 루트 디렉터리가 클러스터 체인이 아니라 `Fat16Volume`의 고정
+//    섹터 범위(rootDirStartSectorValue()/rootDirSectorCountValue())라
+//    Open/Stat/Readdir 전부 "지금 스캔 중인 게 루트냐 서브디렉터리냐"
+//    분기가 필요하다 - 서브디렉터리는 여전히 평범한 클러스터 체인
+//    (FAT32와 동일한 kClusterToSector 재사용).
+// 2) FAT 엔트리 폭이 `volume_.entryWidth()`로 런타임에 갈리고(FAT12=
+//    12비트 팩, FAT16=16비트 고정), FAT12는 섹터 경계를 걸칠 수 있어
+//    엔트리 하나를 볼 때마다 섹터를 2개씩 읽는다(vfat_driver.cpp의
+//    kFat16EntryLocation/kReadFat16EntryFromWindow 문서 주석 참고).
+// 이번 증분은 읽기 전용(Open/Close/Read/Stat/Readdir)만 다룬다 -
+// Write/Mkdir/Rmdir/Unlink는 Fat32Driver의 1차 증분(PN-F32F55A8)이
+// 그랬듯 후속 증분(PN-9D6FE4B6과 대응하는 후속 계획)으로 남긴다.
+class Fat16Driver : public kernel::FileSystemDriver {
+public:
+    bool mount(fs::BlockDevice* device, bool readOnly) override;
+    bool remount(bool writable) override;
+    // v1은 dirty-shutdown 비트 관리를 하지 않는다(Fat32Driver도 처음엔
+    // 그랬다가 PN-547EF839로 후속 추가됐다 - 같은 순서로 이번 증분
+    // 범위 밖에 둔다).
+    void onUnmount() override {}
+
+    kernel::AsyncExecCoro onExec(kernel::AsyncTask* task, void* argsRaw) override;
+    void onFailure(kernel::AsyncTask*) override {}
+    void onCancel(kernel::AsyncTask*, void*) override {}
+
+private:
+    Fat16Volume volume_;
+    bool mounted_ = false;
+    bool readOnly_ = true;
+    OpenHandleEntry openHandles_[kMaxOpenHandles]{};
+};
+
 }  // namespace vfat
 
 #endif  // MINICORE_LIBVFAT_VFAT_DRIVER_H

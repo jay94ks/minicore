@@ -121,6 +121,9 @@ bool gHasAhciBlockDevice = false;
 // 순서에서 제외 - 그 계획들이 완료되면 이 목록에 추가한다.
 ext4::Ext4Driver gExt4Driver;
 vfat::Fat32Driver gFat32Driver;
+// [구현, 2026-09-26, PN-5481287C] FAT32 다음 우선순위 - clusterCount
+// 기준(§3.2)으로 Fat32Volume이 거부하는 FAT12/16 볼륨을 여기서 잡는다.
+vfat::Fat16Driver gFat16Driver;
 
 // [구현, 2026-09-23, PN-4859FDE9 준비 작업, SP-D02C4A73 §2 명시 지시]
 // libswapfs(SwapfsBackend)는 FileSystemDriver를 구현하지 않는 별도
@@ -227,7 +230,16 @@ void kTryAutoMountBlockDevice() {
         MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gFat32Driver);
         return;
     }
-    // [구현, 2026-09-23, SP-D02C4A73 §2] 위 두 후보와 같은 우선순위
+    // [구현, 2026-09-26, PN-5481287C] FAT12/16 - Fat32Volume이 §3.2
+    // clusterCount 기준으로 거부한 볼륨을 여기서 잡는다. v1은 읽기
+    // 전용(Open/Close/Read/Stat/Readdir)만 지원 - Write/Mkdir/Rmdir/
+    // Unlink는 항상 PermissionDenied(vfat_driver.h 문서 주석 참고).
+    if (gFat16Driver.mount(&gAhciBlockDevice, /*readOnly=*/true)) {
+        MountTable::unmount(kMountMnt, sizeof(kMountMnt) - 1);
+        MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gFat16Driver);
+        return;
+    }
+    // [구현, 2026-09-23, SP-D02C4A73 §2] 위 세 후보와 같은 우선순위
     // 체인의 마지막 - VFS 마운트 지점에는 연결하지 않는다(스왑은 VFS
     // 개념이 없음, gSwapBackend 선언부 주석 참고).
     if (gSwapBackend.mount(&gAhciBlockDevice)) {

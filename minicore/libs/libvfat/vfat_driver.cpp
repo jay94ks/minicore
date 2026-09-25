@@ -395,6 +395,58 @@ ChainStep kInterpretFatEntry(uint32_t raw, uint32_t* outNext) {
     return ChainStep::Next;
 }
 
+// [신규, 2026-09-25, PN-5481287C 준비 6단계] FAT12/16 폭에 맞춘
+// 엔트리 해석 - kInterpretFatEntry(위, FAT32 32비트)와 같은 판별을
+// vfat.h의 폭별 EOC/bad-cluster 상수로 재현한다.
+ChainStep kInterpretFat16Entry(FatEntryWidth width, uint16_t raw, uint32_t* outNext) {
+    const uint16_t eocMin = (width == FatEntryWidth::Fat12) ? kFat12EocMin : kFat16EocMin;
+    const uint16_t badCluster = (width == FatEntryWidth::Fat12) ? kFat12BadCluster : kFat16BadCluster;
+    if (raw == 0 || raw == badCluster) {
+        return ChainStep::Invalid;
+    }
+    if (raw >= eocMin) {
+        return ChainStep::End;
+    }
+    *outNext = raw;
+    return ChainStep::Next;
+}
+
+// [신규, 2026-09-25, PN-5481287C 준비 6단계] 클러스터 하나의 FAT12/16
+// 엔트리가 있는 섹터+그 섹터 안에서의 바이트 오프셋(순수 계산) -
+// kFatEntryLocation(위, FAT32)과 같은 역할. FAT12는 1.5바이트 단위라
+// 엔트리가 섹터 경계를 걸칠 수 있다(`kFat12EntryByteOffset` 문서
+// 주석 참고) - 호출부가 이 섹터부터 반드시 2섹터를 읽어야 안전하다
+// (FAT16은 절대 안 걸치지만 같은 2섹터 읽기를 그대로 써도 무해 -
+// FAT 영역 뒤엔 항상 루트 디렉터리 영역이 있어(rootEntryCount>0)
+// 마지막 FAT 섹터에서 2섹터를 읽어도 장치 끝을 넘지 않는다).
+void kFat16EntryLocation(uint32_t fatStartSector, uint32_t bytesPerSector, FatEntryWidth width, uint32_t cluster,
+                          uint32_t* outSector, uint32_t* outByteOffsetInSector) {
+    const uint32_t absOffset = (width == FatEntryWidth::Fat12) ? kFat12EntryByteOffset(cluster) : cluster * 2u;
+    *outSector = fatStartSector + absOffset / bytesPerSector;
+    *outByteOffsetInSector = absOffset % bytesPerSector;
+}
+
+// [신규, 2026-09-25, PN-5481287C 준비 6단계] kFat16EntryLocation이
+// 가리킨 섹터부터 읽은 2섹터짜리 버퍼에서 폭에 맞게 엔트리 값을
+// 뽑는다(순수 계산, I/O 없음) - `kFat12EntryGet`/`kFat16EntryGet`
+// (vfat.h)은 FAT 영역 시작(클러스터 0)부터의 절대 오프셋을 가정해
+// (내부에서 `cluster+cluster/2`/`cluster*2`를 직접 계산) 이런 "섹터
+// 두 개짜리 창"에는 그대로 못 쓴다(가상의 음의 오프셋 포인터가
+// 되어버림) - 그래서 이미 안 대신 "그 창 안에서의 상대 오프셋"을
+// 받는 버전을 별도로 둔다(비트 연산 자체는 vfat.h의 두 함수와 동일).
+uint16_t kReadFat16EntryFromWindow(FatEntryWidth width, const uint8_t* twoSectorBuf, uint32_t byteOffsetInSector,
+                                    uint32_t cluster) {
+    if (width == FatEntryWidth::Fat12) {
+        if (cluster & 1) {
+            return static_cast<uint16_t>((twoSectorBuf[byteOffsetInSector] >> 4) |
+                                          (twoSectorBuf[byteOffsetInSector + 1] << 4));
+        }
+        return static_cast<uint16_t>(twoSectorBuf[byteOffsetInSector] |
+                                      ((twoSectorBuf[byteOffsetInSector + 1] & 0x0F) << 8));
+    }
+    return static_cast<uint16_t>(twoSectorBuf[byteOffsetInSector] | (twoSectorBuf[byteOffsetInSector + 1] << 8));
+}
+
 // [신규, 2026-09-23, PN-9D6FE4B6 준비 작업 - §3.4] 새 FAT 엔트리 값을
 // 기존 raw 32비트 값 위에 인코딩한다(순수 계산, I/O 없음) - kFatEntryMask
 // (하위 28비트)만 바꾸고 상위 4예약비트는 원래 값 그대로 보존한다
@@ -3544,6 +3596,630 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                     break;
                 }
                 cluster = nextCluster;
+            }
+
+            args->hasMore = found;
+            args->error = ioFailed ? kernel::VfsError::InvalidHandle : kernel::VfsError::None;
+            break;
+        }
+    }
+    co_return;
+}
+
+// ===========================================================================
+// [신규, 2026-09-25, PN-5481287C 준비 6단계] Fat16Driver - FAT12/FAT16
+// 공용 읽기 전용(v1) onExec. Fat32Driver와 같은 평탄화 관례(파일 상단
+// 문서 주석)를 따르되, 위 vfat_driver.h 문서 주석의 두 차이(루트 고정
+// 섹터 범위, 폭별 FAT 엔트리)를 Open/Stat/Readdir 세 곳에 반영한다.
+// Write/Mkdir/Rmdir/Unlink는 이번 증분 범위 밖(항상 PermissionDenied -
+// KernelFsWriteArgs 문서 주석의 "읽기 전용 뷰" 관례와 동일).
+// ===========================================================================
+
+bool Fat16Driver::mount(fs::BlockDevice* device, bool readOnly) {
+    if (!volume_.mount(device)) {
+        return false;
+    }
+    mounted_ = true;
+    readOnly_ = readOnly;
+    return true;
+}
+
+bool Fat16Driver::remount(bool writable) {
+    readOnly_ = !writable;
+    return true;
+}
+
+kernel::AsyncExecCoro Fat16Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
+    const auto op = *static_cast<const kernel::KernelFsOpCode*>(argsRaw);
+    fs::BlockDevice* device = volume_.device();
+    const uint32_t bytesPerSector = volume_.bytesPerSectorValue();
+    const uint32_t sectorsPerCluster = volume_.sectorsPerClusterValue();
+    const uint32_t bytesPerCluster = volume_.bytesPerClusterValue();
+    const uint32_t fatStartSector = volume_.fatStartSectorValue();
+    const uint32_t dataStartSector = volume_.dataStartSectorValue();
+    const uint32_t rootDirStartSector = volume_.rootDirStartSectorValue();
+    const uint32_t rootDirSectorCount = volume_.rootDirSectorCountValue();
+    const uint32_t rootBytes = rootDirSectorCount * bytesPerSector;
+    const FatEntryWidth width = volume_.entryWidth();
+
+    switch (op) {
+        case kernel::KernelFsOpCode::Open: {
+            auto* args = static_cast<kernel::KernelFsOpenArgs*>(argsRaw);
+            // [vfat_driver.h 문서 주석] 루트는 클러스터가 없다 - firstCluster=0
+            // +isDir=true를 "지금 루트를 보고 있다"는 내부 센티널로 쓴다
+            // (실제 FAT 스펙에서도 ".." 엔트리가 부모가 루트일 때 cluster=0을
+            // 쓰는 것과 같은 관례라 우연이 아니다).
+            bool curIsRoot = true;
+            uint32_t curCluster = 0;
+            bool currentIsDir = true;
+            uint64_t currentFileSize = 0;
+            bool currentEntryValid = false;
+            uint32_t currentEntryCluster = 0;
+            uint32_t currentEntryByteOffset = 0;
+            bool failed = false;
+
+            uint32_t pos = 0;
+            while (pos < args->relPathLen && !failed) {
+                while (pos < args->relPathLen && args->relPath[pos] == '/') {
+                    ++pos;
+                }
+                if (pos >= args->relPathLen) {
+                    break;
+                }
+                const uint32_t segStart = pos;
+                while (pos < args->relPathLen && args->relPath[pos] != '/') {
+                    ++pos;
+                }
+                const uint32_t segLen = pos - segStart;
+                if (!currentIsDir) {
+                    failed = true;
+                    break;
+                }
+
+                char normalized[11];
+                kNormalizeTo83(args->relPath + segStart, segLen, normalized);
+
+                ResolvedEntry matched;
+                bool foundInThisDir = false;
+                uint32_t scanEntryCluster = 0;  // matched.entryCluster로 옮길 값(루트면 의미 없음)
+
+                if (curIsRoot) {
+                    SlabBuf rootBuf(rootBytes);
+                    if (!rootBuf) {
+                        failed = true;
+                        break;
+                    }
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask = kSubmitReadSectors(device, bytesPerSector, rootDirStartSector,
+                                                                     rootDirSectorCount, rootBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        failed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        failed = true;
+                        break;
+                    }
+                    const DirScanResult scanResult = kScanDirClusterForName(
+                        rootBuf.get(), rootBytes, normalized, args->relPath + segStart, segLen, &matched);
+                    foundInThisDir = (scanResult == DirScanResult::Found);
+                    scanEntryCluster = 0;  // 루트 자신은 클러스터가 없음 - entryCluster/ByteOffset 갱신 안 함(entryValid=false 유지)
+                } else {
+                    uint32_t scanCluster = curCluster;
+                    while (true) {
+                        uint32_t sector = 0;
+                        if (!kClusterToSector(dataStartSector, sectorsPerCluster, scanCluster, &sector)) {
+                            break;
+                        }
+                        SlabBuf clusterBuf(bytesPerCluster);
+                        if (!clusterBuf) {
+                            failed = true;
+                            break;
+                        }
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask = kSubmitReadSectors(
+                            device, bytesPerSector, sector, sectorsPerCluster, clusterBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            failed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            failed = true;
+                            break;
+                        }
+                        const DirScanResult scanResult = kScanDirClusterForName(
+                            clusterBuf.get(), bytesPerCluster, normalized, args->relPath + segStart, segLen, &matched);
+                        if (scanResult == DirScanResult::Found) {
+                            foundInThisDir = true;
+                            scanEntryCluster = scanCluster;
+                            break;
+                        }
+                        if (scanResult == DirScanResult::EndOfDir) {
+                            break;
+                        }
+                        uint32_t fatSector = 0;
+                        uint32_t byteOffsetInSector = 0;
+                        kFat16EntryLocation(fatStartSector, bytesPerSector, width, scanCluster, &fatSector,
+                                             &byteOffsetInSector);
+                        SlabBuf fatBuf(2 * bytesPerSector);
+                        if (!fatBuf) {
+                            failed = true;
+                            break;
+                        }
+                        fs::BlockIoResult fatIoResult;
+                        kernel::AsyncTask* fatIoTask =
+                            kSubmitReadSectors(device, bytesPerSector, fatSector, 2, fatBuf.get(), &fatIoResult);
+                        if (!fatIoTask) {
+                            failed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                        if (!fatIoResult.ok) {
+                            failed = true;
+                            break;
+                        }
+                        const uint16_t raw =
+                            kReadFat16EntryFromWindow(width, fatBuf.get(), byteOffsetInSector, scanCluster);
+                        uint32_t nextCluster = 0;
+                        if (kInterpretFat16Entry(width, raw, &nextCluster) != ChainStep::Next) {
+                            break;
+                        }
+                        scanCluster = nextCluster;
+                    }
+                }
+
+                if (!foundInThisDir) {
+                    failed = true;
+                    break;
+                }
+                curIsRoot = false;
+                curCluster = matched.firstCluster;
+                currentIsDir = matched.isDir;
+                currentFileSize = matched.fileSize;
+                currentEntryValid = true;
+                currentEntryCluster = scanEntryCluster;
+                currentEntryByteOffset = matched.entryByteOffset;
+            }
+
+            if (failed) {
+                args->result = kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
+                break;
+            }
+            uint32_t slotIndex = kMaxOpenHandles;
+            for (uint32_t i = 0; i < kMaxOpenHandles; ++i) {
+                if (!openHandles_[i].inUse) {
+                    slotIndex = i;
+                    break;
+                }
+            }
+            if (slotIndex == kMaxOpenHandles) {
+                args->result = kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NoSpace};
+            } else {
+                OpenHandleEntry& slot = openHandles_[slotIndex];
+                slot.inUse = true;
+                slot.firstCluster = curCluster;  // 루트면 0(센티널) - 위 문서 주석
+                slot.fileSize = currentFileSize;
+                slot.isDir = currentIsDir;
+                slot.entryValid = currentEntryValid;
+                slot.entryCluster = currentEntryCluster;
+                slot.entryByteOffset = currentEntryByteOffset;
+                args->result = kernel::OpenResult{kernel::FileHandle{slotIndex}, currentIsDir, kernel::VfsError::None};
+            }
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Close: {
+            auto* args = static_cast<kernel::KernelFsCloseArgs*>(argsRaw);
+            const uint32_t index = static_cast<uint32_t>(args->handle.value);
+            if (index < kMaxOpenHandles) {
+                openHandles_[index].inUse = false;
+            }
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Read: {
+            // 파일 데이터는(루트든 서브디렉터리든 상관없이) 항상 평범한
+            // 클러스터 체인이다 - 루트 고정 섹터 범위는 디렉터리 엔트리
+            // 저장 방식일 뿐 일반 파일엔 적용되지 않는다(파일이 루트
+            // 자신일 수는 없음). Fat32Driver의 Read와 동일한 구조,
+            // FAT 엔트리 조회만 폭별 헬퍼로 교체.
+            auto* args = static_cast<kernel::KernelFsReadArgs*>(argsRaw);
+            const uint32_t handleIndex = static_cast<uint32_t>(args->handle.value);
+            if (handleIndex >= kMaxOpenHandles || !openHandles_[handleIndex].inUse) {
+                args->result = kernel::ReadResult{0, kernel::VfsError::InvalidHandle};
+                break;
+            }
+            const uint32_t firstCluster = openHandles_[handleIndex].firstCluster;
+            const uint64_t fileSize = openHandles_[handleIndex].fileSize;
+
+            if (args->offset >= fileSize) {
+                args->result = kernel::ReadResult{0, kernel::VfsError::None};
+                break;
+            }
+            uint64_t remaining = fileSize - args->offset;
+            if (remaining > args->len) {
+                remaining = args->len;
+            }
+
+            uint32_t cluster = firstCluster;
+            uint64_t clusterStartOffset = 0;
+            bool chainBroken = false;
+            while (clusterStartOffset + bytesPerCluster <= args->offset) {
+                uint32_t fatSector = 0;
+                uint32_t byteOffsetInSector = 0;
+                kFat16EntryLocation(fatStartSector, bytesPerSector, width, cluster, &fatSector, &byteOffsetInSector);
+                SlabBuf fatBuf(2 * bytesPerSector);
+                if (!fatBuf) {
+                    chainBroken = true;
+                    break;
+                }
+                fs::BlockIoResult fatIoResult;
+                kernel::AsyncTask* fatIoTask =
+                    kSubmitReadSectors(device, bytesPerSector, fatSector, 2, fatBuf.get(), &fatIoResult);
+                if (!fatIoTask) {
+                    chainBroken = true;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                if (!fatIoResult.ok) {
+                    chainBroken = true;
+                    break;
+                }
+                const uint16_t raw = kReadFat16EntryFromWindow(width, fatBuf.get(), byteOffsetInSector, cluster);
+                uint32_t nextCluster = 0;
+                if (kInterpretFat16Entry(width, raw, &nextCluster) != ChainStep::Next) {
+                    chainBroken = true;
+                    break;
+                }
+                cluster = nextCluster;
+                clusterStartOffset += bytesPerCluster;
+            }
+
+            if (chainBroken) {
+                args->result = kernel::ReadResult{0, kernel::VfsError::None};
+                break;
+            }
+
+            SlabBuf clusterBuf(bytesPerCluster);
+            if (!clusterBuf) {
+                args->result = kernel::ReadResult{0, kernel::VfsError::InvalidHandle};
+                break;
+            }
+            uint32_t totalCopied = 0;
+            auto* out = static_cast<uint8_t*>(args->buf);
+            bool ioFailed = false;
+            while (remaining > 0 && !ioFailed) {
+                uint32_t sector = 0;
+                if (!kClusterToSector(dataStartSector, sectorsPerCluster, cluster, &sector)) {
+                    ioFailed = true;
+                    break;
+                }
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask = kSubmitReadSectors(device, bytesPerSector, sector, sectorsPerCluster,
+                                                                 clusterBuf.get(), &ioResult);
+                if (!ioTask) {
+                    ioFailed = true;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                if (!ioResult.ok) {
+                    ioFailed = true;
+                    break;
+                }
+
+                const uint64_t curOffset = args->offset + totalCopied;
+                const uint32_t offsetInCluster = static_cast<uint32_t>(curOffset - clusterStartOffset);
+                const uint32_t chunk = static_cast<uint32_t>(
+                    remaining < (bytesPerCluster - offsetInCluster) ? remaining : (bytesPerCluster - offsetInCluster));
+                memcpy(out + totalCopied, clusterBuf.get() + offsetInCluster, chunk);
+                totalCopied += chunk;
+                remaining -= chunk;
+
+                if (remaining > 0) {
+                    uint32_t fatSector = 0;
+                    uint32_t byteOffsetInSector = 0;
+                    kFat16EntryLocation(fatStartSector, bytesPerSector, width, cluster, &fatSector,
+                                         &byteOffsetInSector);
+                    SlabBuf fatBuf(2 * bytesPerSector);
+                    if (!fatBuf) {
+                        ioFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult fatIoResult;
+                    kernel::AsyncTask* fatIoTask =
+                        kSubmitReadSectors(device, bytesPerSector, fatSector, 2, fatBuf.get(), &fatIoResult);
+                    if (!fatIoTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                    if (!fatIoResult.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    const uint16_t raw = kReadFat16EntryFromWindow(width, fatBuf.get(), byteOffsetInSector, cluster);
+                    uint32_t nextCluster = 0;
+                    if (kInterpretFat16Entry(width, raw, &nextCluster) != ChainStep::Next) {
+                        break;
+                    }
+                    cluster = nextCluster;
+                    clusterStartOffset += bytesPerCluster;
+                }
+            }
+            args->result =
+                kernel::ReadResult{totalCopied, ioFailed ? kernel::VfsError::InvalidHandle : kernel::VfsError::None};
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Write: {
+            auto* args = static_cast<kernel::KernelFsWriteArgs*>(argsRaw);
+            args->bytesWritten = 0;
+            args->error = kernel::VfsError::PermissionDenied;
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Stat: {
+            auto* args = static_cast<kernel::KernelFsStatArgs*>(argsRaw);
+            bool curIsRoot = true;
+            uint32_t curCluster = 0;
+            bool currentIsDir = true;
+            uint64_t currentFileSize = 0;
+            bool failed = false;
+
+            uint32_t pos = 0;
+            while (pos < args->relPathLen && !failed) {
+                while (pos < args->relPathLen && args->relPath[pos] == '/') {
+                    ++pos;
+                }
+                if (pos >= args->relPathLen) {
+                    break;
+                }
+                const uint32_t segStart = pos;
+                while (pos < args->relPathLen && args->relPath[pos] != '/') {
+                    ++pos;
+                }
+                const uint32_t segLen = pos - segStart;
+                if (!currentIsDir) {
+                    failed = true;
+                    break;
+                }
+
+                char normalized[11];
+                kNormalizeTo83(args->relPath + segStart, segLen, normalized);
+
+                ResolvedEntry matched;
+                bool foundInThisDir = false;
+
+                if (curIsRoot) {
+                    SlabBuf rootBuf(rootBytes);
+                    if (!rootBuf) {
+                        failed = true;
+                        break;
+                    }
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask = kSubmitReadSectors(device, bytesPerSector, rootDirStartSector,
+                                                                     rootDirSectorCount, rootBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        failed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        failed = true;
+                        break;
+                    }
+                    const DirScanResult scanResult = kScanDirClusterForName(
+                        rootBuf.get(), rootBytes, normalized, args->relPath + segStart, segLen, &matched);
+                    foundInThisDir = (scanResult == DirScanResult::Found);
+                } else {
+                    uint32_t scanCluster = curCluster;
+                    while (true) {
+                        uint32_t sector = 0;
+                        if (!kClusterToSector(dataStartSector, sectorsPerCluster, scanCluster, &sector)) {
+                            break;
+                        }
+                        SlabBuf clusterBuf(bytesPerCluster);
+                        if (!clusterBuf) {
+                            failed = true;
+                            break;
+                        }
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask = kSubmitReadSectors(
+                            device, bytesPerSector, sector, sectorsPerCluster, clusterBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            failed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            failed = true;
+                            break;
+                        }
+                        const DirScanResult scanResult = kScanDirClusterForName(
+                            clusterBuf.get(), bytesPerCluster, normalized, args->relPath + segStart, segLen, &matched);
+                        if (scanResult == DirScanResult::Found) {
+                            foundInThisDir = true;
+                            break;
+                        }
+                        if (scanResult == DirScanResult::EndOfDir) {
+                            break;
+                        }
+                        uint32_t fatSector = 0;
+                        uint32_t byteOffsetInSector = 0;
+                        kFat16EntryLocation(fatStartSector, bytesPerSector, width, scanCluster, &fatSector,
+                                             &byteOffsetInSector);
+                        SlabBuf fatBuf(2 * bytesPerSector);
+                        if (!fatBuf) {
+                            failed = true;
+                            break;
+                        }
+                        fs::BlockIoResult fatIoResult;
+                        kernel::AsyncTask* fatIoTask =
+                            kSubmitReadSectors(device, bytesPerSector, fatSector, 2, fatBuf.get(), &fatIoResult);
+                        if (!fatIoTask) {
+                            failed = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                        if (!fatIoResult.ok) {
+                            failed = true;
+                            break;
+                        }
+                        const uint16_t raw =
+                            kReadFat16EntryFromWindow(width, fatBuf.get(), byteOffsetInSector, scanCluster);
+                        uint32_t nextCluster = 0;
+                        if (kInterpretFat16Entry(width, raw, &nextCluster) != ChainStep::Next) {
+                            break;
+                        }
+                        scanCluster = nextCluster;
+                    }
+                }
+
+                if (!foundInThisDir) {
+                    failed = true;
+                    break;
+                }
+                curIsRoot = false;
+                curCluster = matched.firstCluster;
+                currentIsDir = matched.isDir;
+                currentFileSize = matched.fileSize;
+            }
+
+            if (failed) {
+                args->error = kernel::VfsError::NotFound;
+            } else {
+                args->size = currentFileSize;
+                args->isDirectory = currentIsDir;
+                args->error = kernel::VfsError::None;
+            }
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Mkdir: {
+            auto* args = static_cast<kernel::KernelFsMkdirArgs*>(argsRaw);
+            args->error = kernel::VfsError::PermissionDenied;
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Rmdir: {
+            auto* args = static_cast<kernel::KernelFsRmdirArgs*>(argsRaw);
+            args->error = kernel::VfsError::PermissionDenied;
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Unlink: {
+            auto* args = static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw);
+            args->error = kernel::VfsError::PermissionDenied;
+            break;
+        }
+
+        case kernel::KernelFsOpCode::Readdir: {
+            auto* args = static_cast<kernel::KernelFsReaddirArgs*>(argsRaw);
+            const uint32_t dirHandleIndex = static_cast<uint32_t>(args->dirHandle.value);
+            if (dirHandleIndex >= kMaxOpenHandles || !openHandles_[dirHandleIndex].inUse) {
+                args->hasMore = false;
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            const OpenHandleEntry& dirHandle = openHandles_[dirHandleIndex];
+            // [vfat_driver.h 문서 주석] firstCluster==0 && isDir==true는
+            // Open()이 남긴 "이건 루트다" 센티널.
+            const bool dirIsRoot = dirHandle.isDir && dirHandle.firstCluster == 0;
+
+            uint64_t seen = 0;
+            bool found = false;
+            bool ioFailed = false;
+
+            if (dirIsRoot) {
+                SlabBuf rootBuf(rootBytes);
+                if (!rootBuf) {
+                    args->hasMore = false;
+                    args->error = kernel::VfsError::InvalidHandle;
+                    break;
+                }
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask = kSubmitReadSectors(device, bytesPerSector, rootDirStartSector,
+                                                                 rootDirSectorCount, rootBuf.get(), &ioResult);
+                if (!ioTask) {
+                    ioFailed = true;
+                } else {
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        ioFailed = true;
+                    } else {
+                        const DirScanResult scanResult =
+                            kScanDirClusterForIndex(rootBuf.get(), rootBytes, args->index, &seen, args->entry.name,
+                                                     sizeof(args->entry.name), &args->entry.nameLength,
+                                                     &args->entry.isDirectory);
+                        found = (scanResult == DirScanResult::Found);
+                    }
+                }
+            } else {
+                uint32_t cluster = dirHandle.firstCluster;
+                SlabBuf clusterBuf(bytesPerCluster);
+                if (!clusterBuf) {
+                    args->hasMore = false;
+                    args->error = kernel::VfsError::InvalidHandle;
+                    break;
+                }
+                while (!found && !ioFailed) {
+                    uint32_t sector = 0;
+                    if (!kClusterToSector(dataStartSector, sectorsPerCluster, cluster, &sector)) {
+                        break;
+                    }
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask = kSubmitReadSectors(device, bytesPerSector, sector, sectorsPerCluster,
+                                                                     clusterBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    const DirScanResult scanResult =
+                        kScanDirClusterForIndex(clusterBuf.get(), bytesPerCluster, args->index, &seen,
+                                                 args->entry.name, sizeof(args->entry.name), &args->entry.nameLength,
+                                                 &args->entry.isDirectory);
+                    if (scanResult == DirScanResult::Found) {
+                        found = true;
+                        break;
+                    }
+                    if (scanResult == DirScanResult::EndOfDir) {
+                        break;
+                    }
+                    uint32_t fatSector = 0;
+                    uint32_t byteOffsetInSector = 0;
+                    kFat16EntryLocation(fatStartSector, bytesPerSector, width, cluster, &fatSector,
+                                         &byteOffsetInSector);
+                    SlabBuf fatBuf(2 * bytesPerSector);
+                    if (!fatBuf) {
+                        ioFailed = true;
+                        break;
+                    }
+                    fs::BlockIoResult fatIoResult;
+                    kernel::AsyncTask* fatIoTask =
+                        kSubmitReadSectors(device, bytesPerSector, fatSector, 2, fatBuf.get(), &fatIoResult);
+                    if (!fatIoTask) {
+                        ioFailed = true;
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                    if (!fatIoResult.ok) {
+                        ioFailed = true;
+                        break;
+                    }
+                    const uint16_t raw = kReadFat16EntryFromWindow(width, fatBuf.get(), byteOffsetInSector, cluster);
+                    uint32_t nextCluster = 0;
+                    if (kInterpretFat16Entry(width, raw, &nextCluster) != ChainStep::Next) {
+                        break;
+                    }
+                    cluster = nextCluster;
+                }
             }
 
             args->hasMore = found;
