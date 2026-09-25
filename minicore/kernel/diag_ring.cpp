@@ -77,6 +77,10 @@ const char* kEventName(uint8_t event) {
             return "IdtGateSnapshot";
         case DiagRingEvent::GdtEntrySnapshot:
             return "GdtEntrySnapshot";
+        case DiagRingEvent::SchedulerSyncRsp0Entry:
+            return "SyncRsp0Entry";
+        case DiagRingEvent::SchedulerSyncCr3Entry:
+            return "SyncCr3Entry";
         default:
             return "?";
     }
@@ -114,7 +118,7 @@ void kDiagRingDump(uint32_t coreIndex) {
     for (uint64_t i = 0; i < count; ++i) {
         const uint64_t seq = start + i;
         const DiagRingEntry& e = ring.entries[seq % kDiagRingCapacity];
-        Logger::info("  [%llu] %s vector=%x rsp=%llx if=%u cs=%llx", e.seq, kEventName(e.event), e.vector, e.rsp,
+        Logger::info("  [%llu] %s vector=%x rsp=%llx if=%u extra=%llx", e.seq, kEventName(e.event), e.vector, e.rsp,
                      e.ifFlag ? 1u : 0u, e.extra);
     }
 }

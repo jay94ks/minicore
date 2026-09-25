@@ -76,6 +76,20 @@ enum class DiagRingEvent : uint8_t {
     // `vector` 필드=조회한 셀렉터 값, `extra` 필드=그 GDT 엔트리의
     // low qword 전체(8바이트).
     GdtEntrySnapshot = 16,
+
+    // [신규, 2026-09-25, PN-6360E6E9/PN-24A2B6F5] `kSyncRsp0ForDispatch`/
+    // `kSyncCr3`가 함수 인자로 받은 Task 포인터 값 자체를 기록한다 -
+    // 두 heisenbug(각각 `next=0x100000000`, `task=0x100000000`)가
+    // 정확히 이 두 함수 안에서 무효 포인터를 역참조해 PANIC했는데,
+    // Logger 기반 breadcrumb는 타이밍을 왜곡해 재현 조건 자체를
+    // 바꿔 버릴 위험이 있어(PN-24A2B6F5 2026-09-25 갱신 절 참고)
+    // 이 저오버헤드 링으로 대체한다. `extra` 필드=받은 Task* 값
+    // 그대로(uint64_t), `vector` 필드=호출부 구분용 태그(scheduler.cpp
+    // 안에서 `kSyncRsp0ForDispatch`/`kSyncCr3`를 부르는 지점마다 고유
+    // 번호를 매겨 어느 호출부에서 이 값이 관측됐는지 되짚을 수 있게
+    // 한다 - 정확한 매핑은 scheduler.cpp의 호출부 주석 참고).
+    SchedulerSyncRsp0Entry = 17,
+    SchedulerSyncCr3Entry = 18,
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

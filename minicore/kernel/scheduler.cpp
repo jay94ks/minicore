@@ -3,6 +3,7 @@
 #include "acpi.h"
 #include "async_task.h"
 #include "delayed_exec.h"
+#include "diag_ring.h"
 #include "gdt.h"
 #include "idt.h"
 #include "interrupt_frame.h"
@@ -396,6 +397,13 @@ private:
 // 전이다) 무해하다. CR3 복원은 이것과 달리 **runLoop()에서는 안전하지
 // 않다** - 아래 kSyncCr3ForDispatch 참고.
 void kSyncRsp0ForDispatch(Task* next) {
+    // [신규, 2026-09-25, PN-6360E6E9/PN-24A2B6F5] 이 함수 인자로 받은
+    // 값 자체를 저오버헤드로 기록 - diag_ring.h SchedulerSyncRsp0Entry
+    // 문서 주석 참고. `next->isUserLevel` 역참조로 실제 PANIC이 났던
+    // 지점이라, 그 역참조보다 먼저 로깅해 무효 포인터여도 값 자체는
+    // 남긴다.
+    kDiagRingLog(DiagRingEvent::SchedulerSyncRsp0Entry, Scheduler::currentCoreIndex(), 0, 0,
+                 reinterpret_cast<uint64_t>(next));
     if (next->isUserLevel) {
         Gdt::setRsp0ForThisCore(next->kernelStackTop);
         SyscallFastPath::setKernelRspForThisCore(next->kernelStackTop);
@@ -462,6 +470,11 @@ void kSyncRsp0ForDispatch(Task* next) {
 // 같으면 `mov cr3` 자체를 생략하는 최적화를 추가했다(§5 - 불필요한
 // 전체 TLB flush 회피, 레지스터 읽기 자체는 매우 저렴해 항상 이득).
 void kSyncCr3(Task* task) {
+    // [신규, 2026-09-25, PN-6360E6E9/PN-24A2B6F5] kSyncRsp0ForDispatch와
+    // 동일한 이유 - `task->isUserLevel` 역참조가 실제 PANIC 지점이었다
+    // (2026-09-25 재현, task=0x100000000).
+    kDiagRingLog(DiagRingEvent::SchedulerSyncCr3Entry, Scheduler::currentCoreIndex(), 0, 0,
+                 reinterpret_cast<uint64_t>(task));
     const uint64_t targetPml4 = task->isUserLevel ? task->userPml4Phys : gBootPml4Phys;
     if (Paging::currentPml4Phys() != targetPml4) {
         asm volatile("mov %0, %%cr3" : : "r"(targetPml4) : "memory");
