@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-25T17:33:28.973Z
+  updatedAt: 2026-09-25T17:53:04.774Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -57,6 +57,27 @@ RM-28225668와 같은 성격의 **현황판 문서** - 다만 저 문서들이 "
    "문서만 정정"으로 기록.
 
 ## §1. 확정된 발견 (완료)
+
+### 1-Z. `SP-6CEFBE9B` §7.2 5단계(`kReclaimScanReclaimPass()`) - 무거운 부하 재검증 완료, 영구 활성화 (코드 갭 아님 - 이미 추적 중이던 계획의 마지막 미검증 항목 해소, commit 1b269e5)
+
+`PN-4859FDE9`가 인터럽트 굶주림 버그(kAsyncDrainIsr 무제한 while
+루프)를 수정한 뒤에도, "원래 문제를 재현했던 실제 스왑아웃→스왑인
+왕복 부하로는 재검증하지 못했다"며 §7.2 5단계 호출 자체를 계속
+꺼 둔 채로 남겨 뒀다 - 이 상태로는 확정된 설계(SP-6CEFBE9B §7.2)가
+부팅 경로에서 계속 비활성 상태였다는 점에서 §1-X/1-W와 같은 계열의
+감사 대상이었다.
+
+이번 틱에 §1-X(Mmap/Munmap/Brk 배선 복구)가 먼저 해결되면서 실제
+유저 프로세스로 부하를 생성할 방법이 처음 열렸고, 그 김에 이 마지막
+미검증 항목까지 마저 재검증했다 - `mkswap` 실제 스왑 이미지+GRUB+
+AHCI+SMP1으로 120초 연속 실행, gdb로 `gHeartbeat` 연속 증가 확인 +
+스왑 이미지 원시 바이트에서 실제 스왑아웃된 테스트 페이지 발견.
+크래시 없음 - `kReclaimScanReclaimPass()`를 영구 활성화했다
+(`PN-4859FDE9` 참고).
+
+## 참고
+- `PN-4859FDE9`(completed) - 이 발견/해소의 전체 경위.
+- 1-X(아래) - 이 재검증을 가능케 한 선행 수정.
 
 ### 1-X. `SP-2AAD7C8D` §5 - Mmap/Munmap/Brk syscall이 "구현 완료"(PN-012E8C1A)로 기록됐으나 부팅 경로에 전혀 배선 안 됨 (코드 갭, 완전 해소, commit d67b9eb)
 
