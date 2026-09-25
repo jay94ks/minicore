@@ -262,13 +262,36 @@ bool gDraining[kMaxCores] = {};
 // sti 상태였다면 그 즉시) 전달된다.
 constexpr kernel::uint32_t kAsyncDrainVector = 0xE3;
 
+// [신규, 2026-09-25, PN-4859FDE9, QU-F90FB07F 답변("배치 상한 + 자기
+// IPI 재예약")] 이전 버전은 `drainOnce()`가 false를 반환할 때까지 무제한
+// 루프를 돌았다 - AHCI 커맨드 완료 처리 중 같은 코어의 같은 큐에 다음
+// 커맨드를 즉시 `submit()`하는 패턴(스왑 I/O 등)을 만나면 외부 IPI 없이도
+// 이 루프가 영원히 새 작업을 찾아 계속 돌고, 이 ISR이 IF=0 상태로
+// 반환하지 않아 스케줄러 LAPIC 타이머 틱을 포함한 모든 일반 인터럽트가
+// 150초+ 굶는 것을 실측으로 확인했다(async_task.cpp 문서 이력, PN-4859FDE9
+// 참고). 한 번의 ISR 호출이 처리하는 작업 수를 이 상한으로 제한하고,
+// 상한에 도달했는데 아직 처리할 게 남아 있을 수 있으면(마지막 호출이
+// true를 반환) 스스로에게 같은 벡터로 IPI를 재발사한 뒤 그냥 반환한다 -
+// 이 ISR이 실제로 반환해야 iretq가 IF를 복원하고, 그 순간 대기 중인 다른
+// 일반 인터럽트(타이머 틱 포함)가 끼어들 기회를 얻는다(재발사한 self-IPI
+// 자신도 그중 하나로 대기하다가 곧 처리됨 - 큐가 실제로 비어 있었다면
+// 다음 호출의 drainOnce() 한 번이 즉시 false를 반환하고 끝나므로 낭비가
+// 거의 없다). 값 자체(32)는 이 프로젝트가 아직 실측 튜닝을 해 본 적
+// 없는 v1 추정치 - AHCI NCQ 큐 깊이(전형적으로 32슬롯) 정도를 한 배치로
+// 다 처리해도 ISR 체류 시간이 과도해지지 않을 것이라는 보수적 가정.
+// 실측으로 너무 크거나 작다고 드러나면 조정 대상(RM-23F4B687 §4 취지상
+// 숫자값 수준은 구현 중 결정 가능한 범위).
+constexpr kernel::uint32_t kAsyncDrainBatchLimit = 32;
+
 void kAsyncDrainIsr(kernel::InterruptFrame*) {
     const kernel::uint32_t coreIndex = kernel::Scheduler::currentCoreIndex();
-    // 이 IPI가 도착한 시점에 큐에 있던 것 전부를 이 자리에서 처리한다 -
-    // 그 사이 또 들어온 게 있으면(드문 경쟁) 다음 IPI가 마저 처리하므로
-    // 무한정 여기 머무르지 않는다. EOI는 공통 ISR 스텁이 처리
-    // (tlb_shootdown.cpp와 동일 관례).
+    kernel::uint32_t processed = 0;
     while (kernel::AsyncReactor::drainOnce(coreIndex)) {
+        if (++processed >= kAsyncDrainBatchLimit) {
+            kernel::kDiagRingLog(kernel::DiagRingEvent::AsyncDrainBatchLimitHit, coreIndex, processed, 0, coreIndex);
+            kernel::Lapic::sendFixedIpi(kernel::Acpi::cpuApicId(coreIndex), static_cast<kernel::uint8_t>(kAsyncDrainVector));
+            return;
+        }
     }
 }
 

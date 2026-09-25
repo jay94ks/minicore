@@ -101,6 +101,14 @@ enum class DiagRingEvent : uint8_t {
     // `extra` 필드=넘기려는 Task* 값(바로 다음 SchedulerSyncCr3Entry의
     // extra와 같아야 정상 - 다르면 그 사이 무언가 값을 바꿨다는 뜻).
     SchedulerSyncCr3CallSite = 19,
+
+    // [신규, 2026-09-25, PN-4859FDE9, QU-F90FB07F 답변("배치 상한 +
+    // 자기 IPI 재예약")] `kAsyncDrainIsr`가 배치 상한에 도달해 self-IPI로
+    // 재예약하고 반환하는 시점 - `vector` 필드=그 배치에서 실제로 처리한
+    // 작업 개수(항상 kAsyncDrainBatchLimit와 같아야 정상), `extra`
+    // 필드=coreIndex. 이 이벤트가 실제로 얼마나 자주/큰 배치로
+    // 찍히는지가 인터럽트 굶주림 재발 여부를 가늠하는 지표가 된다.
+    AsyncDrainBatchLimitHit = 20,
 };
 
 // event가 일어난 시점의 rsp/vector를 기록한다 - vector는 Enter/Leave

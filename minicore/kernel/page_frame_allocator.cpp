@@ -629,25 +629,24 @@ void kReclaimScanCallback(void*) {
         kernel::SpinlockGuard guard(gLruLock);
         kReclaimScanPromotePass();
         kReclaimScanDemotePass();
-        // [재보류, 2026-09-24, PN-4859FDE9] §7.2 5단계(실제 회수)를
-        // 다시 끈다 - `ahci.cpp`의 `WaitInterrupt` 제출을 preemptive=
-        // false로 고쳐(그 함수 주석 참고) 원래 발견된 정확한 데드락
-        // 시그니처(gNormalQueues[coreIndex] 스핀락이 0x01로 잠긴 채
-        // NormalQueue::popMin이 영원히 spin)는 확실히 사라졌음을
-        // 확인했으나, 같은 세션의 다음 검증 라운드(실제 스왑 부하가
-        // 더 걸린 실행)에서 **다른 새 문제**를 발견했다 - `gHeartbeat`
-        // 카운터가 150초+ 동안 완전히 정지(스케줄러 LAPIC 틱이 그
-        // 오랫동안 한 번도 안 옴)했는데, 이때 코어는 죽은 게 아니라
-        // `kAsyncDrainIsr → AsyncReactor::drainOnce → AhciCommandHandler::
-        // onExec → AsyncTask::submit`(다음 AHCI 커맨드 제출) 경로를
-        // 계속 실행 중이었다(gdb로 스택/RIP가 계속 이동하는 것 확인) -
-        // 즉 데드락은 아니지만 **일반 인터럽트 하나(kAsyncDrainVector)가
-        // 스케줄러 타이머 틱 벡터를 장시간 굶기는 새로운 문제**로
-        // 보인다(자세한 경위는 PN-4859FDE9 본문 참고). preemptive=false
-        // 수정 자체(원래 데드락 해소)는 유효하고 유지하지만, 이
-        // 새 굶주림 문제의 심각도가 명확해질 때까지 §7.2 5단계는
-        // 안전을 위해 다시 꺼 둔다 - 스왑아웃만 켜고 스왑인을 실제로
-        // 트리거하지 않으면 이 경로 자체가 실행되지 않아 안전하다.
+        // [여전히 보류, 2026-09-25, PN-4859FDE9, QU-F90FB07F 답변 반영]
+        // §7.2 5단계(실제 회수)를 끈 이유였던 "일반 인터럽트 하나
+        // (kAsyncDrainVector)가 스케줄러 타이머 틱 벡터를 150초+
+        // 굶기는 문제"의 정확한 메커니즘은 코드 리뷰로 확정했고
+        // (async_task.cpp의 kAsyncDrainIsr 문서 주석 참고 - 처리
+        // 개수 상한이 없던 while 루프가 같은 코어에 순차 재제출되는
+        // AHCI 커맨드 스트림을 만나면 IF=0 상태로 반환하지 않는
+        // 것이 원인), 설계자가 승인한 방향(배치 상한+자기 IPI
+        // 재예약, `kAsyncDrainBatchLimit=32`)으로 이미 수정했다.
+        // **다만 이 호출 자체는 아직 다시 켜지 않는다** - 표준
+        // 4시나리오 회귀는 무결함이지만, 원래 문제를 실제로 재현했던
+        // "실제 스왑아웃→스왑인 왕복 부하"(mkswap 이미지+실제
+        // initrd+SMP1+AHCI, PN-4859FDE9 재현 환경 절 참고) 조건으로
+        // 아직 재검증하지 않았다 - 그 재현에는 다수의 rmap 추적
+        // 프레임을 실제로 만드는 부하 생성 장치(이전 세션의 TEMP
+        // 하네스, 보존되지 않음)가 다시 필요해 이번 틱 범위를
+        // 넘어선다. 다음 세션이 이 재검증까지 마친 뒤 주석 갱신과
+        // 함께 다시 켤 것.
         // kReclaimScanReclaimPass();
     }
     kernel::DelayedExecutionQueue::schedule(kReclaimScanIntervalTicks, &kReclaimScanCallback, nullptr);

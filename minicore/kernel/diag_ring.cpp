@@ -83,6 +83,8 @@ const char* kEventName(uint8_t event) {
             return "SyncCr3Entry";
         case DiagRingEvent::SchedulerSyncCr3CallSite:
             return "SyncCr3CallSite";
+        case DiagRingEvent::AsyncDrainBatchLimitHit:
+            return "AsyncDrainBatchLimitHit";
         default:
             return "?";
     }
