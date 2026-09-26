@@ -21,6 +21,13 @@ using int64_t = long;
 
 using size_t = decltype(sizeof(0));
 
+// [신규, PN-0556C759] ThreadId - minicore/kernel/syscall.h와 동일한
+// 폭/무효값. process.h(CreateThreadArgs)/debug.h(Debug* Args) 둘 다
+// 이 값이 필요해 공용 헤더인 여기 둔다(pnp.h의 ChannelError를
+// vfs.h/debug.h가 재사용하는 것과 동일한 관례 - 중복 정의 방지).
+using ThreadId = uint16_t;
+constexpr ThreadId kInvalidThreadId = 0xFFFFu;
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_TYPES_H

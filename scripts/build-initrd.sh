@@ -49,16 +49,23 @@ mkdir -p "${STAGE_DIR}"
 # initrd.cpio 안에 원본 ELF 바이트로만 실려, 유저랜드 스포너가
 # `/sys/live/initrd.cpio`를 직접 읽어(libcpio) 그 바이트를
 # SpawnProcess의 imageBuffer로 넘기는 용도다.
+# dbgdriver(PN-0556C759, 2026-09-26) 추가 - dbgtarget을 실제로
+# SpawnProcess하는 쪽(위와 동일한 이유로 원본 ELF 바이트만 필요)이면서
+# 동시에, dbgtarget/proctest와 달리 kmain.cpp의 TEMP 스폰 경로로
+# 이름("dbgdriver")이 매치돼 부팅 시 자동 실행되는 대상이기도 하다
+# (minicore/dbgdriver/main.cpp 상단 주석 참고) - 이 재현 조사 기간
+# 동안만 필요, 조사가 끝나면 이 줄들도 TEMP 스폰 경로와 함께 되돌린다.
 cp "${BUILD_USERLAND_DIR}/minicore-init/init" "${STAGE_DIR}/init"
 cp "${BUILD_USERLAND_DIR}/minicore-pubreg/pubreg" "${STAGE_DIR}/pubreg"
 cp "${BUILD_USERLAND_DIR}/minicore-authmgr/authmgr" "${STAGE_DIR}/authmgr"
 cp "${BUILD_USERLAND_DIR}/minicore-dbgtarget/dbgtarget" "${STAGE_DIR}/dbgtarget"
 cp "${BUILD_USERLAND_DIR}/minicore-proctest/proctest" "${STAGE_DIR}/proctest"
+cp "${BUILD_USERLAND_DIR}/minicore-dbgdriver/dbgdriver" "${STAGE_DIR}/dbgdriver"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver)"

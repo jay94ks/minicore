@@ -11,6 +11,7 @@
 // kFindDebuggableChild)을 원천적으로 통과할 수 없다 - 반드시 실제
 // SpawnProcess syscall을 통해, 그 호출자를 부모로 삼아 스폰돼야
 // 한다(PN-87D6B615 "남은 범위 2번 실현 가능성 조사" 절 참고).
+#include "libmc/process.h"
 #include "libmc/syscall.h"
 
 namespace {
@@ -23,9 +24,33 @@ __attribute__((noinline)) void kBreakpointTarget(mc::uint64_t iteration) {
     asm volatile("" : : "r"(iteration) : "memory");
 }
 
+// [신규, PN-0556C759 재현 인프라] 멀티스레드 동시 하드웨어 브레이크
+// 포인트 경쟁을 재현하려면 같은 kBreakpointTarget을 반복 호출하는
+// 두 번째 스레드가 필요하다(계획 본문 "재현 방법" 절) - CreateThread
+// (RDI=arg 하나만 받는 진입점 관례, process.h 참고)로 추가한다. 이
+// 두 번째 스레드는 dbgtarget 자체와 마찬가지로 영구 유지 - 재현
+// 조사를 재개할 다음 세션도 그대로 재사용한다.
+[[noreturn]] void kSecondThreadEntry(mc::uint64_t) {
+    for (mc::uint64_t i = 0;; ++i) {
+        kBreakpointTarget(i);
+    }
+}
+
 }  // namespace
 
 extern "C" void _start() {
+    mc::CreateThreadArgs createArgs;
+    createArgs.entry = reinterpret_cast<mc::uint64_t>(&kSecondThreadEntry);
+    createArgs.arg = 0;
+    mc::SyscallToken createToken = mc::submit(mc::kSyscallEndpointCreateThread, &createArgs);
+    // CreateThread 실패해도(예: CreateThread syscall 자체가 아직
+    // 등록되지 않은 커널 빌드) 원래의 단일 스레드 동작으로는 계속
+    // 진행한다 - 두 번째 스레드는 이 프로그램의 필수 기능이 아니라
+    // PN-0556C759류 멀티스레드 재현 시나리오를 위한 확장이다.
+    if (createToken != 0) {
+        mc::wait(createToken);
+    }
+
     for (mc::uint64_t i = 0;; ++i) {
         kBreakpointTarget(i);
     }

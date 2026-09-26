@@ -69,6 +69,32 @@ struct WaitArgs {
     bool hasAnyChild = false;
 };
 
+// [신규, PN-0556C759] process.h의 kSyscallEndpointCreateThread(그룹0.
+// call6)와 동일한 값 - 이 커널 최초의 실제 유저랜드 CreateThread
+// 소비자(minicore/dbgtarget, 멀티스레드 하드웨어 브레이크포인트
+// 경쟁 재현용)를 위해 추가.
+constexpr SyscallEndpointId kSyscallEndpointCreateThread = kMakeSyscallEndpointId(0, 6);
+
+// kernel::CreateThreadError와 값 순서를 정확히 맞춘다.
+enum class CreateThreadError : unsigned int {
+    None = 0,
+    InvalidArgument,
+    TooManyThreads,
+    OutOfMemory,
+};
+
+// kernel::CreateThreadArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
+// entry는 SysV 관례대로 RDI=arg 하나만 받는 함수로 취급한다(반환 시
+// 동작은 미정의 - 반드시 반환하지 않게 작성).
+struct CreateThreadArgs {
+    uint64_t entry = 0;      // in, 유저 포인터 - 새 스레드의 시작 함수
+    uint64_t arg = 0;        // in - entry(arg) 형태로 RDI에 그대로 전달
+    uint64_t stackSize = 0;  // in - 0이면 커널 기본값(64KiB)
+    // out
+    ThreadId threadId = kInvalidThreadId;
+    CreateThreadError error = CreateThreadError::None;
+};
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_PROCESS_H

@@ -33,7 +33,7 @@
 | [DC-F367AD5D](./DC-F367AD5D.md) | 커널 정상 종료(clean shutdown/reboot) 경로 부재 - 설계 필요 | approved | 2026-09-23T08:45:47.135Z |
 | [DC-FB38F86F](./DC-FB38F86F.md) | Paging::mapPage() 중간 테이블 생성 동시성 보호 - 락 전략 결정 요청 | approved | 2026-09-17T05:38:21.741Z |
 | [DS-D4E5C451](./DS-D4E5C451.md) | Minicore 초기 설계 결정 확정 (빌드/부팅/커널서비스/라이선스) | approved | 2026-09-21T19:59:54.552Z |
-| [PL-12814728](./PL-12814728.md) | 예정(scheduled) 계획 11건 실행 순서 - 그룹별 착수 가이드 (2026-09-26) | approved | 2026-09-26T09:27:03.668Z |
+| [PL-12814728](./PL-12814728.md) | 예정(scheduled) 계획 11건 실행 순서 - 그룹별 착수 가이드 (2026-09-26) | approved | 2026-09-26T09:55:04.531Z |
 | [PL-16E2CDA4](./PL-16E2CDA4.md) | Slab 할당자(libkmm) 구현 | archived | 2026-09-15T05:53:27.054Z |
 | [PL-1E247831](./PL-1E247831.md) | 비동기 프레임워크(AsyncTask) 구현 | approved | 2026-09-22T03:10:13.049Z |
 | [PL-2070E6EF](./PL-2070E6EF.md) | MSI/MSI-X 인터럽트 지원 | archived | 2026-09-15T05:53:21.418Z |
@@ -49,13 +49,13 @@
 | [PL-E68894CD](./PL-E68894CD.md) | HPET 지원 | approved | 2026-09-14T11:59:06.061Z |
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved | 2026-09-17T14:48:43.312Z |
 | [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-24T05:42:38.228Z |
-| [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-24T06:10:23.057Z |
+| [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-26T10:11:51.262Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-24T07:08:13.497Z |
 | [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-26T02:59:41.215Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-24T09:22:34.427Z |
-| [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-25T17:37:49.571Z |
+| [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-26T10:15:57.240Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-24T07:35:50.746Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-25T16:36:31.140Z |
@@ -75,13 +75,13 @@
 | [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | approved | 2026-09-22T02:14:40.657Z |
 | [SP-33FE698A](./SP-33FE698A.md) | 코루틴 AsyncTask 전용 뮤텍스(AsyncCoroMutex) — 재시도 폴링을 없앤 명시적 wait-queue 기반 설계 | approved | 2026-09-26T02:45:53.905Z |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-19T17:48:08.056Z |
-| [SP-3B8D77A3](./SP-3B8D77A3.md) | libext4 쿼터 2차 증분 — 그룹 쿼터(grpQuotaInum) + 신규 uid/gid 트리 삽입 + curinodes(inode 개수 쿼터) — 설계 제안 (SP-7A9CED3E §2.2 후속, PN-D168A778) | review | 2026-09-26T05:09:33.760Z |
+| [SP-3B8D77A3](./SP-3B8D77A3.md) | libext4 쿼터 2차 증분 — 그룹 쿼터(grpQuotaInum) + 신규 uid/gid 트리 삽입 + curinodes(inode 개수 쿼터) — 설계 제안 (SP-7A9CED3E §2.2 후속, PN-D168A778) | approved | 2026-09-26T09:37:37.400Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
 | [SP-43331889](./SP-43331889.md) | devmgr/fs 커널 흡수 + 유저모드 드라이버 지원 — 설계 제안 (DC-91ABD922/QU-23B339AB 확정 반영) | approved | 2026-09-22T07:19:58.202Z |
 | [SP-4DCD0E6A](./SP-4DCD0E6A.md) | Minicore Lock-free/Concurrent 컨테이너 템플릿(LockFreeList/LockFreeVector/LockFreeQueue/ConcurrentMap/ConcurrentRbtree) — 설계 제안 | approved | 2026-09-17T17:24:15.924Z |
 | [SP-5130284C](./SP-5130284C.md) | 인터럽트 컨텍스트 유발 SharedPtr 소멸 지연 메커니즘 — 설계 제안 (PN-4137C88C, QU-A07B9019) | approved | 2026-09-20T07:57:07.026Z |
 | [SP-5A255B7C](./SP-5A255B7C.md) | 비동기 프레임워크 우선 설계 원칙 평가 - 동기 구현의 wrapper화 검토 | approved | 2026-09-16T00:21:27.201Z |
-| [SP-5D62DCCF](./SP-5D62DCCF.md) | MapleTree v3 — store()/erase()의 인접 2-리프 spanning 지원 — 설계 제안 (SP-2AAD7C8D §3 후속, PN-2EA94B1A/PN-38D17292 known limitation 3 해소) | review | 2026-09-26T05:09:33.760Z |
+| [SP-5D62DCCF](./SP-5D62DCCF.md) | MapleTree v3 — store()/erase()의 인접 2-리프 spanning 지원 — 설계 제안 (SP-2AAD7C8D §3 후속, PN-2EA94B1A/PN-38D17292 known limitation 3 해소) | approved | 2026-09-26T09:37:16.041Z |
 | [SP-5D965B74](./SP-5D965B74.md) | procfs — 커널 상태 노출 파일시스템 스키마 설계 제안 | approved | 2026-09-20T03:55:08.695Z |
 | [SP-5EE7384A](./SP-5EE7384A.md) | ResourceGroup — cgroup 유사 자원 그룹 체계 설계 제안 | deprecated | 2026-09-17T03:04:11.492Z |
 | [SP-677210E6](./SP-677210E6.md) | TSS/IST 예외 스택 서브시스템 — 설계 제안 | approved | 2026-09-16T11:21:53.003Z |
@@ -96,7 +96,7 @@
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved | 2026-09-21T23:30:25.605Z |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | approved | 2026-09-21T14:43:57.320Z |
 | [SP-8D206F11](./SP-8D206F11.md) | Minicore CPU 캐시 관리 정책 | approved | 2026-09-18T13:06:14.505Z |
-| [SP-94C6A764](./SP-94C6A764.md) | PageFrame 캐시 타입 불일치(PAT aliasing) 처리 정책 — 설계 제안 (SP-6CEFBE9B §3 후속, PN-81223433) | review | 2026-09-26T05:09:33.690Z |
+| [SP-94C6A764](./SP-94C6A764.md) | PageFrame 캐시 타입 불일치(PAT aliasing) 처리 정책 — 설계 제안 (SP-6CEFBE9B §3 후속, PN-81223433) | approved | 2026-09-26T09:36:23.181Z |
 | [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-17T12:27:37.052Z |
 | [SP-9A6D579F](./SP-9A6D579F.md) | 프로세스 디버깅(브레이크포인트/싱글스텝) 서브시스템 — 설계 제안 | approved | 2026-09-20T04:50:48.737Z |
 | [SP-9CB55C5B](./SP-9CB55C5B.md) | Kill 대상 확장 — 안전한 ProcessId 해석 메커니즘 설계 제안 | approved | 2026-09-22T00:48:55.792Z |
@@ -109,7 +109,7 @@
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-17T20:01:50.983Z |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |
 | [SP-B26CDBDD](./SP-B26CDBDD.md) | CPU 가중치 스케줄링(vruntime) 및 프로세스 자원 사용량 계정 체계 — 설계 제안 | approved | 2026-09-17T12:44:21.601Z |
-| [SP-BF0B31B5](./SP-BF0B31B5.md) | AsyncTask 코어 간 완료 이관(cross-core completion) — Push/Pull 로드밸런싱 확장 설계 제안 (SP-F682B889 §2 비목표 해소, PN-2CD26587) | review | 2026-09-26T05:09:33.761Z |
+| [SP-BF0B31B5](./SP-BF0B31B5.md) | AsyncTask 코어 간 완료 이관(cross-core completion) — Push/Pull 로드밸런싱 확장 설계 제안 (SP-F682B889 §2 비목표 해소, PN-2CD26587) | approved | 2026-09-26T09:38:07.105Z |
 | [SP-C2670F69](./SP-C2670F69.md) | AHCI(SATA 스토리지 컨트롤러) 드라이버 — 설계 제안 | approved | 2026-09-25T10:36:46.012Z |
 | [SP-CA3C3E57](./SP-CA3C3E57.md) | Channel/BridgeHandle 안전한 핸들 해석 — 세부 설계 (PN-CE6A04AB) | approved | 2026-09-24T18:54:53.951Z |
 | [SP-CC1CF30E](./SP-CC1CF30E.md) | authmgr 커널 서비스(사용자 신원 관리, Key-Value DB) — 설계 제안 | approved | 2026-09-18T06:56:55.919Z |

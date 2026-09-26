@@ -90,3 +90,11 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/dbgtarget ${CMAKE_CURRE
 # (scripts/build-initrd.sh의 고정 스폰 목록)에는 의도적으로 포함하지
 # 않는다** - minicore/proctest/main.cpp 상단 주석 참고.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/proctest ${CMAKE_CURRENT_BINARY_DIR}/minicore-proctest)
+
+# dbgdriver(PN-0556C759, 멀티스레드 하드웨어 브레이크포인트 경쟁
+# 재현용 디버거 드라이버) - dbgtarget/proctest와 동일한 이유의
+# out-of-tree add_subdirectory. dbgtarget/proctest와 달리 kmain.cpp의
+# TEMP 스폰 경로(kSpawnDbgDriverForInvestigation())로 부팅 시 자동
+# 실행되므로 이 재현 조사 기간에는 initrd 안에 실려야 한다 -
+# minicore/dbgdriver/main.cpp 상단 주석 참고.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/dbgdriver ${CMAKE_CURRENT_BINARY_DIR}/minicore-dbgdriver)
