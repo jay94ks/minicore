@@ -1137,6 +1137,21 @@ public:
             co_return;
         }
 
+        // [이동, 2026-09-27, PN-CC0F4EAC 항목7 선행 조건] ProcessId 발급을
+        // 원래 위치(옛 5단계, execImage() 이후)에서 이 지점으로 앞당긴다 -
+        // fd 상속(LISTEN_PID 주입, systemd socket activation류)이 자식의
+        // pid를 envp 구성 시점(바로 아래 3.5단계)에 이미 알아야 하는데,
+        // 그 시점은 execImage()보다 먼저다. [정직하게 기록] 이 시점부터는
+        // 아래 3.5단계(argv/envp 복사)/execImage()/children.insert() 중
+        // 하나라도 실패하면(옛 코드는 이 지점 이후 실패가 전혀 없었으므로
+        // 신경 쓸 필요가 없었다) 방금 발급받은 슬롯을 명시적으로
+        // `kFreeProcessId()`로 반납해야 한다 - 아래 세 실패 분기 각각에
+        // 추가해 뒀다(정상 종료 시의 좀비 회수 경로, process.cpp의
+        // `kFreeProcessId(zombie->processTableIndex)` 호출부와 동일한
+        // 함수를 그대로 재사용 - 인덱스만 지우는 함수라 "아직 한 번도
+        // 스케줄되지 못한 프로세스"에 불러도 안전하다).
+        procShared->processId = kAllocateProcessId(procShared);
+
         // 3.5단계 - [신규, PN-E35294B8 항목2, QU-B9EB45E4 답변] argv/envp
         // 유저 포인터 배열을 검증+복사한다. 오프셋 추적 배열
         // (kMaxSpawnArgsEntryCount*8바이트, 최대 32KiB)까지 스택에
@@ -1183,6 +1198,7 @@ public:
             if (envOffsets) {
                 GenericSlabAllocator::free(envOffsets, kOffsetsBytes);
             }
+            kFreeProcessId(procShared->processTableIndex);  // 위 ProcessId 발급 이동 참고
             UserThread::release(thread);
             procShared.reset();
             GenericSlabAllocator::free(kernelImage, args->imageSize);
@@ -1211,6 +1227,7 @@ public:
         }
 
         if (!started) {
+            kFreeProcessId(procShared->processTableIndex);  // 위 ProcessId 발급 이동 참고
             UserThread::release(thread);
             procShared.reset();  // destroy()+슬랩 반납(위 주석 참고)
             args->error = SpawnProcessError::ExecImageFailed;
@@ -1258,6 +1275,7 @@ public:
         if (parentProc) {
             parentProc->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
             if (!parentProc->children.insert(procShared)) {
+                kFreeProcessId(procShared->processTableIndex);  // 위 ProcessId 발급 이동 참고
                 UserThread::release(thread);
                 procShared.reset();
                 args->error = SpawnProcessError::OutOfMemory;
@@ -1304,21 +1322,13 @@ public:
         // 과설계 방지). 나중에 `DebugContinue`(§3.5, 아직 미구현,
         // PN-87D6B615 항목5)가 `Scheduler::enqueue()`로 명시적으로
         // Ready에 올려야만 실행을 시작한다.
-        // [신규, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2/§6] ProcessId
-        // 발급 - 이 지점 이전엔 아직 실패 가능한 단계(argv/envp 복사,
-        // execImage, children.insert())가 남아 있었으나 전부 통과했다 -
-        // 원래 코드도 이 지점부터는 더 이상 실패 분기가 없었으므로(항상
-        // 성공으로 co_return) 같은 "이 이후엔 실패 없음" 전제를 그대로
-        // 따른다. 슬롯 고갈(UINT16_MAX개 동시 생존 프로세스 초과, 이
-        // 커널 규모에서 사실상 도달 불가)이라는 극히 드문 경우에도
-        // 이미 시작된 프로세스를 되돌리는 것보다(스레드가 곧 Ready
-        // 큐에 오르거나 디버그 정지 상태가 되므로, 그 시점 이후 되돌림은
-        // children.insert() 등 앞선 단계까지 전부 되감아야 해 원래 코드에
-        // 없던 복잡한 unwind를 새로 만들어야 함) `pid`만 무효로 남기고
-        // 스폰 자체는 성공시키는 쪽을 택한다(POSIX에 없는 실패 모드를
-        // 새로 만들지 않음, RM-23F4B687 §4) - `-1`로도 여전히 `Wait(-1,
-        // ...)`(아무 자식이나)로는 회수 가능하다.
-        procShared->processId = kAllocateProcessId(procShared);
+        // [이동, 2026-09-27, PN-CC0F4EAC 항목7] ProcessId 발급은 이제
+        // procShared 확보 직후(3.5단계 이전)로 옮겨졌다 - 위 그 지점의
+        // 주석 참고. 슬롯 고갈(UINT16_MAX개 동시 생존 프로세스 초과, 이
+        // 커널 규모에서 사실상 도달 불가)이라는 극히 드문 경우엔 여전히
+        // `kAllocateProcessId`가 `kInvalidProcessId`를 돌려주고, 이
+        // 함수는(원래 정책 그대로) 그래도 스폰 자체는 성공시킨다 -
+        // `-1`로도 여전히 `Wait(-1, ...)`(아무 자식이나)로는 회수 가능.
 
         if (args->flags & SpawnProcessFlags::kSpawnDebugStart) {
             started->state = TaskState::Blocked;
