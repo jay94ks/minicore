@@ -115,6 +115,162 @@ kernel::AsyncCoroMutex gQuotaCurspaceMutex;
 // 포함해서 재시도 기반 방식이 라이브락났음).
 kernel::AsyncCoroMutex gBlockBitmapAllocMutex;
 
+// [신규, 2026-09-26, PN-CA92C4A7/DC-DC9B2C3E, 설계자 답변 "(b)
+// inode-table 블록 단위 세분화"] `gBlockBitmapAllocMutex`로 블록
+// 비트맵 경쟁(PN-ADA46BF4)을 없앤 뒤에도, 서로 다른 파일이 같은
+// inode-table 블록을 공유하면(ext4가 여러 inode를 한 블록에 packing)
+// 그 블록을 통째로 읽어 자기 inode만 갱신 후 통째로 다시 쓰는
+// read-modify-write가 lost-update를 일으켜 "고아 블록"(비트맵엔
+// 사용 중, 어떤 inode도 미참조)이 생기는 게 실측으로 확인됐다
+// (PN-CA92C4A7 재현 기록). `gBlockBitmapAllocMutex`처럼 전역 하나로
+// 묶으면 서로 무관한 파일 간 동시 쓰기까지 전부 직렬화돼 이 커널의
+// SMP 동시성 목표와 부딪힌다는 지적에 따라, 설계자가 블록별로 독립된
+// `AsyncCoroMutex`를 동적으로 관리하는 세분화 락을 선택했다(DC-DC9B2C3E
+// 답변) - 서로 다른 블록을 건드리는 연산은 완전히 병렬로 진행되고,
+// 같은 블록을 공유하는 경우만 직렬화된다.
+//
+// **참조 카운트로 항목을 회수**: 절대다수 시점엔 "지금 이 순간 동시에
+// 진행 중인 파일 연산 수"만큼만 항목이 살아있으면 되지, 이 파일시스템
+// 수명 전체에 걸쳐 한 번이라도 건드린 블록 수만큼 쌓아 둘 필요는 없다 -
+// `acquire()`가 참조를 늘리고 `release()`가 줄여 0이 되면 즉시
+// 슬랩으로 반납한다(`Process::allocate()`와 동일한 관례로 슬랩
+// 할당 직후 `memset(0)`만 하고 별도 생성자를 안 쓴다 - `AsyncCoroMutex`
+// 의 모든 필드가 0으로 올바른 초기 상태가 되므로, `gBlockBitmapAllocMutex`
+// 같은 전역 인스턴스가 `init()`을 안 불러도 되는 것과 같은 이유).
+//
+// **락 순서(데드락 방지)**: `Mkdir`/`Rmdir`은 부모 inode와 자신의
+// (새/대상) inode 두 블록을 모두 건드릴 수 있다(둘이 같은 블록일
+// 수도 있음 - 그 경우 한 번만 잠근다) - 이 파일 전체가 항상 "부모
+// 블록 먼저, 그다음 자신의 블록"(둘 다 필요한 경우) 순서만 쓰도록
+// 통일해 역방향으로 중첩되는 경로 자체가 없게 한다(사이클 불가능).
+// `Write`/`Unlink`는 자신의 inode 블록 하나만 건드린다(`Unlink`는
+// 부모 inode를 읽기만 하고 다시 쓰지 않으므로 잠글 필요가 없다 -
+// 해당 case의 문서 주석 참고).
+class InodeTableLockTable {
+public:
+    struct Entry {
+        uint64_t blockOffset = 0;
+        kernel::AsyncCoroMutex mutex;
+        uint32_t refCount = 0;
+        Entry* next = nullptr;
+    };
+
+    // acquire()가 늘린 참조는 release()로 반드시 짝을 맞춘다 - 성공
+    // 여부는 mutex()가 nullptr인지로 확인한다(슬랩 고갈 등).
+    class Handle {
+    public:
+        Handle() = default;
+        kernel::AsyncCoroMutex* mutex() const { return _entry ? &_entry->mutex : nullptr; }
+
+    private:
+        friend class InodeTableLockTable;
+        Entry* _entry = nullptr;
+    };
+
+    Handle acquire(uint64_t blockOffset) {
+        kernel::SpinlockGuard guard(_lock);
+        Entry* e = findLocked(blockOffset);
+        if (!e) {
+            e = allocEntryLocked(blockOffset);
+        }
+        if (e) {
+            ++e->refCount;
+        }
+        Handle h;
+        h._entry = e;
+        return h;
+    }
+
+    void release(Handle& h) {
+        if (!h._entry) {
+            return;
+        }
+        h._entry->mutex.release();
+        kernel::SpinlockGuard guard(_lock);
+        if (--h._entry->refCount == 0) {
+            removeLocked(h._entry);
+        }
+        h._entry = nullptr;
+    }
+
+    // `Ext4Driver::onCancel` 전용 - 이 task가 어느 블록의 대기열에
+    // 있었는지 호출부가 알 방법이 없으므로, 지금 살아있는 항목(=동시에
+    // 활성인 블록 수만큼만 존재)을 전부 확인한다.
+    bool removeIfWaitingAnywhere(kernel::AsyncTask* task) {
+        kernel::SpinlockGuard guard(_lock);
+        for (uint32_t i = 0; i < kBucketCount; ++i) {
+            for (Entry* e = _buckets[i]; e; e = e->next) {
+                if (e->mutex.removeIfWaiting(task)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+private:
+    static constexpr uint32_t kBucketCount = 64;
+
+    Entry* findLocked(uint64_t blockOffset) {
+        const uint32_t idx = static_cast<uint32_t>(blockOffset % kBucketCount);
+        for (Entry* e = _buckets[idx]; e; e = e->next) {
+            if (e->blockOffset == blockOffset) {
+                return e;
+            }
+        }
+        return nullptr;
+    }
+
+    Entry* allocEntryLocked(uint64_t blockOffset) {
+        void* raw = kernel::GenericSlabAllocator::alloc(sizeof(Entry));
+        if (!raw) {
+            return nullptr;
+        }
+        memset(raw, 0, sizeof(Entry));
+        auto* e = reinterpret_cast<Entry*>(raw);
+        e->blockOffset = blockOffset;
+        const uint32_t idx = static_cast<uint32_t>(blockOffset % kBucketCount);
+        e->next = _buckets[idx];
+        _buckets[idx] = e;
+        return e;
+    }
+
+    void removeLocked(Entry* target) {
+        const uint32_t idx = static_cast<uint32_t>(target->blockOffset % kBucketCount);
+        Entry** link = &_buckets[idx];
+        while (*link) {
+            if (*link == target) {
+                *link = target->next;
+                kernel::GenericSlabAllocator::free(target, sizeof(Entry));
+                return;
+            }
+            link = &(*link)->next;
+        }
+    }
+
+    kernel::Spinlock _lock;
+    Entry* _buckets[kBucketCount] = {};
+};
+
+InodeTableLockTable gInodeTableLockTable;
+
+// `InodeTableLockTable::acquire()` 성공 이후 생성해 무조건 `release()`
+// 를 보장하는 RAII 래퍼 - 기본 생성된(=획득 실패한) Handle을 넘겨도
+// `release()`가 조용히 no-op이라 안전하다(호출부가 매번 성공 여부를
+// 따로 분기하지 않아도 됨, 이 파일의 다른 ReleaseGuard류와 동일 관례).
+class InodeTableLockReleaseGuard {
+public:
+    InodeTableLockReleaseGuard(InodeTableLockTable& table, InodeTableLockTable::Handle handle)
+        : _table(table), _handle(handle) {}
+    ~InodeTableLockReleaseGuard() { _table.release(_handle); }
+    InodeTableLockReleaseGuard(const InodeTableLockReleaseGuard&) = delete;
+    InodeTableLockReleaseGuard& operator=(const InodeTableLockReleaseGuard&) = delete;
+
+private:
+    InodeTableLockTable& _table;
+    InodeTableLockTable::Handle _handle;
+};
+
 // inodeNum이 속한 그룹/inode 테이블 상의 정확한 바이트 위치를
 // 계산한다(ext4.cpp의 Ext4Volume::readInodeStruct와 동일 계산) -
 // 실패(inode 번호 범위 밖)면 false.
@@ -392,6 +548,9 @@ bool Ext4Driver::remount(bool writable) {
 void Ext4Driver::onCancel(kernel::AsyncTask* task, void*) {
     gBlockBitmapAllocMutex.removeIfWaiting(task);
     gQuotaCurspaceMutex.removeIfWaiting(task);
+    // [PN-CA92C4A7] inode-table 블록별 락 - 어느 블록에 대기 중이었는지
+    // 몰라 살아있는 항목 전부를 확인한다(InodeTableLockTable 문서 참고).
+    gInodeTableLockTable.removeIfWaitingAnywhere(task);
 }
 
 kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw) {
@@ -828,6 +987,16 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 args->error = kernel::VfsError::InvalidHandle;
                 break;
             }
+            // [PN-CA92C4A7] 이 inode-table 블록의 read-modify-write
+            // 왕복 전체(이 아래 최종 되쓰기까지)를 블록 단위로 잠근다.
+            InodeTableLockTable::Handle inodeLock = gInodeTableLockTable.acquire(inodeBlockOffset);
+            if (!inodeLock.mutex()) {
+                args->bytesWritten = 0;
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            co_await inodeLock.mutex()->lockAsync();
+            InodeTableLockReleaseGuard inodeLockGuard(gInodeTableLockTable, inodeLock);
             const uint32_t inodeBlocksNeeded = static_cast<uint32_t>(
                 kCeilDiv(static_cast<uint64_t>(inodeByteOffset) + sb.inodeSize, blockSize));
             SlabBuf inodeBlockBuf(inodeBlocksNeeded * blockSize);
@@ -2517,6 +2686,18 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 args->error = kernel::VfsError::NotFound;
                 break;
             }
+            // [PN-CA92C4A7] 부모 inode-table 블록을 이 case 끝(부모
+            // linksCount 되쓰기)까지 먼저 잠근다 - Mkdir/Rmdir는 항상
+            // "부모 먼저, 그다음 자신의(새/대상) 블록" 순서만 써서
+            // 역방향 중첩(데드락)이 생기지 않게 한다(파일 상단
+            // InodeTableLockTable 문서 주석 참고).
+            InodeTableLockTable::Handle parentInodeLock = gInodeTableLockTable.acquire(parentInodeBlockOffset);
+            if (!parentInodeLock.mutex()) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+            co_await parentInodeLock.mutex()->lockAsync();
+            InodeTableLockReleaseGuard parentInodeLockGuard(gInodeTableLockTable, parentInodeLock);
             const uint32_t parentInodeBlocksNeeded = static_cast<uint32_t>(
                 kCeilDiv(static_cast<uint64_t>(parentInodeByteOffset) + sb.inodeSize, blockSize));
             SlabBuf parentInodeBuf(parentInodeBlocksNeeded * blockSize);
@@ -3469,6 +3650,21 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 args->error = kernel::VfsError::InvalidArgument;
                 break;
             }
+            // [PN-CA92C4A7] 새 inode 블록도 잠근다(부모와 같은 블록이면
+            // 건너뛴다 - 이미 위에서 잠근 parentInodeLock이 그 블록을
+            // 덮고 있고, AsyncCoroMutex는 재진입 불가라 같은 코루틴에서
+            // 두 번 잠그면 자기 자신에게 영원히 막힌다).
+            const bool newInodeSharesParentBlock = (newInodeBlockOffset == parentInodeBlockOffset);
+            InodeTableLockTable::Handle newInodeLock;
+            if (!newInodeSharesParentBlock) {
+                newInodeLock = gInodeTableLockTable.acquire(newInodeBlockOffset);
+                if (!newInodeLock.mutex()) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await newInodeLock.mutex()->lockAsync();
+            }
+            InodeTableLockReleaseGuard newInodeLockGuard(gInodeTableLockTable, newInodeLock);
             const uint32_t newInodeBlocksNeeded = static_cast<uint32_t>(
                 kCeilDiv(static_cast<uint64_t>(newInodeByteOffset) + sb.inodeSize, blockSize));
             SlabBuf newInodeBlockBuf(newInodeBlocksNeeded * blockSize);
@@ -3942,6 +4138,14 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 args->error = kernel::VfsError::NotFound;
                 break;
             }
+            // [PN-CA92C4A7] 부모 먼저(위 Mkdir case와 동일 순서 규약).
+            InodeTableLockTable::Handle parentInodeLock = gInodeTableLockTable.acquire(parentInodeBlockOffset);
+            if (!parentInodeLock.mutex()) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+            co_await parentInodeLock.mutex()->lockAsync();
+            InodeTableLockReleaseGuard parentInodeLockGuard(gInodeTableLockTable, parentInodeLock);
             const uint32_t parentInodeBlocksNeeded = static_cast<uint32_t>(
                 kCeilDiv(static_cast<uint64_t>(parentInodeByteOffset) + sb.inodeSize, blockSize));
             SlabBuf parentInodeBuf(parentInodeBlocksNeeded * blockSize);
@@ -4059,6 +4263,20 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 args->error = kernel::VfsError::NotFound;
                 break;
             }
+            // [PN-CA92C4A7] 대상(자신) 블록도 잠근다(부모와 동일 블록이면
+            // 건너뜀 - 이 아래 훨씬 뒤에서 이 블록을 0으로 지워 다시
+            // 쓰므로 지금부터 그 시점까지 계속 잠가 둔다).
+            const bool targetSharesParentBlock = (targetInodeBlockOffset == parentInodeBlockOffset);
+            InodeTableLockTable::Handle targetInodeLock;
+            if (!targetSharesParentBlock) {
+                targetInodeLock = gInodeTableLockTable.acquire(targetInodeBlockOffset);
+                if (!targetInodeLock.mutex()) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await targetInodeLock.mutex()->lockAsync();
+            }
+            InodeTableLockReleaseGuard targetInodeLockGuard(gInodeTableLockTable, targetInodeLock);
             SlabBuf targetInodeBuf(targetInodeBlocksNeeded * blockSize);
             if (!targetInodeBuf) {
                 args->error = kernel::VfsError::InvalidArgument;
@@ -4868,6 +5086,15 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 args->error = kernel::VfsError::NotFound;
                 break;
             }
+            // [PN-CA92C4A7] Unlink는 부모 inode를 다시 쓰지 않아(위
+            // 참고) 부모 락이 없다 - 대상(자신) 블록 하나만 잠근다.
+            InodeTableLockTable::Handle targetInodeLock = gInodeTableLockTable.acquire(targetInodeBlockOffset);
+            if (!targetInodeLock.mutex()) {
+                args->error = kernel::VfsError::InvalidArgument;
+                break;
+            }
+            co_await targetInodeLock.mutex()->lockAsync();
+            InodeTableLockReleaseGuard targetInodeLockGuard(gInodeTableLockTable, targetInodeLock);
             SlabBuf targetInodeBuf(targetInodeBlocksNeeded * blockSize);
             if (!targetInodeBuf) {
                 args->error = kernel::VfsError::InvalidArgument;
