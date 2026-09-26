@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-26T00:39:57.824Z
+  updatedAt: 2026-09-26T01:08:26.961Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2401,6 +2401,22 @@ commit `d190008`로 정확히 이 설계 그대로 구현됨(`async_task.h/.cpp`
 await_suspend()`/`AsyncReactor::drainOnce()`를 읽어 코드 대조까지
 완료 - **결론: 이 DC가 확정한 것 중 코드에 반영 안 된 항목 없음.**
 다음 approved 전환 시까지 이 §3 스윕은 다시 건너뛴다.
+
+**[정정, 2026-09-26, 같은 날 후속 틱] 위 "갭 없음" 결론은 성급했다 -
+`DC-59F63D0E`(open, 설계자 답변 대기)로 반증됨.** `PN-ADA46BF4`가
+같은 "(b)" 수정을 실제 `gBlockBitmapAllocMutexCore`(임계구역이 AHCI
+I/O `co_await`를 4회 연달아 감싸는 케이스)에 재적용해 검증했더니
+8-writer는 물론 **2-writer(락 경합자 1개)조차 100% 다시 hang**했다 -
+바로 위에서 "통과"로 인용한 두 검증(디스크 없는 순수 재현,
+`gQuotaCurspaceMutexCore` 8-writer)은 실제로 통과했던 게 맞지만,
+그 결론을 "이 DC가 확정한 설계로 문제 유형 전체가 해소됐다"로
+일반화한 것이 틀렸다 - 검증되지 않은 조건(임계구역이 여러 I/O
+`co_await`를 연달아 감싸는 경우)까지 커버한다고 잘못 판정한 사례.
+상세 재현/원인 후보는 `DC-59F63D0E`(`QU-5CE6FA42`)와 `PN-F2594E93`/
+`PN-ADA46BF4` 자신의 정정 절 참고 - **이 DC 항목은 설계자가
+`QU-5CE6FA42`에 답변하고 그 방향이 실제로 구현+재검증될 때까지 다시
+갭 있음(미해소) 상태로 취급**, 그 답변이 나오면 이 §2 항목도 그때
+다시 갱신한다.
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
