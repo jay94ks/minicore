@@ -3406,6 +3406,176 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 break;
             }
 
+            // [신규, PN-956A3A66/SP-3B8D77A3 §3] curinodes(inode 개수
+            // 쿼터) 하드리밋 검사 - Write 경로의 bhardlimit 검사(§1)를
+            // ihardlimit로 복제. **소유자는 이 새 디렉터리 inode 자신의
+            // uid를 그대로 써야 한다** - 아래에서 실제로 `kExt4InitDirInode`
+            // 가 새 inode에 채우는 값(현재 이 커널의 Mkdir v1은 항상
+            // uid=0 - 제출자의 진짜 uid를 아직 안 씀, 별도의 더 큰 v1
+            // 한계로 이 계획 범위 밖)과 반드시 일치해야, 나중에 Unlink/
+            // Rmdir의 curinodes 감소(`targetInode.uid` 기준)가 같은
+            // 쿼터 레코드를 정확히 되돌린다. **삽입은 여전히 범위 밖**
+            // (트리에 그 uid가 없으면 무제한 관례로 통과) - 실패해도 이
+            // 검사 자체를 건너뛸 뿐 Mkdir을 막지 않는다(Write 쪽과 동일
+            // 원칙 - 실측된 적 없는 순수 조회 실패를 거부 사유로 쓰지
+            // 않음).
+            constexpr kernel::Uid kMkdirOwnerUidForQuota = 0;
+            bool inodeQuotaExceeded = false;
+            if (sb.usrQuotaInum != 0) {
+                do {
+                    uint64_t qInodeBlockOffset = 0;
+                    uint32_t qInodeByteOffset = 0;
+                    uint32_t qInodeBlocksNeeded = 0;
+                    if (!kLocateInode(sb, volume_, groupCount, blockSize, sb.usrQuotaInum, &qInodeBlockOffset,
+                                      &qInodeByteOffset, &qInodeBlocksNeeded)) {
+                        break;
+                    }
+                    SlabBuf qInodeBuf(qInodeBlocksNeeded * blockSize);
+                    if (!qInodeBuf) {
+                        break;
+                    }
+                    {
+                        fs::BlockIoResult qInodeIo;
+                        kernel::AsyncTask* qInodeTask = kSubmitReadExtBlocks(
+                            device, blockSize, qInodeBlockOffset, qInodeBlocksNeeded, qInodeBuf.get(), &qInodeIo);
+                        if (!qInodeTask) {
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(qInodeTask);
+                        if (!qInodeIo.ok) {
+                            break;
+                        }
+                    }
+                    InodeCore qInode;
+                    memcpy(&qInode, qInodeBuf.get() + qInodeByteOffset, sizeof(qInode));
+
+                    const uint32_t qblocksPerFsBlock = blockSize / kQuotaBlockSize;
+                    const uint32_t qDepth = kQtreeDepth(kQuotaBlockSize);
+                    const uint32_t qEpb = kQuotaBlockSize / sizeof(uint32_t);
+                    uint32_t curQBlock = kQtreeTreeOff;
+                    SlabBuf qFsBlockBuf(blockSize);
+                    if (!qFsBlockBuf) {
+                        break;
+                    }
+
+                    bool giveUp = false;
+                    for (uint32_t level = 0; level < qDepth; ++level) {
+                        const uint32_t fsBlockIdx = curQBlock / qblocksPerFsBlock;
+                        const uint32_t byteOffInFsBlock = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                        uint64_t qPhysAbs = 0;
+                        ExtentLookup qLookup = kLookupExtent(qInode.block, fsBlockIdx, &qPhysAbs);
+                        uint32_t qDepthGuard = 5;
+                        SlabBuf qExtentNodeBuf(blockSize);
+                        while (qLookup == ExtentLookup::NeedChild && qDepthGuard > 0) {
+                            if (!qExtentNodeBuf) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult qExIo;
+                            kernel::AsyncTask* qExTask =
+                                kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qExtentNodeBuf.get(), &qExIo);
+                            if (!qExTask) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qExTask);
+                            if (!qExIo.ok) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            qLookup = kLookupExtent(qExtentNodeBuf.get(), fsBlockIdx, &qPhysAbs);
+                            --qDepthGuard;
+                        }
+                        if (qLookup != ExtentLookup::Found) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        fs::BlockIoResult qReadIo;
+                        kernel::AsyncTask* qReadTask =
+                            kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qFsBlockBuf.get(), &qReadIo);
+                        if (!qReadTask) {
+                            giveUp = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(qReadTask);
+                        if (!qReadIo.ok) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        const uint32_t idx = kQtreeGetIndex(kMkdirOwnerUidForQuota, level, qDepth, qEpb);
+                        uint32_t next = 0;
+                        memcpy(&next, qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), sizeof(next));
+                        if (next == 0) {
+                            giveUp = true;  // 트리에 없는 uid - 무제한 관례
+                            break;
+                        }
+                        curQBlock = next;
+                    }
+                    if (giveUp) {
+                        break;
+                    }
+
+                    const uint32_t leafFsBlockIdx = curQBlock / qblocksPerFsBlock;
+                    const uint32_t leafByteOff = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                    uint64_t leafPhysAbs = 0;
+                    ExtentLookup leafLookup = kLookupExtent(qInode.block, leafFsBlockIdx, &leafPhysAbs);
+                    uint32_t leafDepthGuard = 5;
+                    SlabBuf leafExtentNodeBuf(blockSize);
+                    while (leafLookup == ExtentLookup::NeedChild && leafDepthGuard > 0) {
+                        if (!leafExtentNodeBuf) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult leafExIo;
+                        kernel::AsyncTask* leafExTask = kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1,
+                                                                              leafExtentNodeBuf.get(), &leafExIo);
+                        if (!leafExTask) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(leafExTask);
+                        if (!leafExIo.ok) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        leafLookup = kLookupExtent(leafExtentNodeBuf.get(), leafFsBlockIdx, &leafPhysAbs);
+                        --leafDepthGuard;
+                    }
+                    if (leafLookup != ExtentLookup::Found) {
+                        break;
+                    }
+
+                    fs::BlockIoResult leafReadIo;
+                    kernel::AsyncTask* leafReadTask =
+                        kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafReadIo);
+                    if (!leafReadTask) {
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(leafReadTask);
+                    if (!leafReadIo.ok) {
+                        break;
+                    }
+
+                    QuotaV2DiskDqblk dqblk;
+                    if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize,
+                                                kMkdirOwnerUidForQuota, &dqblk)) {
+                        break;
+                    }
+                    if (dqblk.ihardlimit == 0) {
+                        break;  // 0 = 무제한 관례
+                    }
+                    if (dqblk.curinodes + 1 > dqblk.ihardlimit) {
+                        inodeQuotaExceeded = true;
+                    }
+                } while (false);
+            }
+            if (inodeQuotaExceeded) {
+                args->error = kernel::VfsError::NoSpace;
+                break;
+            }
+
             // 4) inode를 먼저 할당(부모의 그룹부터 순서대로 스캔) -
             //    블록 할당이 나중에 실패하면 이 inode를 되돌린다(아래
             //    5단계의 롤백 참고). 비트맵/그룹 디스크립터 버퍼는
@@ -3833,6 +4003,29 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             //    부모를 가리키므로) - 2단계에서 읽어 둔 parentInodeBuf
             //    (전체 inodeSize바이트가 유효 범위)를 그대로 갱신 후
             //    다시 쓴다.
+            // [버그 수정, PN-956A3A66 curinodes 실측 중 발견] 부모(root
+            // 등 이른 inode 번호)와 새 inode(6단계, 마찬가지로 이른
+            // 번호일 수 있음)가 같은 온디스크 블록을 공유하면(작은
+            // 파일시스템/이른 inode 번호에서 흔함), 2단계에서 미리
+            // 읽어 둔 parentInodeBuf는 6단계의 새 inode 기록을 반영
+            // 못 한 스테일 사본이다 - 그대로 다시 쓰면 방금 쓴 새
+            // inode 내용을 지워버린다(실측: mode/flags가 0으로 되돌아가
+            // Rmdir이 "익스텐트 기반 디렉터리 아님"으로 거부). 공유
+            // 블록이면 쓰기 직전에 다시 읽어 최신 상태 위에 얹는다.
+            if (newInodeSharesParentBlock) {
+                fs::BlockIoResult reReadResult;
+                kernel::AsyncTask* reReadTask = kSubmitReadExtBlocks(
+                    device, blockSize, parentInodeBlockOffset, parentInodeBlocksNeeded, parentInodeBuf.get(), &reReadResult);
+                if (!reReadTask) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+                co_await kernel::AsyncTaskCoroAwaiter(reReadTask);
+                if (!reReadResult.ok) {
+                    args->error = kernel::VfsError::InvalidArgument;
+                    break;
+                }
+            }
             parentInode.linksCount = static_cast<uint16_t>(parentInode.linksCount + 1);
             memcpy(parentInodeBuf.get() + parentInodeByteOffset, &parentInode, sizeof(parentInode));
             if (metadataCsum) {
@@ -3908,6 +4101,174 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         break;
                     }
                 }
+            }
+
+            // [신규, PN-956A3A66/SP-3B8D77A3 §3] curinodes 실시간 증분 -
+            // 여기(모든 롤백 지점을 지나 슈퍼블록 free-inodes까지 이미
+            // 커밋된 지점)에서만 반영한다 - 위 하드리밋 검사와 마찬가지로
+            // 이 새 디렉터리 inode 자신의 uid(`kMkdirOwnerUidForQuota`,
+            // 현재 항상 0)로 회계해야 나중에 Unlink/Rmdir의 감소와 같은
+            // 레코드를 가리킨다. 실패해도(트리에 없음 등) 이 Mkdir 자체는
+            // 이미 성공했으므로 에러로 취급하지 않는다(Write/Unlink 쪽과
+            // 동일 원칙 - 순수 회계 오차는 다음 quotacheck가 재동기화).
+            if (sb.usrQuotaInum != 0) {
+                co_await gQuotaCurspaceMutex.lockAsync();
+                kernel::AsyncCoroMutexReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutex);
+                do {
+                    uint64_t qInodeBlockOffset = 0;
+                    uint32_t qInodeByteOffset = 0;
+                    uint32_t qInodeBlocksNeeded = 0;
+                    if (!kLocateInode(sb, volume_, groupCount, blockSize, sb.usrQuotaInum, &qInodeBlockOffset,
+                                      &qInodeByteOffset, &qInodeBlocksNeeded)) {
+                        break;
+                    }
+                    SlabBuf qInodeBuf(qInodeBlocksNeeded * blockSize);
+                    if (!qInodeBuf) {
+                        break;
+                    }
+                    {
+                        fs::BlockIoResult qInodeIo;
+                        kernel::AsyncTask* qInodeTask = kSubmitReadExtBlocks(
+                            device, blockSize, qInodeBlockOffset, qInodeBlocksNeeded, qInodeBuf.get(), &qInodeIo);
+                        if (!qInodeTask) {
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(qInodeTask);
+                        if (!qInodeIo.ok) {
+                            break;
+                        }
+                    }
+                    InodeCore qInode;
+                    memcpy(&qInode, qInodeBuf.get() + qInodeByteOffset, sizeof(qInode));
+
+                    const uint32_t qblocksPerFsBlock = blockSize / kQuotaBlockSize;
+                    const uint32_t qDepth = kQtreeDepth(kQuotaBlockSize);
+                    const uint32_t qEpb = kQuotaBlockSize / sizeof(uint32_t);
+                    uint32_t curQBlock = kQtreeTreeOff;
+                    SlabBuf qFsBlockBuf(blockSize);
+                    if (!qFsBlockBuf) {
+                        break;
+                    }
+
+                    bool giveUp = false;
+                    for (uint32_t level = 0; level < qDepth; ++level) {
+                        const uint32_t fsBlockIdx = curQBlock / qblocksPerFsBlock;
+                        const uint32_t byteOffInFsBlock = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                        uint64_t qPhysAbs = 0;
+                        ExtentLookup qLookup = kLookupExtent(qInode.block, fsBlockIdx, &qPhysAbs);
+                        uint32_t qDepthGuard = 5;
+                        SlabBuf qExtentNodeBuf(blockSize);
+                        while (qLookup == ExtentLookup::NeedChild && qDepthGuard > 0) {
+                            if (!qExtentNodeBuf) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult qExIo;
+                            kernel::AsyncTask* qExTask =
+                                kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qExtentNodeBuf.get(), &qExIo);
+                            if (!qExTask) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qExTask);
+                            if (!qExIo.ok) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            qLookup = kLookupExtent(qExtentNodeBuf.get(), fsBlockIdx, &qPhysAbs);
+                            --qDepthGuard;
+                        }
+                        if (qLookup != ExtentLookup::Found) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        fs::BlockIoResult qReadIo;
+                        kernel::AsyncTask* qReadTask =
+                            kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qFsBlockBuf.get(), &qReadIo);
+                        if (!qReadTask) {
+                            giveUp = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(qReadTask);
+                        if (!qReadIo.ok) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        const uint32_t idx = kQtreeGetIndex(kMkdirOwnerUidForQuota, level, qDepth, qEpb);
+                        uint32_t next = 0;
+                        memcpy(&next, qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), sizeof(next));
+                        if (next == 0) {
+                            giveUp = true;  // 트리에 없는 uid - 삽입은 범위 밖, 그냥 건너뜀
+                            break;
+                        }
+                        curQBlock = next;
+                    }
+                    if (giveUp) {
+                        break;
+                    }
+
+                    const uint32_t leafFsBlockIdx = curQBlock / qblocksPerFsBlock;
+                    const uint32_t leafByteOff = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                    uint64_t leafPhysAbs = 0;
+                    ExtentLookup leafLookup = kLookupExtent(qInode.block, leafFsBlockIdx, &leafPhysAbs);
+                    uint32_t leafDepthGuard = 5;
+                    SlabBuf leafExtentNodeBuf(blockSize);
+                    while (leafLookup == ExtentLookup::NeedChild && leafDepthGuard > 0) {
+                        if (!leafExtentNodeBuf) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult leafExIo;
+                        kernel::AsyncTask* leafExTask = kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1,
+                                                                              leafExtentNodeBuf.get(), &leafExIo);
+                        if (!leafExTask) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(leafExTask);
+                        if (!leafExIo.ok) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        leafLookup = kLookupExtent(leafExtentNodeBuf.get(), leafFsBlockIdx, &leafPhysAbs);
+                        --leafDepthGuard;
+                    }
+                    if (leafLookup != ExtentLookup::Found) {
+                        break;
+                    }
+
+                    fs::BlockIoResult leafReadIo;
+                    kernel::AsyncTask* leafReadTask =
+                        kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafReadIo);
+                    if (!leafReadTask) {
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(leafReadTask);
+                    if (!leafReadIo.ok) {
+                        break;
+                    }
+
+                    QuotaV2DiskDqblk dqblk;
+                    uint32_t dqblkByteOffset = 0;
+                    if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize,
+                                                kMkdirOwnerUidForQuota, &dqblk, &dqblkByteOffset)) {
+                        break;  // 삽입은 범위 밖 - 트리에 없으면 그냥 건너뜀
+                    }
+                    dqblk.curinodes += 1;
+                    memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
+
+                    fs::BlockIoResult leafWriteIo;
+                    kernel::AsyncTask* leafWriteTask =
+                        kSubmitWriteExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafWriteIo);
+                    if (!leafWriteTask) {
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(leafWriteTask);
+                    // 실패해도 이 Mkdir 자체의 성공/실패에 영향 없음(위
+                    // 문서 주석 참고).
+                } while (false);
             }
 
             args->error = kernel::VfsError::None;
@@ -4747,6 +5108,178 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 }
             }
 
+            // [신규, PN-956A3A66/SP-3B8D77A3 §3] curinodes 실시간 감소 -
+            // Unlink 쪽(아래 케이스)의 동일 패턴과 대칭, Rmdir은 이전에
+            // curspace조차 다루지 않았으므로(디렉터리는 이 계정에서
+            // "블록 사용량"을 따로 추적한 적이 없음) curinodes 전용
+            // 신규 블록이다. 대상 디렉터리 자신의 소유자
+            // (`targetInode.uid`)로 회계 - Mkdir이 실제로 그 필드에 쓴
+            // 값(현재 항상 0)을 그대로 읽어오므로 자동으로 일치한다.
+            // 여기 도달했다는 것 자체가 inode 하나가 실제로 해제됐다는
+            // 뜻이라 항상 1 감소. 실패해도(트리에 없음 등) 이 Rmdir
+            // 자체는 이미 성공했으므로 에러로 취급하지 않는다(Write/
+            // Unlink 쪽과 동일 원칙).
+            if (sb.usrQuotaInum != 0) {
+                const kernel::Uid ownerUid = static_cast<kernel::Uid>(targetInode.uid);
+                co_await gQuotaCurspaceMutex.lockAsync();
+                kernel::AsyncCoroMutexReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutex);
+                do {
+                    uint64_t qInodeBlockOffset = 0;
+                    uint32_t qInodeByteOffset = 0;
+                    uint32_t qInodeBlocksNeeded = 0;
+                    if (!kLocateInode(sb, volume_, groupCount, blockSize, sb.usrQuotaInum, &qInodeBlockOffset,
+                                      &qInodeByteOffset, &qInodeBlocksNeeded)) {
+                        break;
+                    }
+                    SlabBuf qInodeBuf(qInodeBlocksNeeded * blockSize);
+                    if (!qInodeBuf) {
+                        break;
+                    }
+                    {
+                        fs::BlockIoResult qInodeIo;
+                        kernel::AsyncTask* qInodeTask = kSubmitReadExtBlocks(
+                            device, blockSize, qInodeBlockOffset, qInodeBlocksNeeded, qInodeBuf.get(), &qInodeIo);
+                        if (!qInodeTask) {
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(qInodeTask);
+                        if (!qInodeIo.ok) {
+                            break;
+                        }
+                    }
+                    InodeCore qInode;
+                    memcpy(&qInode, qInodeBuf.get() + qInodeByteOffset, sizeof(qInode));
+
+                    const uint32_t qblocksPerFsBlock = blockSize / kQuotaBlockSize;
+                    const uint32_t qDepth = kQtreeDepth(kQuotaBlockSize);
+                    const uint32_t qEpb = kQuotaBlockSize / sizeof(uint32_t);
+                    uint32_t curQBlock = kQtreeTreeOff;
+                    SlabBuf qFsBlockBuf(blockSize);
+                    if (!qFsBlockBuf) {
+                        break;
+                    }
+
+                    bool giveUp = false;
+                    for (uint32_t level = 0; level < qDepth; ++level) {
+                        const uint32_t fsBlockIdx = curQBlock / qblocksPerFsBlock;
+                        const uint32_t byteOffInFsBlock = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                        uint64_t qPhysAbs = 0;
+                        ExtentLookup qLookup = kLookupExtent(qInode.block, fsBlockIdx, &qPhysAbs);
+                        uint32_t qDepthGuard = 5;
+                        SlabBuf qExtentNodeBuf(blockSize);
+                        while (qLookup == ExtentLookup::NeedChild && qDepthGuard > 0) {
+                            if (!qExtentNodeBuf) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            fs::BlockIoResult qExIo;
+                            kernel::AsyncTask* qExTask =
+                                kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qExtentNodeBuf.get(), &qExIo);
+                            if (!qExTask) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qExTask);
+                            if (!qExIo.ok) {
+                                qLookup = ExtentLookup::Invalid;
+                                break;
+                            }
+                            qLookup = kLookupExtent(qExtentNodeBuf.get(), fsBlockIdx, &qPhysAbs);
+                            --qDepthGuard;
+                        }
+                        if (qLookup != ExtentLookup::Found) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        fs::BlockIoResult qReadIo;
+                        kernel::AsyncTask* qReadTask =
+                            kSubmitReadExtBlocks(device, blockSize, qPhysAbs, 1, qFsBlockBuf.get(), &qReadIo);
+                        if (!qReadTask) {
+                            giveUp = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(qReadTask);
+                        if (!qReadIo.ok) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        const uint32_t idx = kQtreeGetIndex(ownerUid, level, qDepth, qEpb);
+                        uint32_t next = 0;
+                        memcpy(&next, qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), sizeof(next));
+                        if (next == 0) {
+                            giveUp = true;  // 트리에 없는 uid - 삽입은 범위 밖, 그냥 건너뜀
+                            break;
+                        }
+                        curQBlock = next;
+                    }
+                    if (giveUp) {
+                        break;
+                    }
+
+                    const uint32_t leafFsBlockIdx = curQBlock / qblocksPerFsBlock;
+                    const uint32_t leafByteOff = (curQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                    uint64_t leafPhysAbs = 0;
+                    ExtentLookup leafLookup = kLookupExtent(qInode.block, leafFsBlockIdx, &leafPhysAbs);
+                    uint32_t leafDepthGuard = 5;
+                    SlabBuf leafExtentNodeBuf(blockSize);
+                    while (leafLookup == ExtentLookup::NeedChild && leafDepthGuard > 0) {
+                        if (!leafExtentNodeBuf) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        fs::BlockIoResult leafExIo;
+                        kernel::AsyncTask* leafExTask = kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1,
+                                                                              leafExtentNodeBuf.get(), &leafExIo);
+                        if (!leafExTask) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(leafExTask);
+                        if (!leafExIo.ok) {
+                            leafLookup = ExtentLookup::Invalid;
+                            break;
+                        }
+                        leafLookup = kLookupExtent(leafExtentNodeBuf.get(), leafFsBlockIdx, &leafPhysAbs);
+                        --leafDepthGuard;
+                    }
+                    if (leafLookup != ExtentLookup::Found) {
+                        break;
+                    }
+
+                    fs::BlockIoResult leafReadIo;
+                    kernel::AsyncTask* leafReadTask =
+                        kSubmitReadExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafReadIo);
+                    if (!leafReadTask) {
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(leafReadTask);
+                    if (!leafReadIo.ok) {
+                        break;
+                    }
+
+                    QuotaV2DiskDqblk dqblk;
+                    uint32_t dqblkByteOffset = 0;
+                    if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize, ownerUid, &dqblk,
+                                                &dqblkByteOffset)) {
+                        break;  // 삽입은 범위 밖 - 트리에 없으면 그냥 건너뜀
+                    }
+                    dqblk.curinodes = dqblk.curinodes > 0 ? dqblk.curinodes - 1 : 0;
+                    memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
+
+                    fs::BlockIoResult leafWriteIo;
+                    kernel::AsyncTask* leafWriteTask =
+                        kSubmitWriteExtBlocks(device, blockSize, leafPhysAbs, 1, qFsBlockBuf.get(), &leafWriteIo);
+                    if (!leafWriteTask) {
+                        break;
+                    }
+                    co_await kernel::AsyncTaskCoroAwaiter(leafWriteTask);
+                    // 실패해도 이 Rmdir 자체의 성공/실패에 영향 없음(위
+                    // 문서 주석 참고).
+                } while (false);
+            }
+
             args->error = kernel::VfsError::None;
             break;
         }
@@ -5456,21 +5989,30 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                 }
             }
 
-            // 10) 사용자 쿼터 curspace 실시간 갱신(감소) - Write 경로의
-            //     증분(§6, PN-D168A778 2단계)과 대칭. 파일 소유자
-            //     (`targetInode.uid` - 이 삭제를 제출한 프로세스의 uid가
-            //     아니라 파일 자체의 소유자, 다른 사용자 소유 파일을
-            //     삭제할 수 있는 경우와도 일관되게 소유자 기준으로
-            //     회계) 앞으로 실제로 해제된 블록 수(`targetBlockCount`,
-            //     구멍 제외)만큼 curspace를 줄인다. **삽입은 여전히
-            //     범위 밖** - 트리에 그 uid가 없으면 그냥 건너뜀(삭제
-            //     자체의 성공/실패에 영향 없음, Write 쪽과 동일한 이유
-            //     - 순수 회계 갱신 실패는 다음 quotacheck가 재동기화).
-            //     curspace가 이미 이 값보다 작으면(이 기능 도입 전부터
+            // 10) 사용자 쿼터 curspace/curinodes 실시간 갱신(감소) - Write
+            //     경로의 증분(§6, PN-D168A778 2단계)과 대칭, curinodes는
+            //     PN-956A3A66/SP-3B8D77A3 §3(curspace의 정확한 대칭 - 같은
+            //     리프 레코드의 다른 필드라 새 순회 없이 이 블록에 얹는다).
+            //     파일 소유자(`targetInode.uid` - 이 삭제를 제출한
+            //     프로세스의 uid가 아니라 파일 자체의 소유자, 다른 사용자
+            //     소유 파일을 삭제할 수 있는 경우와도 일관되게 소유자
+            //     기준으로 회계) 앞으로 실제로 해제된 블록 수
+            //     (`targetBlockCount`, 구멍 제외)만큼 curspace를, inode
+            //     1개만큼 curinodes를 줄인다. **삽입은 여전히 범위 밖** -
+            //     트리에 그 uid가 없으면 그냥 건너뜀(삭제 자체의 성공/
+            //     실패에 영향 없음, Write 쪽과 동일한 이유 - 순수 회계
+            //     갱신 실패는 다음 quotacheck가 재동기화). curspace/
+            //     curinodes가 이미 이 값보다 작으면(이 기능 도입 전부터
             //     있던 파일이라 회계가 애초에 안 맞았던 경우 등) 0으로
             //     클램프해 unsigned 언더플로로 거대한 값이 되는 것을
-            //     막는다.
-            if (targetBlockCount > 0 && sb.usrQuotaInum != 0) {
+            //     막는다. **이 지점에 도달했다는 것 자체가 inode 하나가
+            //     실제로 해제됐다는 뜻**이라(v1은 하드링크 refcount를
+            //     다루지 않음 - 파일 상단 문서 주석 "v1 범위" 참고)
+            //     curinodes 감소는 `targetBlockCount==0`(0바이트 파일)
+            //     이어도 항상 적용한다 - 그래서 바깥 조건에서
+            //     `targetBlockCount>0`을 뺐다(curspace 쪽만 안에서 따로
+            //     가드).
+            if (sb.usrQuotaInum != 0) {
                 const kernel::Uid ownerUid = static_cast<kernel::Uid>(targetInode.uid);
                 co_await gQuotaCurspaceMutex.lockAsync();
                 kernel::AsyncCoroMutexReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutex);
@@ -5616,8 +6158,14 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                                                 &dqblkByteOffset)) {
                         break;  // 삽입은 범위 밖 - 트리에 없으면 그냥 건너뜀
                     }
-                    const uint64_t freedBytes = static_cast<uint64_t>(targetBlockCount) * blockSize;
-                    dqblk.curspace = dqblk.curspace > freedBytes ? dqblk.curspace - freedBytes : 0;
+                    if (targetBlockCount > 0) {
+                        const uint64_t freedBytes = static_cast<uint64_t>(targetBlockCount) * blockSize;
+                        dqblk.curspace = dqblk.curspace > freedBytes ? dqblk.curspace - freedBytes : 0;
+                    }
+                    // [신규, PN-956A3A66/SP-3B8D77A3 §3] curinodes - 이
+                    // 지점에 도달했다는 것 자체가 inode 하나가 실제로
+                    // 해제됐다는 뜻이라 항상 1 감소.
+                    dqblk.curinodes = dqblk.curinodes > 0 ? dqblk.curinodes - 1 : 0;
                     memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
 
                     fs::BlockIoResult leafWriteIo;
