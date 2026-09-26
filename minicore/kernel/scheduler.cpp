@@ -402,8 +402,14 @@ void kSyncRsp0ForDispatch(Task* next) {
     // 문서 주석 참고. `next->isUserLevel` 역참조로 실제 PANIC이 났던
     // 지점이라, 그 역참조보다 먼저 로깅해 무효 포인터여도 값 자체는
     // 남긴다.
-    kDiagRingLog(DiagRingEvent::SchedulerSyncRsp0Entry, Scheduler::currentCoreIndex(), 0, 0,
-                 reinterpret_cast<uint64_t>(next));
+    // [신규, 2026-09-26, PN-6360E6E9] rsp 필드(그동안 0 고정)에 반환
+    // 주소를 대신 실어 보낸다 - 6개 알려진 호출부 전부 태깅해도
+    // 손상 시점에 태그가 하나도 안 찍힌다는 게 오래 막힌 지점이었다
+    // (소스상 어떤 호출 경로도 설명 못 함) - 이 반환주소가 6개 호출부
+    // 주소 중 하나와 일치하는지, 아니면 완전히 무관한(제어 흐름 자체가
+    // 손상된) 값인지로 가설을 좁힌다.
+    kDiagRingLog(DiagRingEvent::SchedulerSyncRsp0Entry, Scheduler::currentCoreIndex(), 0,
+                 reinterpret_cast<uint64_t>(__builtin_return_address(0)), reinterpret_cast<uint64_t>(next));
     if (next->isUserLevel) {
         Gdt::setRsp0ForThisCore(next->kernelStackTop);
         SyscallFastPath::setKernelRspForThisCore(next->kernelStackTop);
@@ -473,8 +479,10 @@ void kSyncCr3(Task* task) {
     // [신규, 2026-09-25, PN-6360E6E9/PN-24A2B6F5] kSyncRsp0ForDispatch와
     // 동일한 이유 - `task->isUserLevel` 역참조가 실제 PANIC 지점이었다
     // (2026-09-25 재현, task=0x100000000).
-    kDiagRingLog(DiagRingEvent::SchedulerSyncCr3Entry, Scheduler::currentCoreIndex(), 0, 0,
-                 reinterpret_cast<uint64_t>(task));
+    // [신규, 2026-09-26, PN-6360E6E9] 위 kSyncRsp0ForDispatch와 같은
+    // 이유 - rsp 필드에 반환주소를 실어 손상 시 호출 경로를 역추적.
+    kDiagRingLog(DiagRingEvent::SchedulerSyncCr3Entry, Scheduler::currentCoreIndex(), 0,
+                 reinterpret_cast<uint64_t>(__builtin_return_address(0)), reinterpret_cast<uint64_t>(task));
     const uint64_t targetPml4 = task->isUserLevel ? task->userPml4Phys : gBootPml4Phys;
     if (Paging::currentPml4Phys() != targetPml4) {
         asm volatile("mov %0, %%cr3" : : "r"(targetPml4) : "memory");
