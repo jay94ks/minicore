@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-26T01:08:26.961Z
+  updatedAt: 2026-09-26T04:48:36.005Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2384,6 +2384,27 @@ UEFI측 사본 minicore/boot/x86_64/uefi/efi/boot_info.h) 신설로 정확히
 바로 대조 완료) 그 외 새로 approved 전환된 SP/DC는 없다 - 다음
 approved 전환 시까지 이 §3 스윕은 다시 건너뛴다(2026-09-21/22/23과
 동일한 재소진 패턴).
+
+**[2026-09-26, minicore-3c 세션 후속 갱신] `SP-33FE698A`(AsyncCoroMutex
+설계, approved)/`DC-DC9B2C3E`(inode-table 락 세분화 결정, approved)
+점검 완료 - 갭 없음.** 위에서 "갭 없음"으로 반증됐던 `DC-5F0AC0D3`
+"(b)"의 후속 조치 - 그 반증을 계기로 설계자가 지시한 `SP-33FE698A`
+(코루틴 전용 `AsyncCoroMutex`, "직접 인계" wait-queue, 재시도/폴링
+자체를 없애는 방향)가 approved 상태 그대로 `PN-6D2C8836`(commit
+`40ee8a4`)으로 정확히 구현됐다 - §2.3 API(`LockAwaiter`/`tryAcquire`/
+`release`의 직접 인계 시맨틱) 그대로 `mutex_core.h`에 존재, §2.4
+취소 처리도 실제 재현으로 발견된 잔여 경쟁(`cancelPendingSyscalls`
+재큐잉 vs `release()`의 이중 큐잉)까지 고쳐졌다. 이어서 발견된
+`DC-DC9B2C3E`(inode-table 블록 read-modify-write 경쟁, "(b)
+inode-table 블록 단위 세분화" 채택)도 `PN-CA92C4A7`(commit
+`636004f`)으로 `InodeTableLockTable`(블록 번호별 동적 `AsyncCoroMutex`,
+"부모 먼저 자신 나중" 고정 순서로 데드락 차단)로 정확히 구현됨을
+확인 - Write/Mkdir(8-way/4-way 실측)/Unlink는 실제 AHCI 부하로
+검증됐고, Rmdir만 유일하게 별도 실측 없이 "낮은 잔여 위험"으로
+남았다(계획 본문 자신이 이미 이 잔여 위험을 명시 - 은폐된 갭이
+아니라 openly 추적 중). **결론: 두 문서가 확정한 설계 중 코드에
+반영 안 된 항목 없음**(Rmdir 실측 누락은 문서가 스스로 밝힌 알려진
+잔여 범위라 "조용히 빠진 것" 패턴이 아님).
 
 **[2026-09-26, minicore-3c 세션 갱신] `DC-5F0AC0D3`(AsyncTaskCoroYield
 재시도 락 우선순위 역전 라이브락 - drainOnce() 공정성 정책 방향
