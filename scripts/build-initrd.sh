@@ -68,11 +68,17 @@ cp "${BUILD_USERLAND_DIR}/minicore-dbgdriver/dbgdriver" "${STAGE_DIR}/dbgdriver"
 # 주석 참고).
 cp "${BUILD_USERLAND_DIR}/minicore-socktest/socktest" "${STAGE_DIR}/socktest"
 cp "${BUILD_USERLAND_DIR}/minicore-sockclient/sockclient" "${STAGE_DIR}/sockclient"
+# sockinherit/sockinheritchild(PN-CC0F4EAC 항목7, 2026-09-27) 추가 -
+# dbgdriver/dbgtarget과 동일한 이유 - sockinherit이 kmain.cpp의 TEMP
+# 스폰 경로로 자동 실행되며 sockinheritchild를 진짜 SpawnProcess(fd
+# 상속 플래그)로 직접 스폰한다(sockinherit/main.cpp 상단 주석 참고).
+cp "${BUILD_USERLAND_DIR}/minicore-sockinherit/sockinherit" "${STAGE_DIR}/sockinherit"
+cp "${BUILD_USERLAND_DIR}/minicore-sockinheritchild/sockinheritchild" "${STAGE_DIR}/sockinheritchild"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild)"

@@ -697,13 +697,28 @@ enum SpawnProcessFlags : uint32_t {
     // DebugSession을 만들지는 않는다 - 디버거는 별도로 DebugAttach를
     // 불러야 실제로 그 세션을 쥔다(§3.3 "Attach/Detach 동작은 유지").
     kSpawnDebugStart = 1u << 0,
-    // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 1, ...).
+    // [신규, 2026-09-27, PN-CC0F4EAC 항목7, SP-6BEAE0C1 §6 확장]
+    // 부모의 소켓(AF_UNIX) fd를 자식에게 그대로 물려준다(systemd
+    // socket activation류 - LISTEN_PID/LISTEN_FDS envp 자동 주입,
+    // process.cpp SpawnProcessHandler::onExec 참고). **소켓 fd만**
+    // 상속 대상이다 - Channel/KernelDriver 종류 fd는 참조 카운트
+    // 보호가 없어(Process::FileDescriptor::kernelDriver가 raw
+    // 포인터, socket 필드만 SharedPtr로 승격돼 있음, process.h 문서
+    // 참고) 그대로 복사하면 한쪽이 Close()할 때 다른 쪽이 이미 닫힌
+    // 핸들을 들고 있게 되는 실제 버그가 생긴다(RM-23F4B687 §4 -
+    // 추측으로 범위를 넓히지 않음). fd 번호는 부모가 갖던 값 그대로
+    // 유지한다(실제 systemd처럼 fd 3부터 재배치하지 않음 - 이 커널
+    // 안에서만 통하는 단순화, 두 관례를 동시에 지원해야 할 실사용처가
+    // 생기면 그때 재검토).
+    kSpawnInheritFds = 1u << 1,
+    // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 2, ...).
 };
 
 // 현재 정의된 비트 전부의 OR - `flags`에 이 마스크 밖의 비트가 하나라도
 // 세팅되면 InvalidArgument(§3 "조용히 무시하지 않음, 표준 커널 syscall
 // 관례"). 새 비트를 추가할 때마다 이 마스크도 같이 넓혀야 한다.
-constexpr uint32_t kSpawnProcessFlagsMask = SpawnProcessFlags::kSpawnDebugStart;
+constexpr uint32_t kSpawnProcessFlagsMask =
+    SpawnProcessFlags::kSpawnDebugStart | SpawnProcessFlags::kSpawnInheritFds;
 
 // [SP-6BEAE0C1 §3] SpawnProcess syscall 인자 - `imageBuffer`/`argv`/
 // `envp`는 전부 유저 포인터(untrusted, 핸들러 내부에서 Paging::

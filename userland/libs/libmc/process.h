@@ -39,6 +39,11 @@ enum class SpawnProcessError : unsigned int {
 enum SpawnProcessFlags : unsigned int {
     kSpawnNone = 0,
     kSpawnDebugStart = 1u << 0,
+    // [신규, 2026-09-27, PN-CC0F4EAC 항목7] kernel::SpawnProcessFlags::
+    // kSpawnInheritFds와 값을 맞춘다 - 부모의 소켓 fd를 자식에게 물려주고
+    // LISTEN_PID/LISTEN_FDS를 envp에 자동 주입한다(소켓 fd만 대상,
+    // process.h 커널 측 문서 주석 참고).
+    kSpawnInheritFds = 1u << 1,
 };
 
 // kernel::SpawnProcessArgs와 바이트 단위로 정확히 같은 필드 순서/타입 -

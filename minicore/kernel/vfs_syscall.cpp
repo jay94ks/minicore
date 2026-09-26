@@ -369,9 +369,10 @@ public:
             // 자원은 다른 소유자를 위해 그대로 둔다 - 아래
             // fileDescriptors.erase(slot)이 이 슬롯의 SharedPtr을 지우면서
             // 참조 카운트만 줄인다(0이 되는 마지막 소유자 쪽에서만
-            // kDestroyAndFree<UnixSocket>가 자동 반납). fd 상속 자체는
-            // 아직 SpawnProcess에 배선되지 않아 지금은 항상 useCount()==1
-            // 이므로 이 분기 추가로 기존 동작은 바뀌지 않는다(회귀 없음).
+            // kDestroyAndFree<UnixSocket>가 자동 반납). [갱신, 2026-09-27
+            // 7회차, PN-CC0F4EAC 항목7 §1/§3] fd 상속 자체가
+            // SpawnProcess(kSpawnInheritFds)로 실제 배선됐다(process.cpp
+            // 참고) - 이제 useCount() > 1이 실제로 관찰 가능한 상태다.
             if (slot->value.socket.useCount() == 1) {
                 UnixSocket* socket = slot->value.socket.get();
                 if (socket->bridge != 0) {

@@ -540,6 +540,38 @@ void Process::destroy() {
     }
 }
 
+// [신규, 2026-09-27, PN-CC0F4EAC 항목7] LISTEN_PID/LISTEN_FDS 합성
+// envp 문자열 조립 전용 - socket.cpp의 kAppendStr/kAppendI64와 완전히
+// 동일한 최소 구현이다(이 프로젝트 관례 - 재사용 가능한 공용 포맷터가
+// 없어 각 파일이 자기 몫을 따로 둔다, socket.cpp 문서 주석 참고).
+void kAppendStr(char* buf, uint32_t bufSize, uint32_t& pos, const char* s) {
+    while (*s && pos + 1 < bufSize) {
+        buf[pos++] = *s++;
+    }
+}
+
+void kAppendI64(char* buf, uint32_t bufSize, uint32_t& pos, int64_t value) {
+    const bool neg = value < 0;
+    const uint64_t mag = neg ? (~static_cast<uint64_t>(value) + 1) : static_cast<uint64_t>(value);
+    char digits[24];
+    uint32_t n = 0;
+    uint64_t m = mag;
+    if (m == 0) {
+        digits[n++] = '0';
+    }
+    while (m) {
+        digits[n++] = static_cast<char>('0' + (m % 10));
+        m /= 10;
+    }
+    if (neg) {
+        kAppendStr(buf, bufSize, pos, "-");
+    }
+    while (n) {
+        char c[2] = {digits[--n], '\0'};
+        kAppendStr(buf, bufSize, pos, c);
+    }
+}
+
 // [PN-E35294B8 항목2, QU-B9EB45E4 답변 그대로 반영] argv 또는 envp
 // 하나(유저 포인터, NULL 종단 `char* const[]`)를 검증하며 걷는다 -
 // 배열 길이를 미리 모르므로 슬롯을 하나씩 `isUserRangeValid`로 확인한
@@ -1152,6 +1184,42 @@ public:
         // 스케줄되지 못한 프로세스"에 불러도 안전하다).
         procShared->processId = kAllocateProcessId(procShared);
 
+        // [이동, 2026-09-27, PN-CC0F4EAC 항목7] 부모 프로세스 해석을
+        // 원래 위치(옛 5단계, execImage() 이후)에서 이 지점으로
+        // 앞당긴다 - fd 상속(바로 아래)과 LISTEN_PID 주입(3.5단계
+        // envp 구성)이 둘 다 부모의 fileDescriptors/자식 pid를 이
+        // 시점에 이미 알아야 한다. 원래 위치의 "이론상 도달 불가"
+        // 방어 주석과 로직은 그대로다 - 단지 더 일찍 계산해 둘 뿐,
+        // 아래에서 실패해도 되돌릴 상태(children.insert() 등)가 아직
+        // 전혀 생기지 않았으므로 이 이동 자체는 새 실패 분기를
+        // 만들지 않는다.
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> parentProc = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!parentProc) {
+            parentProc = Process::orphanRoot().lock();
+        }
+
+        // [신규, 2026-09-27, PN-CC0F4EAC 항목7] fd 상속(kSpawnInheritFds) -
+        // 부모의 소켓 fd만 그대로 복사한다(process.h SpawnProcessFlags
+        // 문서 주석 참고 - Channel/KernelDriver 종류는 참조 카운트
+        // 보호가 없어 이번 범위에서 제외). fd 번호는 부모 값을 그대로
+        // 유지 - `insert(const T&)`가 `FileDescriptor`를 값으로 복사해
+        // `SharedPtr<UnixSocket>`의 참조 카운트를 정상적으로 늘린다
+        // (CloseHandler의 useCount() 게이팅이 이미 이 공유 소유를
+        // 전제로 동작하도록 되어 있다, vfs_syscall.cpp 참고).
+        uint32_t inheritedSocketFdCount = 0;
+        if ((args->flags & SpawnProcessFlags::kSpawnInheritFds) && parentProc) {
+            procShared->fileDescriptors.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
+            parentProc->fileDescriptors.forEach([&](Process::FileDescriptor& fd, void*) {
+                if (fd.kind == MountKind::Socket && fd.socket) {
+                    if (procShared->fileDescriptors.insert(fd)) {
+                        ++inheritedSocketFdCount;
+                    }
+                }
+            });
+        }
+
         // 3.5단계 - [신규, PN-E35294B8 항목2, QU-B9EB45E4 답변] argv/envp
         // 유저 포인터 배열을 검증+복사한다. 오프셋 추적 배열
         // (kMaxSpawnArgsEntryCount*8바이트, 최대 32KiB)까지 스택에
@@ -1170,7 +1238,11 @@ public:
         uint32_t envCount = 0;
         bool argsOk = true;
 
-        if (args->argv || args->envp) {
+        // [확장, 2026-09-27, PN-CC0F4EAC 항목7] inheritedSocketFdCount > 0
+        // 이면 args->argv/envp가 둘 다 nullptr이어도(호출자가 인자 없이
+        // 스폰) LISTEN_PID/LISTEN_FDS를 담을 스크래치 버퍼를 마련해야
+        // 하므로 이 조건에 포함시킨다.
+        if (args->argv || args->envp || inheritedSocketFdCount > 0) {
             argsScratch = static_cast<uint8_t*>(GenericSlabAllocator::alloc(kMaxSpawnArgsTotalSize));
             argOffsets = static_cast<uint64_t*>(GenericSlabAllocator::alloc(kOffsetsBytes));
             envOffsets = static_cast<uint64_t*>(GenericSlabAllocator::alloc(kOffsetsBytes));
@@ -1185,6 +1257,47 @@ public:
                        !kCopyUserStringArray(args->envp, argsScratch, &stringsUsed, envOffsets, &envCount)) {
                 argsOk = false;
                 args->error = SpawnProcessError::ArgsTooLarge;
+            } else if (inheritedSocketFdCount > 0) {
+                // [신규, 2026-09-27, PN-CC0F4EAC 항목7] systemd socket
+                // activation 관례를 빌려 LISTEN_PID=<자식 pid>/
+                // LISTEN_FDS=<상속받은 소켓 개수> 두 환경변수를 사용자가
+                // 넘긴 envp 뒤에 이어붙인다 - 실제 systemd처럼 fd를
+                // 3번부터 재배치하지는 않는다(위 kSpawnInheritFds 문서
+                // 주석 참고, fd 번호는 부모 값 그대로). kAppendStr/
+                // kAppendI64는 socket.cpp의 것과 동일한 최소 구현(이
+                // 프로젝트 관례 - 재사용 가능한 공용 포맷터가 없어 파일마다
+                // 자기 몫을 따로 둠).
+                char envBuf[48];
+                uint32_t pos = 0;
+                kAppendStr(envBuf, sizeof(envBuf), pos, "LISTEN_PID=");
+                kAppendI64(envBuf, sizeof(envBuf), pos, procShared->processId);
+                envBuf[pos] = '\0';
+                const uint64_t pidStrBytes = pos + 1;
+                if (envCount < kMaxSpawnArgsEntryCount && stringsUsed + pidStrBytes <= kMaxSpawnArgsTotalSize) {
+                    memcpy(argsScratch + stringsUsed, envBuf, pidStrBytes);
+                    envOffsets[envCount] = stringsUsed;
+                    stringsUsed += pidStrBytes;
+                    ++envCount;
+
+                    pos = 0;
+                    kAppendStr(envBuf, sizeof(envBuf), pos, "LISTEN_FDS=");
+                    kAppendI64(envBuf, sizeof(envBuf), pos, static_cast<int64_t>(inheritedSocketFdCount));
+                    envBuf[pos] = '\0';
+                    const uint64_t fdsStrBytes = pos + 1;
+                    if (envCount < kMaxSpawnArgsEntryCount && stringsUsed + fdsStrBytes <= kMaxSpawnArgsTotalSize) {
+                        memcpy(argsScratch + stringsUsed, envBuf, fdsStrBytes);
+                        envOffsets[envCount] = stringsUsed;
+                        stringsUsed += fdsStrBytes;
+                        ++envCount;
+                    }
+                }
+                // [정직하게 기록] 위 두 if가 실패하는 경우(kMaxSpawnArgsEntryCount/
+                // kMaxSpawnArgsTotalSize 예산 고갈)는 거부하지 않고 조용히
+                // 생략한다 - 이미 검증을 통과한 사용자 envp를 이제 와서
+                // 실패시키는 것보다, "이 흔치 않은 예산 초과 조합에서는
+                // LISTEN_FDS가 안 실릴 수 있다"는 극히 드문 열화가 낫다고
+                // 판단(SpawnProcessError에 이 사유만을 위한 새 값을
+                // 추가할 만큼 흔한 경로가 아니다, RM-23F4B687 §4).
             }
         }
 
@@ -1248,30 +1361,10 @@ public:
         // 이 함수 끝에서 지역 변수 `procShared`가 스코프를 벗어나도
         // (강한 참조 하나 감소) 그 슬롯의 몫이 남아 있어 안전하다.
         //
-        // [수정, 2026-09-17, PN-5BBD4301] `Scheduler::currentTask()`에서
-        // `task->submitterTask.lock()`으로 전환 - RM-23F4B687이 이미 네
-        // 번 문서화한 "onExec() 안에서 Scheduler::currentTask()를 믿으면
-        // 안 된다" 함정의 다섯 번째 재발(실측으로 발견 - PN-5BBD4301
-        // 참고). `Syscall::wait()`는 항상 호출자를 실제로 파킹시키므로
-        // (syscall.cpp) 이 AsyncTask가 나중에 idle 드레인으로 처음
-        // 실행될 때 `Scheduler::currentTask()`는 이미 nullptr(코어가
-        // 진짜로 idle)이지, 제출자가 절대 아니다 - Channel/Pnp 핸들러가
-        // 처음부터 쓰던 `task->submitterTask.lock()`이 유일하게 안전한
-        // 방법이다.
-        SharedPtr<Task> submitter = task->submitterTask.lock();
-        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
-        SharedPtr<Process> parentProc = caller ? caller->process.lock() : SharedPtr<Process>();
-        if (!parentProc) {
-            // 이론상 도달 불가(SpawnProcess는 항상 실제 UserThread
-            // 실행 흐름에서만 온다, Syscall 클래스 문서 주석과 동일한
-            // 전제) - 방어적으로만, 진짜 부모가 없으면 orphanRoot(init)
-            // 를 대신 소유자로 삼는다(기존에도 "고아처럼 취급"이라고
-            // 문서화돼 있던 그 상태를 SharedPtr 세계에서 실제로 안전하게
-            // 구현한 것 - 소유자가 전혀 없으면 이 함수가 끝나는 순간
-            // `procShared`가 스코프를 벗어나며 막 시작한 프로세스가
-            // 그대로 파괴되는 use-after-free가 된다).
-            parentProc = Process::orphanRoot().lock();
-        }
+        // [이동, 2026-09-27, PN-CC0F4EAC 항목7] `submitter`/`caller`/
+        // `parentProc` 계산 자체는 위(3.5단계 이전)로 옮겨졌다 - 그
+        // 지점의 주석 참고, 로직은 완전히 동일(PN-5BBD4301의 "onExec
+        // 안에서 Scheduler::currentTask()를 믿으면 안 된다" 교훈 포함).
         if (parentProc) {
             parentProc->children.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
             if (!parentProc->children.insert(procShared)) {

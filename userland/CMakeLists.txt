@@ -112,3 +112,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/socktest ${CMAKE_CURREN
 # initrd 안에 원본 ELF 바이트로 실려야 한다 - minicore/sockclient/main.cpp
 # 상단 주석 참고.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockclient ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockclient)
+
+# sockinherit/sockinheritchild(PN-CC0F4EAC 항목7, fd 상속 실측 검증) -
+# dbgdriver/dbgtarget과 동일한 이유의 out-of-tree add_subdirectory 쌍 -
+# sockinherit이 진짜 SpawnProcess로 sockinheritchild를 직접 스폰하므로
+# initrd 안에 원본 ELF 바이트로 실려야 한다 - 각 main.cpp 상단 주석 참고.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockinherit ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockinherit)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockinheritchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockinheritchild)
