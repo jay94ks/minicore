@@ -471,6 +471,7 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
     weakRef = nullptr;
     selfWaitable = SharedPtr<AsyncTaskWaitable>();
     timeoutScheduled = false;
+    coroYieldRetryStreak = 0;  // [PN-F2594E93/DC-5F0AC0D3] 슬랩 재사용 잔여값 방지
 
     void* stack = GenericSlabAllocator::alloc(kAsyncTaskStackSize);
     if (!stack) {
@@ -986,7 +987,19 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
 void AsyncTaskCoroYield::await_suspend(std::coroutine_handle<>) noexcept {
     AsyncTask* self = AsyncTask::current();
     if (self) {
-        AsyncReactor::submitCompletion(self, /*preemptive=*/true);
+        // [신규, 2026-09-26, PN-F2594E93/DC-5F0AC0D3, 설계자 답변 "(b)"]
+        // async_task.h의 kAsyncTaskCoroYieldFairnessThreshold/
+        // coroYieldRetryStreak 문서 주석 참고 - 연속 재시도가 문턱을
+        // 넘으면 이번만 preemptive=false로 강등해 일반 큐도 반드시
+        // 차례를 받게 한다(우선순위 역전 라이브락 방지). 강등한
+        // 그 순간 카운터를 0으로 되돌려, 다음 문턱까지 다시 "자기
+        // 완결적 폴링" 원래 의도(즉시 재확인)를 그대로 유지한다.
+        ++self->coroYieldRetryStreak;
+        bool demote = self->coroYieldRetryStreak >= kAsyncTaskCoroYieldFairnessThreshold;
+        if (demote) {
+            self->coroYieldRetryStreak = 0;
+        }
+        AsyncReactor::submitCompletion(self, /*preemptive=*/!demote);
     }
 }
 

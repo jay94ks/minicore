@@ -416,6 +416,22 @@ struct AsyncTask {
     // 플래그 하나로 유지한다.
     bool timeoutScheduled = false;
 
+    // [신규, 2026-09-26, PN-F2594E93/DC-5F0AC0D3, 설계자 답변 "(b) 재시도
+    // 카운트 기반 강등"] `AsyncTaskCoroYield`가 이 AsyncTask를 연속으로
+    // 몇 번 재시도 재제출했는지 - `AsyncReactor::drainOnce()`가 선점
+    // 큐를 무조건 먼저 비우는 정책(PN-4FA5F13B 굶주림 버그 방지 목적)과
+    // 결합하면, 이 재시도가 영원히 선점 큐에만 머물러 일반 큐에 있는
+    // 다른 작업(예: 이 AsyncTask가 기다리는 락을 쥔 작업의 I/O 완료)을
+    // 영구 기아시키는 우선순위 역전 라이브락이 생긴다(PN-F2594E93 실측
+    // 확정, 디스크 I/O 없이 순수 재현 완료). `kAsyncTaskCoroYieldFairnessThreshold`
+    // 회 연속 재시도되면 그다음 한 번은 `preemptive=false`로 강등해
+    // 일반 큐도 반드시 차례를 받게 한다(async_task.cpp `AsyncTaskCoroYield::
+    // await_suspend()` 참고) - 원래 설계 의도인 "자기 완결적 폴링"
+    // 용례(예: `ahci.cpp`)는 보통 이 문턱 안에서 끝나므로 사실상 영향이
+    // 없다. `init()`이 0으로 리셋한다(슬랩 재사용 잔여값 방지, 다른
+    // 카운터 필드와 동일한 이유).
+    uint32_t coroYieldRetryStreak = 0;
+
     // [신규, 2026-09-18, SP-76250478 §3.1, PN-0EB2FABF] `weakRef`가
     // 아직 없으면 새로 만들어(AsyncTask 자신의 몫으로 `init()`) 채우고,
     // 있으면 그대로 반환(멱등, `ensureSelfRef()`류 관례와 동일) - 실패
@@ -739,6 +755,19 @@ private:
 // PN-4FA5F13B 굶주림 버그와 동일한 이유(이 코어에 계속 Ready인 다른
 // Task가 있으면 idle 분기 자체에 못 도달해 폴링이 무기한 지연될 수
 // 있음).
+//
+// [신규, 2026-09-26, PN-F2594E93/DC-5F0AC0D3, 설계자 답변 "(b) 재시도
+// 카운트 기반 강등"] 위 preemptive=true 전제 하나만으로는 "임계구역
+// 안에서 다른 AsyncTask의 co_await 완료를 기다리는 락 보유자"와
+// "그 락을 tryAcquire+AsyncTaskCoroYield로 재시도하는 대기자"가 만나면
+// 대기자의 무한 재시도가 선점 큐를 영구 점유해 보유자의 일반 큐 항목이
+// 영원히 드레인 안 되는 우선순위 역전 라이브락이 생긴다는 것을
+// PN-F2594E93가 디스크 I/O 없이 순수 재현으로 실측 확정했다 -
+// `kAsyncTaskCoroYieldFairnessThreshold`회 연속 재시도되면 그다음
+// 한 번은 강제로 `preemptive=false`(일반 큐)로 내려보낸다(아래
+// `await_suspend()` 구현 참고, 카운터는 `AsyncTask::coroYieldRetryStreak`).
+constexpr uint32_t kAsyncTaskCoroYieldFairnessThreshold = 8;
+
 class AsyncTaskCoroYield {
 public:
     bool await_ready() const noexcept { return false; }
