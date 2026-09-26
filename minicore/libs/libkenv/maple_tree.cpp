@@ -123,6 +123,18 @@ uint64_t MapleTree::childMaxGap(const MapleArangeNode* child) const {
     return child->gap[child->maxGapSlot];
 }
 
+void MapleTree::recomputeMaxGapSlot(MapleArangeNode* node) {
+    uint64_t maxGap = 0;
+    uint16_t maxIdx = 0;
+    for (uint32_t j = 0; j < node->usedSlotCount; ++j) {
+        if (node->gap[j] >= maxGap) {
+            maxGap = node->gap[j];
+            maxIdx = static_cast<uint16_t>(j);
+        }
+    }
+    node->maxGapSlot = maxIdx;
+}
+
 void MapleTree::rebuildNode(MapleArangeNode* node, const Span* spans, uint32_t count, bool leafFlag) {
     node->leaf = leafFlag;
     node->usedSlotCount = static_cast<uint16_t>(count);
@@ -208,6 +220,112 @@ MapleTree::SplitResult MapleTree::insertIntoLeaf(MapleArangeNode* leaf, uint64_t
     return SplitResult{};
 }
 
+bool MapleTree::insertIntoSpanArray(const Span* spans, uint32_t count, uint64_t start, uint64_t end, void* value,
+                                     Span* outNewSpans, uint32_t* outNewCount) const {
+    uint32_t p = count;
+    for (uint32_t k = 0; k < count; ++k) {
+        if (start >= spans[k].lower && start <= spans[k].upper) {
+            p = k;
+            break;
+        }
+    }
+    uint32_t q = count;
+    for (uint32_t k = 0; k < count; ++k) {
+        if (end >= spans[k].lower && end <= spans[k].upper) {
+            q = k;
+            break;
+        }
+    }
+    if (p == count || q == count || q < p) {
+        return false;
+    }
+    for (uint32_t k = p; k <= q; ++k) {
+        if (spans[k].value != nullptr) {
+            return false;
+        }
+    }
+
+    uint32_t newCount = 0;
+    for (uint32_t k = 0; k < p; ++k) {
+        outNewSpans[newCount++] = spans[k];
+    }
+    if (start > spans[p].lower) {
+        outNewSpans[newCount++] = Span{spans[p].lower, start - 1, nullptr};
+    }
+    outNewSpans[newCount++] = Span{start, end, value};
+    if (end < spans[q].upper) {
+        outNewSpans[newCount++] = Span{end + 1, spans[q].upper, nullptr};
+    }
+    for (uint32_t k = q + 1; k < count; ++k) {
+        outNewSpans[newCount++] = spans[k];
+    }
+    *outNewCount = newCount;
+    return true;
+}
+
+MapleTree::SplitResult MapleTree::spanTwoLeaves(MapleArangeNode* internal, const Span* spans, uint32_t count,
+                                                 uint32_t i, uint64_t start, uint64_t end, void* value, bool* outOk) {
+    auto* childA = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
+    auto* childB = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i + 1].value));
+
+    Span combined[kMapleArangeSlotCount * 2];
+    uint32_t combinedCount = decomposeNode(childA, spans[i].lower, spans[i].upper, combined);
+    combinedCount += decomposeNode(childB, spans[i + 1].lower, spans[i + 1].upper, combined + combinedCount);
+
+    Span merged[kMapleArangeSlotCount * 2 + 2];
+    uint32_t mergedCount = 0;
+    if (!insertIntoSpanArray(combined, combinedCount, start, end, value, merged, &mergedCount)) {
+        *outOk = false;
+        return SplitResult{};
+    }
+    if (mergedCount > kMapleArangeSlotCount * 2) {
+        // [안전장치] 두 리프가 이미 꽉 찬 상태에서 경계에 걸친 삽입이
+        // 슬롯을 하나 더 늘리는 극단적인 경우 - 2개의 리프로도 도저히
+        // 못 담아 3개가 필요해지므로(이 v3의 스코프 "정확히 2개"를
+        // 벗어남) 트리는 안 건드리고 실패한다(merge/redistribute 아래
+        // 두 분기 모두 kMapleArangeSlotCount*2개까지만 담을 수 있다는
+        // 전제 위에 있다 - 이 검사 없이 진행하면 리프당 10슬롯을
+        // 넘는 rebuildNode 호출로 이어져 메모리를 손상시킨다).
+        *outOk = false;
+        return SplitResult{};
+    }
+    *outOk = true;
+
+    Span internalNewSpans[kMapleArangeSlotCount];
+    uint32_t internalNewCount = 0;
+    for (uint32_t k = 0; k < i; ++k) {
+        internalNewSpans[internalNewCount++] = spans[k];
+    }
+
+    if (mergedCount <= kMapleArangeSlotCount) {
+        // 리프 하나로 합쳐진다 - childB는 반납, internal 슬롯 하나가 준다.
+        rebuildNode(childA, merged, mergedCount, true);
+        freeSubtree(childB);
+        internalNewSpans[internalNewCount++] =
+            Span{spans[i].lower, spans[i + 1].upper, kMapleTagNode(childA, MapleNodeType::Arange64)};
+    } else {
+        // 넘친다 - 기존 두 리프에 다시 반씩 재분배(새 할당 없음).
+        const uint32_t leftCount = (mergedCount + 1) / 2;
+        const uint32_t rightCount = mergedCount - leftCount;
+        const uint64_t newSeparator = merged[leftCount - 1].upper;
+        rebuildNode(childA, merged, leftCount, true);
+        rebuildNode(childB, merged + leftCount, rightCount, true);
+        internalNewSpans[internalNewCount++] =
+            Span{spans[i].lower, newSeparator, kMapleTagNode(childA, MapleNodeType::Arange64)};
+        internalNewSpans[internalNewCount++] =
+            Span{newSeparator + 1, spans[i + 1].upper, kMapleTagNode(childB, MapleNodeType::Arange64)};
+    }
+
+    for (uint32_t k = i + 2; k < count; ++k) {
+        internalNewSpans[internalNewCount++] = spans[k];
+    }
+
+    // internal 자신은 슬롯 수가 줄거나 그대로일 뿐 늘지 않으므로
+    // 분할이 필요 없다(클래스 문서 §2.2 항목4 참고).
+    rebuildNode(internal, internalNewSpans, internalNewCount, false);
+    return SplitResult{};
+}
+
 MapleTree::SplitResult MapleTree::insertIntoInternal(MapleArangeNode* internal, uint64_t lower, uint64_t upper,
                                                       uint64_t start, uint64_t end, void* value, bool* outOk) {
     Span spans[kMapleArangeSlotCount];
@@ -218,10 +336,21 @@ MapleTree::SplitResult MapleTree::insertIntoInternal(MapleArangeNode* internal, 
             continue;
         }
         if (end > spans[i].upper) {
-            // 요청 범위가 이 자식 하나의 경계를 넘어선다 - 클래스
-            // 문서의 알려진 한계 3번, 트리는 안 건드리고 실패한다.
-            *outOk = false;
-            return SplitResult{};
+            // 요청 범위가 이 자식 하나의 경계를 넘어선다 - [v3] 정확히
+            // 다음 형제 하나까지만 걸치고 둘 다 리프면 spanTwoLeaves()
+            // 로 위임, 그 외(2개 이상 건너뛰거나 자식이 내부 노드)는
+            // 여전히 실패(클래스 문서의 알려진 한계 3번).
+            if (i + 1 >= count || end < spans[i + 1].lower || end > spans[i + 1].upper) {
+                *outOk = false;
+                return SplitResult{};
+            }
+            auto* childA = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
+            auto* childB = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i + 1].value));
+            if (!childA->leaf || !childB->leaf) {
+                *outOk = false;
+                return SplitResult{};
+            }
+            return spanTwoLeaves(internal, spans, count, i, start, end, value, outOk);
         }
 
         auto* child = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
@@ -237,15 +366,7 @@ MapleTree::SplitResult MapleTree::insertIntoInternal(MapleArangeNode* internal, 
             // 자식 내용이 바뀌었을 뿐 구조는 안 바뀜 - 이 레벨의 gap
             // 집계만 갱신.
             internal->gap[i] = childMaxGap(child);
-            uint64_t maxGap = 0;
-            uint16_t maxIdx = 0;
-            for (uint32_t j = 0; j < internal->usedSlotCount; ++j) {
-                if (internal->gap[j] >= maxGap) {
-                    maxGap = internal->gap[j];
-                    maxIdx = static_cast<uint16_t>(j);
-                }
-            }
-            internal->maxGapSlot = maxIdx;
+            recomputeMaxGapSlot(internal);
             return SplitResult{};
         }
 
@@ -411,46 +532,8 @@ bool MapleTree::findGap(uint64_t searchFloor, uint64_t searchCeil, uint64_t size
     return findGapInNode(_root, 0, kMapleTreeMaxAddr, searchFloor, searchCeil, size, outStart);
 }
 
-bool MapleTree::erase(uint64_t start, uint64_t end) {
-    if (!_root || start > end) {
-        return false;
-    }
-
-    struct PathEntry {
-        MapleArangeNode* node;
-        uint32_t childIndex;
-    };
-    PathEntry path[kMaxTreeDepth];
-    uint32_t depth = 0;
-
-    MapleArangeNode* node = _root;
-    uint64_t lower = 0;
-    uint64_t upper = kMapleTreeMaxAddr;
-    while (node && !node->leaf) {
-        Span spans[kMapleArangeSlotCount];
-        const uint32_t count = decomposeNode(node, lower, upper, spans);
-        bool advanced = false;
-        for (uint32_t i = 0; i < count; ++i) {
-            if (start < spans[i].lower || start > spans[i].upper) {
-                continue;
-            }
-            if (depth < kMaxTreeDepth) {
-                path[depth++] = PathEntry{node, i};
-            }
-            node = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
-            lower = spans[i].lower;
-            upper = spans[i].upper;
-            advanced = true;
-            break;
-        }
-        if (!advanced) {
-            return false;
-        }
-    }
-    if (!node) {
-        return false;
-    }
-
+bool MapleTree::erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t upper, uint64_t start,
+                                 uint64_t end) {
     Span spans[kMapleArangeSlotCount];
     const uint32_t count = decomposeNode(node, lower, upper, spans);
 
@@ -478,7 +561,7 @@ bool MapleTree::erase(uint64_t start, uint64_t end) {
     }
 
     if (!erasedSomething) {
-        return false;  // [start,end]가 처음부터 전부 gap이었음
+        return false;  // [start,end]가 이 리프 범위 안에서는 처음부터 전부 gap이었음
     }
 
     // 인접한 gap끼리 합친다(rebuild 전제 조건 + 슬롯 예산 절약).
@@ -492,7 +575,116 @@ bool MapleTree::erase(uint64_t start, uint64_t end) {
         }
     }
 
+    // [안전장치, 2026-09-26, PN-2EA94B1A 착수 중 발견 - v2부터 있던
+    // 별개의 잠재 버그] 리프가 이미 꽉 찬 상태(usedSlotCount==
+    // kMapleArangeSlotCount)에서 어느 한 값 슬롯의 "가운데"를
+    // punch-out하면(양옆 슬롯이 gap이 아니라 이 새 gap과 안 합쳐짐)
+    // 슬롯 하나가 최대 둘 더 늘 수 있다(왼쪽 조각+가운데 gap+오른쪽
+    // 조각) - erase()는 insertIntoLeaf()와 달리 넘칠 때 리프를
+    // 분할하는 절차가 아예 없어(이 v3 이전부터 없었음, 별도 계획으로
+    // 분리 등록) rebuildNode를 그대로 불렀다면 MapleArangeNode의
+    // 고정 배열(슬롯 10개)을 넘겨 써 메모리를 손상시켰다. 리프 분할을
+    // 지원하는 진짜 수정 전까지는, 트리를 부분적으로도 건드리지 않고
+    // 안전하게 거부한다(호출부는 false를 "아무것도 안 지워짐"과
+    // 구분 못 하지만, 손상보다는 훨씬 낫다).
+    if (mergedCount > kMapleArangeSlotCount) {
+        return false;
+    }
+
     rebuildNode(node, merged, mergedCount, true);
+    return true;
+}
+
+bool MapleTree::eraseAcrossTwoLeaves(MapleArangeNode* leafA, uint64_t lowerA, uint64_t upperA, MapleArangeNode* leafB,
+                                      uint64_t lowerB, uint64_t upperB, uint64_t start, uint64_t end) {
+    const bool erasedA = erasePartInLeaf(leafA, lowerA, upperA, start, end);
+    const bool erasedB = erasePartInLeaf(leafB, lowerB, upperB, start, end);
+    return erasedA || erasedB;
+}
+
+bool MapleTree::erase(uint64_t start, uint64_t end) {
+    if (!_root || start > end) {
+        return false;
+    }
+
+    struct PathEntry {
+        MapleArangeNode* node;
+        uint32_t childIndex;
+    };
+    PathEntry path[kMaxTreeDepth];
+    uint32_t depth = 0;
+
+    MapleArangeNode* node = _root;
+    uint64_t lower = 0;
+    uint64_t upper = kMapleTreeMaxAddr;
+    for (;;) {
+        if (!node) {
+            return false;
+        }
+        if (node->leaf) {
+            break;
+        }
+
+        Span spans[kMapleArangeSlotCount];
+        const uint32_t count = decomposeNode(node, lower, upper, spans);
+        uint32_t i = count;
+        for (uint32_t k = 0; k < count; ++k) {
+            if (start >= spans[k].lower && start <= spans[k].upper) {
+                i = k;
+                break;
+            }
+        }
+        if (i == count) {
+            return false;
+        }
+
+        if (end <= spans[i].upper) {
+            // 기존 단일 자식 경로(변경 없음).
+            if (depth < kMaxTreeDepth) {
+                path[depth++] = PathEntry{node, i};
+            }
+            node = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
+            lower = spans[i].lower;
+            upper = spans[i].upper;
+            continue;
+        }
+
+        // [v3] end가 이 자식의 경계를 넘는다 - 정확히 다음 형제 하나까지,
+        // 그리고 둘 다 리프일 때만 지원(store()의 spanTwoLeaves()와
+        // 동일한 스코프 제한).
+        if (i + 1 >= count || end < spans[i + 1].lower || end > spans[i + 1].upper) {
+            return false;
+        }
+        auto* childA = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
+        auto* childB = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i + 1].value));
+        if (!childA->leaf || !childB->leaf) {
+            return false;
+        }
+
+        if (!eraseAcrossTwoLeaves(childA, spans[i].lower, spans[i].upper, childB, spans[i + 1].lower,
+                                   spans[i + 1].upper, start, end)) {
+            return false;
+        }
+
+        // 두 리프 다 gap이 바뀌었을 수 있으니 이 레벨(node)부터 위로
+        // 다시 계산한다(트리 병합/축소는 하지 않는다 - 클래스 문서의
+        // 알려진 한계 1번).
+        node->gap[i] = childMaxGap(childA);
+        node->gap[i + 1] = childMaxGap(childB);
+        recomputeMaxGapSlot(node);
+        for (uint32_t d = depth; d-- > 0;) {
+            MapleArangeNode* ancestor = path[d].node;
+            const uint32_t idx = path[d].childIndex;
+            const auto* child = static_cast<const MapleArangeNode*>(kMapleNodePtr(ancestor->slot[idx]));
+            ancestor->gap[idx] = childMaxGap(child);
+            recomputeMaxGapSlot(ancestor);
+        }
+        return true;
+    }
+
+    if (!erasePartInLeaf(node, lower, upper, start, end)) {
+        return false;
+    }
 
     // 리프에서 지워진 만큼 gap이 늘었을 수 있으니, 지나온 조상 전부의
     // gap 집계를 아래에서 위로 다시 계산한다(트리 병합/축소는 하지
@@ -502,16 +694,7 @@ bool MapleTree::erase(uint64_t start, uint64_t end) {
         const uint32_t idx = path[d].childIndex;
         const auto* child = static_cast<const MapleArangeNode*>(kMapleNodePtr(ancestor->slot[idx]));
         ancestor->gap[idx] = childMaxGap(child);
-
-        uint64_t maxGap = 0;
-        uint16_t maxIdx = 0;
-        for (uint32_t j = 0; j < ancestor->usedSlotCount; ++j) {
-            if (ancestor->gap[j] >= maxGap) {
-                maxGap = ancestor->gap[j];
-                maxIdx = static_cast<uint16_t>(j);
-            }
-        }
-        ancestor->maxGapSlot = maxIdx;
+        recomputeMaxGapSlot(ancestor);
     }
 
     return true;

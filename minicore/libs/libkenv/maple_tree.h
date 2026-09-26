@@ -118,15 +118,21 @@ inline void* kMapleTagNode(void* raw, MapleNodeType type) {
 //    범위 밖이다. 슬랩 할당자가 시스템 전역적으로 완전히 고갈되는
 //    극단적 상황에서만 발현되는 경로라 v1/v2 전환 시점엔 실측된 적
 //    없음 - 실제로 문제가 되면 재검토.
-// 3. **하나의 store()/erase() 호출이 요구하는 범위가 자식 노드 하나의
-//    경계를 넘어서면 실패한다**(`insertIntoInternal`/`erase`의 방어적
-//    분기) - 이론상 서로 다른 리프에 걸친 "논리적으로 하나로 이어진
-//    gap"이 있을 수 있는데(두 리프가 우연히 인접한 경계에서 각자
-//    gap을 갖고 있는 경우), findGap()의 gap 집계는 서브트리 단위라 이
-//    경우를 하나의 큰 gap으로 합쳐 보고하지 않는다(각 자식의 최대
-//    gap만 본다) - 그래서 store()가 그 경계를 넘는 요청을 받을 일
-//    자체가 findGap()이 먼저 걸러 주지만, 만에 하나 호출부가 직접
-//    임의의 [start,end]를 넘기면 이 방어 분기가 안전하게 거부한다.
+// 3. **[v3, PN-2EA94B1A/SP-5D62DCCF로 부분 해소, 2026-09-26]** 하나의
+//    store()/erase() 호출이 요구하는 범위가 자식 노드 하나의 경계를
+//    넘으면 실패하던 v2의 한계 - **정확히 인접한 두 리프(형제)에
+//    걸치는 경우까지는 이제 지원한다**(`insertIntoInternal`의
+//    spanTwoLeaves(), `erase()`의 eraseAcrossTwoLeaves()). 실사용
+//    트리거(brk() 힙 성장이 인접 VMA로 확장)가 전부 이 경우뿐이라
+//    스코프를 의도적으로 좁혔다(SP-5D62DCCF §2.1 - Linux 원본의 완전한
+//    N-리프 spanning + 재귀적 부모 재분배는 과설계로 판단, RM-23F4B687
+//    §4). **세 개 이상의 리프에 걸치는 요청은 여전히 실패한다**
+//    (store()는 `*outOk=false`, erase()는 `false` 반환 - 부분 삭제
+//    없이 깔끔하게 거부, v2 시절 erase()가 아무 검사 없이 요청 범위를
+//    그 리프의 상한으로 조용히 잘라 처리하던 잠재 버그도 이번에 함께
+//    막았다). 두 자식 중 하나라도 리프가 아니면(내부 노드) 이 지원
+//    범위 밖이라 마찬가지로 거부한다 - "정확히 두 개의 인접 리프"만
+//    지원한다는 스코프를 그대로 지킨다.
 class MapleTree {
 public:
     using AllocFn = void* (*)(uint64_t size);
@@ -164,6 +170,8 @@ public:
     // nullptr일 수 없다(gap과 구분이 안 되므로). 노드가 꽉 차 있으면
     // 필요한 만큼 자동으로 분할한다(v2, 위 클래스 문서 참고) - v1과
     // 달리 엔트리 개수 상한 때문에 실패하는 경우는 사실상 없다.
+    // [v3] 요청 범위가 인접한 두 리프에 걸쳐도 성공한다 - 세 개
+    // 이상에 걸치면 여전히 false(위 클래스 문서 알려진 한계 3번).
     bool store(uint64_t start, uint64_t end, void* value);
 
     // addr을 포함하는 범위를 찾는다 - gap 안이면(등록된 값이 없으면)
@@ -184,6 +192,11 @@ public:
     // 구멍을 내면 조각이 둘로 남을 수 있다). 실제로 무언가 지웠으면
     // true, [start,end]가 처음부터 전부 gap이었으면 false. **노드
     // 병합/트리 축소는 하지 않는다**(위 클래스 문서의 알려진 한계 1번).
+    // [v3, 2026-09-26] 요청 범위가 인접한 두 리프에 걸쳐도 지원한다
+    // (각 리프에서 독립적으로 punch-out - 합치기 불필요, store()보다
+    // 단순함). 세 개 이상에 걸치면 false(부분 삭제 없이 깔끔하게
+    // 거부 - v2 시절엔 이 검사 자체가 없어 요청 범위를 첫 리프의
+    // 상한으로 조용히 잘라 처리하던 잠재 버그였다, SP-5D62DCCF §2.3).
     //
     // **주의**: 이 함수는 순수하게 트리의 키 구조만 다룬다 - 값
     // 포인터가 가리키는 객체(예: Vma) 자신이 캐싱해 둔 start/end
@@ -248,6 +261,12 @@ private:
     // gap[maxGapSlot]을 그대로 재사용(재귀적으로 이미 정확함이 보장됨).
     uint64_t childMaxGap(const MapleArangeNode* child) const;
 
+    // node->gap[]이 이미 최신이라는 전제로 node->maxGapSlot만 다시
+    // 계산한다 - insertIntoInternal()의 "자식이 안 쪼개졌을 때" 분기와
+    // erase()의 조상 gap 재계산 루프(단일/2-리프 케이스 공용)가 같은
+    // 6줄짜리 패턴을 반복하던 것을 뽑아냈다.
+    static void recomputeMaxGapSlot(MapleArangeNode* node);
+
     // leaf에 [start,end]=value를 삽입한다 - leaf가 [lower,upper]를
     // 담당한다는 전제. 겹치거나 여러 슬롯에 걸치면 *outOk=false(트리는
     // 안 건드림). 성공하면 *outOk=true - 분할이 필요 없었으면
@@ -259,9 +278,55 @@ private:
     // 삽입한다 - 그 자식이 분할되면 (separatorKey, 새 형제)를 이
     // internal 노드에 편입시키고, 그 결과 이 노드 자신도 꽉 차면
     // 다시 분할해 위로 전파한다. [start,end]가 자식 하나의 경계를
-    // 넘으면 *outOk=false(위 클래스 문서의 알려진 한계 3번).
+    // 넘으면 - [v3] 그 다음 형제 자식(정확히 하나)까지만 걸치고 둘 다
+    // 리프면 spanTwoLeaves()로 위임, 그 외(2개 이상 건너뛰거나 자식이
+    // 내부 노드)는 여전히 *outOk=false(위 클래스 문서의 알려진 한계
+    // 3번, v3로 부분 해소).
     SplitResult insertIntoInternal(MapleArangeNode* internal, uint64_t lower, uint64_t upper, uint64_t start,
                                     uint64_t end, void* value, bool* outOk);
+
+    // [v3, SP-5D62DCCF §2.2] insertIntoInternal()이 [start,end]가
+    // 정확히 인접한 두 리프 자식(spans[i]/spans[i+1], 이미 둘 다
+    // leaf==true로 확인된 뒤)에 걸치는 걸 발견했을 때 위임하는 절차 -
+    // 두 리프를 Span 배열로 풀어 하나로 이어붙이고(decomposeNode 재사용)
+    // insertIntoSpanArray()로 [start,end]=value를 끼워 넣은 뒤, 합친
+    // 슬롯 수가 kMapleArangeSlotCount 이하면 리프 하나로 합치고(형제는
+    // freeSubtree()로 반납, internal의 슬롯 하나가 사라짐), 넘치면
+    // 기존 두 리프에 다시 반씩 재분배한다(형제를 새로 할당하지 않고
+    // 재사용). internal 자신의 usedSlotCount는 줄거나 그대로일 뿐
+    // 늘지 않으므로 항상 SplitResult{}(분할 없음)를 반환한다(§2.2
+    // 항목4 - 부모 자신의 분할 전파가 필요 없는 이유).
+    SplitResult spanTwoLeaves(MapleArangeNode* internal, const Span* spans, uint32_t count, uint32_t i,
+                               uint64_t start, uint64_t end, void* value, bool* outOk);
+
+    // [v3] insertIntoLeaf()의 "단일 gap 슬롯에만 끼워 넣는다" 전제를
+    // "start가 속한 슬롯부터 end가 속한 슬롯까지(포함, 인접한 여러
+    // 슬롯이어도 됨)가 전부 gap이면 된다"로 일반화한 버전 - spans는
+    // 반드시 연속·전체 범위를 빈틈없이 덮어야 한다(decomposeNode의
+    // 출력 전제와 동일). 그 구간에 하나라도 값이 있거나 start/end가
+    // 이 배열 범위를 벗어나면 실패. outNewSpans는 최소 count+2칸
+    // 필요(왼쪽/오른쪽 leftover gap). spanTwoLeaves()가 두 리프를
+    // 합친 배열에 삽입할 때 쓴다 - insertIntoLeaf() 자신은 항상
+    // count==1 범위(자기 노드 하나)로만 이 상황을 겪으므로 손대지
+    // 않는다(회귀 위험 최소화).
+    bool insertIntoSpanArray(const Span* spans, uint32_t count, uint64_t start, uint64_t end, void* value,
+                              Span* outNewSpans, uint32_t* outNewCount) const;
+
+    // [v3, SP-5D62DCCF §2.3] erase()의 단일 리프 punch-out 로직을
+    // 재사용 가능한 형태로 뽑아낸 것 - node가 [lower,upper]를
+    // 담당한다는 전제로 [start,end]와 겹치는 부분만 지운다(node 자신의
+    // 범위 밖은 자동으로 무시됨, s.lower/s.upper 클리핑 참고). 실제로
+    // 뭔가 지웠으면 true. 단일 리프 케이스(erase() 본문)와 2-리프
+    // spanning 케이스(eraseAcrossTwoLeaves()) 양쪽이 공유한다.
+    bool erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t upper, uint64_t start, uint64_t end);
+
+    // [v3] [start,end]가 정확히 인접한 두 리프(leafA=[lowerA,upperA],
+    // leafB=[lowerB,upperB], upperA+1==lowerB)에 걸칠 때 각자
+    // 독립적으로 punch-out한다 - store()의 spanTwoLeaves()와 달리
+    // 합치기가 필요 없다(§2.3 - erase는 조각이 남아도 무해하므로).
+    // 둘 중 하나라도 실제로 지웠으면 true.
+    bool eraseAcrossTwoLeaves(MapleArangeNode* leafA, uint64_t lowerA, uint64_t upperA, MapleArangeNode* leafB,
+                               uint64_t lowerB, uint64_t upperB, uint64_t start, uint64_t end);
 
     // findGap()의 재귀 구현 - node가 [lower,upper]를 담당.
     bool findGapInNode(const MapleArangeNode* node, uint64_t lower, uint64_t upper, uint64_t searchFloor,
