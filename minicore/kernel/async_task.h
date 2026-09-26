@@ -842,6 +842,17 @@ public:
     // 필요했던 실측 사례(PN-622BA93C, Push/Pull 로드밸런싱으로
     // accepter/connector가 다른 코어에 배치되며 처음 드러남).
     static void submitCompletion(AsyncTask* task, bool preemptive = false);
+
+    // [신규, PN-2CD26587/SP-BF0B31B5 §3.2-4] AsyncTask 코어 간 이관
+    // Pull - 이 코어의 gExecQueues 관점에서 가장 바쁜 다른 코어를 찾아
+    // 이관 가능한(코루틴 기반+allowCoreMigration) 항목이 있으면 하나
+    // 훔쳐와 이 코어의 큐에 넣는다(없으면 아무 일도 안 함). Push 방향
+    // 대칭은 submitCompletion() 내부에 이미 배선돼 있다(계속 바쁜
+    // 코어는 idle 분기가 안 와서 이 Pull만으로는 못 보므로 별도 필요 -
+    // SP-BF0B31B5 §2 배경 참고). `Scheduler::runLoop()`의 idle 분기
+    // (Task Pull과 같은 지점)가 호출한다 - 뭔가 훔쳐왔으면 true(호출부가
+    // drainOnce()처럼 즉시 pickNext()부터 다시 돌게 하기 위함).
+    static bool tryPull(uint32_t coreIndex);
 };
 
 }  // namespace kernel

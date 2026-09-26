@@ -179,33 +179,50 @@ constexpr kernel::uint32_t kMaxCores = kernel::kAcpiMaxCpus;
 class AsyncTaskQueue {
 public:
     void pushBack(kernel::AsyncTask* task) {
-        kernel::SpinlockGuard guard(_lock);
-        task->next.store(nullptr);
-        if (_tail) {
-            _tail->next.store(task);
-        } else {
-            _head = task;
+        {
+            kernel::SpinlockGuard guard(_lock);
+            task->next.store(nullptr);
+            if (_tail) {
+                _tail->next.store(task);
+            } else {
+                _head = task;
+            }
+            _tail = task;
         }
-        _tail = task;
+        // [신규, PN-2CD26587/SP-BF0B31B5 §3.2-1] TaskQueue::approxLength()
+        // 와 동일한 이유/관례 - 임계구역 밖에서 원자적으로 갱신(근사치라
+        // 정밀 동기화 불필요).
+        _approxLength.fetchAdd(1);
     }
 
     kernel::AsyncTask* popFront() {
-        kernel::SpinlockGuard guard(_lock);
-        kernel::AsyncTask* task = _head;
-        if (task) {
-            _head = task->next.load();
-            if (!_head) {
-                _tail = nullptr;
+        kernel::AsyncTask* task;
+        {
+            kernel::SpinlockGuard guard(_lock);
+            task = _head;
+            if (task) {
+                _head = task->next.load();
+                if (!_head) {
+                    _tail = nullptr;
+                }
+                task->next.store(nullptr);
             }
-            task->next.store(nullptr);
+        }
+        if (task) {
+            _approxLength.fetchSub(1);
         }
         return task;
     }
+
+    // Push/Pull(SP-BF0B31B5 §3.2-1) 임계치 판정용 근사 길이 -
+    // scheduler.h TaskQueue::approxLength()와 동일한 관례.
+    kernel::uint32_t approxLength() const { return _approxLength.load(); }
 
 private:
     kernel::Spinlock _lock;
     kernel::AsyncTask* _head = nullptr;
     kernel::AsyncTask* _tail = nullptr;
+    kernel::AtomicU32 _approxLength;
 };
 
 AsyncTaskQueue gExecQueues[kMaxCores];
@@ -261,6 +278,134 @@ bool gDraining[kMaxCores] = {};
 // (대개 submitCompletion() 호출부가 반환하며 sti하는 시점, 또는 이미
 // sti 상태였다면 그 즉시) 전달된다.
 constexpr kernel::uint32_t kAsyncDrainVector = 0xE3;
+
+// [신규, PN-2CD26587/SP-BF0B31B5 §3.2-5] AsyncTask 코어 간 이관 Push
+// 임계치 - scheduler.cpp의 kNormalQueueLengthPerCore/kPushThresholdPercent
+// 와 정확히 같은 "설정 가능한 최대/최소값 + 코어 수 대비 상대적 기준"
+// 패턴을 그대로 재사용(QU-9325BD40 설계자 답변). 별도 상수로 분리한
+// 이유는 Task Ready 큐와 AsyncTask 실행 큐가 서로 다른 워크로드
+// 특성을 가질 수 있어서다(같은 수치를 공유할 근거가 없음, RM-23F4B687
+// §4 - 필요한 만큼만).
+constexpr kernel::uint32_t kAsyncQueueLengthPerCore = 8;
+constexpr kernel::uint32_t kAsyncQueueMinLength = 8;
+constexpr kernel::uint32_t kAsyncQueueMaxLength = 64;
+constexpr kernel::uint32_t kAsyncPushThresholdPercent = 90;
+
+kernel::uint32_t kAsyncEffectiveQueueMaxLength() {
+    const kernel::uint32_t coreCount = kernel::Acpi::cpuCount();
+    kernel::uint32_t maxLength = kAsyncQueueLengthPerCore * coreCount;
+    if (maxLength < kAsyncQueueMinLength) {
+        maxLength = kAsyncQueueMinLength;
+    }
+    if (maxLength > kAsyncQueueMaxLength) {
+        maxLength = kAsyncQueueMaxLength;
+    }
+    return maxLength;
+}
+
+kernel::uint32_t kAsyncPushThresholdLength() {
+    return (kAsyncEffectiveQueueMaxLength() * kAsyncPushThresholdPercent) / 100;
+}
+
+// [신규, PN-2CD26587/SP-BF0B31B5 §3] 이 항목을 지금 강제로 다른 코어의
+// 큐로 옮겨도 안전한지 - 코루틴 기반(coroHandle이 실제로 채워진, 즉
+// co_await로 정지된 상태)이고 호출부가 명시적으로 opt-in한
+// (allowCoreMigration) 경우만. 스택풀 기반(coroHandle 비어 있음)은
+// 아직 한 번도 실행된 적 없는 경우와 구분할 방법이 없어(§3.1 조사
+// 결과) 이 v1은 두 경우를 구분하지 않고 전부 건드리지 않는다(안전
+// 우선 - SP §3 핵심 안전조건, 스택풀은 절대 건너뛰지 않고 무시).
+bool kIsMigratableAsyncTask(const kernel::AsyncTask* task) { return task->coroHandle && task->allowCoreMigration; }
+
+// coreIndex를 제외한 코어 중 gExecQueues 근사 길이가 가장 짧은/긴
+// 코어 - scheduler.cpp의 kFindLeastLoadedCore/kFindMostLoadedCore와
+// 동일한 O(코어 수) 선형 스캔 패턴(NUMA 인식은 이 SP 범위 밖).
+kernel::uint32_t kFindLeastLoadedAsyncCore(kernel::uint32_t excludeCore) {
+    const kernel::uint32_t coreCount = kernel::Acpi::cpuCount();
+    kernel::uint32_t best = excludeCore;
+    kernel::uint32_t bestLen = 0xFFFFFFFFU;
+    for (kernel::uint32_t i = 0; i < coreCount; ++i) {
+        if (i == excludeCore) {
+            continue;
+        }
+        const kernel::uint32_t len = gExecQueues[i].approxLength();
+        if (len < bestLen) {
+            bestLen = len;
+            best = i;
+        }
+    }
+    return best;
+}
+
+kernel::uint32_t kFindMostLoadedAsyncCore(kernel::uint32_t excludeCore) {
+    const kernel::uint32_t coreCount = kernel::Acpi::cpuCount();
+    kernel::uint32_t best = excludeCore;
+    kernel::uint32_t bestLen = 0;
+    for (kernel::uint32_t i = 0; i < coreCount; ++i) {
+        if (i == excludeCore) {
+            continue;
+        }
+        const kernel::uint32_t len = gExecQueues[i].approxLength();
+        if (len > bestLen) {
+            bestLen = len;
+            best = i;
+        }
+    }
+    return best;
+}
+
+// queue에서 kIsMigratableAsyncTask() 조건을 만족하는 항목 하나를 찾아
+// 꺼낸다(없으면 nullptr) - 검사하다 만 나머지는 순서를 보존해 그대로
+// 되돌린다(정확한 FIFO 보장은 아니지만 TaskQueue::approxLength() 문서
+// 와 동일하게 근사치로 충분).
+kernel::AsyncTask* kExtractOneMigratableAsyncTask(AsyncTaskQueue& queue) {
+    AsyncTaskQueue rejected;
+    kernel::AsyncTask* found = nullptr;
+    for (;;) {
+        kernel::AsyncTask* task = queue.popFront();
+        if (!task) {
+            break;
+        }
+        if (!found && kIsMigratableAsyncTask(task)) {
+            found = task;
+            break;
+        }
+        rejected.pushBack(task);
+    }
+    for (;;) {
+        kernel::AsyncTask* task = rejected.popFront();
+        if (!task) {
+            break;
+        }
+        queue.pushBack(task);
+    }
+    return found;
+}
+
+// [신규, PN-2CD26587/SP-BF0B31B5 §3.2-2/3] Push - targetCore의
+// gExecQueues가 임계치를 넘으면 이관 가능한 항목 하나를 찾아 가장
+// 한가한 다른 코어로 옮기고 그 코어에 즉시 처리를 재촉하는 IPI를
+// 보낸다(기존 kAsyncDrainVector 재사용 - submitCompletion()의
+// preemptive 경로가 이미 같은 방식으로 원격 코어를 깨운다). **리액터
+// idle 분기가 아니라 submitCompletion() 직후(매 큐잉 시점)에 호출한다**
+// - AsyncTask 드레인은 그 코어가 idle해질 때만 일어나므로, 계속 바쁜
+// 코어의 큐는 idle 분기 스캔으로는 영원히 못 볼 수 있다(SP-BF0B31B5
+// §2 배경의 실측 워크로드가 정확히 이 경우).
+void kAsyncTaskTryPush(kernel::uint32_t targetCore) {
+    if (gExecQueues[targetCore].approxLength() <= kAsyncPushThresholdLength()) {
+        return;
+    }
+    kernel::AsyncTask* candidate = kExtractOneMigratableAsyncTask(gExecQueues[targetCore]);
+    if (!candidate) {
+        return;
+    }
+    const kernel::uint32_t dest = kFindLeastLoadedAsyncCore(targetCore);
+    if (dest == targetCore) {
+        gExecQueues[targetCore].pushBack(candidate);  // 옮길 곳이 없음(다들 이미 이만큼 참) - 되돌림
+        return;
+    }
+    gExecQueues[dest].pushBack(candidate);
+    kernel::Lapic::sendFixedIpi(kernel::Acpi::cpuApicId(dest), static_cast<kernel::uint8_t>(kAsyncDrainVector));
+}
 
 // [신규, 2026-09-25, PN-4859FDE9, QU-F90FB07F 답변("배치 상한 + 자기
 // IPI 재예약")] 이전 버전은 `drainOnce()`가 false를 반환할 때까지 무제한
@@ -958,6 +1103,9 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
         gPreemptiveQueues[targetCore].pushBack(task);
     } else {
         gExecQueues[targetCore].pushBack(task);
+        // [신규, PN-2CD26587/SP-BF0B31B5 §3.2-2/3] Push - 위
+        // kAsyncTaskTryPush() 문서 주석 참고.
+        kAsyncTaskTryPush(targetCore);
     }
     // [재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]
     // 리액터가 더 이상 Task가 아니므로(async_task.h 주석 참고) "파킹돼
@@ -974,6 +1122,25 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
     if (preemptive) {
         Lapic::sendFixedIpi(Acpi::cpuApicId(targetCore), static_cast<uint8_t>(kAsyncDrainVector));
     }
+}
+
+// [신규, PN-2CD26587/SP-BF0B31B5 §3.2-4] Pull - Scheduler::runLoop()의
+// idle 분기(Task Pull과 같은 지점, kFindMostLoadedCoreNumaAware 호출부
+// 참고)가 호출한다. 가장 바쁜 다른 코어의 gExecQueues에서 이관 가능한
+// 항목 하나를 훔쳐와 자신의 큐에 넣는다 - 훔쳐온 코어(coreIndex)가
+// 곧바로 pickNext()/drainOnce()로 돌아가 처리하므로 별도 IPI가
+// 필요 없다(Push와 달리 호출자 자신이 이미 깨어있는 소비자).
+bool AsyncReactor::tryPull(uint32_t coreIndex) {
+    const uint32_t victim = kFindMostLoadedAsyncCore(coreIndex);
+    if (victim == coreIndex) {
+        return false;
+    }
+    AsyncTask* stolen = kExtractOneMigratableAsyncTask(gExecQueues[victim]);
+    if (!stolen) {
+        return false;
+    }
+    gExecQueues[coreIndex].pushBack(stolen);
+    return true;
 }
 
 // [신규, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6] async_task.h의

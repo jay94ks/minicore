@@ -2146,6 +2146,13 @@ void Scheduler::runLoop() {
             if (AsyncReactor::drainOnce(coreIndex)) {
                 continue;
             }
+            // [신규, PN-2CD26587/SP-BF0B31B5 §3.2-4] AsyncTask Pull -
+            // 로컬 AsyncTask 큐도 정말 비어 있을 때(drainOnce가 false)
+            // 가장 바쁜 다른 코어에서 이관 가능한 항목을 하나 훔쳐온다.
+            // 뭔가 훔쳐왔으면 바로 pickNext()/drainOnce()부터 다시 돈다.
+            if (AsyncReactor::tryPull(coreIndex)) {
+                continue;
+            }
             // Pull(PN-04D6197A, SP-9525C4C0 §3) - 로컬에 할 일이 정말
             // 없을 때만(위 drainOnce가 false) 가장 바쁜 다른 코어의
             // gNormalQueues에서 하나 훔쳐온다. "~100ms 이상 idle 지속"
