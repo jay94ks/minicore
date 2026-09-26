@@ -1937,7 +1937,7 @@ kernel::AsyncExecCoro Fat32Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 // 자신에 이미 있어(vfat.h의 ResolvedEntry 문서 주석)
                 // 위 탐색 루프의 마지막 매치 결과를 그대로 쓰면 된다.
                 args->size = currentFileSize;
-                args->isDirectory = currentIsDir;
+                args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
                 args->error = kernel::VfsError::None;
             }
             break;
@@ -4572,7 +4572,7 @@ kernel::AsyncExecCoro Fat16Driver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->error = kernel::VfsError::NotFound;
             } else {
                 args->size = currentFileSize;
-                args->isDirectory = currentIsDir;
+                args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
                 args->error = kernel::VfsError::None;
             }
             break;

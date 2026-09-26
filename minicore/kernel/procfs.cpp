@@ -390,21 +390,21 @@ void ProcFs::stat(AsyncTask* task, KernelFsStatArgs* args) {
     if (args->relPathLen == 0) {
         // [신규, 2026-09-19, PN-770A28FB 항목6] "proc" 자신.
         args->size = 0;
-        args->isDirectory = true;
+        args->type = FileType::Directory;
         args->error = VfsError::None;
         return;
     }
     if (kEqualsExact(args->relPath, args->relPathLen, kMeminfoPath, sizeof(kMeminfoPath) - 1)) {
         char global[kMaxGlobalStatusLen];
         args->size = kFormatMeminfo(global, kMaxGlobalStatusLen);
-        args->isDirectory = false;
+        args->type = FileType::Regular;
         args->error = VfsError::None;
         return;
     }
     if (kEqualsExact(args->relPath, args->relPathLen, kUptimePath, sizeof(kUptimePath) - 1)) {
         char global[kMaxGlobalStatusLen];
         args->size = kFormatUptime(global, kMaxGlobalStatusLen);
-        args->isDirectory = false;
+        args->type = FileType::Regular;
         args->error = VfsError::None;
         return;
     }
@@ -423,7 +423,7 @@ void ProcFs::stat(AsyncTask* task, KernelFsStatArgs* args) {
     }
     char status[kMaxStatusLen];
     args->size = kFormatStatus(target.get(), status, kMaxStatusLen);
-    args->isDirectory = false;
+    args->type = FileType::Regular;
     args->error = VfsError::None;
 }
 

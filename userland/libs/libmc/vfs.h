@@ -125,13 +125,22 @@ struct LseekArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [변경, 2026-09-27, PN-4BDA31FC, DC-E441CB59(B)] isDirectory:bool ->
+// FileType - 커널 쪽 minicore/kernel/mount_table.h::FileType과 값을
+// 맞춤(소켓 특수 파일 지원).
+enum class FileType : uint8_t {
+    Regular = 0,
+    Directory = 1,
+    Socket = 2,
+};
+
 // [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] fd 없이 경로만으로 동작.
 struct StatArgs {
     const char* path = nullptr;
     uint32_t pathLen = 0;
     // out
     uint64_t size = 0;
-    bool isDirectory = false;
+    FileType type = FileType::Regular;
     ChannelError error = ChannelError::None;
 };
 

@@ -309,7 +309,7 @@ void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
     if (args->relPathLen == 0) {
         // [신규, 2026-09-19, PN-770A28FB] 루트 디렉터리 자신.
         args->size = 0;
-        args->isDirectory = true;
+        args->type = kernel::FileType::Directory;
         args->error = kernel::VfsError::None;
         return;
     }
@@ -317,7 +317,7 @@ void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
         kEqualsExact(args->relPath, args->relPathLen, kKernelDirName, sizeof(kKernelDirName) - 1)) {
         // [신규, 2026-09-19, PN-770A28FB] "named"/"kernel" 자신.
         args->size = 0;
-        args->isDirectory = true;
+        args->type = kernel::FileType::Directory;
         args->error = kernel::VfsError::None;
         return;
     }
@@ -327,7 +327,7 @@ void kLiveFsStatImpl(kernel::KernelFsStatArgs* args) {
             return;
         }
         args->size = gLiveFsCpioSize;
-        args->isDirectory = false;
+        args->type = kernel::FileType::Regular;
         args->error = kernel::VfsError::None;
         return;
     }
@@ -470,7 +470,7 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
                 procArgs.relPathLen = isExactProc ? 0 : args->relPathLen - (sizeof(kProcPrefix) - 1);
                 ProcFs::stat(task, &procArgs);
                 args->size = procArgs.size;
-                args->isDirectory = procArgs.isDirectory;
+                args->type = procArgs.type;
                 args->error = procArgs.error;
             } else if (kHasPrefix(args->relPath, args->relPathLen, kResourceGroupPrefix,
                                    sizeof(kResourceGroupPrefix) - 1) ||

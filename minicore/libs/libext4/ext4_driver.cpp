@@ -2815,7 +2815,7 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             InodeCore targetInode;
             memcpy(&targetInode, targetInodeBuf.get() + targetByteOffset, sizeof(targetInode));
             args->size = targetInode.sizeLo | (static_cast<uint64_t>(targetInode.sizeHigh) << 32);
-            args->isDirectory = currentIsDir;
+            args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
             args->error = kernel::VfsError::None;
             break;
         }

@@ -523,7 +523,7 @@ void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsSta
     if (relPathLen == 0) {
         // [신규, 2026-09-19, PN-770A28FB 항목7] "resourcegroup" 자신.
         args->size = 0;
-        args->isDirectory = true;
+        args->type = FileType::Directory;
         args->error = VfsError::None;
         return;
     }
@@ -552,7 +552,7 @@ void ResourceGroupFs::stat(const char* relPath, uint32_t relPathLen, KernelFsSta
     args->size = isIoStat        ? kFormatIoStat(group, statText, sizeof(statText))
                  : isMemoryStat  ? kFormatMemoryStat(group, statText, sizeof(statText))
                                  : kFormatCpuStat(group, statText, sizeof(statText));
-    args->isDirectory = false;
+    args->type = FileType::Regular;
     args->error = VfsError::None;
 }
 

@@ -585,7 +585,7 @@ kernel::AsyncExecCoro NtfsDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 // 부모 디렉터리 인덱스 엔트리($FILE_NAME) 자신에 이미
                 // 있어 ext4의 Stat과 달리 별도 "타깃 재조회"가 필요 없다.
                 args->size = currentFileSize;
-                args->isDirectory = currentIsDir;
+                args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
                 args->error = kernel::VfsError::None;
             }
             break;

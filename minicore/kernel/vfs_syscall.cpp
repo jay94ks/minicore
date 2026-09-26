@@ -647,7 +647,7 @@ public:
             co_return;
         }
         args->size = kfsArgs.size;
-        args->isDirectory = kfsArgs.isDirectory;
+        args->type = kfsArgs.type;
         args->error = ChannelError::None;
         co_return;
     }

@@ -148,13 +148,24 @@ struct KernelFsWriteArgs {
     VfsError error = VfsError::None;
 };
 
+// [신규, 2026-09-27, PN-4BDA31FC, DC-E441CB59(B)] 소켓 특수 파일
+// 지원을 위해 "디렉터리냐 아니냐" 이분법을 파일 종류 전체로
+// 일반화한다 - `isDirectory: bool`이 표현 못 하는 세 번째 종류
+// (Socket)가 필요해졌다(RM-32D06563에도 등재). 심볼릭 링크/디바이스
+// 특수 파일은 구체적 소비자가 생기면 그때 추가(RM-23F4B687 §4).
+enum class FileType : uint8_t {
+    Regular = 0,
+    Directory = 1,
+    Socket = 2,
+};
+
 struct KernelFsStatArgs {
     KernelFsOpCode op = KernelFsOpCode::Stat;
     const char* relPath = nullptr;
     uint32_t relPathLen = 0;
     // out
     uint64_t size = 0;
-    bool isDirectory = false;
+    FileType type = FileType::Regular;
     VfsError error = VfsError::None;
 };
 

@@ -3,6 +3,7 @@
 
 #include "channel.h"
 #include "libkenv/types.h"
+#include "mount_table.h"  // FileType(PN-4BDA31FC) 재사용
 #include "syscall.h"
 
 namespace kernel {
@@ -143,7 +144,7 @@ struct StatArgs {
     uint32_t pathLen = 0;
     // out
     uint64_t size = 0;
-    bool isDirectory = false;
+    FileType type = FileType::Regular;  // [변경, PN-4BDA31FC, DC-E441CB59] isDirectory:bool -> FileType
     ChannelError error = ChannelError::None;
 };
 
