@@ -33,7 +33,7 @@
 | [DC-F367AD5D](./DC-F367AD5D.md) | 커널 정상 종료(clean shutdown/reboot) 경로 부재 - 설계 필요 | approved | 2026-09-23T08:45:47.135Z |
 | [DC-FB38F86F](./DC-FB38F86F.md) | Paging::mapPage() 중간 테이블 생성 동시성 보호 - 락 전략 결정 요청 | approved | 2026-09-17T05:38:21.741Z |
 | [DS-D4E5C451](./DS-D4E5C451.md) | Minicore 초기 설계 결정 확정 (빌드/부팅/커널서비스/라이선스) | approved | 2026-09-21T19:59:54.552Z |
-| [PL-12814728](./PL-12814728.md) | 예정(scheduled) 계획 11건 실행 순서 - 그룹별 착수 가이드 (2026-09-26) | approved | 2026-09-26T12:12:21.603Z |
+| [PL-12814728](./PL-12814728.md) | 예정(scheduled) 계획 11건 실행 순서 - 그룹별 착수 가이드 (2026-09-26) | approved | 2026-09-26T12:49:34.126Z |
 | [PL-16E2CDA4](./PL-16E2CDA4.md) | Slab 할당자(libkmm) 구현 | archived | 2026-09-15T05:53:27.054Z |
 | [PL-1E247831](./PL-1E247831.md) | 비동기 프레임워크(AsyncTask) 구현 | approved | 2026-09-22T03:10:13.049Z |
 | [PL-2070E6EF](./PL-2070E6EF.md) | MSI/MSI-X 인터럽트 지원 | archived | 2026-09-15T05:53:21.418Z |
