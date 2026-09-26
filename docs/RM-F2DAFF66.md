@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-25T17:53:04.774Z
+  updatedAt: 2026-09-26T00:39:57.824Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2384,6 +2384,23 @@ UEFI측 사본 minicore/boot/x86_64/uefi/efi/boot_info.h) 신설로 정확히
 바로 대조 완료) 그 외 새로 approved 전환된 SP/DC는 없다 - 다음
 approved 전환 시까지 이 §3 스윕은 다시 건너뛴다(2026-09-21/22/23과
 동일한 재소진 패턴).
+
+**[2026-09-26, minicore-3c 세션 갱신] `DC-5F0AC0D3`(AsyncTaskCoroYield
+재시도 락 우선순위 역전 라이브락 - drainOnce() 공정성 정책 방향
+결정 요청) 점검 완료 - 갭 없음.** 설계자가 3가지 후보 중 "(b) 재시도
+카운트 기반 강등"을 선택 - `AsyncTask::coroYieldRetryStreak` 필드
+신설(init()에서 리셋, slab 재사용 stale 값 방지) +
+`kAsyncTaskCoroYieldFairnessThreshold=8` 임계치 + 8회 연속 재시도 시
+그 1회만 `preemptive=false`(일반 큐)로 제출 후 카운터 리셋 -
+commit `d190008`로 정확히 이 설계 그대로 구현됨(`async_task.h/.cpp`).
+검증도 완료 - (1) 디스크 없는 순수 `MutexCore`+더미
+`AsyncTaskHandler` 격리 재현(수정 전 라이브락 100% 재현 확인 후
+수정 적용 시 해소), (2) 실제 AHCI+ext4 8-writer 동시 Write 부하
+재검증(이 결정으로 열린 `PN-ADA46BF4`가 이어서 재적용/재검증 담당).
+이 문서(minicore-3c)가 직접 `async_task.cpp`의 `AsyncTaskCoroYield::
+await_suspend()`/`AsyncReactor::drainOnce()`를 읽어 코드 대조까지
+완료 - **결론: 이 DC가 확정한 것 중 코드에 반영 안 된 항목 없음.**
+다음 approved 전환 시까지 이 §3 스윕은 다시 건너뛴다.
 
 같은 방법론(§목차 나열형 "확정된 설계" 절 vs 실제 코드)을 아직
 적용 안 해본 주요 SP 문서/영역 - 매 틱 1-2개씩 골라 점검하고
