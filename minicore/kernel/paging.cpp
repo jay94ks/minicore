@@ -8,6 +8,7 @@
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
 #include "libswapfs/swapfs.h"
+#include "logger.h"
 #include "swap_backend.h"
 #include "page_frame_allocator.h"
 #include "process.h"
@@ -1110,8 +1111,28 @@ void Paging::destroyAddressSpace(uint64_t pml4Phys) {
 // [신규, 2026-09-18, SP-8D206F11 §2.3] CacheType -> PAT/PCD/PWT 비트
 // 변환표 - Paging::initPatForThisCore()가 세팅한 IA32_PAT 레이아웃과
 // 정확히 대응한다(인덱스0/1/3/4).
-void kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags, CacheType cacheType,
-                            uint64_t pml4Phys) {
+//
+// [신규, PN-81223433/SP-94C6A764 §2.1] 매핑 전에 PageFrame::mapCount/
+// lastCacheType/cacheTypeAssigned로 PAT aliasing 충돌을 검사한다 -
+// mapCount==0이면 이 프레임의 타입을 자유롭게 새로 정하고, mapCount>0
+// 이고 기존 타입과 다르면 매핑하지 않고 거부한다.
+CacheTypeMapError kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags, CacheType cacheType,
+                                          uint64_t pml4Phys) {
+    PageFrame* frame = PageFrameAllocator::frameFor(physAddr);
+    if (frame) {
+        if (frame->mapCount == 0) {
+            frame->lastCacheType = static_cast<uint8_t>(cacheType);
+            frame->cacheTypeAssigned = 1;
+        } else if (frame->cacheTypeAssigned && frame->lastCacheType != static_cast<uint8_t>(cacheType)) {
+            Logger::warn(
+                "minicore: kMapPageWithCacheType conflict - physAddr=%llx existingType=%x requestedType=%x "
+                "virtAddr=%llx",
+                physAddr, frame->lastCacheType, static_cast<uint8_t>(cacheType), virtAddr);
+            return CacheTypeMapError::Conflict;
+        }
+        frame->mapCount = static_cast<uint16_t>(frame->mapCount + 1);
+    }
+
     switch (cacheType) {
         case CacheType::WriteBack:
             break;  // 인덱스0 - PAT.PCD.PWT 전부 0, 추가 비트 없음
@@ -1126,6 +1147,22 @@ void kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags,
             break;
     }
     Paging::mapPage(virtAddr, physAddr, flags, pml4Phys);
+    return CacheTypeMapError::None;
+}
+
+void kUnmapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t pml4Phys) {
+    Paging::unmapPage(virtAddr, pml4Phys);
+
+    PageFrame* frame = PageFrameAllocator::frameFor(physAddr);
+    if (!frame) {
+        return;
+    }
+    if (frame->mapCount > 0) {
+        frame->mapCount = static_cast<uint16_t>(frame->mapCount - 1);
+    }
+    if (frame->mapCount == 0) {
+        frame->cacheTypeAssigned = 0;
+    }
 }
 
 }  // namespace kernel

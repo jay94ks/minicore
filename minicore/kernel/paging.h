@@ -413,14 +413,43 @@ enum class CacheType : uint8_t {
     WriteCombining,  // 인덱스4 - [신규] 프레임버퍼 등
 };
 
+// [신규, PN-81223433/SP-94C6A764 §2.2] kMapPageWithCacheType()의
+// 반환값 - syscall 에러코드가 아니라 이 함수 자신의 실패 사유라
+// RM-48E1E610류 전역 번호표 등록 대상이 아니다.
+enum class CacheTypeMapError : uint8_t {
+    None,
+    // 같은 물리 프레임에 이미 다른 CacheType으로 활성 매핑(mapCount>0)
+    // 이 있다 - x86_64 PAT aliasing(Intel SDM Vol.3A §11.5.2.1)을
+    // 피하기 위해 매핑 자체를 거부한다.
+    Conflict,
+};
+
 // virtAddr에 physAddr을 매핑하되, flags에 cacheType이 가리키는 PAT
 // 인덱스의 PAT/PCD/PWT 비트 조합을 자동으로 얹어 Paging::mapPage()에
 // 위임하는 얇은 래퍼(SP-8D206F11 §2.3) - 4KiB 매핑 전용(PAGE_PAT
-// 문서 주석 참고, 대형 페이지는 이 API의 대상이 아니다). 새 자료구조/
-// 전역 상태 없음 - mapPage()와 마찬가지로 pml4Phys 생략(0) 시 현재
-// CR3을 쓴다.
-void kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags, CacheType cacheType,
-                            uint64_t pml4Phys = 0);
+// 문서 주석 참고, 대형 페이지는 이 API의 대상이 아니다). pml4Phys
+// 생략(0) 시 현재 CR3을 쓴다.
+//
+// [신규, SP-94C6A764 §2.1] 같은 물리 프레임(physAddr)에 이미 다른
+// CacheType으로 활성 매핑이 있으면(`PageFrame::mapCount>0` && 타입
+// 불일치) 매핑하지 않고 `CacheTypeMapError::Conflict`를 반환한다 -
+// 매핑을 완전히 해제한 뒤(mapCount==0) 다른 타입으로 다시 매핑하는
+// 것은 안전하므로 막지 않는다. 성공하면(또는 physAddr가
+// `PageFrameAllocator`의 추적 범위 밖이면, 그 경우는 검사 자체를
+// 건너뛴다) `CacheTypeMapError::None`. 짝이 되는 해제 경로는
+// `kUnmapPageWithCacheType()`.
+CacheTypeMapError kMapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t flags, CacheType cacheType,
+                                          uint64_t pml4Phys = 0);
+
+// [신규, SP-94C6A764 §2.1] kMapPageWithCacheType()의 해제 짝 -
+// Paging::unmapPage()를 그대로 호출한 뒤 physAddr가 추적 범위 안이면
+// `PageFrame::mapCount--`, 0이 되면 `cacheTypeAssigned`를 0으로
+// 리셋해 다음 매핑이 자유롭게 새 타입을 고를 수 있게 한다. 이
+// mapCount 증감은 `PageFrameAllocator::insertRmap()`/`removeRmap()`
+// (익명 VMA 전용, SP-6CEFBE9B §6.2)과는 별개 경로다 - 이 API는 MMIO/
+// 프레임버퍼처럼 그 경로를 타지 않는 직접 물리 매핑 전용이라 서로
+// 겹치지 않는다.
+void kUnmapPageWithCacheType(uint64_t virtAddr, uint64_t physAddr, uint64_t pml4Phys = 0);
 
 }  // namespace kernel
 
