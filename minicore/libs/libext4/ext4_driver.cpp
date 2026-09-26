@@ -4508,11 +4508,27 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     const uint32_t qblocksPerFsBlock = blockSize / kQuotaBlockSize;
                     const uint32_t qDepth = kQtreeDepth(kQuotaBlockSize);
                     const uint32_t qEpb = kQuotaBlockSize / sizeof(uint32_t);
+                    constexpr uint32_t kMaxDqblkPerLeaf =
+                        (kQuotaBlockSize - sizeof(QtreeLeafHeader)) / sizeof(QuotaV2DiskDqblk);
                     uint32_t curQBlock = kQtreeTreeOff;
                     SlabBuf qFsBlockBuf(blockSize);
                     if (!qFsBlockBuf) {
                         break;
                     }
+
+                    // [신규, PN-956A3A66/SP-3B8D77A3 §2] 트리 삽입 - quota-block
+                    // 0(QuotaV2Header 바로 뒤 QuotaV2Info)의 freeBlk/freeEntry/
+                    // blocks를 필요할 때만(next==0을 실제로 만났을 때) 지연
+                    // 로드한다 - 이미 트리에 있는(가장 흔한) 경우엔 이 블록을
+                    // 아예 안 건드림. `docs relation`(target: "Linux quota v2
+                    // qtree... 리프 분할이 아니라 빈 엔트리 블록 공유 풀")이
+                    // 확정한 실제 커널 알고리즘 그대로: 인덱스 레벨은 빈
+                    // 슬롯에 새 블록을 연결할 뿐(분할 없음), 최심층은
+                    // freeEntry 전역 연결 리스트에서 재사용/신규 할당한다.
+                    bool qb0Loaded = false;
+                    QuotaV2Info qb0Info{};
+                    uint64_t qb0PhysAbs = 0;
+                    SlabBuf qb0Buf(blockSize);
 
                     bool giveUp = false;
                     for (uint32_t level = 0; level < qDepth; ++level) {
@@ -4563,11 +4579,233 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         const uint32_t idx = kQtreeGetIndex(kMkdirOwnerUidForQuota, level, qDepth, qEpb);
                         uint32_t next = 0;
                         memcpy(&next, qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), sizeof(next));
-                        if (next == 0) {
-                            giveUp = true;  // 트리에 없는 uid - 삽입은 범위 밖, 그냥 건너뜀
+                        if (next != 0) {
+                            curQBlock = next;
+                            continue;
+                        }
+
+                        // [신규] next==0 - 이 슬롯에 아직 아무것도 없다. qb0
+                        // (freeBlk/freeEntry/blocks)를 지연 로드한다.
+                        if (!qb0Loaded) {
+                            uint64_t qb0FsPhys = 0;
+                            ExtentLookup qb0Lookup = kLookupExtent(qInode.block, 0, &qb0FsPhys);
+                            uint32_t qb0Guard = 5;
+                            SlabBuf qb0ExtentBuf(blockSize);
+                            while (qb0Lookup == ExtentLookup::NeedChild && qb0Guard > 0) {
+                                if (!qb0ExtentBuf) {
+                                    qb0Lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                fs::BlockIoResult qb0ExIo;
+                                kernel::AsyncTask* qb0ExTask = kSubmitReadExtBlocks(device, blockSize, qb0FsPhys, 1,
+                                                                                     qb0ExtentBuf.get(), &qb0ExIo);
+                                if (!qb0ExTask) {
+                                    qb0Lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                co_await kernel::AsyncTaskCoroAwaiter(qb0ExTask);
+                                if (!qb0ExIo.ok) {
+                                    qb0Lookup = ExtentLookup::Invalid;
+                                    break;
+                                }
+                                qb0Lookup = kLookupExtent(qb0ExtentBuf.get(), 0, &qb0FsPhys);
+                                --qb0Guard;
+                            }
+                            if (qb0Lookup != ExtentLookup::Found || !qb0Buf) {
+                                giveUp = true;
+                                break;
+                            }
+                            fs::BlockIoResult qb0ReadIo;
+                            kernel::AsyncTask* qb0ReadTask =
+                                kSubmitReadExtBlocks(device, blockSize, qb0FsPhys, 1, qb0Buf.get(), &qb0ReadIo);
+                            if (!qb0ReadTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qb0ReadTask);
+                            if (!qb0ReadIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+                            memcpy(&qb0Info, qb0Buf.get() + sizeof(QuotaV2Header), sizeof(qb0Info));
+                            qb0PhysAbs = qb0FsPhys;
+                            qb0Loaded = true;
+                        }
+
+                        const bool isLeafLevel = (level == qDepth - 1);
+                        uint32_t newQBlock = 0;
+                        bool zeroNewBlock = false;
+                        bool reusedFromPool = false;
+                        if (isLeafLevel && qb0Info.freeEntry != 0) {
+                            // 최심층 - freeEntry 전역 리스트에서 재사용(가득
+                            // 차기 직전이면 리스트에서 뺄지는 실제 엔트리를
+                            // 쓴 뒤에 entries 값을 보고 판단 - 아래 leaf-append
+                            // 절에서 처리).
+                            newQBlock = qb0Info.freeEntry;
+                            reusedFromPool = true;
+                        } else if (!isLeafLevel && qb0Info.freeBlk != 0) {
+                            // 인덱스 레벨 - 완전히 빈 블록 재사용(이 프로젝트는
+                            // 삭제 미구현이라 사실상 항상 비어 있을 리스트지만
+                            // 커널과 동일하게 확인은 한다).
+                            newQBlock = qb0Info.freeBlk;
+                            zeroNewBlock = true;
+                            // pop: 이 블록 헤더의 nextFree를 읽어 freeBlk를 갱신.
+                            const uint32_t fbFsBlockIdx = newQBlock / qblocksPerFsBlock;
+                            const uint32_t fbByteOff = (newQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                            uint64_t fbPhysAbs = 0;
+                            ExtentLookup fbLookup = kLookupExtent(qInode.block, fbFsBlockIdx, &fbPhysAbs);
+                            if (fbLookup != ExtentLookup::Found) {
+                                giveUp = true;
+                                break;
+                            }
+                            SlabBuf fbBuf(blockSize);
+                            if (!fbBuf) {
+                                giveUp = true;
+                                break;
+                            }
+                            fs::BlockIoResult fbReadIo;
+                            kernel::AsyncTask* fbReadTask =
+                                kSubmitReadExtBlocks(device, blockSize, fbPhysAbs, 1, fbBuf.get(), &fbReadIo);
+                            if (!fbReadTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(fbReadTask);
+                            if (!fbReadIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+                            QtreeLeafHeader fbHeader;
+                            memcpy(&fbHeader, fbBuf.get() + fbByteOff, sizeof(fbHeader));
+                            qb0Info.freeBlk = fbHeader.nextFree;
+                        } else {
+                            // 완전히 새 quota-block - QuotaV2Info::blocks
+                            // 위치에 새로 쓴다. 이 새 quota-block이 quota
+                            // 파일 자신의 익스텐트 범위를 벗어나면(quotacheck가
+                            // 남겨 둔 여유를 다 쓴 경우) quota 파일 자체를
+                            // 키워야 하는데, 이는 PN-81C6322C와 같은 급의
+                            // 별도 작업이라 v1은 범위 밖으로 남기고 정직하게
+                            // 실패 처리한다(docs relation 기록 참고).
+                            newQBlock = qb0Info.blocks;
+                            const uint32_t nbFsBlockIdx = newQBlock / qblocksPerFsBlock;
+                            uint64_t nbPhysAbs = 0;
+                            ExtentLookup nbLookup = kLookupExtent(qInode.block, nbFsBlockIdx, &nbPhysAbs);
+                            if (nbLookup != ExtentLookup::Found) {
+                                giveUp = true;  // quota 파일 확장 필요 - v1 범위 밖
+                                break;
+                            }
+                            qb0Info.blocks += 1;
+                            zeroNewBlock = true;
+                            if (isLeafLevel) {
+                                // 갓 만든 블록은 room이 있으니 바로 freeEntry
+                                // 리스트 맨 앞에 넣는다(entries=0으로 아래에서
+                                // 초기화 - 커널의 find_free_dqentry "else" 분기와
+                                // 동일).
+                                qb0Info.freeEntry = newQBlock;
+                            }
+                        }
+
+                        // 필요하면 새/재사용 블록의 실제 온디스크 내용을 준비.
+                        const uint32_t nqFsBlockIdx = newQBlock / qblocksPerFsBlock;
+                        const uint32_t nqByteOff = (newQBlock % qblocksPerFsBlock) * kQuotaBlockSize;
+                        uint64_t nqPhysAbs = 0;
+                        ExtentLookup nqLookup = kLookupExtent(qInode.block, nqFsBlockIdx, &nqPhysAbs);
+                        if (nqLookup != ExtentLookup::Found) {
+                            giveUp = true;
                             break;
                         }
-                        curQBlock = next;
+                        SlabBuf nqBuf(blockSize);
+                        if (!nqBuf) {
+                            giveUp = true;
+                            break;
+                        }
+                        fs::BlockIoResult nqReadIo;
+                        kernel::AsyncTask* nqReadTask =
+                            kSubmitReadExtBlocks(device, blockSize, nqPhysAbs, 1, nqBuf.get(), &nqReadIo);
+                        if (!nqReadTask) {
+                            giveUp = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(nqReadTask);
+                        if (!nqReadIo.ok) {
+                            giveUp = true;
+                            break;
+                        }
+                        if (zeroNewBlock) {
+                            memset(nqBuf.get() + nqByteOff, 0, kQuotaBlockSize);
+                            if (isLeafLevel) {
+                                QtreeLeafHeader freshHeader{};
+                                freshHeader.nextFree = 0;
+                                freshHeader.prevFree = 0;
+                                freshHeader.entries = 0;
+                                memcpy(nqBuf.get() + nqByteOff, &freshHeader, sizeof(freshHeader));
+                            }
+                            fs::BlockIoResult nqWriteIo;
+                            kernel::AsyncTask* nqWriteTask =
+                                kSubmitWriteExtBlocks(device, blockSize, nqPhysAbs, 1, nqBuf.get(), &nqWriteIo);
+                            if (!nqWriteTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(nqWriteTask);
+                            if (!nqWriteIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+                        }
+                        (void)reusedFromPool;
+
+                        // 현재(레벨) 인덱스 블록에 새 블록 번호를 연결 + 씀.
+                        memcpy(qFsBlockBuf.get() + byteOffInFsBlock + idx * sizeof(uint32_t), &newQBlock,
+                               sizeof(newQBlock));
+                        fs::BlockIoResult idxWriteIo;
+                        kernel::AsyncTask* idxWriteTask =
+                            kSubmitWriteExtBlocks(device, blockSize, qPhysAbs, 1, qFsBlockBuf.get(), &idxWriteIo);
+                        if (!idxWriteTask) {
+                            giveUp = true;
+                            break;
+                        }
+                        co_await kernel::AsyncTaskCoroAwaiter(idxWriteTask);
+                        if (!idxWriteIo.ok) {
+                            giveUp = true;
+                            break;
+                        }
+
+                        // qb0(freeBlk/freeEntry/blocks) 변경분을 즉시 반영.
+                        {
+                            SlabBuf qb0WriteBuf(blockSize);
+                            if (!qb0WriteBuf) {
+                                giveUp = true;
+                                break;
+                            }
+                            fs::BlockIoResult qb0RereadIo;
+                            kernel::AsyncTask* qb0RereadTask = kSubmitReadExtBlocks(
+                                device, blockSize, qb0PhysAbs, 1, qb0WriteBuf.get(), &qb0RereadIo);
+                            if (!qb0RereadTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qb0RereadTask);
+                            if (!qb0RereadIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+                            memcpy(qb0WriteBuf.get() + sizeof(QuotaV2Header), &qb0Info, sizeof(qb0Info));
+                            fs::BlockIoResult qb0WriteIo;
+                            kernel::AsyncTask* qb0WriteTask = kSubmitWriteExtBlocks(
+                                device, blockSize, qb0PhysAbs, 1, qb0WriteBuf.get(), &qb0WriteIo);
+                            if (!qb0WriteTask) {
+                                giveUp = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(qb0WriteTask);
+                            if (!qb0WriteIo.ok) {
+                                giveUp = true;
+                                break;
+                            }
+                        }
+
+                        curQBlock = newQBlock;
                     }
                     if (giveUp) {
                         break;
@@ -4616,12 +4854,111 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
 
                     QuotaV2DiskDqblk dqblk;
                     uint32_t dqblkByteOffset = 0;
-                    if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize,
-                                                kMkdirOwnerUidForQuota, &dqblk, &dqblkByteOffset)) {
-                        break;  // 삽입은 범위 밖 - 트리에 없으면 그냥 건너뜀
+                    if (kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize,
+                                               kMkdirOwnerUidForQuota, &dqblk, &dqblkByteOffset)) {
+                        dqblk.curinodes += 1;
+                        memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
+                    } else {
+                        // [신규] 새 uid 삽입(append) - 이 프로젝트는 삭제를
+                        // 구현 안 해 gap이 생길 일이 없으므로, 커널의 "전체
+                        // 슬롯 스캔" 대신 항상 entries 인덱스 자리에
+                        // 이어붙인다(kQtreeFindEntryInLeaf가 이미 전제하는
+                        // "entries개수만큼 앞에서부터 연속" 불변식과 일치).
+                        QtreeLeafHeader leafHeader;
+                        memcpy(&leafHeader, qFsBlockBuf.get() + leafByteOff, sizeof(leafHeader));
+                        if (leafHeader.entries >= kMaxDqblkPerLeaf) {
+                            break;  // 이론상 불가능(가득 차기 전에 free-entry
+                                     // 리스트에서 제거되므로) - 방어적 실패
+                        }
+                        QuotaV2DiskDqblk newDqblk{};
+                        newDqblk.id = kMkdirOwnerUidForQuota;
+                        newDqblk.curinodes = 1;
+                        const uint32_t newEntryByteOff =
+                            sizeof(QtreeLeafHeader) + leafHeader.entries * sizeof(QuotaV2DiskDqblk);
+                        memcpy(qFsBlockBuf.get() + leafByteOff + newEntryByteOff, &newDqblk, sizeof(newDqblk));
+                        leafHeader.entries += 1;
+                        if (leafHeader.entries >= kMaxDqblkPerLeaf) {
+                            // 이제 가득 찼다(직전) - freeEntry 리스트에서
+                            // 제거(prev/next 체인 + qb0.freeEntry 갱신).
+                            do {
+                                if (!qb0Loaded) {
+                                    break;  // 갓 만든 블록이라 애초에 리스트에
+                                            // 넣은 그 값이 qb0Info에 이미 있어야
+                                            // 함 - 로드 안 된 경우는 이론상 없음.
+                                }
+                                if (leafHeader.prevFree != 0) {
+                                    const uint32_t pvFsBlockIdx = leafHeader.prevFree / qblocksPerFsBlock;
+                                    const uint32_t pvByteOff = (leafHeader.prevFree % qblocksPerFsBlock) * kQuotaBlockSize;
+                                    uint64_t pvPhysAbs = 0;
+                                    if (kLookupExtent(qInode.block, pvFsBlockIdx, &pvPhysAbs) != ExtentLookup::Found) {
+                                        break;
+                                    }
+                                    SlabBuf pvBuf(blockSize);
+                                    if (!pvBuf) break;
+                                    fs::BlockIoResult pvReadIo;
+                                    kernel::AsyncTask* pvReadTask =
+                                        kSubmitReadExtBlocks(device, blockSize, pvPhysAbs, 1, pvBuf.get(), &pvReadIo);
+                                    if (!pvReadTask) break;
+                                    co_await kernel::AsyncTaskCoroAwaiter(pvReadTask);
+                                    if (!pvReadIo.ok) break;
+                                    QtreeLeafHeader pvHeader;
+                                    memcpy(&pvHeader, pvBuf.get() + pvByteOff, sizeof(pvHeader));
+                                    pvHeader.nextFree = leafHeader.nextFree;
+                                    memcpy(pvBuf.get() + pvByteOff, &pvHeader, sizeof(pvHeader));
+                                    fs::BlockIoResult pvWriteIo;
+                                    kernel::AsyncTask* pvWriteTask =
+                                        kSubmitWriteExtBlocks(device, blockSize, pvPhysAbs, 1, pvBuf.get(), &pvWriteIo);
+                                    if (!pvWriteTask) break;
+                                    co_await kernel::AsyncTaskCoroAwaiter(pvWriteTask);
+                                } else {
+                                    qb0Info.freeEntry = leafHeader.nextFree;
+                                }
+                                if (leafHeader.nextFree != 0) {
+                                    const uint32_t nxFsBlockIdx = leafHeader.nextFree / qblocksPerFsBlock;
+                                    const uint32_t nxByteOff = (leafHeader.nextFree % qblocksPerFsBlock) * kQuotaBlockSize;
+                                    uint64_t nxPhysAbs = 0;
+                                    if (kLookupExtent(qInode.block, nxFsBlockIdx, &nxPhysAbs) != ExtentLookup::Found) {
+                                        break;
+                                    }
+                                    SlabBuf nxBuf(blockSize);
+                                    if (!nxBuf) break;
+                                    fs::BlockIoResult nxReadIo;
+                                    kernel::AsyncTask* nxReadTask =
+                                        kSubmitReadExtBlocks(device, blockSize, nxPhysAbs, 1, nxBuf.get(), &nxReadIo);
+                                    if (!nxReadTask) break;
+                                    co_await kernel::AsyncTaskCoroAwaiter(nxReadTask);
+                                    if (!nxReadIo.ok) break;
+                                    QtreeLeafHeader nxHeader;
+                                    memcpy(&nxHeader, nxBuf.get() + nxByteOff, sizeof(nxHeader));
+                                    nxHeader.prevFree = leafHeader.prevFree;
+                                    memcpy(nxBuf.get() + nxByteOff, &nxHeader, sizeof(nxHeader));
+                                    fs::BlockIoResult nxWriteIo;
+                                    kernel::AsyncTask* nxWriteTask =
+                                        kSubmitWriteExtBlocks(device, blockSize, nxPhysAbs, 1, nxBuf.get(), &nxWriteIo);
+                                    if (!nxWriteTask) break;
+                                    co_await kernel::AsyncTaskCoroAwaiter(nxWriteTask);
+                                }
+                                leafHeader.nextFree = 0;
+                                leafHeader.prevFree = 0;
+                                // qb0(freeEntry) 변경분 반영.
+                                SlabBuf qb0WriteBuf2(blockSize);
+                                if (!qb0WriteBuf2) break;
+                                fs::BlockIoResult qb0Reread2Io;
+                                kernel::AsyncTask* qb0Reread2Task = kSubmitReadExtBlocks(
+                                    device, blockSize, qb0PhysAbs, 1, qb0WriteBuf2.get(), &qb0Reread2Io);
+                                if (!qb0Reread2Task) break;
+                                co_await kernel::AsyncTaskCoroAwaiter(qb0Reread2Task);
+                                if (!qb0Reread2Io.ok) break;
+                                memcpy(qb0WriteBuf2.get() + sizeof(QuotaV2Header), &qb0Info, sizeof(qb0Info));
+                                fs::BlockIoResult qb0Write2Io;
+                                kernel::AsyncTask* qb0Write2Task = kSubmitWriteExtBlocks(
+                                    device, blockSize, qb0PhysAbs, 1, qb0WriteBuf2.get(), &qb0Write2Io);
+                                if (!qb0Write2Task) break;
+                                co_await kernel::AsyncTaskCoroAwaiter(qb0Write2Task);
+                            } while (false);
+                        }
+                        memcpy(qFsBlockBuf.get() + leafByteOff, &leafHeader, sizeof(leafHeader));
                     }
-                    dqblk.curinodes += 1;
-                    memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
 
                     fs::BlockIoResult leafWriteIo;
                     kernel::AsyncTask* leafWriteTask =
