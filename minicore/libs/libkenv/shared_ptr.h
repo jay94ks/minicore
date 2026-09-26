@@ -128,6 +128,18 @@ public:
     void addStrongRefUnchecked() { _strongCount.fetchAdd(1); }
     void addWeakRef() { _weakCount.fetchAdd(1); }
 
+    // [신규, 2026-09-27, PN-CC0F4EAC 항목7 §2] 현재 강한 참조 수를
+    // 그냥 읽기만 한다(증감 없음) - "내가 이 대상의 마지막 소유자인가"
+    // 판단(예: fd 상속으로 여러 fd가 같은 소켓을 공유할 때, Close()가
+    // 마지막 fd에서만 실제 자원을 해제해야 하는 경우)을 위해 추가.
+    // 표준 std::shared_ptr::use_count()와 동일하게 스냅샷일 뿐이다 -
+    // 다른 스레드가 동시에 참조를 늘리거나 줄이면 그 순간 이후로는
+    // 낡은 값일 수 있다(이 프로젝트에 아직 fd 테이블 자체의 동시성
+    // 보호가 없어 호출부가 이미 단일 스레드 전제를 깔고 있는 자리에만
+    // 쓴다 - 진짜 멀티스레드 공유 fd 테이블이 생기면 그때 이 계약을
+    // 재검토해야 한다).
+    uint32_t strongCount() const { return _strongCount.load(); }
+
     // [신규, 2026-09-20, SP-5130284C §3.2-a] 지연 경로를 타면
     // releaseStrong()이 원래(즉시 경로에서) 했을 일 전체 -
     // `_destroyOwned` 호출 다음 `releaseWeak()`까지 - 를 나중에
@@ -280,6 +292,12 @@ public:
     T* operator->() const { return _ptr; }
     T& operator*() const { return *_ptr; }
     explicit operator bool() const { return _ptr != nullptr; }
+
+    // [신규, 2026-09-27, PN-CC0F4EAC 항목7 §2] 표준 std::shared_ptr::
+    // use_count()와 동일한 역할 - ControlBlockBase::strongCount() 그대로
+    // 위임(계약/주의사항은 그쪽 문서 주석 참고). 빈 SharedPtr(_block ==
+    // nullptr)이면 0.
+    uint32_t useCount() const { return _block ? _block->strongCount() : 0; }
 
     void reset() {
         if (_block) {

@@ -359,42 +359,45 @@ public:
             // 영구히 남는다(socket.h UnixSocket::boundPath 문서 주석
             // 참고 - kResolveChannelId 자체는 세대 태그로 안전하지만,
             // 그 이름이 다시는 재사용 못 하게 되는 네임스페이스 누수).
-            // [정직하게 기록, 2026-09-27 4회차] `slot->value.socket`이
-            // `SharedPtr`로 승격됐지만(fd 상속 선행 리팩터링,
-            // PN-CC0F4EAC 항목7 스코핑 메모 참고) 이 아래 로직은 여전히
-            // "이 fd가 이 소켓의 유일한 소유자"를 전제로 Channel/Bridge를
-            // 무조건 파괴한다 - fd 상속이 실제로 구현돼 같은 소켓을
-            // 두 fd가 공유하게 되면, 이 Close()가 다른 쪽(예: 부모가
-            // 자식에게 물려준 뒤 먼저 닫는 경우) fd를 망가뜨린다. 지금은
-            // fd 상속 자체가 없어(모든 소켓이 항상 refcount 1로 시작)
-            // 도달 불가능한 문제지만, 다음 착수 세션은 이 지점에
-            // "내가 마지막 소유자인가"(참조 카운트 조회 API가
-            // `SharedPtr`에 아직 없음) 판단을 반드시 추가해야 한다.
-            UnixSocket* socket = slot->value.socket.get();
-            if (socket->bridge != 0) {
-                CloseBridgeArgs closeArgs;
-                closeArgs.bridge = socket->bridge;
-                kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
-            }
-            if (socket->channelId != 0) {
-                // Socket()이 등록한 것과 정확히 같은 포맷으로 재계산
-                // (kFormatAutoSocketPath, socket.h §4-1 포맷 주석 참고).
-                char autoPath[kMaxNamedObjectNameLength];
-                const uint32_t autoPathLen =
-                    kFormatAutoSocketPath(process->processId, fd, autoPath, kMaxNamedObjectNameLength);
-                NamedObjectTable::release(autoPath, autoPathLen);
-                if (socket->explicitlyBound) {
-                    NamedObjectTable::release(socket->boundPath, socket->boundPathLength);
+            // [해소, 2026-09-27 6회차, PN-CC0F4EAC 항목7 §2] 4회차가
+            // "다음 착수 세션 필수 과제"로 남겨 둔 참조 카운트 조회가
+            // SharedPtr::useCount()(shared_ptr.h)로 생겼다 - 이제 실제로
+            // "내가 이 소켓의 마지막 소유자인가"를 판단한다. useCount()==1
+            // 이면 이 fd가 유일한 소유자이므로 기존 그대로 Channel/Bridge/
+            // NamedObjectTable 이름을 전부 정리하고, >1이면(fd 상속으로
+            // 부모/자식이 같은 소켓을 공유 중) 이 fd만 내려놓을 뿐 공유
+            // 자원은 다른 소유자를 위해 그대로 둔다 - 아래
+            // fileDescriptors.erase(slot)이 이 슬롯의 SharedPtr을 지우면서
+            // 참조 카운트만 줄인다(0이 되는 마지막 소유자 쪽에서만
+            // kDestroyAndFree<UnixSocket>가 자동 반납). fd 상속 자체는
+            // 아직 SpawnProcess에 배선되지 않아 지금은 항상 useCount()==1
+            // 이므로 이 분기 추가로 기존 동작은 바뀌지 않는다(회귀 없음).
+            if (slot->value.socket.useCount() == 1) {
+                UnixSocket* socket = slot->value.socket.get();
+                if (socket->bridge != 0) {
+                    CloseBridgeArgs closeArgs;
+                    closeArgs.bridge = socket->bridge;
+                    kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
                 }
-                DestroyChannelArgs destroyArgs;
-                destroyArgs.channelHandle = socket->channelId;
-                kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
+                if (socket->channelId != 0) {
+                    // Socket()이 등록한 것과 정확히 같은 포맷으로 재계산
+                    // (kFormatAutoSocketPath, socket.h §4-1 포맷 주석 참고).
+                    char autoPath[kMaxNamedObjectNameLength];
+                    const uint32_t autoPathLen =
+                        kFormatAutoSocketPath(process->processId, fd, autoPath, kMaxNamedObjectNameLength);
+                    NamedObjectTable::release(autoPath, autoPathLen);
+                    if (socket->explicitlyBound) {
+                        NamedObjectTable::release(socket->boundPath, socket->boundPathLength);
+                    }
+                    DestroyChannelArgs destroyArgs;
+                    destroyArgs.channelHandle = socket->channelId;
+                    kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
+                }
             }
-            // [승격, 2026-09-27 4회차] 더 이상 직접 free하지 않는다 -
-            // 아래 fileDescriptors.erase(slot)이 이 슬롯의 SharedPtr을
-            // 지우는 순간 참조 카운트가 줄고(지금은 항상 유일한 소유자라
-            // 즉시 0), kMakeShared의 기본 삭제자(kDestroyAndFree<UnixSocket>)
-            // 가 자동으로 반납한다(Channel/BridgePipe와 동일한 관례).
+            // 마지막 소유자든 아니든, 이 fd 슬롯 자체의 SharedPtr은 항상
+            // 내려놓는다(아래 fileDescriptors.erase(slot) - 참조 카운트
+            // 감소는 그쪽이 담당, 위 분기는 "부가 자원까지 같이 정리할지"
+            // 만 결정한다).
         }
         process->fileDescriptors.erase(slot);
         args->error = ChannelError::None;
