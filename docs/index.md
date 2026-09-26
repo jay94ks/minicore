@@ -51,7 +51,7 @@
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-24T07:08:13.497Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-25T08:28:29.350Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-26T02:59:41.215Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-24T09:22:34.427Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-25T17:37:49.571Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
@@ -71,7 +71,7 @@
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved | 2026-09-16T14:29:59.188Z |
 | [SP-2BCE5D60](./SP-2BCE5D60.md) | fs 커널 서비스(파일시스템 드라이버: ext4/swapfs/FAT32-16) — 설계 제안 | approved | 2026-09-22T05:24:17.169Z |
 | [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | approved | 2026-09-22T02:14:40.657Z |
-| [SP-33FE698A](./SP-33FE698A.md) | 코루틴 AsyncTask 전용 뮤텍스(AsyncCoroMutex) — 재시도 폴링을 없앤 명시적 wait-queue 기반 설계 | review | 2026-09-26T02:36:08.005Z |
+| [SP-33FE698A](./SP-33FE698A.md) | 코루틴 AsyncTask 전용 뮤텍스(AsyncCoroMutex) — 재시도 폴링을 없앤 명시적 wait-queue 기반 설계 | approved | 2026-09-26T02:45:53.905Z |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-19T17:48:08.056Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
 | [SP-43331889](./SP-43331889.md) | devmgr/fs 커널 흡수 + 유저모드 드라이버 지원 — 설계 제안 (DC-91ABD922/QU-23B339AB 확정 반영) | approved | 2026-09-22T07:19:58.202Z |

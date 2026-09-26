@@ -88,41 +88,32 @@ kernel::AsyncTask* kSubmitWriteExtBlocks(fs::BlockDevice* device, uint32_t extBl
                                       extBlockCount * devBlocksPerExtBlock, outResult);
 }
 
-// [신규, 2026-09-26, PN-D168A778 curspace 실시간 갱신] 여러 코어가 동시에
-// 서로 다른 파일에 쓰기를 제출해도 같은 uid의 쿼터 리프 레코드를 향한
-// read-modify-write가 겹치면 갱신 유실(lost update)이 난다 - 그 RMW
-// 구간(트리 재순회 + curspace 계산 + 되쓰기) 전체를 감싸는 상호배제가
-// 필요하다. **`kernel::AsyncMutex`(mutex_core.h)를 그대로 쓸 수 없다** -
-// 그 YieldingPolicy는 경합 시 raw `kernel::AsyncTask::yield()`를 부르는데,
-// 이 `onExec`은 진짜 코루틴(`AsyncExecCoro`, 파일 맨 위 문서 주석 참고)
-// 이라 raw yield()를 그 안에서 부르면 무한 대기가 난다(async_task.h의
-// `AsyncTaskCoroYield` 문서 주석 + PN-A0CEF82D/QU-CC8A31F6이 ahci.cpp에서
-// 실측으로 이미 겪은 것과 정확히 같은 함정 - 코루틴 onExec 안에서는
-// 반드시 `co_await AsyncTaskCoroYield{}`로 리액터에 양보해야 한다).
-// 그래서 `MutexCore`(정책 없는 원시 코어, tryAcquire()/release()만
-// 노출)만 재사용하고, 경합 시 재시도는 호출부가 코루틴 안에서 직접
-// `co_await kernel::AsyncTaskCoroYield{}`로 돌린다(아래 사용부 참고).
-kernel::MutexCore gQuotaCurspaceMutexCore;
+// [신규, 2026-09-26, PN-D168A778 curspace 실시간 갱신, 이전 완료
+// PN-6D2C8836/SP-33FE698A] 여러 코어가 동시에 서로 다른 파일에 쓰기를
+// 제출해도 같은 uid의 쿼터 리프 레코드를 향한 read-modify-write가
+// 겹치면 갱신 유실(lost update)이 난다 - 그 RMW 구간(트리 재순회 +
+// curspace 계산 + 되쓰기) 전체를 감싸는 상호배제가 필요하다.
+// **[이전, 2026-09-26]** 원래 `MutexCore`(정책 없는 원시 코어) +
+// 호출부의 `while(!tryAcquire()) co_await AsyncTaskCoroYield{};` 재시도
+// 패턴이었으나, 이 재시도 자체가 임계구역 안에서 실제 AHCI I/O를
+// `co_await`하는 경우(`gBlockBitmapAllocMutex`가 먼저 겪음, `PN-ADA46BF4`/
+// `DC-59F63D0E`) 우선순위 역전 라이브락을 일으킨다는 게 실측으로
+// 확정돼, 재시도/폴링 자체가 없는 `kernel::AsyncCoroMutex`(SP-33FE698A -
+// `interrupt_subscription.cpp`의 `WaitInterruptHandler`와 동일한
+// "정지 후 명시적 깨우기" 패턴, "직접 인계"로 FIFO 보장)로 교체했다.
+kernel::AsyncCoroMutex gQuotaCurspaceMutex;
 
-// tryAcquire() 성공 이후 생성해 무조건 release()를 보장하는 RAII 래퍼 -
-// MutexCore 자체는 (BasicMutex와 달리) lock()/unlock() 짝이 아니라
-// tryAcquire()/release() 짝이라 mutex_core.h의 LockGuard<T>를 그대로
-// 못 쓴다(그 템플릿은 인자 없는 lock()/unlock()을 가정). 임계구역
-// 안에 조기 `break`가 여러 개 있어도(아래 사용부의 do-while(false))
-// 소멸자가 스택 언와인딩만으로 정확히 한 번 불린다(SlabBuf와 동일한
-// 근거 - 이 코드베이스가 C++ 예외를 안 써도 성립).
-class MutexCoreReleaseGuard {
-public:
-    explicit MutexCoreReleaseGuard(kernel::MutexCore& core) : _core(core) {}
-    ~MutexCoreReleaseGuard() {
-        _core.release([] {});
-    }
-    MutexCoreReleaseGuard(const MutexCoreReleaseGuard&) = delete;
-    MutexCoreReleaseGuard& operator=(const MutexCoreReleaseGuard&) = delete;
-
-private:
-    kernel::MutexCore& _core;
-};
+// [신규, 2026-09-26, PN-ADA46BF4/SP-33FE698A] 블록 할당/해제 루틴
+// (`kExt4AllocateBlockInGroup`/`kExt4FreeBlockInGroup`) 왕복 전체
+// (비트맵 read → gd read → 순수 메모리 연산 → 비트맵 write → gd write)
+// 를 감싸는 상호배제 - 이 파일 전역 9개 호출부가 지금까지 전혀
+// 보호되지 않아, 서로 무관한 두 프로세스가 각자 다른 파일에 동시에
+// 쓰기만 해도 블록 이중 할당(e2fsck multiply-claimed block)이
+// 실측으로 확인됐다(`PN-ADA46BF4` 재현 기록). `gQuotaCurspaceMutex`와
+// 동일한 이유로 `AsyncCoroMutex`를 쓴다 - 오히려 이 뮤텍스가 그 설계
+// 전환의 직접 계기였다(임계구역이 I/O `co_await`를 4회 연달아
+// 포함해서 재시도 기반 방식이 라이브락났음).
+kernel::AsyncCoroMutex gBlockBitmapAllocMutex;
 
 // inodeNum이 속한 그룹/inode 테이블 상의 정확한 바이트 위치를
 // 계산한다(ext4.cpp의 Ext4Volume::readInodeStruct와 동일 계산) -
@@ -390,6 +381,17 @@ bool Ext4Driver::remount(bool writable) {
     // 여전히 onExec에서 PermissionDenied로 거부된다.
     readOnly_ = !writable;
     return true;
+}
+
+// [PN-6D2C8836, SP-33FE698A §2.4] 이 task가 gBlockBitmapAllocMutex/
+// gQuotaCurspaceMutex 대기열에 매달린 채로 취소됐을 수 있다 - 둘 다
+// 무해하게 "없으면 false"를 반환하므로 어느 쪽에 실제로 대기 중이었는지
+// 미리 알 필요 없이 둘 다 시도한다(동시에 두 대기열 모두에 있을 수는
+// 없다 - 코루틴 하나는 한 순간에 최대 하나의 co_await만 정지 지점으로
+// 가진다). 최대 하나만 실제로 제거를 수행하고 나머지는 no-op.
+void Ext4Driver::onCancel(kernel::AsyncTask* task, void*) {
+    gBlockBitmapAllocMutex.removeIfWaiting(task);
+    gQuotaCurspaceMutex.removeIfWaiting(task);
 }
 
 kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw) {
@@ -1115,9 +1117,12 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         break;  // 이미 충분함
                     }
 
-                    // 데이터 블록 하나 할당.
+                    // 데이터 블록 하나 할당. [PN-6D2C8836] 비트맵 왕복
+                    // 전체를 gBlockBitmapAllocMutex로 감싼다.
                     uint64_t dataBlockAbs = 0;
                     {
+                        co_await gBlockBitmapAllocMutex.lockAsync();
+                        kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                         SlabBuf blockBitmapBuf(blockSize);
                         SlabBuf blockGdBuf(blockSize);
                         if (!blockBitmapBuf || !blockGdBuf) {
@@ -1228,6 +1233,11 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     // 합성 불가 제약 때문).
                     uint64_t growBlockAbs = 0;
                     {
+                        // [PN-6D2C8836] 이 스코프 전체(할당 스캔 + 실패 시
+                        // dataBlockAbs 롤백 free까지)를 한 임계구역으로
+                        // 감싼다 - 재진입 없음(PN-ADA46BF4 스코프 경계).
+                        co_await gBlockBitmapAllocMutex.lockAsync();
+                        kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                         SlabBuf growBitmapBuf(blockSize);
                         SlabBuf growGdBuf(blockSize);
                         if (!growBitmapBuf || !growGdBuf) {
@@ -1465,6 +1475,9 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
 
                     uint64_t dataBlockAbs = 0;
                     {
+                        // [PN-6D2C8836]
+                        co_await gBlockBitmapAllocMutex.lockAsync();
+                        kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                         SlabBuf blockBitmapBuf(blockSize);
                         SlabBuf blockGdBuf(blockSize);
                         if (!blockBitmapBuf || !blockGdBuf) {
@@ -1583,6 +1596,10 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         SlabBuf rbBitmapBuf(blockSize);
                         SlabBuf rbGdBuf(blockSize);
                         if (rbBitmapBuf && rbGdBuf) {
+                            // [PN-6D2C8836] 바깥 할당 임계구역(CS-C)이 이미
+                            // 닫힌 뒤라 별개의 새 임계구역(재진입 아님).
+                            co_await gBlockBitmapAllocMutex.lockAsync();
+                            kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                             fs::BlockIoResult rbBmIo;
                             kernel::AsyncTask* rbBmTask =
                                 kSubmitReadExtBlocks(device, blockSize, rbBitmapBlock, 1, rbBitmapBuf.get(), &rbBmIo);
@@ -1850,12 +1867,9 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             //
             //    **동시성**: 서로 다른 코어가 동시에 다른 파일에 쓰기를
             //    제출해도 같은 uid의 쿼터 리프 레코드를 향한 RMW가
-            //    겹치면 갱신 유실이 난다 - `gQuotaCurspaceMutexCore`
-            //    (파일 위쪽 선언, `MutexCore` 원시 코어)로 이 구간
-            //    전체를 감싼다. `kernel::AsyncMutex`를 쓰지 않는 이유는
-            //    그 선언부 문서 주석 참고(YieldingPolicy가 raw
-            //    `AsyncTask::yield()`를 불러 진짜 코루틴인 이 onExec
-            //    안에서는 무한 대기가 남).
+            //    겹치면 갱신 유실이 난다 - `gQuotaCurspaceMutex`(파일
+            //    위쪽 선언, `AsyncCoroMutex` - PN-6D2C8836 이전)로 이
+            //    구간 전체를 감싼다.
             if (blocksAllocatedCount > 0 && sb.usrQuotaInum != 0) {
                 kernel::Uid writerUid = kernel::kRootUid;
                 bool haveWriterUid = false;
@@ -1869,10 +1883,8 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     haveWriterUid = true;
                 }
                 if (haveWriterUid) {
-                    while (!gQuotaCurspaceMutexCore.tryAcquire()) {
-                        co_await kernel::AsyncTaskCoroYield{};
-                    }
-                    MutexCoreReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutexCore);
+                    co_await gQuotaCurspaceMutex.lockAsync();
+                    kernel::AsyncCoroMutexReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutex);
                     do {
                         uint64_t qInodeBlockOffset = 0;
                         uint32_t qInodeByteOffset = 0;
@@ -2825,6 +2837,9 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     const uint32_t anchorGroupLocal = (parentInodeNum - 1) / sb.inodesPerGroup;
                     uint64_t newLeafAbs = 0;
                     {
+                        // [PN-6D2C8836]
+                        co_await gBlockBitmapAllocMutex.lockAsync();
+                        kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                         SlabBuf blockBitmapBuf(blockSize);
                         SlabBuf blockGdBuf(blockSize);
                         if (!blockBitmapBuf || !blockGdBuf) {
@@ -3328,6 +3343,12 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             //    건드리므로 재확인 없이 그대로 반전 가능).
             uint64_t newBlockAbs = 0;
             {
+                // [PN-6D2C8836] 이 스코프는 블록 비트맵 할당 스캔 외에
+                // 실패 시 inode 비트맵(별개 자원) 롤백도 포함하지만,
+                // 전체를 감싸도 무해하다(과보호일 뿐 상호 배제 대상이
+                // 아닌 자원을 추가로 직렬화할 뿐).
+                co_await gBlockBitmapAllocMutex.lockAsync();
+                kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                 SlabBuf blockBitmapBuf(blockSize);
                 SlabBuf blockGdBuf(blockSize);
                 if (!blockBitmapBuf || !blockGdBuf) {
@@ -4156,6 +4177,10 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         ioFailed = true;
                         break;
                     }
+                    // [PN-6D2C8836] 매 반복(그룹)마다 새로 획득/반납 -
+                    // for 루프 몸체 스코프가 그대로 임계구역 경계.
+                    co_await gBlockBitmapAllocMutex.lockAsync();
+                    kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                     fs::BlockIoResult bmIo;
                     kernel::AsyncTask* bmTask =
                         kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, bitmapBuf.get(), &bmIo);
@@ -4919,6 +4944,9 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         ioFailed = true;
                         break;
                     }
+                    // [PN-6D2C8836] 매 반복(그룹)마다 새로 획득/반납.
+                    co_await gBlockBitmapAllocMutex.lockAsync();
+                    kernel::AsyncCoroMutexReleaseGuard bitmapGuard(gBlockBitmapAllocMutex);
                     fs::BlockIoResult bmIo;
                     kernel::AsyncTask* bmTask =
                         kSubmitReadExtBlocks(device, blockSize, bitmapBlock, 1, bitmapBuf.get(), &bmIo);
@@ -5217,10 +5245,8 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             //     막는다.
             if (targetBlockCount > 0 && sb.usrQuotaInum != 0) {
                 const kernel::Uid ownerUid = static_cast<kernel::Uid>(targetInode.uid);
-                while (!gQuotaCurspaceMutexCore.tryAcquire()) {
-                    co_await kernel::AsyncTaskCoroYield{};
-                }
-                MutexCoreReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutexCore);
+                co_await gQuotaCurspaceMutex.lockAsync();
+                kernel::AsyncCoroMutexReleaseGuard quotaReleaseGuard(gQuotaCurspaceMutex);
                 do {
                     uint64_t qInodeBlockOffset = 0;
                     uint32_t qInodeByteOffset = 0;

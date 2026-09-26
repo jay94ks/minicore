@@ -279,6 +279,228 @@ private:
 // 자체가 성립하지 않는다(설계자 승인, QU-C06793C2). ReentrantSemaphore
 // 류는 만들지 않는다.
 
+// [신규, 2026-09-26, SP-33FE698A, DC-59F63D0E/QU-5CE6FA42 설계자
+// 지시("이걸 설계안으로 작성해봐")] 진짜 C++20 코루틴(`co_return`이
+// 있어 컴파일러가 상태 기계로 변환한 함수, 예: `Ext4Driver::onExec`)
+// 안에서 경합 시 폴링/재시도 없이 진짜로 정지했다가 `release()`가
+// 명시적으로 깨워 주는 뮤텍스 - 위 `Mutex`(`ParkingPolicy`, 진짜
+// `kernel::Task`를 재움)와 `AsyncMutex`(`YieldingPolicy`, `AsyncTask::
+// yield()` - 스택풀 전용, 코루틴에서 부르면 무한 대기)를 코루틴에
+// 못 쓴다는 공백을 메운다. `BasicMutex<Policy>::lock()`은 평범한
+// 비-코루틴 함수라 그 자리에 새 Policy를 끼우는 방식으로는 코루틴을
+// 정지시킬 수 없다(정지 지점이 호출부 코루틴 자신의 `co_await` 식
+// 이어야 한다는 C++20 언어 규칙) - 그래서 `BasicMutex<Policy>`를
+// 확장하지 않고 `AsyncTaskCoroAwaiter`/`AsyncTaskCoroYield`와 같은
+// 급의 독립된 co_await 가능 프리미티브로 새로 만든다.
+//
+// `interrupt_subscription.cpp`의 `WaitInterruptHandler`가 이미
+// 실사용 중인 패턴을 이름만 일반화했다 - 대기자는 `kernel::
+// SuspendAlways{}`로 순수 정지(스스로 재큐잉하지 않으므로 "재시도"
+// 개념 자체가 없음), 깨우기는 소유자가 대기열에서 직접 `popFront()`
+// 한 뒤 `AsyncReactor::submitCompletion()`을 호출(`kInterruptSubscriptionIsr`
+// 의 `popFront()`+`submitCompletion()`과 동일). 대기열 노드는
+// `AsyncTask::next`를 재사용하는 침습적 FIFO(`channel.h`의
+// `AsyncTaskWaitQueue`/`interrupt_subscription.h`의
+// `InterruptWaiterQueue`와 완전히 같은 구조 - 이 작은 구조체를
+// 서브시스템마다 독립적으로 다시 두는 게 이 커널의 의도된 관례,
+// "관계없는 두 서브시스템의 불필요한 결합 방지").
+//
+// **"직접 인계"(direct handoff)**: `release()`는 대기열이 비어
+// 있지 않으면 `_locked`를 여전히 true로 유지한 채 다음 대기자에게
+// 소유권을 그대로 넘긴다(그 대기자의 `await_resume()`이 "이미 락을
+// 쥔 채로 재개됐다"는 뜻) - 기존 `WaitQueue::wakeOne()`/
+// `ParkingPolicy`의 "깨우고 재경쟁"과 달리, `_locked=false`가 되는
+// 순간 자체가 "대기자가 없을 때"로 한정되므로 release와 동시에
+// 다른 코어의 새 `tryAcquire()`가 새치기할 여지가 없다 - 순서가
+// 항상 등록 순서 그대로(FIFO) 확정되고, "재시도 카운터"/"드레인
+// 배치 상한" 같은 스케줄러 공정성 파라미터에 전혀 의존하지 않는다
+// (`PN-F2594E93`의 "(b)" 수정이 실제 AHCI I/O처럼 임계구역이 여러
+// `co_await`를 연달아 감싸는 경우 여전히 hang했던 근본 원인 - 재시도
+// 폴링 자체를 없애 그 원인이 무엇이든 성립할 수 없게 만든다).
+//
+// **취소(cancel) 처리 - 이 클래스를 쓰는 각 AsyncTaskHandler의
+// 책임**: `WaitInterruptHandler::onCancel`이 이미 겪은 것과 같은
+// 위험이 그대로 적용된다 - 대기열에 매달린 채로 그 AsyncTask의
+// 소유자(제출자 프로세스)가 강제 종료되면, 프레임워크가 onExec을
+// 재개하는 대신 onCancel만 부르고 코루틴 프레임 자체를 반납한다 -
+// 그 시점에 `_waiters`에 남아 있는 포인터가 댕글링돼 다음
+// `release()`의 `popFront()`가 UAF를 일으킨다(`SP-1FBC0EEB` Channel
+// IPC의 `PN-C4611402`, interrupt_subscription.cpp의 동일 클래스
+// 결함과 같은 패턴) - 이 뮤텍스를 쓰는 각 `AsyncTaskHandler`의
+// `onCancel`이 "이 task가 대기열에 매달려 있으면 제거한다"를
+// 반드시 구현해야 한다(`removeIfWaiting()` 참고).
+class AsyncCoroMutex {
+public:
+    void init() {
+        _locked = false;
+        _waiters.head = nullptr;
+        _waiters.tail = nullptr;
+    }
+
+    // co_await 가능한 획득 - 진짜 C++20 코루틴 onExec 안에서만 쓴다
+    // (AsyncTaskCoroAwaiter/AsyncTaskCoroYield와 동일한 제약 - 코루틴
+    // 밖에서 부르면 AsyncTask::current()가 nullptr이라 안전하지
+    // 않다).
+    class LockAwaiter {
+    public:
+        explicit LockAwaiter(AsyncCoroMutex& mutex) : _mutex(mutex) {}
+        // 항상 await_suspend 안에서 "확인+등록"을 한 스핀락 보유
+        // 구간으로 원자적으로 처리해야 lost-wakeup을 피할 수 있다
+        // (MutexCore::tryAcquireOrKeepLock/WaitInterruptHandler §3
+        // "onExec 원자성 계약"과 동일한 원칙) - 그래서 await_ready()는
+        // 항상 false만 반환해 반드시 await_suspend를 거치게 한다.
+        bool await_ready() noexcept { return false; }
+        bool await_suspend(std::coroutine_handle<>) noexcept {
+            AsyncTask* self = AsyncTask::current();
+            SpinlockGuard guard(_mutex._lock);
+            if (!_mutex._locked) {
+                _mutex._locked = true;
+                return false;  // 무경합 - 정지 없이 즉시 재개(락 획득 완료)
+            }
+            _mutex._waiters.pushBack(self);
+            return true;  // 정지 - release()의 직접 인계가 재개시킴(그때 이미 락 보유 상태)
+        }
+        void await_resume() noexcept {}
+
+    private:
+        AsyncCoroMutex& _mutex;
+    };
+    LockAwaiter lockAsync() { return LockAwaiter(*this); }
+
+    // 즉시 시도 - 기존 MutexCore::tryAcquire()와 동일한 의미(비-코루틴
+    // 호출부/점진 이행 호환용).
+    bool tryAcquire() {
+        SpinlockGuard guard(_lock);
+        if (_locked) return false;
+        _locked = true;
+        return true;
+    }
+
+    // [PN-6D2C8836, SP-33FE698A §2.4 실측 확정] onCancel의 removeIfWaiting
+    // 만으로는 부족하다 - 실제로 재현됨: 대기자가 취소되면
+    // `Scheduler::cancelPendingSyscalls()`가 `state=Cancelled`로 바꾸고
+    // 그 즉시 `submitCompletion()`으로 큐에 다시 넣지만(onCancel은 그
+    // 큐 항목이 나중에 drainOnce()에 뽑힐 때에야 비로소 불린다), 그
+    // "나중"이 오기 전에 락 보유자가 `release()`를 부르면 `_waiters`
+    // 에는 아직 그 대기자가 남아 있어 여기서 또 `submitCompletion()`을
+    // 부르게 된다 - 같은 AsyncTask가 두 큐(또는 같은 큐에 두 번) 노드로
+    // 동시에 걸려 침습적 리스트가 깨진다. 그래서 여기서 직접 인계
+    // 대상을 고를 때 이미 취소된 항목은 건너뛴다(그 항목은 자신의
+    // 기존 큐 등록만으로 나중에 onCancel이 알아서 청소한다) - 이렇게
+    // 하면 release() 쪽에서 다시 큐에 넣는 일 자체가 없어져 이 경쟁이
+    // 사라진다. **잔여 위험**: 이 상태 읽기 자체는 락 없이 이뤄져(다른
+    // 필드 접근과 동일한 이 코드베이스 기존 관례) `state` 대입과의
+    // 진짜 원자성은 없다 - "그 즉시" 취소되는 아주 좁은 타이밍은 여전히
+    // 이론상 남는다(DC 등록 예정).
+    void release() {
+        AsyncTask* next = nullptr;
+        for (;;) {
+            {
+                SpinlockGuard guard(_lock);
+                next = _waiters.popFront();
+                if (!next) {
+                    _locked = false;
+                    return;
+                }
+                // next가 있으면 _locked=true 유지 - 위 "직접 인계" 참고.
+            }
+            if (next->state == AsyncTaskState::Cancelled) {
+                continue;  // 이미 취소됨 - 건너뛰고 다음 대기자를 본다.
+            }
+            break;
+        }
+        AsyncReactor::submitCompletion(next, /*preemptive=*/true);
+    }
+
+    // 취소 경로 전용 - 이 task가 아직 대기열에 매달려 있으면(아직
+    // release()가 꺼내 깨우기 전) 제거한다. 이미 꺼내져 재개
+    // 대기 중이거나 이미 락을 보유 중이면 false(할 일 없음) - 호출부
+    // (각 AsyncTaskHandler::onCancel)가 이 반환값으로 추가 정리가
+    // 필요한지 판단할 수 있다. 선형 탐색(WaitInterruptHandler와 동일
+    // 관례 - 대기자 수가 많지 않다는 전제, kMaxSubscribersPerVector류
+    // 상한과 같은 급).
+    bool removeIfWaiting(AsyncTask* task) {
+        SpinlockGuard guard(_lock);
+        return _waiters.remove(task);
+    }
+
+private:
+    // interrupt_subscription.h의 InterruptWaiterQueue/channel.h의
+    // AsyncTaskWaitQueue와 동일한 구조 - 이 파일 안에 독립적으로
+    // 다시 둔다(관계없는 서브시스템 간 불필요한 결합 방지 관례).
+    struct Waiters {
+        AsyncTask* head = nullptr;
+        AsyncTask* tail = nullptr;
+
+        void pushBack(AsyncTask* task) {
+            task->next.store(nullptr);
+            if (tail) {
+                tail->next.store(task);
+            } else {
+                head = task;
+            }
+            tail = task;
+        }
+
+        AsyncTask* popFront() {
+            AsyncTask* task = head;
+            if (task) {
+                head = task->next.load();
+                if (!head) {
+                    tail = nullptr;
+                }
+                task->next.store(nullptr);
+            }
+            return task;
+        }
+
+        // removeIfWaiting() 전용 - 침습적 단일 연결 리스트에서 임의
+        // 원소 하나를 제거(선형 탐색, 이전 노드를 추적하며 진행).
+        bool remove(AsyncTask* target) {
+            AsyncTask* prev = nullptr;
+            AsyncTask* cur = head;
+            while (cur) {
+                AsyncTask* nextNode = cur->next.load();
+                if (cur == target) {
+                    if (prev) {
+                        prev->next.store(nextNode);
+                    } else {
+                        head = nextNode;
+                    }
+                    if (cur == tail) {
+                        tail = prev;
+                    }
+                    cur->next.store(nullptr);
+                    return true;
+                }
+                prev = cur;
+                cur = nextNode;
+            }
+            return false;
+        }
+    };
+
+    Spinlock _lock;
+    bool _locked = false;
+    Waiters _waiters;
+};
+
+// SpinlockGuard/LockGuard<T>와 같은 RAII 관례 - AsyncCoroMutex는
+// tryAcquire()/release() 짝(인자 없는 lock()/unlock()이 아님)이라
+// 위 LockGuard<T> 템플릿 대상이 아니다(MutexCore와 동일한 이유).
+// co_await로 이미 획득이 끝난 뒤(LockAwaiter가 반환된 뒤) 생성해
+// 스코프 종료 시 항상 release()를 호출한다.
+class AsyncCoroMutexReleaseGuard {
+public:
+    explicit AsyncCoroMutexReleaseGuard(AsyncCoroMutex& mutex) : _mutex(mutex) {}
+    ~AsyncCoroMutexReleaseGuard() { _mutex.release(); }
+    AsyncCoroMutexReleaseGuard(const AsyncCoroMutexReleaseGuard&) = delete;
+    AsyncCoroMutexReleaseGuard& operator=(const AsyncCoroMutexReleaseGuard&) = delete;
+
+private:
+    AsyncCoroMutex& _mutex;
+};
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_MUTEX_CORE_H

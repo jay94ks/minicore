@@ -45,7 +45,13 @@ public:
 
     kernel::AsyncExecCoro onExec(kernel::AsyncTask* task, void* argsRaw) override;
     void onFailure(kernel::AsyncTask*) override {}
-    void onCancel(kernel::AsyncTask*, void*) override {}
+    // [PN-6D2C8836, SP-33FE698A §2.4] gBlockBitmapAllocMutex/
+    // gQuotaCurspaceMutex 대기열에 매달린 채로 소유 프로세스가 강제
+    // 종료되면 이 task가 removeIfWaiting()으로 제거돼야 한다 - 그대로
+    // 두면 다음 release()의 popFront()가 댕글링 포인터를 깨운다(UAF).
+    // 정의는 ext4_driver.cpp(그 두 뮤텍스가 이 파일 anonymous
+    // namespace 전역이라 여기선 접근 불가).
+    void onCancel(kernel::AsyncTask* task, void* args) override;
 
 private:
     Ext4Volume volume_;
