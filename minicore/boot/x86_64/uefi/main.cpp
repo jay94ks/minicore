@@ -520,6 +520,27 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
         unsigned long long physicalBase = 0;
         bool physicalBaseFound = false;
         bool physicalBaseSearchDone = false;
+        // [신규, 2026-09-26, PN-61D908EB/PN-7FBF255A 재현 중 발견]
+        // 커널 이미지가 커지면서(현재 imageSpan ~24.8MiB) 아래 메모리맵
+        // 스캔이 재배치 후보를 못 찾아 100% 실패하는 회귀를 실측
+        // 확인했다(-m 256M/512M/1024M/2048M 전부 동일하게 실패 -
+        // 총 RAM 크기와 무관, [kKernelLma, kKernelLma+imageSpan) 자체를
+        // 재배치 후보에서 배제하는 규칙(아래 "겹치지 않는 후보만 채택"
+        // 참고) 때문에 부팅 초기 가장 큰 연속 여유 영역이 하나 통째로
+        // 후보 풀에서 빠져, 이미지가 커질수록 남는 조각들 중엔 충분히
+        // 큰 게 없어짐). **delta=0("제자리 유지")은 항상 안전한 후보다**
+        // - kKernelLma(0x100000)는 항상 kOneGiB보다 한참 작고
+        // (0x100000+imageSpan은 실측상 25MiB 안팎, 1GiB 한도에 여유가
+        // 충분), kApTrampolineSafeLimit(0x9000)보다 크므로 트램폴린과도
+        // 절대 안 겹치며, delta=0은 자명하게 2MiB 배수(정렬 조건
+        // 자동 만족) - 메모리맵 스캔보다 먼저 이 자명한 후보를 확인해
+        // 불필요한 재배치 자체를 건너뛴다(제자리면 복사도 없어 "복사
+        // 도중 겹침" 위험도 원천적으로 없음).
+        if (loaderPreconditionsOk && kKernelLma + imageSpan <= kOneGiB &&
+            !(kKernelLma <= kApTrampolineSafeLimit && kKernelLma + imageSpan > kApTrampolinePhys)) {
+            physicalBase = kKernelLma;
+            physicalBaseFound = true;
+        }
         bool exitedBootServices = false;
         for (unsigned int attempt = 0; attempt < 3 && !exitedBootServices; ++attempt) {
             unsigned long long finalMapSize = kMemoryMapBufferCapacity;
@@ -547,7 +568,7 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
                 gUefiBootInfo.memmapDescriptorSize = finalDescriptorSize;
                 gUefiBootInfo.memmapEntryCount =
                     finalDescriptorSize > 0 ? static_cast<unsigned int>(finalMapSize / finalDescriptorSize) : 0;
-                if (loaderPreconditionsOk && finalDescriptorSize > 0) {
+                if (!physicalBaseFound && loaderPreconditionsOk && finalDescriptorSize > 0) {
                     const unsigned long long entryCount = finalMapSize / finalDescriptorSize;
                     for (unsigned long long i = 0; i < entryCount; ++i) {
                         const auto* region =
@@ -738,10 +759,39 @@ extern "C" EFI_STATUS efi_main(EFI_HANDLE imageHandle, EFI_SYSTEM_TABLE* systemT
             // 건 나중에 long_mode_entry가 세그먼트 레지스터를 재적재할
             // 때이므로 - 그때는 이미 새 CR3가 활성화돼 있어
             // actualGdt64Addr가 identity map으로 정상 역참조된다).
+            //
+            // [수정, 2026-09-26, PN-61D908EB/PN-E4C6AF72 근본 원인 확정]
+            // 이전엔 `jmp *%1`(간접 **니어** 점프)이었다 - 니어 점프는
+            // CS를 절대 재적재하지 않는다(오퍼랜드가 RIP만 바꿈). 위
+            // lgdt로 GDTR은 우리 gdt64로 바뀌었지만, **CS 히든 캐시는
+            // 여전히 UEFI 펌웨어 자신의 코드 세그먼트를 가리킨 채로
+            // long_mode_entry에 진입**했다 - 그 선택자 값(이 환경에서
+            // 실측 0x38)은 UEFI 자신의 GDT에선 유효한 64비트 코드
+            // 세그먼트였지만, 우리 GDT에서는 우연히 코어0 TSS
+            // 디스크립터 슬롯과 같은 번호라 System 타입이다. long mode는
+            // 대부분의 명령 실행에 CS 내용을 재검사하지 않으므로(캐시된
+            // L=1만 쓰면 그만) 이 상태로도 평범한 코드는 끝없이 정상
+            // 실행되다가, 훨씬 나중에 최초의 `iretq`가 CS=0x38을 GDT에서
+            // **새로** 읽어들이려는 순간(iretq는 항상 새로 읽는다) 그
+            // 엔트리가 System 디스크립터라 즉시 #GP가 난다 - 그래서
+            // 겉보기엔 "인터럽트 처리 중 CS가 오염된다"는 정확히 반대의
+            // 증상으로 보였다(실제로는 진작부터 잘못돼 있었고 iretq가
+            // 처음으로 그 사실을 검증했을 뿐). GRUB/PVH 경로가 이
+            // 버그가 전혀 없는 이유도 확인했다 - boot.S의 32비트 진입
+            // 코드는 이 정확히 같은 전환에 `push 0x08; push
+            // offset long_mode_entry; retf`(진짜 **파** 전환)를 쓴다
+            // (boot.S :257-262) - UEFI 경로만 "이미 64비트 long mode라
+            // 32/64 전환 준비 코드를 건너뛴다"는 지름길을 택하면서 이
+            // 파 전환 자체도 함께 생략해 버린 것이 근본 원인이었다.
+            // 아래를 GRUB/PVH와 정확히 같은 파 반환(retf의 64비트
+            // 판인 lretq) 관용구로 교체해 CS를 우리 gdt64의 코드
+            // 셀렉터(0x08)로 명시적으로 재적재한다.
             asm volatile(
                 "lgdt (%2)\n"
                 "mov %0, %%cr3\n"
-                "jmp *%1\n"
+                "pushq $0x08\n"
+                "pushq %1\n"
+                "lretq\n"
                 :
                 : "r"(actualPml4Addr), "r"(actualEntry), "r"(&gdtr)
                 : "memory");
