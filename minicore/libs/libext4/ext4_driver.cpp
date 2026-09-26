@@ -3785,6 +3785,11 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
             // 않음).
             constexpr kernel::Uid kMkdirOwnerUidForQuota = 0;
             bool inodeQuotaExceeded = false;
+            // [신규, PN-D15D06AA, 설계자 답변(QU-C5D7940F) - "적용한다"]
+            // 블록 쿼터(bhardlimit) 검사도 같은 조회에 곁들인다 - Write
+            // 경로(§1)와 동일 원칙, 새 디렉터리 자신의 데이터 블록(항상
+            // 1개) 몫만큼만 더한다.
+            bool blockQuotaExceeded = false;
             if (sb.usrQuotaInum != 0) {
                 do {
                     uint64_t qInodeBlockOffset = 0;
@@ -3927,15 +3932,18 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                                                 kMkdirOwnerUidForQuota, &dqblk)) {
                         break;
                     }
-                    if (dqblk.ihardlimit == 0) {
-                        break;  // 0 = 무제한 관례
-                    }
-                    if (dqblk.curinodes + 1 > dqblk.ihardlimit) {
+                    if (dqblk.ihardlimit != 0 && dqblk.curinodes + 1 > dqblk.ihardlimit) {
                         inodeQuotaExceeded = true;
+                    }
+                    if (dqblk.bhardlimit != 0) {
+                        const uint64_t hardLimitBytes = dqblk.bhardlimit * static_cast<uint64_t>(kQuotaBlockSize);
+                        if (dqblk.curspace + static_cast<uint64_t>(blockSize) > hardLimitBytes) {
+                            blockQuotaExceeded = true;
+                        }
                     }
                 } while (false);
             }
-            if (inodeQuotaExceeded) {
+            if (inodeQuotaExceeded || blockQuotaExceeded) {
                 args->error = kernel::VfsError::NoSpace;
                 break;
             }
