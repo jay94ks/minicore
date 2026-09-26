@@ -533,7 +533,7 @@ bool MapleTree::findGap(uint64_t searchFloor, uint64_t searchCeil, uint64_t size
 }
 
 bool MapleTree::erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t upper, uint64_t start,
-                                 uint64_t end) {
+                                 uint64_t end, bool allowSplit, SplitResult* outSplit) {
     Span spans[kMapleArangeSlotCount];
     const uint32_t count = decomposeNode(node, lower, upper, spans);
 
@@ -575,20 +575,33 @@ bool MapleTree::erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t 
         }
     }
 
-    // [안전장치, 2026-09-26, PN-2EA94B1A 착수 중 발견 - v2부터 있던
-    // 별개의 잠재 버그] 리프가 이미 꽉 찬 상태(usedSlotCount==
-    // kMapleArangeSlotCount)에서 어느 한 값 슬롯의 "가운데"를
-    // punch-out하면(양옆 슬롯이 gap이 아니라 이 새 gap과 안 합쳐짐)
-    // 슬롯 하나가 최대 둘 더 늘 수 있다(왼쪽 조각+가운데 gap+오른쪽
-    // 조각) - erase()는 insertIntoLeaf()와 달리 넘칠 때 리프를
-    // 분할하는 절차가 아예 없어(이 v3 이전부터 없었음, 별도 계획으로
-    // 분리 등록) rebuildNode를 그대로 불렀다면 MapleArangeNode의
-    // 고정 배열(슬롯 10개)을 넘겨 써 메모리를 손상시켰다. 리프 분할을
-    // 지원하는 진짜 수정 전까지는, 트리를 부분적으로도 건드리지 않고
-    // 안전하게 거부한다(호출부는 false를 "아무것도 안 지워짐"과
-    // 구분 못 하지만, 손상보다는 훨씬 낫다).
+    // [갱신, 2026-09-27, PN-304F600C] 리프가 이미 꽉 찬 상태에서 어느
+    // 한 값 슬롯의 "가운데"를 punch-out하면(양옆 슬롯이 gap이 아니라
+    // 이 새 gap과 안 합쳐짐) 슬롯 하나가 최대 둘 더 늘 수 있다(왼쪽
+    // 조각+가운데 gap+오른쪽 조각) - `allowSplit`이 false(부모/
+    // childIndex 컨텍스트가 없는 eraseAcrossTwoLeaves() 경로, 위
+    // 헤더 주석 참고)면 예전 그대로 트리를 손대지 않고 안전하게
+    // 거부한다.
     if (mergedCount > kMapleArangeSlotCount) {
-        return false;
+        if (!allowSplit) {
+            return false;
+        }
+        // insertIntoLeaf()의 분할과 완전히 동일한 방식(절반씩 나눠
+        // 형제 리프 생성) - 호출자(erase() 본문)가 이 SplitResult를
+        // 받아 부모에 새 형제를 편입할 책임을 진다.
+        const uint32_t leftCount = (mergedCount + 1) / 2;
+        const uint32_t rightCount = mergedCount - leftCount;
+        MapleArangeNode* sibling = allocNode(true);
+        if (!sibling) {
+            return false;  // 슬랩 고갈 - node는 아직 안 건드렸으니 안전하게 거부
+        }
+        const uint64_t separator = merged[leftCount - 1].upper;
+        rebuildNode(node, merged, leftCount, true);
+        rebuildNode(sibling, merged + leftCount, rightCount, true);
+        if (outSplit) {
+            *outSplit = SplitResult{true, separator, sibling};
+        }
+        return true;
     }
 
     rebuildNode(node, merged, mergedCount, true);
@@ -597,8 +610,8 @@ bool MapleTree::erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t 
 
 bool MapleTree::eraseAcrossTwoLeaves(MapleArangeNode* leafA, uint64_t lowerA, uint64_t upperA, MapleArangeNode* leafB,
                                       uint64_t lowerB, uint64_t upperB, uint64_t start, uint64_t end) {
-    const bool erasedA = erasePartInLeaf(leafA, lowerA, upperA, start, end);
-    const bool erasedB = erasePartInLeaf(leafB, lowerB, upperB, start, end);
+    const bool erasedA = erasePartInLeaf(leafA, lowerA, upperA, start, end, /*allowSplit=*/false, nullptr);
+    const bool erasedB = erasePartInLeaf(leafB, lowerB, upperB, start, end, /*allowSplit=*/false, nullptr);
     return erasedA || erasedB;
 }
 
@@ -610,6 +623,12 @@ bool MapleTree::erase(uint64_t start, uint64_t end) {
     struct PathEntry {
         MapleArangeNode* node;
         uint32_t childIndex;
+        // [신규, PN-304F600C] 이 node 자신이 담당하는 범위 - 리프
+        // 분할이 부모까지 전파될 때 decomposeNode(parent, ...)를
+        // 다시 호출하려면 필요하다(기존에는 gap 재계산만 했어서
+        // node/childIndex만으로 충분했음).
+        uint64_t lower;
+        uint64_t upper;
     };
     PathEntry path[kMaxTreeDepth];
     uint32_t depth = 0;
@@ -641,7 +660,7 @@ bool MapleTree::erase(uint64_t start, uint64_t end) {
         if (end <= spans[i].upper) {
             // 기존 단일 자식 경로(변경 없음).
             if (depth < kMaxTreeDepth) {
-                path[depth++] = PathEntry{node, i};
+                path[depth++] = PathEntry{node, i, lower, upper};
             }
             node = static_cast<MapleArangeNode*>(kMapleNodePtr(spans[i].value));
             lower = spans[i].lower;
@@ -682,18 +701,108 @@ bool MapleTree::erase(uint64_t start, uint64_t end) {
         return true;
     }
 
-    if (!erasePartInLeaf(node, lower, upper, start, end)) {
+    SplitResult splitResult;
+    if (!erasePartInLeaf(node, lower, upper, start, end, /*allowSplit=*/true, &splitResult)) {
         return false;
     }
 
-    // 리프에서 지워진 만큼 gap이 늘었을 수 있으니, 지나온 조상 전부의
-    // gap 집계를 아래에서 위로 다시 계산한다(트리 병합/축소는 하지
-    // 않는다 - 클래스 문서의 알려진 한계 1번).
-    for (uint32_t d = depth; d-- > 0;) {
-        MapleArangeNode* ancestor = path[d].node;
+    if (!splitResult.split) {
+        // 리프에서 지워진 만큼 gap이 늘었을 수 있으니, 지나온 조상
+        // 전부의 gap 집계를 아래에서 위로 다시 계산한다(트리 병합/
+        // 축소는 하지 않는다 - 클래스 문서의 알려진 한계 1번).
+        for (uint32_t d = depth; d-- > 0;) {
+            MapleArangeNode* ancestor = path[d].node;
+            const uint32_t idx = path[d].childIndex;
+            const auto* child = static_cast<const MapleArangeNode*>(kMapleNodePtr(ancestor->slot[idx]));
+            ancestor->gap[idx] = childMaxGap(child);
+            recomputeMaxGapSlot(ancestor);
+        }
+        return true;
+    }
+
+    // [신규, PN-304F600C] 리프가 분할됐다 - insertIntoInternal()의
+    // "자식이 분할됐다" 분기(위 참고)와 완전히 동일한 방식으로 새
+    // 형제를 부모에 편입한다. path[]가 없으면(depth==0, 즉 리프
+    // 자신이 루트였음) 곧바로 새 루트를 만든다 - store()의 루트 분할
+    // 처리(위 store() 참고)와 동일 패턴.
+    MapleArangeNode* splitChild = node;
+    uint64_t sepKey = splitResult.separatorKey;
+    MapleArangeNode* sibling = splitResult.sibling;
+    bool stillSplitting = true;
+    uint32_t d = depth;
+
+    while (stillSplitting && d > 0) {
+        --d;
+        MapleArangeNode* parent = path[d].node;
         const uint32_t idx = path[d].childIndex;
-        const auto* child = static_cast<const MapleArangeNode*>(kMapleNodePtr(ancestor->slot[idx]));
-        ancestor->gap[idx] = childMaxGap(child);
+
+        Span spans[kMapleArangeSlotCount];
+        const uint32_t count = decomposeNode(parent, path[d].lower, path[d].upper, spans);
+
+        Span newSpans[kMapleArangeSlotCount + 2];
+        uint32_t newCount = 0;
+        for (uint32_t j = 0; j < idx; ++j) {
+            newSpans[newCount++] = spans[j];
+        }
+        newSpans[newCount++] = Span{spans[idx].lower, sepKey, kMapleTagNode(splitChild, MapleNodeType::Arange64)};
+        newSpans[newCount++] =
+            Span{sepKey + 1, spans[idx].upper, kMapleTagNode(sibling, MapleNodeType::Arange64)};
+        for (uint32_t j = idx + 1; j < count; ++j) {
+            newSpans[newCount++] = spans[j];
+        }
+
+        if (newCount <= kMapleArangeSlotCount) {
+            rebuildNode(parent, newSpans, newCount, false);
+            stillSplitting = false;
+        } else {
+            // 부모 자신도 꽉 차 있었다 - 부모도 분할하고 계속 위로
+            // 전파한다(insertIntoInternal()의 재귀 분할과 동일 원리,
+            // 여기서는 path[]를 따라 도는 루프로 구현).
+            const uint32_t leftCount = (newCount + 1) / 2;
+            const uint32_t rightCount = newCount - leftCount;
+            MapleArangeNode* newSibling = allocNode(false);
+            if (!newSibling) {
+                // 클래스 문서의 알려진 한계 2번과 동일(store() 루트
+                // 분할 실패와 같은 급) - 슬랩 고갈, v1 실측된 적 없는
+                // 극단적 경로. 리프 punch-out 자체는 이미 성공했으므로
+                // erase() 호출은 true를 반환하되, 이 지점보다 위쪽
+                // 구조는 갱신되지 않은 채로 남는다.
+                return true;
+            }
+            const uint64_t newSep = newSpans[leftCount - 1].upper;
+            rebuildNode(parent, newSpans, leftCount, false);
+            rebuildNode(newSibling, newSpans + leftCount, rightCount, false);
+            splitChild = parent;
+            sepKey = newSep;
+            sibling = newSibling;
+        }
+    }
+
+    if (stillSplitting) {
+        // 전파가 path[] 전체(루트 자신 포함)를 다 썼다 - store()와
+        // 동일하게 새 내부 루트를 만들어 트리 높이를 하나 늘린다.
+        MapleArangeNode* newRoot = allocNode(false);
+        if (newRoot) {
+            const Span rootSpans[2] = {
+                Span{0, sepKey, kMapleTagNode(splitChild, MapleNodeType::Arange64)},
+                Span{sepKey + 1, kMapleTreeMaxAddr, kMapleTagNode(sibling, MapleNodeType::Arange64)},
+            };
+            rebuildNode(newRoot, rootSpans, 2, false);
+            _root = newRoot;
+        }
+        // newRoot 할당 실패 시에도 store()와 동일한 원칙(위 주석 참고)
+        // - 알려진 한계, erase 자체는 이미 성공했으므로 true 유지.
+    }
+
+    // 분할이 멈춘 지점(d)보다 위쪽 조상들은 슬롯 구조 자체는 안
+    // 바뀌었지만 그 자식(경로상의 다음 노드)의 내부 gap 분포가
+    // 바뀌었을 수 있으니 gap 집계만 다시 계산한다 - 분할이 실제로
+    // 일어난 레벨들은 rebuildNode가 이미 정확한 gap을 계산해 뒀다.
+    for (uint32_t dd = d; dd-- > 0;) {
+        MapleArangeNode* ancestor = path[dd].node;
+        const uint32_t idx2 = path[dd].childIndex;
+        const auto* child2 = static_cast<const MapleArangeNode*>(kMapleNodePtr(ancestor->slot[idx2]));
+        ancestor->gap[idx2] = childMaxGap(child2);
         recomputeMaxGapSlot(ancestor);
     }
 

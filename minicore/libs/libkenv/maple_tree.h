@@ -318,13 +318,35 @@ private:
     // 범위 밖은 자동으로 무시됨, s.lower/s.upper 클리핑 참고). 실제로
     // 뭔가 지웠으면 true. 단일 리프 케이스(erase() 본문)와 2-리프
     // spanning 케이스(eraseAcrossTwoLeaves()) 양쪽이 공유한다.
-    bool erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t upper, uint64_t start, uint64_t end);
+    //
+    // [신규, PN-304F600C] punch-out 결과 슬롯이 10개를 넘치면(왼쪽/
+    // 가운데/오른쪽 3조각짜리 gap이 생기는 경우) 예전엔 안전하게
+    // 거부(false, node 무변경)만 했는데, 이제 allowSplit=true인
+    // 호출자는 insertIntoLeaf()와 동일한 방식(절반씩 나눠 형제 리프
+    // 생성)으로 실제 분할을 수행하고 그 결과를 *outSplit에 실어
+    // 돌려준다 - 호출자가 부모에 새 형제를 편입할 책임을 진다(store()
+    // 쪽 SplitResult 프로토콜과 동일). allowSplit=false면 예전과
+    // 완전히 동일하게 동작한다(node 무변경 + false 반환) - 부모/
+    // childIndex 컨텍스트가 없는 eraseAcrossTwoLeaves()가 계속 이
+    // 경로를 쓴다(§ 아래 eraseAcrossTwoLeaves 주석 참고, 2-리프
+    // 분할 전파는 이번 증분 범위 밖).
+    bool erasePartInLeaf(MapleArangeNode* node, uint64_t lower, uint64_t upper, uint64_t start, uint64_t end,
+                          bool allowSplit, SplitResult* outSplit);
 
     // [v3] [start,end]가 정확히 인접한 두 리프(leafA=[lowerA,upperA],
     // leafB=[lowerB,upperB], upperA+1==lowerB)에 걸칠 때 각자
     // 독립적으로 punch-out한다 - store()의 spanTwoLeaves()와 달리
     // 합치기가 필요 없다(§2.3 - erase는 조각이 남아도 무해하므로).
     // 둘 중 하나라도 실제로 지웠으면 true.
+    //
+    // [PN-304F600C] 이 함수는 부모/childIndex 컨텍스트가 없어(erase()의
+    // path[]는 이 2-리프 분기 진입 전에 push되지 않음, erase() 본문
+    // 참고) 리프 분할을 부모에 편입할 방법이 없다 - 그래서 항상
+    // erasePartInLeaf()를 allowSplit=false로 호출한다(10슬롯 초과 시
+    // 예전과 동일하게 안전 거부). 단일 리프 경로(erase() 본문)만
+    // allowSplit=true로 실제 분할+상위 전파를 지원한다 - 2-리프
+    // 케이스의 분할 지원은 이번 증분 범위 밖으로 남긴다(RM-F2DAFF66에
+    // 갭으로 기록).
     bool eraseAcrossTwoLeaves(MapleArangeNode* leafA, uint64_t lowerA, uint64_t upperA, MapleArangeNode* leafB,
                                uint64_t lowerB, uint64_t upperB, uint64_t start, uint64_t end);
 
