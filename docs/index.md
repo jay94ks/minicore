@@ -48,7 +48,7 @@
 | [PL-D65F49CC](./PL-D65F49CC.md) | x2APIC 지원 | archived | 2026-09-15T05:53:16.645Z |
 | [PL-E68894CD](./PL-E68894CD.md) | HPET 지원 | approved | 2026-09-14T11:59:06.061Z |
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved | 2026-09-17T14:48:43.312Z |
-| [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | review | 2026-09-24T05:42:38.228Z |
+| [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | approved | 2026-09-26T12:25:26.221Z |
 | [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-26T10:11:51.262Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
