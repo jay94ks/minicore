@@ -17,6 +17,7 @@
 | [DC-474EE823](./DC-474EE823.md) | 4K 페이지의 2M 페이지 병합 정책 미정 | archived | 2026-09-15T05:47:25.626Z |
 | [DC-4809BB47](./DC-4809BB47.md) | Slab 할당자(SP-D7013B26) 세부 결정 미정 | archived | 2026-09-15T05:47:04.974Z |
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved | 2026-09-13T13:14:35.335Z |
+| [DC-4A0D3749](./DC-4A0D3749.md) | Mkdir이 자기 자신의 디렉터리 데이터 블록에 대해 블록 쿼터 하드리밋(bhardlimit)을 검사해야 하는가 | approved | 2026-09-26T15:02:23.218Z |
 | [DC-53B93BFF](./DC-53B93BFF.md) | PN-584DB994 잔존 원인 확정 - 중첩 인터럽트의 실제 커널 스택 소진(8KiB 고정) - 수정 방향 확인 요청 | approved | 2026-09-20T20:16:29.647Z |
 | [DC-59F63D0E](./DC-59F63D0E.md) | AsyncTaskCoroYield 재시도 카운트 강등(DC-5F0AC0D3 "(b)")이 실제 AHCI 2-writer에서도 여전히 재현되는 hang - 추가 설계 필요 | approved | 2026-09-26T02:38:44.925Z |
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved | 2026-09-13T13:14:35.340Z |
@@ -29,6 +30,7 @@
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
 | [DC-DC9B2C3E](./DC-DC9B2C3E.md) | ext4 inode 테이블 블록 read-modify-write 경쟁(고아 블록) - 락 세분화 단위 결정 요청 | approved | 2026-09-26T04:21:13.790Z |
+| [DC-E441CB59](./DC-E441CB59.md) | VFS StatArgs에 파일 타입 필드가 없음 - 소켓 특수 파일 지원을 위한 확장 방식 결정 요청 | approved | 2026-09-26T15:02:15.978Z |
 | [DC-F196028B](./DC-F196028B.md) | UEFI 직접 부팅 - 메모리맵/ACPI RSDP를 kMain에 전달하는 방법 | approved | 2026-09-24T09:43:10.521Z |
 | [DC-F367AD5D](./DC-F367AD5D.md) | 커널 정상 종료(clean shutdown/reboot) 경로 부재 - 설계 필요 | approved | 2026-09-23T08:45:47.135Z |
 | [DC-FB38F86F](./DC-FB38F86F.md) | Paging::mapPage() 중간 테이블 생성 동시성 보호 - 락 전략 결정 요청 | approved | 2026-09-17T05:38:21.741Z |
@@ -49,16 +51,16 @@
 | [PL-E68894CD](./PL-E68894CD.md) | HPET 지원 | approved | 2026-09-14T11:59:06.061Z |
 | [PL-FC38956C](./PL-FC38956C.md) | multiboot2 + GRUB 부팅 경로 추가 | approved | 2026-09-17T14:48:43.312Z |
 | [QA-08F8C96F](./QA-08F8C96F.md) | rdtscp 기반 currentCoreIndex() 전환 - 타이밍 실측 QA | approved | 2026-09-26T12:25:26.221Z |
-| [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-26T10:11:51.262Z |
+| [QA-26450C3E](./QA-26450C3E.md) | Minicore 초기 QA 시나리오 — 부팅/커널 기본 동작 | review | 2026-09-26T14:18:19.806Z |
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-24T07:08:13.497Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-26T02:59:41.215Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-24T09:22:34.427Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-26T14:46:13.538Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-26T14:44:50.888Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-26T10:15:57.240Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
-| [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-24T07:35:50.746Z |
-| [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-25T16:36:31.140Z |
+| [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-26T14:53:45.979Z |
+| [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-26T14:58:25.400Z |
 | [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-26T04:48:36.005Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-22T02:13:51.590Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-19T01:32:40.139Z |
@@ -67,6 +69,7 @@
 | [SP-1DB13F61](./SP-1DB13F61.md) | 가상 함수(vtable) 타입의 슬랩 할당 초기화 관례 - placement new 예외 설계 제안 | approved | 2026-09-16T16:48:17.214Z |
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-21T20:00:11.552Z |
 | [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
+| [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-26T15:08:59.108Z |
 | [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | approved | 2026-09-22T02:14:20.261Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-22T01:15:53.326Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-17T08:01:20.217Z |
@@ -84,6 +87,7 @@
 | [SP-5D62DCCF](./SP-5D62DCCF.md) | MapleTree v3 — store()/erase()의 인접 2-리프 spanning 지원 — 설계 제안 (SP-2AAD7C8D §3 후속, PN-2EA94B1A/PN-38D17292 known limitation 3 해소) | approved | 2026-09-26T09:37:16.041Z |
 | [SP-5D965B74](./SP-5D965B74.md) | procfs — 커널 상태 노출 파일시스템 스키마 설계 제안 | approved | 2026-09-20T03:55:08.695Z |
 | [SP-5EE7384A](./SP-5EE7384A.md) | ResourceGroup — cgroup 유사 자원 그룹 체계 설계 제안 | deprecated | 2026-09-17T03:04:11.492Z |
+| [SP-6350DEBB](./SP-6350DEBB.md) | epoll류 유저 영역 비동기 이벤트 다중화 — 설계 제안 | approved | 2026-09-26T15:09:17.262Z |
 | [SP-677210E6](./SP-677210E6.md) | TSS/IST 예외 스택 서브시스템 — 설계 제안 | approved | 2026-09-16T11:21:53.003Z |
 | [SP-68182FBD](./SP-68182FBD.md) | 프로세스 모델(Process/AddressSpace) — 설계 제안 및 1차 구현 | approved | 2026-09-18T10:28:09.946Z |
 | [SP-6A563A8F](./SP-6A563A8F.md) | ResourceGroup CPU 쿼터 스로틀(cpu.max류) — 설계 제안 | approved | 2026-09-18T16:35:59.548Z |
@@ -97,6 +101,7 @@
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | approved | 2026-09-21T14:43:57.320Z |
 | [SP-8D206F11](./SP-8D206F11.md) | Minicore CPU 캐시 관리 정책 | approved | 2026-09-18T13:06:14.505Z |
 | [SP-94C6A764](./SP-94C6A764.md) | PageFrame 캐시 타입 불일치(PAT aliasing) 처리 정책 — 설계 제안 (SP-6CEFBE9B §3 후속, PN-81223433) | approved | 2026-09-26T09:36:23.181Z |
+| [SP-94CD958D](./SP-94CD958D.md) | systemd 포팅 준비 사전조사 | review | 2026-09-26T14:13:03.798Z |
 | [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-17T12:27:37.052Z |
 | [SP-9A6D579F](./SP-9A6D579F.md) | 프로세스 디버깅(브레이크포인트/싱글스텝) 서브시스템 — 설계 제안 | approved | 2026-09-20T04:50:48.737Z |
 | [SP-9CB55C5B](./SP-9CB55C5B.md) | Kill 대상 확장 — 안전한 ProcessId 해석 메커니즘 설계 제안 | approved | 2026-09-22T00:48:55.792Z |
@@ -105,6 +110,7 @@
 | [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | approved | 2026-09-22T07:19:02.888Z |
 | [SP-A252E82F](./SP-A252E82F.md) | 인터럽트 컨텍스트 재설계 - 회피 불가능한 예외만 IST로 격리, 일반 인터럽트는 단일 스택 통일, gInterruptDepth 폐기 | approved | 2026-09-21T23:03:58.039Z |
 | [SP-A658A124](./SP-A658A124.md) | libvfat — FAT32/16 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-23T00:51:34.903Z |
+| [SP-A7479F83](./SP-A7479F83.md) | timerfd/signalfd - epoll 호환 타이머/시그널 fd — 설계 제안 | approved | 2026-09-26T15:09:31.943Z |
 | [SP-AA6DF406](./SP-AA6DF406.md) | libntfs — NTFS 온디스크 포맷 읽기 라이브러리 설계 (1차 증분: 읽기 전용) | approved | 2026-09-22T06:19:30.570Z |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-17T20:01:50.983Z |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |

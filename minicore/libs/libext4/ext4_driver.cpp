@@ -4857,6 +4857,11 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     if (kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize,
                                                kMkdirOwnerUidForQuota, &dqblk, &dqblkByteOffset)) {
                         dqblk.curinodes += 1;
+                        // [신규, PN-D15D06AA] Mkdir이 새 디렉터리 자신의
+                        // "."/".." 데이터 블록(newBlockAbs, 항상 1개)을
+                        // curspace에도 반영 - 기존에는 curinodes만 반영하고
+                        // 이 블록 자체는 누락돼 있었다.
+                        dqblk.curspace += static_cast<uint64_t>(blockSize);
                         memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
                     } else {
                         // [신규] 새 uid 삽입(append) - 이 프로젝트는 삭제를
@@ -4873,6 +4878,8 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                         QuotaV2DiskDqblk newDqblk{};
                         newDqblk.id = kMkdirOwnerUidForQuota;
                         newDqblk.curinodes = 1;
+                        // [신규, PN-D15D06AA] 위 "찾음" 분기와 동일한 이유.
+                        newDqblk.curspace = static_cast<uint64_t>(blockSize);
                         const uint32_t newEntryByteOff =
                             sizeof(QtreeLeafHeader) + leafHeader.entries * sizeof(QuotaV2DiskDqblk);
                         memcpy(qFsBlockBuf.get() + leafByteOff + newEntryByteOff, &newDqblk, sizeof(newDqblk));
@@ -5965,6 +5972,14 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
                     if (!kQtreeFindEntryInLeaf(qFsBlockBuf.get() + leafByteOff, kQuotaBlockSize, ownerUid, &dqblk,
                                                 &dqblkByteOffset)) {
                         break;  // 삽입은 범위 밖 - 트리에 없으면 그냥 건너뜀
+                    }
+                    // [신규, PN-D15D06AA] Mkdir이 이 디렉터리 생성 시 반영해 둔
+                    // 자신의 데이터 블록(항상 1개, targetBlockCount로 실측)을
+                    // curspace에서도 대칭으로 빼 준다 - Unlink 쪽(아래 6884-6886
+                    // 근방)과 동일한 saturating-subtract 패턴.
+                    if (targetBlockCount > 0) {
+                        const uint64_t freedBytes = static_cast<uint64_t>(targetBlockCount) * blockSize;
+                        dqblk.curspace = dqblk.curspace > freedBytes ? dqblk.curspace - freedBytes : 0;
                     }
                     dqblk.curinodes = dqblk.curinodes > 0 ? dqblk.curinodes - 1 : 0;
                     memcpy(qFsBlockBuf.get() + leafByteOff + dqblkByteOffset, &dqblk, sizeof(dqblk));
