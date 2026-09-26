@@ -139,22 +139,38 @@ public:
             co_return;
         }
 
-        auto* socket = static_cast<UnixSocket*>(GenericSlabAllocator::alloc(sizeof(UnixSocket)));
-        if (!socket) {
+        // [승격, 2026-09-27 4회차] kCreateNamedChannel(channel.cpp)과
+        // 동일한 관례 - raw slab 메모리를 memset(0)한 뒤 kMakeShared로
+        // 감싼다(fd 상속을 위한 SharedPtr 승격, socket.h 문서 주석 참고).
+        void* socketMem = GenericSlabAllocator::alloc(sizeof(UnixSocket));
+        if (!socketMem) {
             DestroyChannelArgs destroyArgs;
             destroyArgs.channelHandle = openArgs.channelHandle;
             kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
             args->error = ChannelError::ResourceExhausted;
             co_return;
         }
-        memset(socket, 0, sizeof(UnixSocket));
+        memset(socketMem, 0, sizeof(UnixSocket));
+        auto* rawSocket = reinterpret_cast<UnixSocket*>(socketMem);
+        SharedPtr<UnixSocket> socket = kMakeShared<UnixSocket>(rawSocket);
+        if (!socket) {
+            GenericSlabAllocator::free(socketMem, sizeof(UnixSocket));
+            DestroyChannelArgs destroyArgs;
+            destroyArgs.channelHandle = openArgs.channelHandle;
+            kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
         socket->type = args->type;
         socket->channelId = openArgs.channelId;
 
         process->fileDescriptors.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
         const int32_t newFd = kAllocateFd(process.get());
         if (newFd < 0) {
-            GenericSlabAllocator::free(socket, sizeof(UnixSocket));
+            // socket(SharedPtr)이 스코프를 벗어나며 스스로 정리된다
+            // (kMakeShared 성공 후엔 raw slab을 직접 free하면 이중
+            // 해제가 되므로 절대 하지 않는다 - channel.cpp의 동일한
+            // 패턴 참고).
             DestroyChannelArgs destroyArgs;
             destroyArgs.channelHandle = openArgs.channelHandle;
             kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
@@ -227,7 +243,7 @@ public:
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
-        UnixSocket* socket = slot->value.socket;
+        UnixSocket* socket = slot->value.socket.get();
         if (socket->channelId == 0) {
             // Accept()가 만든(자기 Channel이 없는, 이미 연결된) 소켓 -
             // bind 대상이 될 수 없다.
@@ -277,7 +293,7 @@ public:
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
-        UnixSocket* socket = slot->value.socket;
+        UnixSocket* socket = slot->value.socket.get();
         if (socket->type != SocketType::Stream) {
             args->error = ChannelError::NotSupported;  // Datagram엔 listen/accept 개념이 없다(§8 항목2)
             co_return;
@@ -310,7 +326,7 @@ public:
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
-        UnixSocket* listener = slot->value.socket;
+        UnixSocket* listener = slot->value.socket.get();
         if (listener->type != SocketType::Stream || !listener->listening || listener->channelId == 0) {
             args->error = ChannelError::InvalidArgument;
             co_return;
@@ -335,22 +351,32 @@ public:
         // 참고) - §4-1 자동 등록도 하지 않는다(그 절은 명시적으로
         // "Socket()으로 만들어지는" 소켓만 대상으로 한다, 연결마다
         // 계속 쌓이는 무의미한 이름 항목을 막기 위함).
-        auto* connected = static_cast<UnixSocket*>(GenericSlabAllocator::alloc(sizeof(UnixSocket)));
-        if (!connected) {
+        void* connectedMem = GenericSlabAllocator::alloc(sizeof(UnixSocket));
+        if (!connectedMem) {
             CloseBridgeArgs closeArgs;
             closeArgs.bridge = acceptArgs.bridge;
             kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
             args->error = ChannelError::ResourceExhausted;
             co_return;
         }
-        memset(connected, 0, sizeof(UnixSocket));
+        memset(connectedMem, 0, sizeof(UnixSocket));
+        auto* rawConnected = reinterpret_cast<UnixSocket*>(connectedMem);
+        SharedPtr<UnixSocket> connected = kMakeShared<UnixSocket>(rawConnected);
+        if (!connected) {
+            GenericSlabAllocator::free(connectedMem, sizeof(UnixSocket));
+            CloseBridgeArgs closeArgs;
+            closeArgs.bridge = acceptArgs.bridge;
+            kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
         connected->type = listener->type;
         connected->bridge = acceptArgs.bridge;
 
         process->fileDescriptors.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
         const int32_t newFd = kAllocateFd(process.get());
         if (newFd < 0) {
-            GenericSlabAllocator::free(connected, sizeof(UnixSocket));
+            // connected(SharedPtr)가 스코프를 벗어나며 스스로 정리된다.
             CloseBridgeArgs closeArgs;
             closeArgs.bridge = acceptArgs.bridge;
             kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
@@ -414,7 +440,7 @@ public:
             args->error = ChannelError::InvalidHandle;
             co_return;
         }
-        UnixSocket* socket = slot->value.socket;
+        UnixSocket* socket = slot->value.socket.get();
         if (socket->bridge != 0) {
             args->error = ChannelError::InvalidArgument;  // 이미 연결됨(POSIX EISCONN과 동일한 취지)
             co_return;

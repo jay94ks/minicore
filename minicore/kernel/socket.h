@@ -36,11 +36,16 @@ enum class SocketType : uint32_t {
 };
 
 // UnixSocket - `Process::FileDescriptor::socket`(kind==MountKind::Socket
-// 일 때만 유효)가 GenericSlabAllocator로 확보해 단독 소유하는 상태
-// 블록. BridgePipe/Channel과 달리 SharedPtr로 감싸지 않는다 - 지금은
-// 이 fd 하나만이 유일한 소유자이기 때문(fd 상속(§6, PN-CC0F4EAC 항목7)
-// 이 나중에 "여러 fd가 같은 소켓을 공유"하는 경우를 실제로 만들면
-// 그때 SharedPtr로 승격 - RM-23F4B687 §4, 지금은 실사용처가 없다).
+// 일 때만 유효)이 `kMakeShared`로 소유하는 상태 블록 - `Channel`/
+// `BridgePipe`와 동일한 관례(`destroy()`는 이 아래 정의, 소유
+// 자원이 없어 no-op). [승격, 2026-09-27 4회차] 원래는 단독 소유
+// raw 포인터였으나(fd 상속 이전엔 그걸로 충분했음), fd 상속(§6,
+// PN-CC0F4EAC 항목7)이 정의상 부모/자식 fd 테이블 두 곳이 같은
+// 소켓을 동시에 참조하게 만들어 `SharedPtr`로 승격했다 - **다만
+// 이 승격 자체는 순수 소유권 리팩터링이고, fd 상속 기능(§6의
+// inheritFds/LISTEN_FDS/LISTEN_PID) 자체는 여전히 미구현이다**
+// (PN-CC0F4EAC "남은 범위" §항목7 스코핑 메모 참고 - LISTEN_PID
+// 주입에 별도의 processId 할당 순서 문제가 남아 있음).
 struct UnixSocket {
     SocketType type = SocketType::Stream;
 
@@ -76,6 +81,13 @@ struct UnixSocket {
     bool explicitlyBound = false;
     char boundPath[kMaxNamedObjectNameLength] = {};
     uint32_t boundPathLength = 0;
+
+    // `kMakeShared`의 기본 삭제자(`kDestroyAndFree<UnixSocket>`)가
+    // 마지막 강한 참조 해제 시 호출한다(`Channel::destroy()`와 동일한
+    // 이유) - 정리할 힙 자원이 없어(모든 필드가 값 타입) no-op이지만,
+    // `kDestroyAndFree<T>`가 `ptr->destroy()`를 무조건 호출하는 계약이라
+    // 정의 자체는 필수다.
+    void destroy() {}
 };
 
 // §4-1 자동 등록 경로 포맷("<pid>/<handle>") - `Socket()`(socket.cpp,

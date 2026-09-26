@@ -268,11 +268,17 @@ public:
         uint64_t ownerChannelId = 0;        // kind==Channel일 때만 유효 - [미구현] Channel 경로는 아직 없음(PN-EA4EE935 스코프 결정)
         KernelFsDriver* kernelDriver = nullptr;  // kind==KernelDriver일 때만 유효
         // [신규, 2026-09-27, PN-CC0F4EAC, SP-231493CB §3] kind==Socket일
-        // 때만 유효 - GenericSlabAllocator로 확보되어 이 fd 하나가 단독
-        // 소유(fd 상속이 이 가정을 깨면 그때 공유 소유권으로 승격,
-        // socket.h 문서 주석 참고). CloseHandler가 kind==Socket 분기에서
-        // 명시적으로 반납한다.
-        UnixSocket* socket = nullptr;
+        // 때만 유효. [승격, 2026-09-27 4회차, PN-CC0F4EAC 항목7(fd 상속)
+        // 착수 전 스코핑에서 발견한 선행 조건] 원래 단독 소유 raw
+        // 포인터였으나, fd 상속은 정의상 부모/자식 fd 테이블 두 곳이
+        // 같은 `UnixSocket`을 동시에 참조하게 만들어 `SharedPtr`로
+        // 승격했다(`Channel`/`BridgePipe`와 동일한 `kMakeShared`+
+        // `destroy()` 패턴, socket.h 참고) - fd 상속 자체(항목7의
+        // 나머지 부분)는 여전히 미구현, 이건 그 선행 리팩터링만.
+        // `CloseHandler`(vfs_syscall.cpp)는 이제 명시적으로 반납하지
+        // 않는다 - `fileDescriptors.erase()`가 이 슬롯을 지우는 순간
+        // 참조 카운트가 자연히 줄어든다.
+        SharedPtr<UnixSocket> socket;
         FileHandle fsHandle;
         uint64_t offset = 0;
         bool isDirectory = false;

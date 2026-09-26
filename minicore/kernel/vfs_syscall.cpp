@@ -359,7 +359,18 @@ public:
             // 영구히 남는다(socket.h UnixSocket::boundPath 문서 주석
             // 참고 - kResolveChannelId 자체는 세대 태그로 안전하지만,
             // 그 이름이 다시는 재사용 못 하게 되는 네임스페이스 누수).
-            UnixSocket* socket = slot->value.socket;
+            // [정직하게 기록, 2026-09-27 4회차] `slot->value.socket`이
+            // `SharedPtr`로 승격됐지만(fd 상속 선행 리팩터링,
+            // PN-CC0F4EAC 항목7 스코핑 메모 참고) 이 아래 로직은 여전히
+            // "이 fd가 이 소켓의 유일한 소유자"를 전제로 Channel/Bridge를
+            // 무조건 파괴한다 - fd 상속이 실제로 구현돼 같은 소켓을
+            // 두 fd가 공유하게 되면, 이 Close()가 다른 쪽(예: 부모가
+            // 자식에게 물려준 뒤 먼저 닫는 경우) fd를 망가뜨린다. 지금은
+            // fd 상속 자체가 없어(모든 소켓이 항상 refcount 1로 시작)
+            // 도달 불가능한 문제지만, 다음 착수 세션은 이 지점에
+            // "내가 마지막 소유자인가"(참조 카운트 조회 API가
+            // `SharedPtr`에 아직 없음) 판단을 반드시 추가해야 한다.
+            UnixSocket* socket = slot->value.socket.get();
             if (socket->bridge != 0) {
                 CloseBridgeArgs closeArgs;
                 closeArgs.bridge = socket->bridge;
@@ -379,7 +390,11 @@ public:
                 destroyArgs.channelHandle = socket->channelId;
                 kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
             }
-            GenericSlabAllocator::free(socket, sizeof(UnixSocket));
+            // [승격, 2026-09-27 4회차] 더 이상 직접 free하지 않는다 -
+            // 아래 fileDescriptors.erase(slot)이 이 슬롯의 SharedPtr을
+            // 지우는 순간 참조 카운트가 줄고(지금은 항상 유일한 소유자라
+            // 즉시 0), kMakeShared의 기본 삭제자(kDestroyAndFree<UnixSocket>)
+            // 가 자동으로 반납한다(Channel/BridgePipe와 동일한 관례).
         }
         process->fileDescriptors.erase(slot);
         args->error = ChannelError::None;
@@ -424,7 +439,7 @@ public:
             // 이미 연결된(Connect()/Accept() 성공) 소켓만 유효. 실제
             // 바이트 이동은 새로 구현하지 않고 기존 ChannelRead
             // 핸들러(channel.cpp)에 그대로 위임한다.
-            UnixSocket* socket = slot->value.socket;
+            UnixSocket* socket = slot->value.socket.get();
             if (socket->bridge == 0) {
                 args->bytesRead = 0;
                 args->error = ChannelError::BrokenPipe;  // 아직 연결 안 됨(POSIX ENOTCONN과 동일한 취지)
@@ -589,7 +604,7 @@ public:
         if (slot->value.kind == MountKind::Socket) {
             // ReadHandler의 Socket 분기와 대칭 - ChannelWrite 핸들러에
             // 위임한다.
-            UnixSocket* socket = slot->value.socket;
+            UnixSocket* socket = slot->value.socket.get();
             if (socket->bridge == 0) {
                 args->bytesWritten = 0;
                 args->error = ChannelError::BrokenPipe;
