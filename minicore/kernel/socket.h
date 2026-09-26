@@ -21,6 +21,15 @@ enum class SocketDomain : uint32_t {
     Unix = 1,  // AF_INET 등은 후속(§7) - NIC 드라이버가 생기기 전엔 정의하지 않는다(RM-23F4B687 §4)
 };
 
+// [정직하게 기록, 실측으로 발견, PN-CC0F4EAC] `Datagram`은 아직
+// `Socket()`으로 만들 수만 있고 `Listen`/`Accept`/`Connect`는 전부
+// `NotSupported`로 명시적으로 거절한다(socket.cpp의 SocketListenHandler/
+// SocketAcceptHandler/SocketConnectHandler 참고) - 이 파일의 connect/
+// accept 핸드셰이크(§3)는 근본적으로 Channel의 connection-oriented
+// 모델이라 POSIX 데이터그램 소켓의 "핸드셰이크 없는 로컬 connect()"
+// 의미와 안 맞는다(실제로 거절 없이 뒀더니 Connect()가 영원히 안
+// 끝나는 걸 재현했다 - 아무도 Accept를 불러 줄 수 없어서). 새
+// 메커니즘 설계가 필요해 후속(PN-CC0F4EAC "남은 범위").
 enum class SocketType : uint32_t {
     Stream = 1,
     Datagram = 2,

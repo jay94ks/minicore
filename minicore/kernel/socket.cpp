@@ -419,6 +419,22 @@ public:
             args->error = ChannelError::InvalidArgument;  // 이미 연결됨(POSIX EISCONN과 동일한 취지)
             co_return;
         }
+        // [정직하게 기록, 실측으로 발견] Datagram은 여기서 명시적으로
+        // 거절한다 - 이 아래 ConnectChannel 핸드셰이크는 상대가
+        // AcceptFromChannel을 불러야만 끝나는데, Datagram 소켓은
+        // Listen()/Accept() 자체가 허용되지 않아(위 SocketListenHandler/
+        // SocketAcceptHandler 참고) 아무도 그 accept를 불러 줄 수 없다 -
+        // 그대로 두면 Connect()가 영원히 안 끝난다(실제로 재현해서
+        // 발견). POSIX 데이터그램 소켓의 connect()는 원래 핸드셰이크가
+        // 없는 순수 로컬 동작(기본 목적지만 기억)이라 Channel의
+        // connect/accept 모델과 근본적으로 안 맞는다 - 새 메커니즘
+        // 설계가 필요해 이번 증분 범위 밖으로 명시적으로 남긴다
+        // (PN-CC0F4EAC "남은 범위" 참고, 조용히 hang하는 것보다
+        // 명확한 에러가 낫다는 판단).
+        if (socket->type != SocketType::Stream) {
+            args->error = ChannelError::NotSupported;
+            co_return;
+        }
 
         // [중요 - 실측 전 코드 추적으로 발견] 여기서 커널 로컬 버퍼로
         // 복사한 값을 ConnectChannelArgs::name에 넘기면 안 된다 -
