@@ -3,9 +3,11 @@
 #include "libkenv/spinlock.h"
 #include "libkmm/slab.h"
 #include "mount_table.h"
+#include "named_object.h"
 #include "paging.h"
 #include "process.h"
 #include "resource_group.h"
+#include "socket.h"
 #include "task.h"
 
 namespace kernel {
@@ -55,6 +57,26 @@ SharedPtr<Process> kProcessFromSubmitter(AsyncTask* task) {
     }
     auto* thread = static_cast<UserThread*>(submitter.get());
     return thread->process.lock();
+}
+
+// [socket.cpp의 동일 함수와 같은 패턴 재사용 - 각 파일이 자기 몫을
+// 따로 갖는 기존 관례] PN-CC0F4EAC - Read/Write/Close(아래)가 소켓
+// fd를 만나면 이미 등록된 Channel syscall 핸들러(ChannelRead/
+// ChannelWrite/CloseBridge/DestroyChannel)에 그대로 위임한다 -
+// submitterTask를 원래 호출자로 물려줘야 그 안쪽 핸들러들이 "진짜
+// 호출자"를 올바르게 식별한다.
+bool kSubmitAndAwait(AsyncTask* callerTask, SyscallEndpointId endpointId, void* args) {
+    AsyncTaskSubjectCode subjectCode;
+    if (!SyscallRegistry::resolveSubjectCode(endpointId, &subjectCode)) {
+        return false;
+    }
+    AsyncTask* nested = AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/false);
+    if (!nested) {
+        return false;
+    }
+    nested->submitterTask = callerTask->submitterTask;
+    AsyncTaskAwaiter(nested).await();
+    return true;
 }
 
 // VfsError(mount_table.h, KernelFsDriver 전용 - §9 이전부터 존재하던
@@ -329,6 +351,35 @@ public:
                 fsTask->submitterTask = task->submitterTask;  // 실측 발견, PN-EA4EE935 - OpenHandler 주석 참고
                 AsyncTaskAwaiter(fsTask).await();
             }
+        } else if (slot->value.kind == MountKind::Socket) {
+            // [PN-CC0F4EAC, SP-231493CB §3] 소켓 fd 종료 - 연결
+            // 상태(bridge)/자기 소유 Channel/§4-1 자동 등록 이름/명시적
+            // Bind() 이름을 전부 정리해야 한다. 이 중 하나라도 빠뜨리면
+            // NamedObjectTable에 죽은 소켓을 가리키는 좀비 이름이
+            // 영구히 남는다(socket.h UnixSocket::boundPath 문서 주석
+            // 참고 - kResolveChannelId 자체는 세대 태그로 안전하지만,
+            // 그 이름이 다시는 재사용 못 하게 되는 네임스페이스 누수).
+            UnixSocket* socket = slot->value.socket;
+            if (socket->bridge != 0) {
+                CloseBridgeArgs closeArgs;
+                closeArgs.bridge = socket->bridge;
+                kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
+            }
+            if (socket->channelId != 0) {
+                // Socket()이 등록한 것과 정확히 같은 포맷으로 재계산
+                // (kFormatAutoSocketPath, socket.h §4-1 포맷 주석 참고).
+                char autoPath[kMaxNamedObjectNameLength];
+                const uint32_t autoPathLen =
+                    kFormatAutoSocketPath(process->processId, fd, autoPath, kMaxNamedObjectNameLength);
+                NamedObjectTable::release(autoPath, autoPathLen);
+                if (socket->explicitlyBound) {
+                    NamedObjectTable::release(socket->boundPath, socket->boundPathLength);
+                }
+                DestroyChannelArgs destroyArgs;
+                destroyArgs.channelHandle = socket->channelId;
+                kSubmitAndAwait(task, kSyscallEndpointDestroyChannel, &destroyArgs);
+            }
+            GenericSlabAllocator::free(socket, sizeof(UnixSocket));
         }
         process->fileDescriptors.erase(slot);
         args->error = ChannelError::None;
@@ -366,6 +417,30 @@ public:
         if (!slot) {
             args->bytesRead = 0;
             args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        if (slot->value.kind == MountKind::Socket) {
+            // [PN-CC0F4EAC, SP-231493CB §3] "소켓도 파일처럼 read된다" -
+            // 이미 연결된(Connect()/Accept() 성공) 소켓만 유효. 실제
+            // 바이트 이동은 새로 구현하지 않고 기존 ChannelRead
+            // 핸들러(channel.cpp)에 그대로 위임한다.
+            UnixSocket* socket = slot->value.socket;
+            if (socket->bridge == 0) {
+                args->bytesRead = 0;
+                args->error = ChannelError::BrokenPipe;  // 아직 연결 안 됨(POSIX ENOTCONN과 동일한 취지)
+                co_return;
+            }
+            ChannelReadArgs readArgs;
+            readArgs.bridge = socket->bridge;
+            readArgs.buffer = args->buf;
+            readArgs.maxLength = args->len;
+            if (!kSubmitAndAwait(task, kSyscallEndpointChannelRead, &readArgs)) {
+                args->bytesRead = 0;
+                args->error = ChannelError::ResourceExhausted;
+                co_return;
+            }
+            args->bytesRead = readArgs.bytesRead;
+            args->error = readArgs.error;
             co_return;
         }
         if (slot->value.kind != MountKind::KernelDriver) {
@@ -509,6 +584,28 @@ public:
         if (!slot) {
             args->bytesWritten = 0;
             args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        if (slot->value.kind == MountKind::Socket) {
+            // ReadHandler의 Socket 분기와 대칭 - ChannelWrite 핸들러에
+            // 위임한다.
+            UnixSocket* socket = slot->value.socket;
+            if (socket->bridge == 0) {
+                args->bytesWritten = 0;
+                args->error = ChannelError::BrokenPipe;
+                co_return;
+            }
+            ChannelWriteArgs writeArgs;
+            writeArgs.bridge = socket->bridge;
+            writeArgs.data = args->buf;
+            writeArgs.length = args->len;
+            if (!kSubmitAndAwait(task, kSyscallEndpointChannelWrite, &writeArgs)) {
+                args->bytesWritten = 0;
+                args->error = ChannelError::ResourceExhausted;
+                co_return;
+            }
+            args->bytesWritten = writeArgs.bytesWritten;
+            args->error = writeArgs.error;
             co_return;
         }
         if (slot->value.kind != MountKind::KernelDriver) {

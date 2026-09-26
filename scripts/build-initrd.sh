@@ -61,11 +61,18 @@ cp "${BUILD_USERLAND_DIR}/minicore-authmgr/authmgr" "${STAGE_DIR}/authmgr"
 cp "${BUILD_USERLAND_DIR}/minicore-dbgtarget/dbgtarget" "${STAGE_DIR}/dbgtarget"
 cp "${BUILD_USERLAND_DIR}/minicore-proctest/proctest" "${STAGE_DIR}/proctest"
 cp "${BUILD_USERLAND_DIR}/minicore-dbgdriver/dbgdriver" "${STAGE_DIR}/dbgdriver"
+# socktest/sockclient(PN-CC0F4EAC, 2026-09-27) 추가 - dbgdriver와
+# 동일한 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시 둘 다 독립
+# 프로세스로 자동 실행된다(SpawnProcess/CreateThread 둘 다 시도했다가
+# PN-395F4D89를 발견해 이 방식으로 우회, socktest/main.cpp 상단
+# 주석 참고).
+cp "${BUILD_USERLAND_DIR}/minicore-socktest/socktest" "${STAGE_DIR}/socktest"
+cp "${BUILD_USERLAND_DIR}/minicore-sockclient/sockclient" "${STAGE_DIR}/sockclient"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient)"

@@ -17,6 +17,12 @@ constexpr uint32_t kMaxMountEntries = 16;   // SP-8B6B8D25 §4가 나열한 고�
 enum class MountKind : uint8_t {
     Channel = 0,       // 유저랜드 fs 서비스 - IPC(Channel)로 라우팅
     KernelDriver = 1,  // 커널이 직접 구현한 드라이버(livefs 등) - IPC 없이 그 자리에서 직접 호출
+    // [신규, 2026-09-27, PN-CC0F4EAC, SP-231493CB §3] 실제 VFS 마운트
+    // 종류가 아니다 - `Process::FileDescriptor::kind`가 이 enum을
+    // 재사용하는 기존 관례(process.h §9.2 문서 주석 참고) 그대로,
+    // 소켓 fd를 구분하는 세 번째 태그값만 여기 추가한다. 소켓은 절대
+    // `MountTable`에 실제로 마운트되지 않는다.
+    Socket = 2,
 };
 
 // **[v1 잠정 결정, 2026-09-16, PN-71C2B857]** SP-7CC5693A §2.1의

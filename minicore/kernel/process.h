@@ -20,6 +20,7 @@ namespace kernel {
 class UserThread;
 class ResourceGroup;  // 포인터로만 참조(Process::group) - 전체 정의는 resource_group.h(SP-245D130B)
 struct BridgePipe;  // 포인터로만 참조(Process::openBridges) - 전체 정의는 channel.h(PN-9CC66142)
+struct UnixSocket;  // 포인터로만 참조(FileDescriptor::socket) - 전체 정의는 socket.h(PN-CC0F4EAC)
 
 // 프로세스 신원 - 이 프로세스가 신뢰할 수 있는 커널 서비스인지를
 // syscall 레벨에서 판정하는 불변 속성(SP-EAB162FC §2.1). 생성
@@ -266,6 +267,12 @@ public:
         MountKind kind = MountKind::Channel;
         uint64_t ownerChannelId = 0;        // kind==Channel일 때만 유효 - [미구현] Channel 경로는 아직 없음(PN-EA4EE935 스코프 결정)
         KernelFsDriver* kernelDriver = nullptr;  // kind==KernelDriver일 때만 유효
+        // [신규, 2026-09-27, PN-CC0F4EAC, SP-231493CB §3] kind==Socket일
+        // 때만 유효 - GenericSlabAllocator로 확보되어 이 fd 하나가 단독
+        // 소유(fd 상속이 이 가정을 깨면 그때 공유 소유권으로 승격,
+        // socket.h 문서 주석 참고). CloseHandler가 kind==Socket 분기에서
+        // 명시적으로 반납한다.
+        UnixSocket* socket = nullptr;
         FileHandle fsHandle;
         uint64_t offset = 0;
         bool isDirectory = false;

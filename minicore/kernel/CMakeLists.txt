@@ -38,6 +38,7 @@ add_library(minicore_kernel OBJECT
     procfs.cpp
     mount_table.cpp
     vfs_syscall.cpp
+    socket.cpp
     process.cpp
     user_record.cpp
     debug_session.cpp

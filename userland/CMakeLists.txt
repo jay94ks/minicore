@@ -98,3 +98,17 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/proctest ${CMAKE_CURREN
 # 실행되므로 이 재현 조사 기간에는 initrd 안에 실려야 한다 -
 # minicore/dbgdriver/main.cpp 상단 주석 참고.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/dbgdriver ${CMAKE_CURRENT_BINARY_DIR}/minicore-dbgdriver)
+
+# socktest(PN-CC0F4EAC, 소켓 계층 실측 검증) - dbgtarget/proctest와
+# 동일한 이유의 out-of-tree add_subdirectory. dbgdriver와 동일하게
+# kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행되므로 그 검증 기간
+# 동안은 initrd 안에 실려야 한다 - minicore/socktest/main.cpp 상단
+# 주석 참고.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/socktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-socktest)
+
+# sockclient(PN-CC0F4EAC, socktest의 클라이언트 반쪽) - dbgtarget/proctest와
+# 동일한 이유의 out-of-tree add_subdirectory. socktest가 SpawnProcess로
+# 직접 스폰하므로(dbgdriver가 dbgtarget을 스폰하는 것과 동일한 패턴)
+# initrd 안에 원본 ELF 바이트로 실려야 한다 - minicore/sockclient/main.cpp
+# 상단 주석 참고.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockclient ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockclient)

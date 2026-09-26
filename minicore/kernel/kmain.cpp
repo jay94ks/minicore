@@ -37,6 +37,7 @@
 #include "scheduler.h"
 #include "serial.h"
 #include "smp.h"
+#include "socket.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
 #include "task.h"
@@ -882,6 +883,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // BSP에서 한 번만).
     kernel::VfsSyscallService::registerSyscallEndpoints();
     kernel::Logger::info("minicore: vfs mount/unmount/resolve-path/open/close/read/write syscall endpoints registered");
+
+    // 소켓 계층(SP-231493CB, PN-CC0F4EAC) - fd 테이블(Read/Write/Close,
+    // 위 VfsSyscallService)이 이미 등록돼 있어야 소켓 fd에 대한 그
+    // 핸들러들의 Socket 분기가 의미가 있으므로 이 순서를 지킨다(다른
+    // registerSyscallEndpoints() 호출들과 같은 이유로 BSP에서 한 번만).
+    kernel::Socket::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: socket(AF_UNIX) socket/bind/listen/accept/connect syscall endpoints registered");
 
     // ResourceGroup syscall 6종(SP-245D130B §8/SP-6A563A8F §5-A/§7,
     // PN-4190BBD3) - 위와 같은 이유로 BSP에서 한 번만. gRootResourceGroup
