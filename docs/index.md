@@ -18,7 +18,7 @@
 | [DC-4809BB47](./DC-4809BB47.md) | Slab 할당자(SP-D7013B26) 세부 결정 미정 | archived | 2026-09-15T05:47:04.974Z |
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-53B93BFF](./DC-53B93BFF.md) | PN-584DB994 잔존 원인 확정 - 중첩 인터럽트의 실제 커널 스택 소진(8KiB 고정) - 수정 방향 확인 요청 | approved | 2026-09-20T20:16:29.647Z |
-| [DC-59F63D0E](./DC-59F63D0E.md) | AsyncTaskCoroYield 재시도 카운트 강등(DC-5F0AC0D3 "(b)")이 실제 AHCI 2-writer에서도 여전히 재현되는 hang - 추가 설계 필요 | review | 2026-09-26T00:54:34.696Z |
+| [DC-59F63D0E](./DC-59F63D0E.md) | AsyncTaskCoroYield 재시도 카운트 강등(DC-5F0AC0D3 "(b)")이 실제 AHCI 2-writer에서도 여전히 재현되는 hang - 추가 설계 필요 | approved | 2026-09-26T02:38:44.925Z |
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved | 2026-09-13T13:14:35.340Z |
 | [DC-5F0AC0D3](./DC-5F0AC0D3.md) | AsyncTaskCoroYield 재시도 락의 우선순위 역전 라이브락 - drainOnce() 공정성 정책 방향 결정 요청 | approved | 2026-09-26T00:13:16.815Z |
 | [DC-6E2500A6](./DC-6E2500A6.md) | 커널 ↔ 커널 서비스 전용 고속 통신 채널 - 결정 요구사항 | archived | 2026-09-16T00:33:55.662Z |
@@ -71,6 +71,7 @@
 | [SP-2AAD7C8D](./SP-2AAD7C8D.md) | mmap 서브시스템 및 Maple Tree 자료구조 — 설계 제안 | approved | 2026-09-16T14:29:59.188Z |
 | [SP-2BCE5D60](./SP-2BCE5D60.md) | fs 커널 서비스(파일시스템 드라이버: ext4/swapfs/FAT32-16) — 설계 제안 | approved | 2026-09-22T05:24:17.169Z |
 | [SP-30FCC8AE](./SP-30FCC8AE.md) | Minicore 사용자/권한 체계(uid/gid + RWX + root) — 설계 제안 | approved | 2026-09-22T02:14:40.657Z |
+| [SP-33FE698A](./SP-33FE698A.md) | 코루틴 AsyncTask 전용 뮤텍스(AsyncCoroMutex) — 재시도 폴링을 없앤 명시적 wait-queue 기반 설계 | review | 2026-09-26T02:36:08.005Z |
 | [SP-39F18E30](./SP-39F18E30.md) | DMA 버퍼 관리자 및 메모리 관리자 확장 — 설계 제안 | approved | 2026-09-19T17:48:08.056Z |
 | [SP-40E5534D](./SP-40E5534D.md) | pubreg 커널 서비스 대행 릴레이 — 설계 제안 | deprecated | 2026-09-15T16:54:36.012Z |
 | [SP-43331889](./SP-43331889.md) | devmgr/fs 커널 흡수 + 유저모드 드라이버 지원 — 설계 제안 (DC-91ABD922/QU-23B339AB 확정 반영) | approved | 2026-09-22T07:19:58.202Z |
