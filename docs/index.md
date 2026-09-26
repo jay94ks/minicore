@@ -109,7 +109,7 @@
 | [SP-CC2B18C6](./SP-CC2B18C6.md) | UEFI 직접 부팅 - 커널 물리 재배치(physicalBase) 설계 | approved | 2026-09-24T10:15:36.347Z |
 | [SP-CCACB192](./SP-CCACB192.md) | libjson — 커널/유저 공용 JSON 파서/직렬화 라이브러리 설계 제안 | approved | 2026-09-17T02:37:51.540Z |
 | [SP-D02C4A73](./SP-D02C4A73.md) | libswapfs — 스왑 슬롯 온디스크 포맷 + SwapfsBackend 구현 설계 | approved | 2026-09-22T03:48:27.925Z |
-| [SP-D7013B26](./SP-D7013B26.md) | Slab 할당자(libkmm) — 설계 제안 | approved | 2026-09-14T11:52:49.691Z |
+| [SP-D7013B26](./SP-D7013B26.md) | Slab 할당자(libkmm) — 설계 제안 | approved | 2026-09-26T02:24:16.845Z |
 | [SP-DABFCF9F](./SP-DABFCF9F.md) | QEMU gdb stub 기반 커널 디버깅 워크플로 — 설계 제안 | approved | 2026-09-16T04:15:01.976Z |
 | [SP-DE19BB1C](./SP-DE19BB1C.md) | 커널 영역 TLB 샷다운(IPI 기반) — 설계 제안 | approved | 2026-09-16T16:41:25.580Z |
 | [SP-DF89897F](./SP-DF89897F.md) | 커널 로깅 인프라 추상화 — 설계 제안 | approved | 2026-09-16T02:32:42.138Z |
