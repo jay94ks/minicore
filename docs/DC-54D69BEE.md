@@ -1,0 +1,136 @@
+# kAsyncDrainVector(0xE3)이 kSchedulerTickVector(0x24)보다 하드웨어 인터럽트 우선순위가 높아, AsyncTask 폭주 시 스케줄러 틱을 무기한 굶길 수 있다 - 수정 방향 결정 요청
+
+<!--
+  이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
+  정본은 claude-native-workflow(CNW)의 DB에 있습니다.
+  trackingCode: DC-54D69BEE
+  status: review
+  updatedAt: 2026-09-27T05:05:04.992Z
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
+-->
+
+## 배경
+
+`PN-93C26459`(fd 상속 재검증 중 100% 재현되는 NMI watchdog, `PN-CC0F4EAC`
+9-10회차에서 분리)의 근본 원인을 gdb + 코드 추적으로 확정했다 -
+**새 syscall 버그도, `PN-395F4D89`(DC-D8951156)와 같은 계열도 아니고,
+완전히 별개의 인터럽트 우선순위 역전 버그다.**
+
+## 재현/진단 경위
+
+`minicore/sockinherit`+`minicore/sockinheritchild`+`minicore/sockclient`
+TEMP 부팅 훅(GRUB SMP4)으로 100% 재현되는 `"NMI - watchdog: this core
+unresponsive"`를 QEMU gdbstub(`-s`, `-S` 없이 자유 부팅 후 15초 뒤
+attach)으로 실측했다:
+
+1. **`info threads`/`thread apply all bt` 결과, 4코어 중 단 1개
+   코어만 정지해 있었다** - 나머지 3개 코어는 각자 정상적으로
+   syscall 디스패치/idle 루프를 계속 실행 중이었다(`bt`로 확인 -
+   `AsyncTask::submit`/`Scheduler::runLoop` 등 정상 콜스택). **이건
+   전체 시스템 데드락이 아니라 코어 1개만의 국소적 무응답**이라는
+   뜻 - 지금까지 `PN-6360E6E9`/`PN-D44504D1` 등이 "watchdog=시스템
+   전체 정지"로 암묵적으로 취급해 온 전제를 재검토할 필요가 있다.
+2. **정지된 코어(watchdog을 유발한 그 코어)의 실제 정지 지점은
+   `kernel::kDiagRingLog()`(diag_ring.cpp:95) 안**이었다(워치독
+   진단 덤프의 `rip`를 같은 빌드의 `nm`으로 직접 해석해 확인,
+   `rip=...+0xdf`). **`kDiagRingLog()` 자신은 코어별 전용 슬롯만 쓰고
+   락도 루프도 전혀 없는 5줄짜리 함수**(diag_ring.cpp 55행 주석
+   "코어별 독립 슬롯... 락이 필요 없다"가 이미 명시)라 이 함수
+   자체는 절대 멈출 수 없다 - NMI가 도착한 "그 순간의 우연한
+   지점"일 뿐, 진짜 원인은 이 호출을 감싼 더 바깥 코드다.
+3. **`kDiagRingLog(DiagRingEvent::AsyncDrainBatchLimitHit, ...)`
+   호출부(async_task.cpp:505)가 유일하게 이 이벤트를 로그하는
+   지점**이고, 그 호출부는 `kAsyncDrainIsr()`(async_task.cpp:498-510)
+   - **`kAsyncDrainVector`(0xE3) IDT 벡터에 등록된 진짜 인터럽트
+   핸들러**다: `while (AsyncReactor::drainAny(coreIndex))` 루프를
+   돌다가 `kAsyncDrainBatchLimit`(=32)에 도달하면 `kDiagRingLog`로
+   기록하고 **자기 자신에게 다시 같은 벡터로 self-IPI를 보낸 뒤
+   반환**한다(async_task.cpp:506, `Lapic::sendFixedIpi`).
+4. **결정적 사실 - 벡터 우선순위 비교**: `kAsyncDrainVector = 0xE3`
+   (227)인데 `kSchedulerTickVector = 0x24`(36)다(둘 다
+   `async_task.cpp`/`scheduler.h`에서 확인). x86 로컬 APIC는
+   `vector >> 4`(상위 4비트)로 우선순위 클래스를 매기고 **높은
+   벡터 번호가 항상 더 높은 우선순위**다 - `0xE3`(클래스 0xE)는
+   `0x24`(클래스 0x2)보다 하드웨어 우선순위가 훨씬 높다.
+
+## 근본 원인(확정)
+
+`kAsyncDrainIsr`가 배치 상한에 걸릴 때마다 **자기 자신과 같은,
+스케줄러 틱보다 하드웨어 우선순위가 훨씬 높은 벡터로 self-IPI를
+재예약**한다. AsyncTask가 계속 밀려드는 워크로드(이번 재현처럼
+여러 프로세스가 동시에 짧은 syscall을 연속 제출하는 상황 - `Read()`
+루프로 cpio를 읽는 `sockinherit`, `Socket/Bind/Listen/SpawnProcess`
+연쇄 등)에서는, 이 self-IPI가 **매번 새로 도착할 때마다 아직 처리
+안 된(낮은 우선순위인) 스케줄러 틱보다 항상 먼저 서비스된다** - x86
+인터럽트 우선순위 중재 규칙상 더 높은 우선순위의 pending/in-service
+인터럽트가 있으면 낮은 우선순위 인터럽트는 그게 없어질 때까지
+서비스되지 않는다. 워크로드가 끊기지 않고 계속 새 AsyncTask를
+큐에 넣는 한 이 self-IPI 사슬이 이론상 **무기한** 이어질 수 있고,
+그동안 이 코어의 스케줄러 틱(그리고 그걸로 진행되는
+`gWatchdogTickCounter` 자기 갱신)이 단 한 번도 실행되지 못해
+다른 코어의 워치독이 "이 코어가 응답 없다"고 오판(사실은 응답이
+없는 게 아니라, **다른(더 우선순위 높은) 인터럽트를 계속 정당하게
+처리 중**)해 진단 NMI를 보낸다.
+
+이 메커니즘은 `rflags`의 IF 비트가 재현마다 다르게 관측됐던 것
+(어떤 샘플은 0, 어떤 샘플은 1)과도 정확히 들어맞는다 - "계속 cli
+상태"가 아니라 "매번 짧게 IF=1로 돌아왔다가, 그 순간에 또 더
+높은 우선순위 인터럽트가 대기 중이라 바로 다시 그쪽으로 넘어가는"
+패턴이라 워치독 NMI가 잡는 순간의 IF 값이 매번 달라질 수 있다.
+
+## 왜 이게 여러 자매 계획과 시그니처가 겹쳐 보였는지
+
+`PN-6360E6E9`/`PN-D44504D1`도 "NMI watchdog"/"이 코어 응답 없음"류
+증상을 오랫동안 추적해 왔다 - 이번 발견으로 그 계획들의 재현 중
+일부(전부는 아닐 수 있음)가 실제로는 `DC-D8951156`류 포인터 손상이
+아니라 **이 인터럽트 우선순위 역전**이었을 가능성이 새로 생겼다.
+다만 그 계획들의 역사적 시그니처(`kSyncCr3`/`kSyncRsp0ForDispatch`
+Page Fault, `next=0x100000000`)는 이번 재현과 다르므로(이번엔 Page
+Fault가 전혀 없었다) 성급히 통합하지 않는다 - 각 계획이 자신의
+재현을 gdb로 다시 확인해 어느 계열인지 가릴 것.
+
+## 결정이 필요한 지점 - 수정 방향
+
+이 결함은 명백한 버그(어떤 의도적 설계도 "스케줄러 틱을 무기한
+굶겨도 된다"고 정하지 않았다)지만, 수정 방식은 이 커널의 인터럽트
+우선순위 정책 전반(다른 하드웨어 IRQ - AHCI 등 - 와의 상대적 순서
+포함)에 영향을 줄 수 있어 방향을 여쭙는다. 후보:
+
+**(A) `kAsyncDrainVector`를 `kSchedulerTickVector`보다 낮은
+우선순위 벡터로 재배정한다.** 가장 직접적이지만, 이 벡터를 이미
+참조하는 다른 서브시스템(`ahci.cpp`의 self-IPI, `fs.cpp`,
+`page_frame_allocator.cpp`의 "일반 인터럽트 하나로 회수를 미룬다"는
+전제 등)이 "이 IPI가 다른 하드웨어 IRQ보다 우선한다"는 암묵적 순서에
+기대고 있을 가능성이 있어, 전체 벡터 배치를 다시 검토해야 할 수
+있다.
+
+**(B) `kAsyncDrainIsr`의 self-IPI 재예약에 "경과 시간/연속 배치
+횟수" 기반 백오프를 추가한다** - 예: 연속으로 self-IPI를 재예약한
+횟수가 일정 임계치를 넘으면, 그 즉시 다시 쏘지 않고
+`DelayedExecutionQueue`나 일반 우선순위 경로(예: yieldCurrent 이후
+재개)로 완화해 스케줄러 틱이 최소 한 번은 끼어들 여지를 강제로
+만든다. 벡터 우선순위 정책 자체는 안 건드리므로 회귀 위험이 더 낮다.
+
+**(C) 아예 다른 접근** - 예: `kAsyncDrainBatchLimit`(현재 32)를
+훨씬 낮추는 것만으로 실질적 완화가 되는지 먼저 실측하고, 근본
+우선순위 역전 자체는 별도 트랙으로 남긴다(임시 완화 vs 근본 수정
+분리).
+
+## 참고
+- `PN-93C26459` - 이 발견의 출처(fd 상속 재검증), 재현 레시피/gdb
+  세션 로그 보존.
+- `PN-CC0F4EAC` - `PN-93C26459`를 낳은 상위 계획(소켓 계층 fd 상속
+  E2E).
+- `PN-D4F7BB66`(completed) - AsyncReactor를 코어당 전용 Task로
+  승격한 최근 변경 - 이 버그 자체는 그 이전부터 구조적으로 존재했을
+  가능성이 높지만(벡터 우선순위는 그 세션이 바꾸지 않음), AsyncTask
+  처리량이 늘어난 경로라 더 잘 드러나게 됐을 가능성.
+- `PN-6360E6E9`/`PN-D44504D1` - 같은 "NMI watchdog" 표면 증상을
+  오래 추적해 온 자매 계획 - 이번 발견을 계기로 재현을 다시 gdb로
+  구분해 볼 가치가 있음(교차 기록 완료).
+- `async_task.cpp:306`(`kAsyncDrainVector=0xE3`)/`scheduler.h:16`
+  (`kSchedulerTickVector=0x24`)/`async_task.cpp:466`
+  (`kAsyncDrainBatchLimit=32`)/`async_task.cpp:498-510`
+  (`kAsyncDrainIsr`) - 근본 원인의 정확한 코드 위치.
+- `diag_ring.cpp:95`(`kDiagRingLog`)/`diag_ring.cpp:55`(락 불필요
+  주석) - 이 함수 자체는 무죄임을 확인한 근거.

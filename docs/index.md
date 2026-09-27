@@ -19,6 +19,7 @@
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-4A0D3749](./DC-4A0D3749.md) | Mkdir이 자기 자신의 디렉터리 데이터 블록에 대해 블록 쿼터 하드리밋(bhardlimit)을 검사해야 하는가 | approved | 2026-09-26T15:02:23.218Z |
 | [DC-53B93BFF](./DC-53B93BFF.md) | PN-584DB994 잔존 원인 확정 - 중첩 인터럽트의 실제 커널 스택 소진(8KiB 고정) - 수정 방향 확인 요청 | approved | 2026-09-20T20:16:29.647Z |
+| [DC-54D69BEE](./DC-54D69BEE.md) | kAsyncDrainVector(0xE3)이 kSchedulerTickVector(0x24)보다 하드웨어 인터럽트 우선순위가 높아, AsyncTask 폭주 시 스케줄러 틱을 무기한 굶길 수 있다 - 수정 방향 결정 요청 | review | 2026-09-27T05:05:04.992Z |
 | [DC-59F63D0E](./DC-59F63D0E.md) | AsyncTaskCoroYield 재시도 카운트 강등(DC-5F0AC0D3 "(b)")이 실제 AHCI 2-writer에서도 여전히 재현되는 hang - 추가 설계 필요 | approved | 2026-09-26T02:38:44.925Z |
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved | 2026-09-13T13:14:35.340Z |
 | [DC-5F0AC0D3](./DC-5F0AC0D3.md) | AsyncTaskCoroYield 재시도 락의 우선순위 역전 라이브락 - drainOnce() 공정성 정책 방향 결정 요청 | approved | 2026-09-26T00:13:16.815Z |
@@ -29,7 +30,7 @@
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
-| [DC-D8951156](./DC-D8951156.md) | 블로킹 syscall(parkCurrent)이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는 문제 - 수정 방향 결정 필요 | review | 2026-09-26T23:58:58.452Z |
+| [DC-D8951156](./DC-D8951156.md) | 블로킹 syscall(parkCurrent)이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는 문제 - 수정 방향 결정 필요 | approved | 2026-09-27T01:38:17.356Z |
 | [DC-DC9B2C3E](./DC-DC9B2C3E.md) | ext4 inode 테이블 블록 read-modify-write 경쟁(고아 블록) - 락 세분화 단위 결정 요청 | approved | 2026-09-26T04:21:13.790Z |
 | [DC-E441CB59](./DC-E441CB59.md) | VFS StatArgs에 파일 타입 필드가 없음 - 소켓 특수 파일 지원을 위한 확장 방식 결정 요청 | approved | 2026-09-26T15:02:15.978Z |
 | [DC-F196028B](./DC-F196028B.md) | UEFI 직접 부팅 - 메모리맵/ACPI RSDP를 kMain에 전달하는 방법 | approved | 2026-09-24T09:43:10.521Z |
