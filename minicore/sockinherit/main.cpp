@@ -44,6 +44,7 @@
 //   7 = 자기 자신의 fd Close 실패
 #include "libcpio/cpio.h"
 #include "libmc/process.h"
+#include "libmc/signal.h"
 #include "libmc/socket.h"
 #include "libmc/syscall.h"
 #include "libmc/vfs.h"
@@ -87,6 +88,23 @@ void kFindChildEntry(const cpio::Entry& entry, void* userData) {
 }  // namespace
 
 extern "C" void _start() {
+    // 0) [수정, 2026-09-27] SIGCHLD를 Ignore로 설정 - PN-012D6310가 이미
+    // 문서화해 둔 전제(libmc/signal.h SignalNumber::Chld 문서 주석
+    // 참고)를 이 프로그램이 놓치고 있었다: SpawnProcess로 자식을 낳는
+    // 프로세스는 자식이 죽을 때(sockinheritchild가 정상 종료하는 것도
+    // 포함) 자기 자신도 함께 죽지 않으려면 SIGCHLD를 명시적으로
+    // Ignore로 설정해야 한다(기본 disposition은 종료) - 이걸 빠뜨려서
+    // 이 프로그램이 100% 재현되는 "SIGSEGV처럼 보이는" 조기 종료를
+    // 겪고 있었다(실제로는 SIGSEGV가 아니라 SIGCHLD 기본 처리, 실측
+    // 확인 완료 - PN-CC0F4EAC 참고).
+    mc::SignalActionArgs sigArgs;
+    sigArgs.signal = mc::SignalNumber::Chld;
+    sigArgs.disposition = mc::SignalDisposition::Ignore;
+    mc::SyscallToken sigToken = mc::submit(mc::kSyscallEndpointSignalAction, &sigArgs);
+    if (sigToken != 0) {
+        mc::wait(sigToken);
+    }
+
     // 1) Socket(Stream) - 리스너.
     mc::SocketArgs sockArgs;
     sockArgs.domain = mc::SocketDomain::Unix;
