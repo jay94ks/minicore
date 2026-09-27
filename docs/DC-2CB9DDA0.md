@@ -5,9 +5,85 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-2CB9DDA0
   status: review
-  updatedAt: 2026-09-27T10:38:05.304Z
+  updatedAt: 2026-09-27T11:16:56.673Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [gdb 확인, 2026-09-27, QU-2CEB2339 답변("gdb로 재확인해 계속 추적")] 잔여 1/60의 정체 확정 - gLock이 아니라 serial.cpp의 gWriteLock, 완전히 다른 메커니즘
+
+free-running gdb 사냥(GRUB SMP4+실제initrd, `-s` 무`-S`, 워치독 로그가
+뜨는 순간 attach) 31회차에서 재현 성공. `info threads`/`thread apply
+all bt` 결과가 **9/60·기존 gLock 캐스케이딩 케이스와 완전히 다른
+그림**을 보였다:
+
+- CPU#3(워치독을 유발한 코어) - `kHandleNmi`/`kPanic`에서 halted(예상됨).
+- CPU#0 - `kernel::kDevmgrKernelMain()`을 정상적으로 실행 중(정지 아님).
+- CPU#1/CPU#2 - **둘 다 `running`**, `Scheduler::runLoop() →
+  kSyncRsp0ForDispatch → currentCoreIndex() → kScanCoreIndexByApicId()
+  → Lapic::readRegister()` 정상 idle 경로 실행 중(정지 아님).
+
+**즉 나머지 3코어 중 어느 하나도 락을 쥔 채 멈춰 있지 않다** - 이번
+재현은 캐스케이딩 데드락이 아니다. CPU#3 자신의 인터럽트 프레임
+(`rip=0xffffffff80110086`, 시리얼 로그 덤프와 gdb의
+`kHandleNmi(frame=...)` 둘 다 일치)이 가리키는 지점을 그 코어의
+`rdi`(Spinlock::lock()이 `this`를 그대로 보존하는 유일한 레지스터,
+루프 안에서 다른 호출이 없어 안전하게 신뢰 가능)로 역추적한 결과 -
+`rdi=0xffffffff808ddb10` → `nm -n`으로 이 정확한 빌드에서 해석하면
+**`(anonymous namespace)::gWriteLock`(offset=0x0, 완전 일치)** -
+`minicore/kernel/serial.cpp:19`, `Serial::write()`가 문자열 전체를
+감싸는 바로 그 락이다.
+
+**메커니즘 재구성**: `Serial::write()`는 `gWriteLock`을 잡은 채
+`putChar()`로 **문자 하나하나마다 UART LSR THRE 비트를 폴링하는
+바쁜 대기**를 한다(`serial.cpp:36`) - 38400 baud 기준 문자당 약
+260µs, 로그 한 줄(수십~수백 자)이면 수 ms~수십 ms 동안 이 락을
+계속 쥐고 있을 수 있다. `Logger::info/warn/error`가 이 커널
+전역에서 매우 광범위하게 호출되므로(부팅 로그, 각종 진단, syscall
+경로 곳곳), `gLock`보다 오히려 **경합 빈도 자체는 훨씬 높은 락**
+이다 - 다만 임계구역이 "짧고 우연히 재수 없이 선점당하는" 문제가
+아니라 **그 자체로 원래 느린(수 ms~수십 ms) 하드웨어 I/O**라는 점이
+`gLock`과 근본적으로 다르다.
+
+**독립 교차 확인**: 같은 날 다른 작업(`async_task.cpp:992` 주석,
+`kAsyncReactorsPerCore>1` 검증 중 발견)이 이미 **"코어 하나가
+Logger의 Spinlock::lock() 안에서 응답 없음"** 이라는 정확히 같은
+증상을 낮은/불안정한 빈도로 목격했고 `DC-D8951156`/`PN-6360E6E9`/
+`PN-D44504D1` 계열로 잠정 분류해 둔 바 있다 - 이번 gdb 확인이 바로
+그 증상의 정체를 처음으로 정확히 규명한 것이다.
+
+**왜 방향(A)(IrqSpinlock)를 gWriteLock에 그대로 적용하면 안 되는가**:
+`gLock`의 경우 IrqSpinlock 전환이 정답이었다(임계구역이 원래 짧고,
+cli로 감싸도 부작용이 없음) - 그러나 `gWriteLock`은 **임계구역
+자체가 수 ms~수십 ms짜리 실제 느린 하드웨어 폴링**이라, 이를 그대로
+`IrqSpinlock`으로 감싸면 그 구간 내내 로컬 코어의 인터럽트(타이머
+틱 포함)를 전부 막아버려 - 오히려 **매번 확정적으로** 워치독을
+유발하는 방향으로 악화될 가능성이 높다. 이 락은 `gLock`과 다른 종류의
+해법이 필요하다.
+
+**결정이 필요한 지점(신규)**: 방향을 여쭙는다 -
+1. **(E) Serial 출력을 논블로킹/버퍼링 방식으로 재설계** - 문자별
+   busy-wait 대신 링버퍼+인터럽트 구동 TX(IRQ 활성화는 이미 `Serial::
+   init()`이 해 둠, 현재 미사용)로 전환해 `gWriteLock` 보유 시간을
+   "버퍼에 복사"만큼으로 극적으로 줄인다. 가장 근본적이지만 UART
+   드라이버 재설계라 범위가 크다.
+2. **(F) 워치독이 "느린 I/O로 바쁨"과 "진짜 멈춤"을 구분하게 함** -
+   `DC-2CB9DDA0` 최상단(방향 B 후보)이 이미 제시했던 아이디어를
+   여기 재적용 - 코어별 "현재 보유 중인 lock/느린 I/O 표시" 플래그.
+3. **(G) 그냥 둔다** - 캐스케이딩과 달리 이번엔 다른 코어가 전부
+   정상 진행 중이었다(전체 정지 아님, 코어 1개만 영구 손실) - 심각도가
+   `gLock` 케이스보다 낮다고 보고, 발생률(1.7%대)을 감내 가능한
+   잔존 리스크로 남길지.
+4. **(H) 먼저 이 메커니즘을 더 실측** - 어느 Logger:: 호출이 실제로
+   문제의 그 순간 락을 쥐고 있었는지(다른 코어 쪽) 추가 재현으로
+   더 좁힌 뒤 결정.
+
+## 참고 (추가)
+- `minicore/kernel/serial.cpp:19,41-49` - `gWriteLock`/`Serial::write()`
+  /`Serial::putChar()` 정의.
+- `minicore/kernel/async_task.cpp:992` - 같은 증상의 독립적 이전
+  목격(2026-09-27, 다른 작업 도중).
+
+---
 
 ## [구현+검증, 2026-09-27] 방향(A) 채택(설계자 답변, QU-05F4B63B) - IrqSpinlock 신설+gLock 적용, commit 8567fe0 - 9/60 -> 1/60로 대폭 개선, 완전 해소는 아님
 
