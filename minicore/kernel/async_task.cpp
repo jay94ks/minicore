@@ -465,6 +465,29 @@ void kAsyncTaskTryPush(kernel::uint32_t targetCore) {
 // 숫자값 수준은 구현 중 결정 가능한 범위).
 constexpr kernel::uint32_t kAsyncDrainBatchLimit = 32;
 
+// [신규, 2026-09-27, DC-54D69BEE 방향(B), QU-D22ADEB7 설계자 승인]
+// `kAsyncDrainVector`(0xE3)가 `kSchedulerTickVector`(0x24)보다 x86
+// APIC 하드웨어 우선순위가 훨씬 높아, 아래 `kAsyncDrainIsr`가 배치
+// 상한에 걸릴 때마다 자기 자신에게 같은(더 높은 우선순위) 벡터로
+// self-IPI를 재예약하면 워크로드가 끊기지 않는 한 이 사슬이 이론상
+// 무기한 이어져 스케줄러 틱을 완전히 굶길 수 있었다(PN-93C26459가
+// gdb로 확정 - 단일 코어 국소 무응답과, 그 코어가 마침
+// `DelayedExecutionQueue::gLock`을 쥐고 있었을 때의 캐스케이딩 전체
+// 데드락 두 발현 모두 gdb로 재현/확인됨). 벡터 우선순위 정책 자체를
+// 바꾸는 대안(방향 A)은 `RM-28225668`(2026-09-16 설계자 지시로 확정된
+// "커널 IPI 벡터는 0xE0~0xFD 전용" 규칙)과 산술적으로 양립 불가능함이
+// 드러나(QU-D22ADEB7) 설계자가 이 방향(B)으로 확정했다 - 연속으로
+// 배치 상한에 걸린 횟수를 코어별로 세다가, 이 임계치를 넘으면 그
+// 즉시 다시 self-IPI를 쏘지 않고 조용히 반환한다. 남은 작업은
+// `kAsyncReactorTaskMain`의 기존 `yieldCurrent()` 폴링 루프(정상
+// 우선순위 경로)가 다음 라운드로빈 차례에 이어서 처리하므로, 그
+// 사이에 스케줄러 틱(그리고 그보다 낮은 다른 모든 인터럽트)이 최소
+// 한 번은 반드시 끼어들 창이 강제로 열린다. 값 자체(4)는 v1 추정치 -
+// 너무 작으면 처리량이 손해를 보고 너무 크면 굶주림 창이 길어지므로
+// 실측 후 조정 대상(RM-23F4B687 §4).
+constexpr kernel::uint32_t kAsyncDrainConsecutiveRearmLimit = 4;
+kernel::uint32_t gAsyncDrainConsecutiveRearmCount[kMaxCores] = {};
+
 // [신규, 2026-09-27, PN-D4F7BB66] 코어당 전용 리액터 Task 진입점 -
 // kSpawnAsyncReactorTasks()가 (coreIndex, reactorIndex)를 정수 하나로
 // 인코딩해 entryArg로 넘긴다(이 코드베이스에서 entryArg에 정수를 싣는
@@ -503,10 +526,21 @@ void kAsyncDrainIsr(kernel::InterruptFrame*) {
     while (kernel::AsyncReactor::drainAny(coreIndex)) {
         if (++processed >= kAsyncDrainBatchLimit) {
             kernel::kDiagRingLog(kernel::DiagRingEvent::AsyncDrainBatchLimitHit, coreIndex, processed, 0, coreIndex);
+            // [신규, 2026-09-27, DC-54D69BEE 방향(B)] 연속으로 배치
+            // 상한에 걸린 횟수가 임계치를 넘으면 그 즉시 다시 self-IPI를
+            // 쏘지 않는다 - 위 상수 주석 참고. 카운터를 리셋해 다음
+            // "연속 사슬"을 다시 처음부터 셀 수 있게 한다.
+            if (++gAsyncDrainConsecutiveRearmCount[coreIndex] >= kAsyncDrainConsecutiveRearmLimit) {
+                gAsyncDrainConsecutiveRearmCount[coreIndex] = 0;
+                return;
+            }
             kernel::Lapic::sendFixedIpi(kernel::Acpi::cpuApicId(coreIndex), static_cast<kernel::uint8_t>(kAsyncDrainVector));
             return;
         }
     }
+    // 배치 상한에 안 걸리고 큐가 정상적으로 비어 끝났다 - 연속 사슬이
+    // 끊긴 것이므로 카운터를 리셋한다.
+    gAsyncDrainConsecutiveRearmCount[coreIndex] = 0;
 }
 
 // [갱신, SP-39F18E30 §2, AllocDmaBuffer/FreeDmaBuffer 추가] 64는 정확히
