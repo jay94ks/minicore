@@ -4,10 +4,80 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-54D69BEE
-  status: review
-  updatedAt: 2026-09-27T05:19:59.215Z
+  status: pending
+  updatedAt: 2026-09-27T05:35:21.582Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [구현 착수 중 충돌 발견, 2026-09-27] 승인된 방향 (A)가 RM-28225668의 기존 벡터 범위 규칙과 수학적으로 양립 불가능 - 재확인 요청
+
+설계자가 `QU-00E6FB36`에서 방향 **(A)**("`kAsyncDrainVector`를
+`kSchedulerTickVector`보다 낮은 우선순위 벡터로 재배정")를 승인해
+구현에 착수했는데, 코드 배선을 확인하던 중 **이 방향이 이미 확정된
+다른 설계자 지시와 충돌**한다는 걸 발견했다 - 임의로 어느 한쪽을
+택하지 않고 다시 여쭙는다.
+
+**충돌 내용**: `RM-28225668`("Minicore 인터럽트 벡터 목록")은
+2026-09-16 설계자 지시로 "`0xE0`~`0xFD`" 범위를 **커널 내부 IPI/최적화
+벡터 전용**으로 고정해 뒀고, `kAsyncDrainVector`(현재 `0xE3`)는 바로
+그 규칙에 따라 이 표에 등록된 항목이다. 그런데 `kSchedulerTickVector`
+는 `0x24`(LAPIC 틱/HPET/PIT와 같은 타이머 클러스터, `0x20`~`0x24`) -
+**`0xE0`~`0xFD` 범위 안의 어떤 값도 `0x24`보다 하드웨어 우선순위가
+낮을 수 없다**(x86 APIC 우선순위는 `vector >> 4` 클래스 비교라, 클래스
+0xE~0xF는 항상 클래스 0x2보다 높음). 즉 **"`kAsyncDrainVector`를
+`0xE0`~`0xFD` 범위 안에 유지하면서 동시에 `kSchedulerTickVector`보다
+낮은 우선순위로 만드는 것은 산술적으로 불가능**하다 - 방향 (A)를
+문자 그대로 구현하려면 반드시 이 범위 규칙을 깨야 한다.
+
+이 범위 밖에서 `kSchedulerTickVector`(0x24)보다 낮은 후보는 사실상
+`0x21`(CPU 예외 0-31, `0x20` LAPIC 틱, `0x22` HPET, `0x23` PIT가 이미
+고정이라 유일하게 빈 슬롯)뿐이다 - 단 이 값은 `pnp.cpp`의
+`kMsiVectorRangeStart`(=33=`0x21`)와 정확히 겹쳐, 동적 MSI 벡터 풀의
+"첫 후보"이기도 하다(아래 "부수 발견" 참고).
+
+**부수 발견 - `kAllocateMsiVector()`가 고정 벡터를 걸러내지 않는
+기존 버그**: `pnp.cpp:401-411`의 `kAllocateMsiVector()`는 후보를 고를
+때 `InterruptDelegation::isAllowed()`(이미 위임된 동적 벡터인지)만
+확인하고 `kIsFixedVector()`(고정 벡터인지)는 전혀 확인하지 않는다.
+그 결과 `kAllocateMsiVector()`가 우연히 고정 벡터(예: `0x24`
+스케줄러 틱, `0x80` syscall, `0xE0`~`0xE4` IPI들 - 전부 33-254 범위
+안에 있다)를 후보로 반환할 수 있고, `pnp.cpp:490`의 `Pci::enableMsi()`
+가 `InterruptDelegation::allow()`(여기서만 `kIsFixedVector`를 확인)
+로 거부되기 **이전에 먼저 무조건 실행**돼 그 PCI 장치의 실제 MSI
+capability 레지스터가 그 고정 벡터를 가리키도록 프로그램된다 - 이후
+`allow()`가 실패해 `assignedIrqVector`는 0으로 반환되지만, **장치의
+MSI는 이미 활성화된 채 고정 벡터를 가리키고 있어**, 그 장치가
+인터럽트를 발생시키면 엉뚱한(예: 스케줄러 틱) ISR이 실행될 잠재적
+위험이 이미 존재한다. 이 버그는 `kAsyncDrainVector`를 `0x21`로
+옮기는 것과 무관하게 이미 존재하지만, `0x21`은 `kMsiVectorRangeStart`
+바로 그 값이라 옮길 경우 이 버그가 트리거될 확률이 사실상 "부팅
+후 첫 MSI 요청"으로 크게 높아진다 - 방향 (A)를 `0x21`로 구현하려면
+이 버그(고정 벡터 후보를 건너뛰도록 `kAllocateMsiVector()` 수정)도
+함께 고쳐야 안전하다.
+
+**설계자 답변 요청(`QU-` 신규 등록)**: 아래 중 선택해 주시길 -
+1. **(A-1)** `RM-28225668`의 `0xE0`~`0xFD` 범위 규칙에 예외를 두고
+   `kAsyncDrainVector`를 `0x21`로 재배정 - 위 `kAllocateMsiVector()`
+   버그도 함께 수정(고정 벡터 스킵 추가). RM-28225668 본문에 이
+   예외를 명시.
+2. **(A-2)** 대신 `kSchedulerTickVector`(현재 `0x24`, 타이머
+   클러스터)를 `kAsyncDrainVector`보다 낮은 값으로 옮기지 않고,
+   오히려 `kAsyncDrainVector`가 속한 IPI 클러스터 전체의 상대
+   순서만 조정 - 예를 들어 RM-28225668의 IPI 범위 자체를
+   `kSchedulerTickVector`보다 낮은 대역으로 재정의하는 더 큰
+   재검토(범위가 넓어 회귀 위험 큼).
+3. **(B로 회귀)** 애초에 `QU-00E6FB36`에서 권장으로 표시했던 방향
+   (B)(self-IPI 재예약에 배치 횟수 기반 백오프)로 되돌아간다 - 벡터
+   우선순위/RM-28225668 범위 규칙을 전혀 안 건드리고, 이미 gdb로
+   확인된 두 발현(단일 코어 국소 무응답 - `PN-93C26459`, 캐스케이딩
+   `gLock` 전체 데드락 - `PN-6360E6E9`/`PN-D44504D1`) 모두를 해소할
+   것으로 예상된다(self-IPI 사슬 자체를 끊으므로).
+
+**임시 조치**: 이 재확인이 끝날 때까지 코드 변경은 보류한다(RM-28225668/
+`kAsyncDrainVector`/`kAllocateMsiVector` 어느 것도 아직 건드리지
+않았다 - `git status` 클린).
+
+---
 
 ## [보강, 2026-09-27 - dbgdriver 재현으로 확인] 이 근본 원인이 캐스케이딩 데드락까지 설명한다 - `Spinlock`은 인터럽트를 안 끈다
 
