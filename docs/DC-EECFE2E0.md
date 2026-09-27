@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-EECFE2E0
   status: review
-  updatedAt: 2026-09-27T18:41:10.547Z
+  updatedAt: 2026-09-27T19:06:32.612Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -109,9 +109,24 @@ KernelThread가 존재하는 한(즉 항상), 어떤 코어에서든 한 번이�
 조건이 명시적 설계 의도(SP-B26CDBDD §3.2)였던 만큼 최종 방향은
 설계자 판단에 맡긴다.
 
+## [교차 확인 추가, 2026-09-28] 두 번째 독립 희생자 확인 - dbgdriver(PN-0556C759)도 같은 시그니처로 영구 정지
+
+`PN-0556C759`(멀티스레드 하드웨어 브레이크포인트 재현) 재검증 시도
+중, 그 재현 드라이버(`minicore/dbgdriver`)의 물리 UserThread가
+`state=Ready, inRunQueue=true, vruntime=1024, cpuTicksUsed=1`로
+authtest와 **정확히 동일한 시그니처**로 영구 정지하는 것을 gdb로
+확인했다 - `vruntime` 값까지 완전히 같아, 같은 최초 선점 타이밍/
+비용 구조에서 이 버그가 매우 일관되게 발동함을 시사한다. `PN-0556C759`
+가 이번 세션 내내 관찰해 온 "재현율이 원래 33%에서 0%로 떨어졌다"는
+현상 자체가, 원래 찾던 버그가 사라진 게 아니라 **이 gNormalQueues
+기아가 그 재현 하네스를 먼저 잡아먹어 원래 코드 경로에 도달하지도
+못하게 막고 있었을 가능성**을 뒷받침한다 - "authmgr에 국한되지
+않는다"는 위 절의 판단을 독립적으로 뒷받침하는 두 번째 사례.
+
 ## 참고
 - `PN-AA9D7030` - 이 근본 원인을 확정한 조사(23/23 재현, TEMP
   브레드크럼 전부 원복 완료).
+- `PN-0556C759` - 두 번째 독립 희생자 확인 사례(dbgdriver).
 - `PN-24A2B6F5` - authmgr E2E 완성 계획, 이 DC의 결정에 의존.
 - `PN-ECCAD541`(rejected) - 먼저 기각된 Channel 계층 가설.
 - `DC-C4A011C7`(approved) - 이전에 고친 waitingTask 크로스코어
