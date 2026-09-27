@@ -5,9 +5,69 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-54D69BEE
   status: review
-  updatedAt: 2026-09-27T05:05:04.992Z
+  updatedAt: 2026-09-27T05:19:59.215Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [보강, 2026-09-27 - dbgdriver 재현으로 확인] 이 근본 원인이 캐스케이딩 데드락까지 설명한다 - `Spinlock`은 인터럽트를 안 끈다
+
+`PN-6360E6E9`/`PN-D44504D1`의 원 재현 도구(`minicore/dbgdriver`)로
+같은 gdb 사냥 기법(watchdog 로그가 뜨는 순간 즉시 attach)을 40회
+시도 중 20회차에서 재현에 성공했다(과거 재현율 ~5%와 일치) - 이번엔
+**전혀 다른, 그러나 정확히 같은 근본 원인으로 설명되는 패턴**을
+확인했다.
+
+**관찰**: 이번엔 워치독을 유발한 코어(CPU#3, `kHandleNmi`/`kPanic`
+안에 정지) 외에 **나머지 3개 코어(CPU#0/1/2) 전부가 `kernel::
+Spinlock::lock()`(spinlock.h:21) 안에서 스핀 중**이었고, 셋 다
+**정확히 같은 락 주소**(`kernel::(anonymous namespace)::gLock`)를
+기다리고 있었다. 콜스택은 셋 다 동일한 모양:
+`Spinlock::lock → SpinlockGuard::SpinlockGuard → DelayedExecutionQueue::
+pump()(delayed_exec.cpp:86) → AsyncReactor::drainOnce(coreIndex=N) →
+kAsyncReactorTaskMain(arg=N) → kTaskStartTrampoline` - **각 코어가
+자기 전용 `AsyncReactor` Task(`PN-D4F7BB66`가 코어당 전용 Task로
+승격한 바로 그것) 안에서 idle 직전 `DelayedExecutionQueue::pump()`를
+부르다가, `delayed_exec.cpp`의 단 하나뿐인 전역 `gLock`(코어별이
+아니라 프로젝트 전체에 단 하나)을 얻으려 대기 중이었다.**
+
+**결정적 사실**: `kernel::Spinlock::lock()`(libkenv/spinlock.h)은
+순수 TAS 스핀락 구현으로 **`cli`를 전혀 하지 않는다** - 락을 쥔
+채로도 인터럽트는 계속 들어온다. 즉:
+
+1. 어떤 코어(추정 CPU#3)가 `pump()`의 임계구역에서 `gLock`을 쥔
+   채로,
+2. 마침 `kAsyncDrainVector` self-IPI 폭주(위 최상단 절의 근본
+   원인)에 걸려 그 코어가 이 문서가 이미 확정한 메커니즘대로
+   자기 스케줄러 틱뿐 아니라 **원래 실행(=이 `pump()` 호출 자체로
+   돌아오는 것)까지 무기한 선점당하면**,
+3. 그 코어는 `gLock`을 영원히 반납하지 못한 채 다른 코어의 워치독에
+   "응답 없음"으로 잡혀 `kHandleNmi`/`kPanic`에서 영구 정지되고,
+4. **`gLock`이 전역 단일 락이라 다른 모든 코어의 `AsyncReactor` Task도
+   idle 전환 때마다 `pump()`를 부르므로, 나머지 코어 전부가 이제
+   영원히 반납되지 않을 그 락을 놓고 무기한 스핀** - 이 시점부터는
+   진짜 "시스템 전체 정지"가 된다.
+
+**이게 바로 이 계열의 watchdog이 역사적으로 "시스템 전체가 멈춘 것
+같다"고 보고돼 온 이유이자, `PN-93C26459`(sockinherit)에서는 "코어
+1개만 무응답"으로 관찰된 이유이기도 하다** - 어느 쪽이든 근본
+원인은 동일(`kAsyncDrainVector` 우선순위 역전)하지만, 그 순간 걸린
+코어가 마침 전역 락을 쥐고 있었는지(→ 전체 캐스케이딩) 아닌지(→
+그 코어만 국소적으로 무응답)에 따라 겉보기 증상이 완전히 달라진다.
+
+**이 보강 사실이 수정 방향 선택에 주는 함의**: 방향 (B)(self-IPI
+재예약에 백오프 추가)만으로도 근본 우선순위 역전 자체는 해소되지만,
+`gLock`이 여전히 전역 단일 락이라는 사실 자체는 별도 하드닝 과제로
+남는다(이 근본 원인이 없어져도, 다른 이유로 `pump()` 임계구역이
+길어지는 회귀가 생기면 같은 캐스케이딩 패턴이 재발할 수 있음) -
+당장 이 DC의 결정 범위에 넣진 않되, 참고용으로 남긴다.
+
+`PN-6360E6E9`/`PN-D44504D1`의 **이번 dbgdriver 재현은 이 DC의 근본
+원인으로 완전히 설명된다** - 다만 그 두 계획이 과거 기록해 온
+`kSyncCr3`/`kSyncRsp0ForDispatch` Page Fault 계열(`next=0x100000000`)
+재현들은 이번 재현과 시그니처가 달라(Page Fault 없음) 여전히 별개로
+남을 수 있다 - 그 두 계획이 각자 재현들을 다시 gdb로 분류할 것.
+
+---
 
 ## 배경
 
