@@ -19,7 +19,7 @@
 | [DC-48565C0B](./DC-48565C0B.md) | 빌드 시스템/툴체인/CI 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-4A0D3749](./DC-4A0D3749.md) | Mkdir이 자기 자신의 디렉터리 데이터 블록에 대해 블록 쿼터 하드리밋(bhardlimit)을 검사해야 하는가 | approved | 2026-09-26T15:02:23.218Z |
 | [DC-53B93BFF](./DC-53B93BFF.md) | PN-584DB994 잔존 원인 확정 - 중첩 인터럽트의 실제 커널 스택 소진(8KiB 고정) - 수정 방향 확인 요청 | approved | 2026-09-20T20:16:29.647Z |
-| [DC-54D69BEE](./DC-54D69BEE.md) | kAsyncDrainVector(0xE3)이 kSchedulerTickVector(0x24)보다 하드웨어 인터럽트 우선순위가 높아, AsyncTask 폭주 시 스케줄러 틱을 무기한 굶길 수 있다 - 수정 방향 결정 요청 | pending | 2026-09-27T05:35:21.582Z |
+| [DC-54D69BEE](./DC-54D69BEE.md) | kAsyncDrainVector(0xE3)이 kSchedulerTickVector(0x24)보다 하드웨어 인터럽트 우선순위가 높아, AsyncTask 폭주 시 스케줄러 틱을 무기한 굶길 수 있다 - 수정 방향 결정 요청 | pending | 2026-09-27T07:09:21.690Z |
 | [DC-59F63D0E](./DC-59F63D0E.md) | AsyncTaskCoroYield 재시도 카운트 강등(DC-5F0AC0D3 "(b)")이 실제 AHCI 2-writer에서도 여전히 재현되는 hang - 추가 설계 필요 | approved | 2026-09-26T02:38:44.925Z |
 | [DC-5AB13FFC](./DC-5AB13FFC.md) | 커널 서비스 내부 알고리즘 및 라이선스 미정 | approved | 2026-09-13T13:14:35.340Z |
 | [DC-5F0AC0D3](./DC-5F0AC0D3.md) | AsyncTaskCoroYield 재시도 락의 우선순위 역전 라이브락 - drainOnce() 공정성 정책 방향 결정 요청 | approved | 2026-09-26T00:13:16.815Z |
@@ -57,8 +57,8 @@
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-27T05:36:14.831Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-26T17:57:04.990Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-27T01:28:32.735Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-27T07:07:15.386Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-27T07:06:40.584Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-26T10:15:57.240Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-26T14:53:45.979Z |
