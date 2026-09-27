@@ -168,6 +168,8 @@ ChannelId kAllocateChannelId(const SharedPtr<Channel>& channel) {
     return 0;  // 슬롯 고갈 - 호출부가 ResourceExhausted로 매핑
 }
 
+}  // namespace
+
 // 안전 해석 - 이 함수를 거치지 않고는 어디서도 유저 제공 ChannelId를
 // Channel로 캐스팅하지 않는다. 유저가 어떤 값을 넘기든 인덱스 범위
 // 검사 + 세대 일치 확인만으로 끝난다. [갱신, 2026-09-22, PN-260D7D73]
@@ -177,6 +179,13 @@ ChannelId kAllocateChannelId(const SharedPtr<Channel>& channel) {
 // 포인터만 돌려줘, `AcceptFromChannelHandler`의 `AsyncTask::yield()`
 // 대기 루프처럼 resolve 이후 다시 역참조하는 지점에서 이론상 실제
 // use-after-free 경합이 가능했다.
+//
+// [갱신, 2026-09-27, SP-6350DEBB, PN-7562DA62] `kCreateNamedChannel`과
+// 동일한 이유로 익명 네임스페이스 밖(kernel 네임스페이스 스코프)으로
+// 옮겼다 - epoll.cpp가 리슨 소켓 readiness 판정(§4)에 이 함수가
+// 필요해, channel.h의 선언과 같은 외부 링키지를 가져야 한다(실제로
+// 링크 단계에서 undefined reference로 확인됨 - 헤더 선언만으로는
+// 정의가 여전히 익명 네임스페이스에 있으면 외부 링키지가 되지 않는다).
 SharedPtr<Channel> kResolveChannelId(ChannelId id) {
     if (id == 0) {
         return SharedPtr<Channel>();
@@ -193,6 +202,8 @@ SharedPtr<Channel> kResolveChannelId(ChannelId id) {
     }
     return slot.ptr;
 }
+
+namespace {
 
 // DestroyChannelHandler::onExec 안, 이름 해제 직후에 호출한다 - id
 // 자체에서 인덱스를 역산하므로 O(1). [갱신, 2026-09-22, PN-260D7D73]
@@ -314,12 +325,31 @@ namespace {
 // outbound가 꽉 차서 상대 자신이 쓰기를 기다리던 pendingWriters 전부,
 // 모두 이제 BrokenPipe로 깨어나야 한다 - 대기자가 여럿일 수 있으므로
 // (PN-C9625015) 하나만 깨우면 나머지가 영구히 못 깨어난다.
-AsyncTaskWaitQueue kWakeForClose(BridgePipe* closed) {
+// [갱신, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] epoll 관찰자
+// 노드까지 함께 깨우도록 반환 모양을 확장 - `AsyncTaskWaitQueue woken`
+// (기존 진짜 pendingReaders/pendingWriters 대기자)은 그대로 두고,
+// `EpollObserverQueue wokenObservers`를 별도로 추가한다(두 큐는 서로
+// 다른 노드 타입이라 하나로 합칠 수 없다 - 위 EpollObserverQueue 문서
+// 주석 참고).
+struct WakeForCloseResult {
     AsyncTaskWaitQueue woken;
+    EpollObserverQueue wokenObservers;
+};
+
+WakeForCloseResult kWakeForClose(BridgePipe* closed) {
+    WakeForCloseResult result;
     {
         SpinlockGuard guard(closed->outbound.lock);
         for (AsyncTask* t = closed->outbound.pendingReaders.popFront(); t; t = closed->outbound.pendingReaders.popFront()) {
-            woken.pushBack(t);
+            result.woken.pushBack(t);
+        }
+        // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] epoll 관찰자도
+        // 함께 깨운다 - closed 쪽이 닫히면 그 outbound를 읽던 쪽은
+        // BrokenPipe(EOF류)를 봐야 하므로, 그걸 감시 중이던 epoll도
+        // 다시 스캔해 그 상태를 보고해야 한다.
+        for (EpollObserverNode* n = closed->outbound.readObservers.popFront(); n;
+             n = closed->outbound.readObservers.popFront()) {
+            result.wokenObservers.pushBack(n);
         }
     }
     // [수정, 2026-09-17, PN-9CC66142] peer가 이제 WeakPtr - 상대가
@@ -330,16 +360,33 @@ AsyncTaskWaitQueue kWakeForClose(BridgePipe* closed) {
     if (peer) {
         SpinlockGuard guard(peer->outbound.lock);
         for (AsyncTask* t = peer->outbound.pendingWriters.popFront(); t; t = peer->outbound.pendingWriters.popFront()) {
-            woken.pushBack(t);
+            result.woken.pushBack(t);
+        }
+        // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] peer 쪽
+        // 쓰기 가능 여부를 감시 중이던 epoll도 함께 깨운다(더 이상
+        // 아무도 안 읽어 줄 것이므로 다음 쓰기는 BrokenPipe).
+        for (EpollObserverNode* n = peer->outbound.writeObservers.popFront(); n;
+             n = peer->outbound.writeObservers.popFront()) {
+            result.wokenObservers.pushBack(n);
         }
     }
-    return woken;
+    return result;
 }
+
+}  // namespace
 
 // [수정, 2026-09-17, PN-9CC66142] peer.lock()이 실패하면(상대가 이미
 // 자기 프로세스 종료 등으로 반납됨) 그 자체로 broken - closedLocal을
 // 명시적으로 안 불렀어도 더 이상 상대에게 도달할 방법이 없다는 뜻은
 // 같다.
+//
+// [갱신, 2026-09-27, SP-6350DEBB, PN-7562DA62] `kCreateNamedChannel`과
+// 동일한 이유로 익명 네임스페이스 밖(kernel 네임스페이스 스코프)으로
+// 옮겼다 - epoll.cpp가 fd 종류별 readiness 판정(§4)에 이 함수가
+// 필요해, channel.h의 선언과 같은 외부 링키지를 가져야 한다(안 그러면
+// 이 파일 안에서 "익명 네임스페이스 버전"과 "channel.h가 선언한 외부
+// 버전" 둘 다 시야에 들어와 모든 호출부가 모호해진다 - 실제로 빌드
+// 에러로 확인됨).
 bool kIsBridgeBroken(BridgePipe* bridge) {
     if (bridge->closedLocal) {
         return true;
@@ -347,6 +394,8 @@ bool kIsBridgeBroken(BridgePipe* bridge) {
     SharedPtr<BridgePipe> peer = bridge->peer.lock();
     return !peer || peer->closedLocal;
 }
+
+namespace {
 
 // [제거, 2026-09-20, SP-43331889 §3-1] 예전엔 여기 "이 AsyncTask를
 // 제출한 UserThread가 속한 Process"를 얻는 `kProcessFromSubmitter(AsyncTask*)`
@@ -395,6 +444,15 @@ OpenBridgeList* kOwnerOpenBridgesOf(Task* task) {
 // 조사 중 발견). 찾으면 그 슬롯이 쥔 `SharedPtr<BridgePipe>`(=계속
 // 살아있음을 보장)를, 못 찾으면(위조된 핸들, 남의 핸들, 이미 닫혀
 // 목록에서 빠진 핸들) 빈 값을 반환한다.
+//
+// [갱신, 2026-09-27, SP-6350DEBB, PN-7562DA62] 위 kIsBridgeBroken과
+// 동일한 이유로 익명 네임스페이스 밖으로 옮겼다 - epoll.cpp가 소켓
+// readiness 판정(§4)에 필요하다. 내부 전용 헬퍼 `kOwnerOpenBridgesOf`
+// (위, 익명 네임스페이스 그대로 유지)는 계속 이 함수보다 먼저 정의된
+// 내부 링키지 함수를 그대로 호출할 수 있다(kCreateNamedChannel이
+// 익명 네임스페이스의 kAllocateChannelId를 호출하는 것과 동일한 관례).
+}  // namespace
+
 SharedPtr<BridgePipe> kResolveOwnedBridge(AsyncTask* task, BridgeHandle handle) {
     // [갱신, 2026-09-20, SP-43331889 §3-1] Process 전용
     // kProcessFromSubmitter 대신 kOwnerOpenBridgesOf로 - 제출자가
@@ -412,6 +470,8 @@ SharedPtr<BridgePipe> kResolveOwnedBridge(AsyncTask* task, BridgeHandle handle) 
     }
     return slot->value;
 }
+
+namespace {
 
 // [신규, 2026-09-17, PN-B552E75F] `ChannelReadArgs::buffer`/
 // `ChannelWriteArgs::data`(유저 포인터)를 역참조하기 전에 호출자
@@ -534,6 +594,7 @@ public:
         req.useHugePage = args->useHugePage;
 
         AsyncTask* accepter = nullptr;
+        EpollObserverQueue wakeAcceptObservers;
         {
             SpinlockGuard guard(channel->lock);
             if (channel->destroyed) {
@@ -542,12 +603,21 @@ public:
             }
             channel->pushPendingConnect(&req);
             accepter = channel->pendingAccepters.popFront();
+            // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] 새 접속
+            // 요청이 들어왔으니 이 리슨 채널의 accept 가능 여부를
+            // 감시 중이던 epoll 관찰자를 전부 깨워 재스캔시킨다.
+            for (EpollObserverNode* n = channel->acceptObservers.popFront(); n; n = channel->acceptObservers.popFront()) {
+                wakeAcceptObservers.pushBack(n);
+            }
         }
         if (accepter) {
             // 이 completion은 connectChannel/acceptFromChannel 핸드셰이크
             // 자체(§2.2 "acceptFromChannel 등에서 파생된 것")라 channel이
             // 스코프에 있다 - exclusivePreemptive를 그대로 전달.
             AsyncReactor::submitCompletion(accepter, channel->exclusivePreemptive);
+        }
+        for (EpollObserverNode* n = wakeAcceptObservers.popFront(); n; n = wakeAcceptObservers.popFront()) {
+            AsyncReactor::submitCompletion(n->task, n->exclusivePreemptive);
         }
 
         while (req.done.load() == 0) {
@@ -777,6 +847,7 @@ public:
 
         for (;;) {
             AsyncTask* wakeWriter = nullptr;
+            EpollObserverQueue wakeWriteObservers;
             bool done = false;
             {
                 SpinlockGuard guard(ring.lock);
@@ -791,6 +862,13 @@ public:
                     args->bytesRead = n;
                     args->error = ChannelError::None;
                     wakeWriter = ring.pendingWriters.popFront();
+                    // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] 읽어서
+                    // 공간이 생겼으니(정확히 비어 있었다가 생겼는지는
+                    // 안 가리고 항상) 이 링버퍼의 쓰기 가능 여부를
+                    // 감시 중이던 epoll 관찰자를 전부 깨워 재스캔시킨다.
+                    for (EpollObserverNode* n2 = ring.writeObservers.popFront(); n2; n2 = ring.writeObservers.popFront()) {
+                        wakeWriteObservers.pushBack(n2);
+                    }
                     done = true;
                 } else if (kIsBridgeBroken(bridge.get())) {
                     args->error = ChannelError::BrokenPipe;
@@ -805,6 +883,9 @@ public:
                 // submitCompletion 주석/PN-7AC01E6E 항목 6 참고) - 기본값
                 // (false)으로 남긴다.
                 AsyncReactor::submitCompletion(wakeWriter);
+            }
+            for (EpollObserverNode* n2 = wakeWriteObservers.popFront(); n2; n2 = wakeWriteObservers.popFront()) {
+                AsyncReactor::submitCompletion(n2->task, n2->exclusivePreemptive);
             }
             if (done) {
                 co_return;
@@ -859,6 +940,7 @@ public:
 
         for (;;) {
             AsyncTask* wakeReader = nullptr;
+            EpollObserverQueue wakeReadObservers;
             bool done = false;
             {
                 SpinlockGuard guard(ring.lock);
@@ -877,6 +959,12 @@ public:
                     args->bytesWritten = n;
                     args->error = ChannelError::None;
                     wakeReader = ring.pendingReaders.popFront();
+                    // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] 데이터가
+                    // 들어왔으니 이 링버퍼의 읽기 가능 여부를 감시
+                    // 중이던 epoll 관찰자를 전부 깨워 재스캔시킨다.
+                    for (EpollObserverNode* n2 = ring.readObservers.popFront(); n2; n2 = ring.readObservers.popFront()) {
+                        wakeReadObservers.pushBack(n2);
+                    }
                     done = true;
                 } else {
                     ring.pendingWriters.pushBack(task);
@@ -886,6 +974,9 @@ public:
                 // wakeWriter와 같은 이유(위 ChannelReadHandler 참고) -
                 // BridgePipe 단계라 exclusivePreemptive 판단 불가, 기본값.
                 AsyncReactor::submitCompletion(wakeReader);
+            }
+            for (EpollObserverNode* n2 = wakeReadObservers.popFront(); n2; n2 = wakeReadObservers.popFront()) {
+                AsyncReactor::submitCompletion(n2->task, n2->exclusivePreemptive);
             }
             if (done) {
                 co_return;
@@ -959,6 +1050,7 @@ public:
         }
 
         AsyncTaskWaitQueue accepters;
+        EpollObserverQueue destroyedAcceptObservers;
         PendingConnectRequest* rejectedHead = nullptr;
         {
             SpinlockGuard guard(channel->lock);
@@ -970,6 +1062,13 @@ public:
             for (AsyncTask* t = channel->pendingAccepters.popFront(); t; t = channel->pendingAccepters.popFront()) {
                 accepters.pushBack(t);
             }
+            // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] 이 채널을
+            // 감시 중이던 epoll 관찰자도 함께 깨운다 - 다음 재스캔에서
+            // kResolveChannelId()가 NotFound를 반환해 에러 상태로
+            // 보고된다.
+            for (EpollObserverNode* n = channel->acceptObservers.popFront(); n; n = channel->acceptObservers.popFront()) {
+                destroyedAcceptObservers.pushBack(n);
+            }
             rejectedHead = channel->pendingHead;
             channel->pendingHead = nullptr;
             channel->pendingTail = nullptr;
@@ -980,6 +1079,9 @@ public:
         // 를 확인해 NotFound로 반환한다.
         for (AsyncTask* t = accepters.popFront(); t; t = accepters.popFront()) {
             AsyncReactor::submitCompletion(t, channel->exclusivePreemptive);
+        }
+        for (EpollObserverNode* n = destroyedAcceptObservers.popFront(); n; n = destroyedAcceptObservers.popFront()) {
+            AsyncReactor::submitCompletion(n->task, n->exclusivePreemptive);
         }
         // 대기 중이던 connectChannel 호출들을 전부 실패로 깨운다
         // (설계 문서 destroyChannel 절 그대로).
@@ -1056,9 +1158,12 @@ void kCloseBridgeSync(const SharedPtr<Task>& caller, uint64_t bridgeHandle, Chan
     SharedPtr<BridgePipe> bridge = slot->value;
     bridge->closedLocal = true;
 
-    AsyncTaskWaitQueue woken = kWakeForClose(bridge.get());
-    for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
+    WakeForCloseResult wakeResult = kWakeForClose(bridge.get());
+    for (AsyncTask* t = wakeResult.woken.popFront(); t; t = wakeResult.woken.popFront()) {
         AsyncReactor::submitCompletion(t);
+    }
+    for (EpollObserverNode* n = wakeResult.wokenObservers.popFront(); n; n = wakeResult.wokenObservers.popFront()) {
+        AsyncReactor::submitCompletion(n->task, n->exclusivePreemptive);
     }
 
     bridges->erase(slot);
@@ -1083,9 +1188,12 @@ void kShutdownBridgeWrite(const SharedPtr<Task>& caller, uint64_t bridgeHandle, 
     SharedPtr<BridgePipe> bridge = slot->value;
     bridge->closedLocal = true;
 
-    AsyncTaskWaitQueue woken = kWakeForClose(bridge.get());
-    for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
+    WakeForCloseResult wakeResult = kWakeForClose(bridge.get());
+    for (AsyncTask* t = wakeResult.woken.popFront(); t; t = wakeResult.woken.popFront()) {
         AsyncReactor::submitCompletion(t);
+    }
+    for (EpollObserverNode* n = wakeResult.wokenObservers.popFront(); n; n = wakeResult.wokenObservers.popFront()) {
+        AsyncReactor::submitCompletion(n->task, n->exclusivePreemptive);
     }
     *outError = ChannelError::None;
 }

@@ -38,6 +38,7 @@
 #include "serial.h"
 #include "smp.h"
 #include "socket.h"
+#include "epoll.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
 #include "task.h"
@@ -890,6 +891,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // registerSyscallEndpoints() 호출들과 같은 이유로 BSP에서 한 번만).
     kernel::Socket::registerSyscallEndpoints();
     kernel::Logger::info("minicore: socket(AF_UNIX) socket/bind/listen/accept/connect syscall endpoints registered");
+
+    // epoll류 유저 영역 이벤트 다중화(SP-6350DEBB, PN-7562DA62) - 위
+    // Socket 등록 이후에 둔다(레벨 트리거 readiness 판정이 소켓 fd를
+    // 조회하므로, 소켓 fd 테이블 kind 자체는 이미 이 시점 이전부터
+    // 유효하지만 순서를 나란히 맞춰 둔다).
+    kernel::Epoll::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: epoll create/ctl/wait syscall endpoints registered");
 
     // ResourceGroup syscall 6종(SP-245D130B §8/SP-6A563A8F §5-A/§7,
     // PN-4190BBD3) - 위와 같은 이유로 BSP에서 한 번만. gRootResourceGroup

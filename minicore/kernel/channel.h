@@ -142,6 +142,20 @@ void kCloseBridgeSync(const SharedPtr<Task>& caller, uint64_t bridgeHandle, Chan
 // 알릴 필요가 없는 방향이라 여기 내려올 이유가 없음).
 void kShutdownBridgeWrite(const SharedPtr<Task>& caller, uint64_t bridgeHandle, ChannelError* outError);
 
+// [신규, 2026-09-27, SP-6350DEBB, PN-7562DA62] epoll의 fd 종류별
+// 즉시 판정 함수(§4)가 소켓 readiness를 조회하려면 이 세 함수가
+// 필요하다 - 전부 channel.cpp에 이미 정의돼 있던 것을 여기 선언만
+// 추가해 다른 번역 단위(epoll.cpp)에서도 쓸 수 있게 노출한다(원래도
+// static이 아니었으므로 링크 자체는 항상 가능했다 - 헤더 선언 누락만
+// 보강). `kResolveOwnedBridge`는 `task`가 소유(openBridges에 있음)한
+// 핸들만 반환하므로, epoll에서 호출할 때도 그 fd를 실제로 소유한
+// 프로세스의 AsyncTask를 넘겨야 한다(watcher==owner 전제, 다른
+// 프로세스의 fd를 epoll이 감시하는 경로는 없다 - fd 자체가 프로세스
+// 전용 네임스페이스이므로 애초에 불가능).
+SharedPtr<Channel> kResolveChannelId(ChannelId id);
+SharedPtr<BridgePipe> kResolveOwnedBridge(AsyncTask* task, BridgeHandle handle);
+bool kIsBridgeBroken(BridgePipe* bridge);
+
 // AsyncTask 여러 개를 FIFO로 대기시키는 침습적 큐 - AsyncTask::next를
 // 재사용한다(파킹돼 있는 동안엔 AsyncReactor 실행 큐에 없어 비어
 // 있음 - kernel::Task가 WaitQueue에서 Task::next를 재사용하는 것과
@@ -188,6 +202,82 @@ struct AsyncTaskWaitQueue {
                 AsyncTask* nextNode = cur->next.load();
                 if (prev) {
                     prev->next.store(nextNode);
+                } else {
+                    head = nextNode;
+                }
+                if (cur == tail) {
+                    tail = prev;
+                }
+                return;
+            }
+        }
+    }
+};
+
+// [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] epoll 전용 관찰자
+// 큐 - 위 `AsyncTaskWaitQueue`와 겉모양은 비슷하지만 **절대 서로
+// 대체할 수 없다**: `AsyncTaskWaitQueue`는 `AsyncTask::next`를 재사용
+// 하는 침습적 리스트라 **AsyncTask 하나가 동시에 한 큐에만 들어갈 수
+// 있다**(`next` 필드가 단 하나뿐이므로). `EpollWait`은 정의상 여러
+// fd를 동시에 감시해야 해서 같은 AsyncTask가 여러 개의 서로 다른
+// 관찰자 큐에 동시에 등록돼야 한다 - `AsyncTaskWaitQueue`를 그대로
+// 재사용하면 두 번째 등록이 `next`를 덮어써 첫 번째 큐의 연결을
+// 조용히 끊어버리는 메모리 손상이 된다(이 커널이 이미 여러 번 겪은
+// "침습적 필드 재사용 함정"과 같은 종류). 그래서 이 큐는 `AsyncTask`
+// 자신이 아니라 **별도로 할당된 작은 노드**(`EpollObserverNode`, 보통
+// `EpollWaitHandler::onExec()`의 스택 위 지역 배열 - `PendingConnectRequest`
+// 가 스택 위에서 yield를 넘나드는 것과 동일한 관례)를 연결한다 -
+// 노드 하나가 정확히 "이 AsyncTask가 이 fd의 이 방향을 감시 중"이라는
+// 관계 하나만 표현하므로 몇 개든 동시에 서로 다른 큐에 들어갈 수
+// 있다. 호출부가 이미 잡고 있는 락(RingBuffer::lock/Channel::lock)
+// 아래에서만 push/pop해야 한다 - 자체 동기화는 없다(AsyncTaskWaitQueue
+// 와 동일한 전제).
+struct EpollObserverNode {
+    AsyncTask* task = nullptr;
+    bool exclusivePreemptive = false;
+    EpollObserverNode* next = nullptr;
+};
+
+struct EpollObserverQueue {
+    EpollObserverNode* head = nullptr;
+    EpollObserverNode* tail = nullptr;
+
+    void pushBack(EpollObserverNode* node) {
+        node->next = nullptr;
+        if (tail) {
+            tail->next = node;
+        } else {
+            head = node;
+        }
+        tail = node;
+    }
+
+    // 항상 "전부" 드레인해 통지하는 용도(레벨 트리거 재스캔 신호일
+    // 뿐이라 하나만 깨우면 나머지 관찰자가 놓친다) - popFront() 하나만
+    // 노출하고 호출부가 반복 호출해 전부 비운다(기존 AsyncTaskWaitQueue
+    // 소비자 관례와 동일).
+    EpollObserverNode* popFront() {
+        EpollObserverNode* node = head;
+        if (node) {
+            head = node->next;
+            if (!head) {
+                tail = nullptr;
+            }
+        }
+        return node;
+    }
+
+    // EpollWaitHandler::onCancel/재스캔 루프 전용 - 이 노드 자신이 곧
+    // 스택에서 반납될 예정이라(또는 다음 루프에서 다시 등록하기 전에)
+    // 댕글링 포인터로 남으면 안 된다. 선형 탐색(AsyncTaskWaitQueue::
+    // remove()와 동일한 전제 - 이 큐들도 짧다).
+    void remove(EpollObserverNode* target) {
+        EpollObserverNode* prev = nullptr;
+        for (EpollObserverNode* cur = head; cur; prev = cur, cur = cur->next) {
+            if (cur == target) {
+                EpollObserverNode* nextNode = cur->next;
+                if (prev) {
+                    prev->next = nextNode;
                 } else {
                     head = nextNode;
                 }
@@ -273,6 +363,21 @@ struct RingBuffer {
     AsyncTaskWaitQueue pendingReaders;
     AsyncTaskWaitQueue pendingWriters;
 
+    // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] epoll이 이
+    // RingBuffer를 감시할 때 등록하는 관찰자 전용 큐 - 위 pendingReaders/
+    // pendingWriters(실제 데이터를 소비할 진짜 Read/Write 호출자)와는
+    // 완전히 분리된 별도 큐다. 섞어 쓰면 안 되는 이유: write()/read()
+    // 완료 시 기존 코드는 그 큐에서 **정확히 하나**만 popFront()해
+    // 깨운다(단일 소비자 전제) - epoll 관찰자를 같은 큐에 넣으면
+    // 진짜 소비자와 "누가 이번 완료를 가져갈지" 경합하게 돼, 어느
+    // 한쪽이 굶주리거나 데이터가 소비되지 않았는데도 epoll이 통지를
+    // 못 받는 결함으로 이어진다. 이 큐는 매번 **전부** 드레인해
+    // submitCompletion하고(epoll_wait이 스스로 재등록), 데이터를
+    // 소비하지 않는다 - 순수 "상태가 바뀌었을 수 있으니 다시 확인해
+    // 봐" 신호일 뿐이다.
+    EpollObserverQueue readObservers;   // used가 0→양수로 바뀔 때(쓰기 완료) 전부 드레인
+    EpollObserverQueue writeObservers;  // 여유 공간이 생길 때(읽기 완료)/BrokenPipe 전이 시 전부 드레인
+
     // data/physBase/capacity를 raw slab 메모리 위에 세팅하고 나머지
     // 필드를 명시적으로 리셋한다(AsyncTask::init()과 동일한 이유 -
     // reinterpret_cast로 앉혀진 raw 메모리라 기본 멤버 초기화식이
@@ -306,6 +411,10 @@ struct RingBuffer {
         pendingReaders.tail = nullptr;
         pendingWriters.head = nullptr;
         pendingWriters.tail = nullptr;
+        readObservers.head = nullptr;
+        readObservers.tail = nullptr;
+        writeObservers.head = nullptr;
+        writeObservers.tail = nullptr;
     }
 };
 
@@ -391,6 +500,13 @@ public:
     // 진행 중이어도 전부 순서대로 대기/처리된다(PN-C9625015).
     AsyncTaskWaitQueue pendingAccepters;
 
+    // [신규, 2026-09-27, SP-6350DEBB §5-1, PN-7562DA62] epoll이 리슨
+    // 소켓(이 Channel)을 감시할 때 등록하는 관찰자 전용 큐 - 위
+    // pendingAccepters(RingBuffer::readObservers 문서 주석과 동일한
+    // 이유로 분리)와 절대 섞지 않는다. connectChannel이 새
+    // PendingConnectRequest를 매달 때마다 전부 드레인해 submitCompletion.
+    EpollObserverQueue acceptObservers;
+
     // Channel도 raw slab 메모리 위에 reinterpret_cast로 앉혀지므로
     // (AsyncTask/RingBuffer와 동일한 이유로 기본 멤버 초기화식이
     // 실행되지 않는다) 명시적으로 모든 필드를 리셋한다 -
@@ -407,6 +523,8 @@ public:
         pendingTail = nullptr;
         pendingAccepters.head = nullptr;
         pendingAccepters.tail = nullptr;
+        acceptObservers.head = nullptr;
+        acceptObservers.tail = nullptr;
     }
 
     // [신규, 2026-09-22, PN-260D7D73] `kMakeShared<Channel>()`의 기본

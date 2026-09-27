@@ -23,6 +23,12 @@ enum class MountKind : uint8_t {
     // 소켓 fd를 구분하는 세 번째 태그값만 여기 추가한다. 소켓은 절대
     // `MountTable`에 실제로 마운트되지 않는다.
     Socket = 2,
+    // [신규, 2026-09-27, PN-7562DA62, SP-6350DEBB §3] Socket과 동일한
+    // 이유로 실제 VFS 마운트 종류가 아니다 - epoll fd를 구분하는 네
+    // 번째 태그값. epoll 인스턴스도 절대 `MountTable`에 마운트되지
+    // 않는다(POSIX epoll_create()가 반환하는 fd와 동일 - 평범한 fd지만
+    // 파일시스템 경로가 없다).
+    Epoll = 3,
 };
 
 // **[v1 잠정 결정, 2026-09-16, PN-71C2B857]** SP-7CC5693A §2.1의

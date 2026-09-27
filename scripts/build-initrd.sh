@@ -74,11 +74,17 @@ cp "${BUILD_USERLAND_DIR}/minicore-sockclient/sockclient" "${STAGE_DIR}/sockclie
 # 상속 플래그)로 직접 스폰한다(sockinherit/main.cpp 상단 주석 참고).
 cp "${BUILD_USERLAND_DIR}/minicore-sockinherit/sockinherit" "${STAGE_DIR}/sockinherit"
 cp "${BUILD_USERLAND_DIR}/minicore-sockinheritchild/sockinheritchild" "${STAGE_DIR}/sockinheritchild"
+# epolltest(SP-6350DEBB/PN-7562DA62, 2026-09-27) 추가 - sockclient를
+# 그대로 재사용하는 짝(epolltest/main.cpp 상단 주석 참고). **이
+# initrd로 socktest를 함께 켤 땐 반드시 socktest의 TEMP 훅을 빼거나
+# epolltest의 TEMP 훅을 빼서, 둘 다 "socktest.sock" 리스너를 동시에
+# bind하지 않게 한다.**
+cp "${BUILD_USERLAND_DIR}/minicore-epolltest/epolltest" "${STAGE_DIR}/epolltest"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest)"

@@ -119,3 +119,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockclient ${CMAKE_CURR
 # initrd 안에 원본 ELF 바이트로 실려야 한다 - 각 main.cpp 상단 주석 참고.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockinherit ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockinherit)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockinheritchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockinheritchild)
+
+# epolltest(SP-6350DEBB/PN-7562DA62, epoll류 이벤트 다중화 실측 검증) -
+# dbgtarget/proctest와 동일한 이유의 out-of-tree add_subdirectory.
+# 기존 sockclient(클라이언트 반쪽, "socktest.sock" 이름 하드코딩)를
+# 그대로 재사용해 짝을 이룬다 - minicore/epolltest/main.cpp 상단
+# 주석 참고. **socktest와 같은 부팅 훅에 절대 함께 켜지 않는다.**
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/epolltest ${CMAKE_CURRENT_BINARY_DIR}/minicore-epolltest)
