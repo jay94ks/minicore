@@ -241,103 +241,262 @@ void Syscall::submitDetached(SyscallEndpointId endpointId, void* args) {
     AsyncTask::submit(subjectCode, 0, args, /*autoFree=*/true);
 }
 
-bool Syscall::wait(AsyncTaskManageCode token) {
-    return waitForAnyOf(&token, 1).outcome == MultiWaitOutcome::Completed;
+namespace {
+
+// [신규, 2026-09-27, PN-395F4D89 방향 B] wait()/waitForMultipleSyscall()/
+// waitAnyForMultipleSyscall()/재개 트램폴린이 공유하는 "한 번 확인"
+// 로직 - 원래 waitForAnyOf()의 for(;;) 루프 1차/2차 확인 부분을
+// 순서/타이밍 전부 그대로 옮겨 왔다(로직 자체는 전혀 안 바뀜 -
+// PreemptionGuard 스코프, erase/free를 그 스코프 **밖**에서 하는
+// 순서까지 원본과 동일). 재개 트램폴린에서도 재사용하기 위해 분리.
+struct PendingWaitCheckOutcome {
+    bool found = false;
+    Syscall::MultiWaitResult result{};
+};
+
+PendingWaitCheckOutcome kCheckPendingWaitOnce(UserThread* self, const AsyncTaskManageCode* tokens, uint32_t count) {
+    PendingWaitCheckOutcome outcome;
+    decltype(self->pendingSyscalls)::Slot* readySlot = nullptr;
+    AsyncTask* readyTask = nullptr;
+
+    {
+        // 이 스코프 안에서는 이 코어가 선점되지 않는다 - "아직 완료
+        // 안 됨을 확인하고 waitingTask를 등록하는" 사이에 스케줄러
+        // 틱이 끼어들어 리액터가 먼저 이 AsyncTask들 중 하나를
+        // 완료시켜 버리면(그 시점엔 waitingTask가 아직 비어 있어
+        // 아무도 깨우지 않음), 이후 우리가 파킹돼도 영원히 못
+        // 깨어난다 - 그 경쟁을 막는다(기존 wait()과 동일한 이유).
+        PreemptionGuard guard;
+
+        // 1차: 넘겨받은 토큰들 중 이미 끝났거나(Completed/Failed)
+        // 유효하지 않은(자기 소유가 아니거나 이미 소비된) 게
+        // 있는지 먼저 찾는다 - 있으면 블로킹 없이 그 하나만 소비.
+        for (uint32_t i = 0; i < count && !outcome.found; ++i) {
+            auto* slot = self->pendingSyscalls.find(
+                [&](const UserThread::PendingSyscall& p) { return p.token == tokens[i]; });
+            if (!slot) {
+                outcome.result = {tokens[i], Syscall::MultiWaitOutcome::Invalid};
+                outcome.found = true;
+                break;
+            }
+            auto* task = reinterpret_cast<AsyncTask*>(slot->value.token);
+            // [신규, 2026-09-18, PN-B5C2845A] `Cancelled`도 "끝남"으로
+            // 인식한다 - 다른 프로세스의 Kill이 이 토큰을 취소시켰을
+            // 수 있다(`Scheduler::cancelPendingSyscalls`). Completed와
+            // 구분할 필요가 없어(호출부는 결국 실패로 다뤄야 함) Failed
+            // 와 같은 outcome으로 매핑한다 - 새 MultiWaitOutcome 값을
+            // 추가하지 않는다.
+            if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed ||
+                task->state == AsyncTaskState::Cancelled) {
+                outcome.result = {tokens[i], task->state == AsyncTaskState::Completed
+                                                  ? Syscall::MultiWaitOutcome::Completed
+                                                  : Syscall::MultiWaitOutcome::Failed};
+                readySlot = slot;
+                readyTask = task;
+                outcome.found = true;
+            }
+        }
+
+        // 2차: 아무것도 안 끝났으면, 이 스레드를 tokens 전부에 등록해
+        // 둔다 - 그중 먼저 끝나는 아무 하나가 우리를 깨운다.
+        if (!outcome.found) {
+            for (uint32_t i = 0; i < count; ++i) {
+                auto* slot = self->pendingSyscalls.find(
+                    [&](const UserThread::PendingSyscall& p) { return p.token == tokens[i]; });
+                reinterpret_cast<AsyncTask*>(slot->value.token)->waitingTask = self->weakAsTask();
+            }
+        }
+    }
+
+    if (readySlot) {
+        self->pendingSyscalls.erase(readySlot);
+    }
+    if (readyTask) {
+        GenericSlabAllocator::free(reinterpret_cast<void*>(readyTask->stackBase), kAsyncTaskStackSize);
+        if (readyTask->tcb) {
+            GenericSlabAllocator::free(readyTask->tcb, sizeof(TaskTcb));  // PN-81E49523 2단계 - stackBase와 별도 할당
+        }
+        GenericSlabAllocator::free(readyTask, sizeof(AsyncTask));
+    }
+    return outcome;
 }
 
-Syscall::MultiWaitResult Syscall::waitForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count) {
-    return waitForAnyOf(tokens, count);
+}  // namespace
+
+extern "C" [[noreturn]] void kSyscallResumeTrampolineBody();
+
+namespace {
+
+// [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] `Syscall::
+// waitForAnyOf()`가 `int 0x80` 경로에서 실제로 블로킹을 결정했을 때
+// 부르는 유일한 진입점 - 근본 수정의 핵심. `frame`(스왑 이전 진짜
+// InterruptFrame)을 `self->pendingSyscallReturnFrame`에 스냅샷해 둔
+// 뒤, `Task::tcb` 자신은 `kSyscallResumeTrampolineBody`를 가리키는
+// 합성 프레임으로 덮어써 "그 지점에서, 이 스레드 전용 커널 스택
+// (kernelStackTop) 위에서" 재개되게 한다 - `Scheduler::
+// kSyncRsp0ForDispatch()`가 매 디스패치마다 TSS.RSP0을 이 값으로
+// 이미 맞춰 두므로(scheduler.cpp), `int 0x80` 트랩 자체도 원래 이
+// 스택 위로 들어왔었다(공유 스크래치로의 추가 스왑은 isr_common_stub
+// 이 그 *이후에* 한 것). 이 스택은 이 스레드가 다시 뽑힐 때까지
+// 아무도 건드리지 않으므로 - DC-D8951156이 확정한 근본 원인(범용
+// kContextSwitch가 코어 공유 gInterruptDispatchStacks 위의 한 지점을
+// 재개 지점으로 저장)이 여기서는 아예 발생하지 않는다.
+[[noreturn]] void kParkForSyscallWaitAndResumeLater(UserThread* self, InterruptFrame* frame) {
+    self->pendingSyscallReturnFrame = *frame;
+
+    InterruptFrame resumeFrame{};
+    resumeFrame.rip = reinterpret_cast<uint64_t>(&kSyscallResumeTrampolineBody);
+    resumeFrame.cs = 0x08;        // kGdtKernelCodeSelector(task.cpp의 Task::init()과 동일한 상수)
+    resumeFrame.rflags = 0x202;   // IF=1 - kTaskStartTrampoline 착지 관례와 동일(task.cpp)
+    resumeFrame.rspOld = self->kernelStackTop;
+    resumeFrame.ssOld = 0x10;     // kGdtKernelDataSelector
+
+    Scheduler::parkWithSyntheticFrame(self, resumeFrame);
 }
 
-Syscall::MultiWaitResult Syscall::waitAnyForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count) {
-    return waitForAnyOf(tokens, count);
+}  // namespace
+
+bool Syscall::wait(AsyncTaskManageCode token, InterruptFrame* frame) {
+    auto* self = static_cast<UserThread*>(Scheduler::currentTask());
+    // [신규, PN-395F4D89 방향 B] 이 값 자신(self가 소유)의 주소를
+    // 넘긴다 - `&token`(이 함수의 지역 변수)을 그대로 넘기면, 파킹
+    // 후 재개 트램폴린이 원래 C++ 콜스택이 사라진 뒤 그 주소를 다시
+    // 읽으려 할 때 댕글링이 된다(syscall.h의 pendingWaitSingleToken
+    // 문서 주석 참고).
+    self->pendingWaitSingleToken = token;
+    self->pendingWaitAnyOfArgs = nullptr;  // 방어적 - Wait은 write-back할 유저 구조체가 없음
+    return waitForAnyOf(&self->pendingWaitSingleToken, 1, frame).outcome == MultiWaitOutcome::Completed;
 }
 
-Syscall::MultiWaitResult Syscall::waitForAnyOf(const AsyncTaskManageCode* tokens, uint32_t count) {
+Syscall::MultiWaitResult Syscall::waitForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count,
+                                                          InterruptFrame* frame) {
+    return waitForAnyOf(tokens, count, frame);
+}
+
+Syscall::MultiWaitResult Syscall::waitAnyForMultipleSyscall(WaitAnyOfSyscallArgs* args, InterruptFrame* frame) {
+    auto* self = static_cast<UserThread*>(Scheduler::currentTask());
+    self->pendingWaitAnyOfArgs = args;
+    const MultiWaitResult result = waitForAnyOf(args->tokens, args->count, frame);
+    // 이 지점에 도달했다는 건 파킹 없이(또는 syscall 빠른 경로로
+    // 파킹 후 정상 재개돼) 곧장 반환하는 경우뿐이다 - int 0x80 경로가
+    // 실제로 파킹했다면 kParkForSyscallWaitAndResumeLater가
+    // [[noreturn]]이라 이 줄로 다시 돌아오지 않는다(그 경우
+    // pendingWaitAnyOfArgs는 재개 트램폴린이 직접 소비/nullptr로
+    // 되돌린다). 여기서도 되돌려야 다음 서로 무관한 syscall에 이
+    // 상태가 새어나가지 않는다.
+    self->pendingWaitAnyOfArgs = nullptr;
+    return result;
+}
+
+Syscall::MultiWaitResult Syscall::waitForAnyOf(const AsyncTaskManageCode* tokens, uint32_t count,
+                                                InterruptFrame* frame) {
     auto* self = static_cast<UserThread*>(Scheduler::currentTask());
     if (count == 0) {
         return {0, MultiWaitOutcome::Invalid};
     }
 
     for (;;) {
-        MultiWaitResult result{0, MultiWaitOutcome::Invalid};
-        decltype(self->pendingSyscalls)::Slot* readySlot = nullptr;
-        AsyncTask* readyTask = nullptr;
-        bool found = false;
-
-        {
-            // 이 스코프 안에서는 이 코어가 선점되지 않는다 - "아직 완료
-            // 안 됨을 확인하고 waitingTask를 등록하는" 사이에 스케줄러
-            // 틱이 끼어들어 리액터가 먼저 이 AsyncTask들 중 하나를
-            // 완료시켜 버리면(그 시점엔 waitingTask가 아직 비어 있어
-            // 아무도 깨우지 않음), 이후 우리가 파킹돼도 영원히 못
-            // 깨어난다 - 그 경쟁을 막는다(기존 wait()과 동일한 이유).
-            PreemptionGuard guard;
-
-            // 1차: 넘겨받은 토큰들 중 이미 끝났거나(Completed/Failed)
-            // 유효하지 않은(자기 소유가 아니거나 이미 소비된) 게
-            // 있는지 먼저 찾는다 - 있으면 블로킹 없이 그 하나만 소비.
-            for (uint32_t i = 0; i < count && !found; ++i) {
-                auto* slot = self->pendingSyscalls.find(
-                    [&](const UserThread::PendingSyscall& p) { return p.token == tokens[i]; });
-                if (!slot) {
-                    result = {tokens[i], MultiWaitOutcome::Invalid};
-                    found = true;
-                    break;
-                }
-                auto* task = reinterpret_cast<AsyncTask*>(slot->value.token);
-                // [신규, 2026-09-18, PN-B5C2845A] `Cancelled`도 "끝남"
-                // 으로 인식한다 - 다른 프로세스의 Kill이 이 토큰을
-                // 취소시켰을 수 있다(`Scheduler::cancelPendingSyscalls`).
-                // Completed와 구분할 필요가 없어(호출부는 결국 실패로
-                // 다뤄야 함) Failed와 같은 outcome으로 매핑한다 -
-                // 새 MultiWaitOutcome 값을 추가하지 않는다.
-                if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed ||
-                    task->state == AsyncTaskState::Cancelled) {
-                    result = {tokens[i], task->state == AsyncTaskState::Completed ? MultiWaitOutcome::Completed
-                                                                                   : MultiWaitOutcome::Failed};
-                    readySlot = slot;
-                    readyTask = task;
-                    found = true;
-                }
-            }
-
-            // 2차: 아무것도 안 끝났으면, 이 스레드를 tokens 전부에
-            // 등록해 둔다 - 그중 먼저 끝나는 아무 하나가 우리를 깨운다.
-            if (!found) {
-                for (uint32_t i = 0; i < count; ++i) {
-                    auto* slot = self->pendingSyscalls.find(
-                        [&](const UserThread::PendingSyscall& p) { return p.token == tokens[i]; });
-                    reinterpret_cast<AsyncTask*>(slot->value.token)->waitingTask = self->weakAsTask();
-                }
-            }
-        }
-
-        if (found) {
-            if (readySlot) {
-                self->pendingSyscalls.erase(readySlot);
-            }
-            if (readyTask) {
-                GenericSlabAllocator::free(reinterpret_cast<void*>(readyTask->stackBase), kAsyncTaskStackSize);
-                if (readyTask->tcb) {
-                    GenericSlabAllocator::free(readyTask->tcb, sizeof(TaskTcb));  // PN-81E49523 2단계 - stackBase와 별도 할당
-                }
-                GenericSlabAllocator::free(readyTask, sizeof(AsyncTask));
-            }
-            return result;
+        PendingWaitCheckOutcome outcome = kCheckPendingWaitOnce(self, tokens, count);
+        if (outcome.found) {
+            return outcome.result;
         }
 
         // **실측으로 발견한 경쟁(2026-09-14, Channel IPC 스트레스
-        // 테스트, 기존 wait()과 동일한 이유)**: 위 PreemptionGuard
-        // 스코프가 끝난 시점과 실제로 Scheduler::parkCurrent()에
-        // 진입하는 시점 사이에 스케줄러 틱이 끼어들면 이중 스케줄링이
-        // 될 수 있다 - 여기서 미리 거는 cli는 parkCurrent() 안의
-        // cli와 중복(멱등)이라 무해하다.
+        // 테스트, 기존 wait()과 동일한 이유)**: 아래 두 분기 모두
+        // "확인 완료 ~ 실제 파킹" 사이에 스케줄러 틱이 끼어들면 이중
+        // 스케줄링이 될 수 있다 - 여기서 미리 거는 cli는 parkCurrent()
+        // /parkWithSyntheticFrame() 안의 cli와 중복(멱등)이라 무해하다.
         asm volatile("cli");
-        // 여기서 풀려도 유저랜드가 그냥 같은 tokens로 다시 부르면
-        // 된다 - 이 for 루프 자체가 그 재합류와 동일한 코드 경로다.
-        Scheduler::parkCurrent();
+
+        if (!frame) {
+            // [신규, 2026-09-27, PN-395F4D89 방향 B] `syscall` 빠른
+            // 경로(레지스터 기반, `int 0x80`이 아님) - isr_common_stub
+            // 의 공유 스크래치 스택(gInterruptDispatchStacks)을 애초에
+            // 안 타므로(syscall_fastpath.cpp 자체 문서 주석, DC-D8951156
+            // 배경 절 3번 확인) 이 경로의 `Scheduler::parkCurrent()`는
+            // 이미 안전하다 - 이 스레드 자신의 전용 커널 스택
+            // (TSS.RSP0=kernelStackTop) 위에서 계속 실행 중이기 때문.
+            // 기존 동작 그대로 둔다(DC-D8951156 수정 범위 밖).
+            Scheduler::parkCurrent();
+            continue;
+        }
+
+        // [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] `int 0x80`
+        // 경로 - 여기부터 근본 수정 대상. 이 호출 시점의 C++ 콜스택은
+        // 아직 `gInterruptDispatchStacks[coreIndex]`(스왑된 공유
+        // 스크래치) 위에 있다 - 범용 `parkCurrent()`로 "지금 여기"를
+        // 재개 지점으로 저장하면 그 스택이 다음 인터럽트에 덮어써진다
+        // (근본 원인, PN-395F4D89 11회차). 워치셋은 이미 durable한
+        // 위치(self 소유 또는 유저 메모리, 위 syscall.h 문서 참고)를
+        // 가리키고 있으므로 그대로 self에 옮겨 담고,
+        // `kParkForSyscallWaitAndResumeLater`(위)로 넘긴다 - 그 함수가
+        // [[noreturn]]이라 이 지점으로 다시는 안 돌아온다.
+        self->pendingWaitTokens = tokens;
+        self->pendingWaitCount = count;
+        kParkForSyscallWaitAndResumeLater(self, frame);
+        __builtin_unreachable();
     }
 }
 
 }  // namespace kernel
+
+// [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] `kTaskOnFallingToEnd`/
+// `kThreadOnFallingToEnd`(scheduler.cpp)와 동일한 관례로 `namespace
+// kernel` 밖에 둔다(트램폴린이 순수 `rip` 주소로만 진입해 심볼을
+// 찾으므로 extern "C" 링키지 이름이 이 위치와 무관하긴 하지만, 이
+// 코드베이스가 이미 그런 진입점들을 전부 여기 두고 있다). 이 함수는
+// `kernel::Scheduler::parkWithSyntheticFrame()`이 심어 둔 합성
+// 프레임의 착지점 - 항상 그 호출 시점에 지정했던
+// `self->kernelStackTop`(이 스레드 전용 커널 스택) 위에서, 이 스레드로
+// CR3/TSS.RSP0이 이미 동기화된 채로 실행된다(어느 디스패치 경로를
+// 거쳐 오든 `kSyncCr3`/`kSyncRsp0ForDispatch`가 매번 먼저 실행되므로
+// 이 함수 자신은 그 동기화를 신경 쓸 필요가 없다). 여기서부터는
+// 파킹 위험이 있는 공유 스크래치 스택이 아니라 이 스레드만의 안전한
+// 스택이므로, 이후 재시도는 기존 `Scheduler::parkCurrent()`(범용
+// `kContextSwitch`)를 그대로 써도 안전하다 - 이게 바로 이 리디자인의
+// 핵심(딱 한 번, 공유 스크래치 스택 -> 이 안전한 전용 스택으로
+// 건너오는 첫 전환만 프레임 기반으로 하면 충분하고, 그 뒤로는 이미
+// 검증된 기존 메커니즘을 그대로 재사용할 수 있다).
+extern "C" [[noreturn]] void kSyscallResumeTrampolineBody() {
+    asm volatile("sti");
+    auto* self = static_cast<kernel::UserThread*>(kernel::Scheduler::currentTask());
+
+    kernel::Syscall::MultiWaitResult result;
+    for (;;) {
+        auto outcome = kernel::kCheckPendingWaitOnce(self, self->pendingWaitTokens, self->pendingWaitCount);
+        if (outcome.found) {
+            result = outcome.result;
+            break;
+        }
+        asm volatile("cli");
+        // 이제 안전하다 - 이 재개 지점은 이 스레드 전용 스택
+        // (kernelStackTop) 위의 이 루프 자신이다(공유 인터럽트
+        // 디스패치 스택이 아님).
+        kernel::Scheduler::parkCurrent();
+    }
+
+    // [PN-22E5E9E7 항목7] idt.cpp의 kSyscallVerbWait/kSyscallVerbWaitAnyOf
+    // 분기가 원래 하던 결과 마샬링과 정확히 같은 일을 여기서 대신
+    // 한다(그 분기들의 정상 반환 경로는 우리가 파킹한 이 경우엔 다시는
+    // 실행되지 않으므로).
+    kernel::uint64_t raxValue;
+    if (self->pendingWaitAnyOfArgs) {
+        self->pendingWaitAnyOfArgs->resultToken = result.token;
+        self->pendingWaitAnyOfArgs->resultOutcome = result.outcome;
+        raxValue = 1;
+        self->pendingWaitAnyOfArgs = nullptr;
+    } else {
+        raxValue = (result.outcome == kernel::Syscall::MultiWaitOutcome::Completed) ? 1 : 0;
+    }
+
+    // [PN-22E5E9E7 항목7] `kDispatchSyscallVerb`(idt.cpp)의 정상 반환
+    // 경로가 항상 하는 FS_BASE 유저값 복원 - 우리는 그 wrapper를
+    // 우회해 곧장 ring3로 돌아가므로 반드시 직접 호출해야 한다(안
+    // 하면 유저 스레드가 커널 FS_BASE로 계속 실행되는 조용한 버그가
+    // 된다 - TLS/스레드-로컬 접근이 전부 깨짐).
+    kernel::kSyncFsBaseToUser(self);
+
+    self->pendingSyscallReturnFrame.rax = raxValue;
+    kernel::kJumpToFrame(&self->pendingSyscallReturnFrame);
+    __builtin_unreachable();
+}

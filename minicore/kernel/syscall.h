@@ -11,6 +11,7 @@
 namespace kernel {
 
 class Process;  // 포인터로만 참조(UserThread::process) - 전체 정의는 process.h
+struct WaitAnyOfSyscallArgs;  // 포인터로만 참조(UserThread::pendingWaitAnyOfArgs) - 전체 정의는 이 파일 아래
 
 // 공개 ABI로 노출되는 syscall 번호 - 커널이 부팅 시 고정 배정한다
 // (동적 재배정 없음, SP-04EE2A18). AsyncCallbackRegistry가 내부적으로
@@ -212,6 +213,37 @@ public:
     // 8B 낭비로 거의 꽉 채워 들어간다.
     static constexpr uint32_t kPendingSyscallChunkCapacity = 10;
     ChunkedList<PendingSyscall, kPendingSyscallChunkCapacity> pendingSyscalls;
+
+    // [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] `int 0x80`
+    // 경로의 블로킹 대기(Wait/WaitAnyOf)가 파킹될 때, 재개 트램폴린
+    // (`kSyscallResumeTrampolineBody`, syscall.cpp)이 다시 확인할
+    // 워치셋 - 반드시 파킹 기간 내내 안정적인 메모리를 가리켜야 한다
+    // (원래 C++ 콜스택은 이미 사라진 뒤 트램폴린이 실행되므로, 그
+    // 스택 위 지역변수 주소를 담아 두면 댕글링이 된다 - 이 근본 원인
+    // 자체가 DC-D8951156이 확정한 버그와 같은 계열). 단일 `wait()`는
+    // 바로 아래 `pendingWaitSingleToken`(이 구조체 자신 소유라 항상
+    // 안정적)을 가리키게 하고, WaitAnyOf는 유저 공간의
+    // `WaitAnyOfSyscallArgs::tokens`를 그대로 가리킨다(유저 메모리는
+    // 커널 콜스택과 무관하게 항상 안정적이라 그대로 재사용 가능).
+    AsyncTaskManageCode pendingWaitSingleToken = 0;
+    const AsyncTaskManageCode* pendingWaitTokens = nullptr;
+    uint32_t pendingWaitCount = 0;
+
+    // WaitAnyOf 전용 - 완료 시 결과(token/outcome)를 다시 써 줘야 할
+    // 유저 포인터. `Syscall::wait()`(단일)는 nullptr로 남긴다(반환값
+    // 자체가 곧 결과라 write-back할 유저 구조체가 없음) - 트램폴린이
+    // 이 값의 nullptr 여부로 "Wait이었는지 WaitAnyOf였는지"를 구분한다.
+    WaitAnyOfSyscallArgs* pendingWaitAnyOfArgs = nullptr;
+
+    // 이 블로킹 대기가 정말로 완료되면 ring3로 돌아갈 최종 착지
+    // 프레임의 스냅샷 - `int 0x80` 트랩의 원본 InterruptFrame을 그대로
+    // 복사해 둔다(파킹 동안 `Task::tcb` 자신은 재개 트램폴린을
+    // 가리키도록 바뀌므로, 진짜 최종 착지점은 별도 보관이 필요하다 -
+    // DC-D8951156이 확정한 근본 원인에 대한 실제 수정: 재개 지점을
+    // 코어 공유 인터럽트 디스패치 스택이 아니라 이 값과 이 스레드
+    // 자신의 전용 커널 스택(`kernelStackTop`, TSS.RSP0과 항상 같은
+    // 값)에 둔다).
+    InterruptFrame pendingSyscallReturnFrame{};
 
     // 이 유저 스레드가 속한 프로세스(SP-8B6B8D25 §2-B, 유저 모드 페이지
     // 폴트를 그 프로세스의 PCB에 매다는 데 필요) - process.h가
@@ -467,7 +499,17 @@ public:
     // 불필요). 반환값은 AsyncTaskState::Completed로 끝났으면 true,
     // Failed로 끝났으면 false. 내부적으로 waitForAnyOf(토큰 1개짜리
     // 배열)와 완전히 같은 코드 경로를 탄다.
-    static bool wait(AsyncTaskManageCode token);
+    //
+    // [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] `frame` 인자
+    // 신설 - `kDispatchSyscallVerb`의 `frame`을 그대로 물려받는다
+    // (`int 0x80` 경로는 실제 값, `syscall` 빠른 경로는 null). 이
+    // 함수가 실제로 블로킹해야 하고 `frame != nullptr`이면(=이 호출이
+    // 코어 공유 인터럽트 디스패치 스택 위에서 실행 중이라는 뜻) 범용
+    // `Scheduler::parkCurrent()` 대신 프레임 기반 재개(아래
+    // `waitForAnyOf` 문서 참고)로 전환한다 - 그 경우 이 함수는 다시는
+    // 이 호출 지점으로 "반환"하지 않는다(재개 트램폴린이 이어받아
+    // ring3로 직접 iretq한다).
+    static bool wait(AsyncTaskManageCode token, InterruptFrame* frame);
 
     enum class MultiWaitOutcome { Completed, Failed, Invalid };
 
@@ -487,17 +529,41 @@ public:
     //
     // - waitForMultipleSyscall (AND 의미): tokens로 지정한 N개를 전부
     //   드레인하려면 호출부(유저랜드)가 "아직 결과를 못 받은 토큰들"만
-    //   추려 이 함수를 최대 N번 반복 호출해야 한다.
+    //   추려 이 함수를 최대 N번 반복 호출해야 한다. **[정직하게 기록,
+    //   2026-09-27]** 현재 `idt.cpp`의 어느 syscall verb도 이 함수를
+    //   호출하지 않는다 - 유저랜드의 "AND" 시맨틱은 `WaitAnyOf` verb를
+    //   반복 호출하는 방식으로 구현돼 있어(userland 쪽 관례), 이
+    //   커널 측 함수는 사실상 미사용이다. 그래도 `waitForAnyOf`와의
+    //   시그니처 일관성을 위해 `frame` 인자를 동일하게 추가해 둔다.
     // - waitAnyForMultipleSyscall (OR 의미): tokens 중 아무 하나가
-    //   끝나면 그걸로 답이 완성되므로 한 번만 불러도 충분하다.
-    static MultiWaitResult waitForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count);
-    static MultiWaitResult waitAnyForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count);
+    //   끝나면 그걸로 답이 완성되므로 한 번만 불러도 충분하다 - 실제
+    //   유일한 호출부는 `idt.cpp`의 `kSyscallVerbWaitAnyOf`.
+    static MultiWaitResult waitForMultipleSyscall(const AsyncTaskManageCode* tokens, uint32_t count,
+                                                   InterruptFrame* frame);
+
+    // [신규, 2026-09-27, PN-395F4D89 방향 B] WaitAnyOf 전용 - `tokens`/
+    // `count`뿐 아니라 결과를 write-back할 유저 포인터 전체(`args`
+    // 자신)를 받는다. 블로킹이 필요해지면 이 함수가 내부적으로
+    // `UserThread::pendingWaitAnyOfArgs = args`를 세팅해 두어, 재개
+    // 트램폴린이 나중에 그 유저 구조체에 직접 결과를 마샬링할 수 있게
+    // 한다(정상적으로 반환하는 경우엔 이 함수 자신이 반환 직전 다시
+    // nullptr로 되돌린다 - 다음 서로 무관한 syscall에 이 상태가
+    // 새어나가지 않도록).
+    static MultiWaitResult waitAnyForMultipleSyscall(WaitAnyOfSyscallArgs* args, InterruptFrame* frame);
 
 private:
     // wait()/waitForMultipleSyscall()/waitAnyForMultipleSyscall() 셋
     // 다가 공유하는 공용 구현 - "주어진 토큰 집합 중 하나가 끝나길
     // 기다린다"는 하나의 메커니즘.
-    static MultiWaitResult waitForAnyOf(const AsyncTaskManageCode* tokens, uint32_t count);
+    //
+    // [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] `tokens`는
+    // 이 함수가 실제로 블로킹을 결정하는 순간부터는 파킹 기간 내내
+    // 안정적인 메모리를 가리키고 있어야 한다(재개 트램폴린이 원래
+    // C++ 콜스택이 사라진 뒤 이 포인터를 다시 읽는다) - 호출부
+    // (`wait()`/`waitAnyForMultipleSyscall()`)가 이미 그렇게 보장한다
+    // (각자의 문서 주석 참고), 이 함수 자신은 그 보장을 그대로 믿고
+    // 재사용할 뿐 별도 복사를 하지 않는다.
+    static MultiWaitResult waitForAnyOf(const AsyncTaskManageCode* tokens, uint32_t count, InterruptFrame* frame);
 };
 
 // [신규, 2026-09-18, PN-10EE096A] `Syscall::waitAnyForMultipleSyscall()`을

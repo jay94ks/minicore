@@ -535,6 +535,15 @@ extern "C" void kContextSwitch(TaskTcb** oldTcbSlot, TaskTcb* newTcb);
 // iretq 기반 착지로 애초에 사라졌기 때문).
 extern "C" void kContextSwitchFromISR(TaskTcb** oldTcbSlot, TaskTcb* newTcb, TaskTcb* currentFrame);
 
+// [신규, 2026-09-27, PN-395F4D89 방향 B, context_switch.S 문서 주석
+// 참고] "저장" 절반이 아예 없는 단방향 착지 전용 - `frame`을 그대로
+// 새 RSP로 삼아 `isr_common_epilogue`로 점프한다(호출자는 이 호출
+// 이후로 다시는 자신에게 안 돌아온다는 전제, [[noreturn]]이지만
+// 어차피 순수 asm 함수라 컴파일러가 이 사실을 알 방법이 없어 이
+// 선언 자체엔 속성을 안 붙인다 - 호출부가 직접 `__builtin_unreachable()`
+// 로 그 뒤를 방어한다).
+extern "C" void kJumpToFrame(TaskTcb* frame);
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_TASK_H

@@ -2441,6 +2441,32 @@ void Scheduler::parkCurrent() {
     }
 }
 
+// [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] scheduler.h의
+// 문서 주석 참고 - parkFromISR()과 몸통이 거의 같지만
+// `kContextSwitchFromISR`의 세 번째 인자로 "그 순간의 진짜 frame"이
+// 아니라 호출부가 구성한 `resumeFrame`을 넘긴다. `kContextSwitchFromISR`
+// 는 그 인자를 그대로 `caller->tcb`로 복사만 할 뿐(비교/검증 없음)이라
+// 이 차이 하나로 충분하다 - "가짜 InterruptFrame으로 재개 지점을
+// 완전히 대체한다"는 이 함수의 의미 자체가 그 복사 동작을 있는 그대로
+// 재사용한 것.
+[[noreturn]] void Scheduler::parkWithSyntheticFrame(Task* caller, const InterruptFrame& resumeFrame) {
+    asm volatile("cli");
+    const uint32_t coreIndex = currentCoreIndex();
+    {
+        RwSpinlockWriteGuard guard(gCurrentTaskLock[coreIndex]);
+        gCurrentTask[coreIndex] = &gIdleTask[coreIndex];
+    }
+    kSyncCr3ForIdleTransition();
+    // kContextSwitchFromISR가 이 지역 변수를 caller->tcb로 그대로
+    // 복사한 뒤에야 실제로 스택/제어를 넘기므로, resumeFrame이 이
+    // 함수의 스택 위에 잠깐 머무는 것 자체는 안전하다(복사가 끝나기
+    // 전에는 아무 데도 안 넘어감).
+    InterruptFrame resumeFrameCopy = resumeFrame;
+    kContextSwitchFromISR(&caller->tcb, gIdleTask[coreIndex].tcb, &resumeFrameCopy);
+    for (;;) {
+    }
+}
+
 void Scheduler::retireCurrentTask() {
     // yieldCurrent()/parkCurrent()와 같은 이유로 cli - gCurrentTask를
     // 지우기 전에 clean-up 큐에 먼저 넣으면, 그 사이 끼인 스케줄러 틱이

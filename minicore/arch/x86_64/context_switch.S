@@ -178,6 +178,19 @@ kContextSwitchFromISR:
     mov rsp, rsi
     jmp isr_common_epilogue
 
+/* [신규, 2026-09-27, PN-395F4D89 방향 B] rdi=frame(TaskTcb*) - 저장할
+ * "old" 상태가 전혀 없는 단방향 착지 전용. kContextSwitchFromISR의
+ * "복원" 절반만 떼어 낸 것과 같다 - 호출자(kSyscallResumeTrampolineBody,
+ * syscall.cpp)는 이 함수를 부른 뒤로 다시는 자신에게 안 돌아온다는
+ * 걸 이미 알고 있다(frame이 가리키는 곳은 이 호출자의 스택과 전혀
+ * 무관한, 이미 완성된 다른 착지 지점 - 블로킹 syscall이 마침내
+ * 완료돼 ring3로 돌아가는 그 원본 InterruptFrame이다) - "저장"할
+ * 이유 자체가 없다. */
+.global kJumpToFrame
+kJumpToFrame:
+    mov rsp, rdi
+    jmp isr_common_epilogue
+
 /* Task::init()이 이 Task 전용 고정 TaskTcb 블록(Slab 할당, task.cpp
  * 참고)을 "이 함수로 막 돌아온 것처럼" 채워 둔다(kContextSwitch/
  * kContextSwitchFromISR 둘 다 최종적으로 isr_common_epilogue를 거쳐

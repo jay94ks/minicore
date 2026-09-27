@@ -822,7 +822,7 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1, k
         }
         case kSyscallVerbWait: {
             const auto token = static_cast<AsyncTaskManageCode>(arg0);
-            return Syscall::wait(token) ? 1 : 0;
+            return Syscall::wait(token, frame) ? 1 : 0;
         }
         case kSyscallVerbWaitAnyOf: {
             // [신규, 2026-09-18, PN-10EE096A] wait()/submit()과 마찬가지로
@@ -848,7 +848,7 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1, k
                                            thread->userPml4Phys)) {
                 return 0;
             }
-            const Syscall::MultiWaitResult result = Syscall::waitAnyForMultipleSyscall(args->tokens, args->count);
+            const Syscall::MultiWaitResult result = Syscall::waitAnyForMultipleSyscall(args, frame);
             args->resultToken = result.token;
             args->resultOutcome = result.outcome;
             return 1;

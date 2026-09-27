@@ -276,6 +276,22 @@ public:
     // 전이 사유가 다를 수 있어 그 결정은 호출부 몫으로 남긴다).
     [[noreturn]] static void parkFromISR(Task* caller, InterruptFrame* frame);
 
+    // [신규, 2026-09-27, PN-395F4D89 방향 B, DC-D8951156] parkFromISR()
+    // 과 거의 동일한 몸통이지만, caller->tcb에 저장할 "재개 지점"이
+    // 그 순간의 진짜 InterruptFrame이 아니라 **호출부가 미리 구성해
+    // 넘긴 합성 TaskTcb**(resumeTcb)라는 점만 다르다 - caller의 진짜
+    // 원래 프레임은 호출부가 이미 별도로(예: UserThread::
+    // pendingSyscallReturnFrame) 보관해 뒀다는 전제고, 이 함수 자신은
+    // 그 존재를 전혀 모른다. 첫 소비자는 `Syscall::waitForAnyOf()`가
+    // `int 0x80` 트랩의 공유 인터럽트 디스패치 스택
+    // (gInterruptDispatchStacks) 위에서 블로킹해야 할 때 - 범용
+    // `kContextSwitch()`로 "지금 여기"를 재개 지점으로 잡으면 그 공유
+    // 스택이 다음 인터럽트에 덮어써지는 근본 결함(DC-D8951156 확정)이
+    // 있어, 대신 이 함수로 "그 스레드 자신의 전용 커널 스택 위의 재개
+    // 트램폴린"을 재개 지점으로 심는다. 호출부가 이미 `caller->state`
+    // 를 확정한 뒤 불러야 한다(parkFromISR()와 동일한 계약).
+    [[noreturn]] static void parkWithSyntheticFrame(Task* caller, const InterruptFrame& resumeFrame);
+
     // PL-2D3184BC "Task 종료 프로토콜"(설계자 지시, QU-26F9420E 답변
     // 2번, 2026-09-14) - kTaskFallingToEnd(context_switch.S, 예전
     // kTaskStartTrampoline_halt)가 "Kernel-Level Task가 계속 커널에
