@@ -120,6 +120,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockclient ${CMAKE_CURR
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockinherit ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockinherit)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sockinheritchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-sockinheritchild)
 
+# authtest(PN-24A2B6F5, authmgr libkvdb CreateUser/LookupByUid E2E
+# 재검증) - dbgdriver/socktest와 동일한 이유의 out-of-tree
+# add_subdirectory - kmain.cpp의 TEMP 스폰 경로로 이름("authtest")이
+# 매치돼 부팅 시 자동 실행된다(minicore/authtest/main.cpp 상단 주석
+# 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/authtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-authtest)
+
 # epolltest(SP-6350DEBB/PN-7562DA62, epoll류 이벤트 다중화 실측 검증) -
 # dbgtarget/proctest와 동일한 이유의 out-of-tree add_subdirectory.
 # 기존 sockclient(클라이언트 반쪽, "socktest.sock" 이름 하드코딩)를

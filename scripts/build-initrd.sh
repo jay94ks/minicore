@@ -80,11 +80,15 @@ cp "${BUILD_USERLAND_DIR}/minicore-sockinheritchild/sockinheritchild" "${STAGE_D
 # epolltest의 TEMP 훅을 빼서, 둘 다 "socktest.sock" 리스너를 동시에
 # bind하지 않게 한다.**
 cp "${BUILD_USERLAND_DIR}/minicore-epolltest/epolltest" "${STAGE_DIR}/epolltest"
+# authtest(PN-24A2B6F5, 2026-09-27) 추가 - dbgdriver와 동일한 이유로
+# kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행된다(main.cpp 상단
+# 주석 참고). 조사가 끝나면 이 줄도 TEMP 스폰 경로와 함께 되돌린다.
+cp "${BUILD_USERLAND_DIR}/minicore-authtest/authtest" "${STAGE_DIR}/authtest"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest)"
