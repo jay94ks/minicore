@@ -35,6 +35,7 @@
 | [DC-D8951156](./DC-D8951156.md) | 블로킹 syscall(parkCurrent)이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는 문제 - 수정 방향 결정 필요 | approved | 2026-09-27T01:38:17.356Z |
 | [DC-DC9B2C3E](./DC-DC9B2C3E.md) | ext4 inode 테이블 블록 read-modify-write 경쟁(고아 블록) - 락 세분화 단위 결정 요청 | approved | 2026-09-26T04:21:13.790Z |
 | [DC-E441CB59](./DC-E441CB59.md) | VFS StatArgs에 파일 타입 필드가 없음 - 소켓 특수 파일 지원을 위한 확장 방식 결정 요청 | approved | 2026-09-26T15:02:15.978Z |
+| [DC-EECFE2E0](./DC-EECFE2E0.md) | Scheduler gNormalQueues 영구 기아 - Process-less KernelThread(devmgr/fs/AsyncReactor)가 vruntime을 절대 안 내면서 같은 큐에서 UserThread와 경쟁 | review | 2026-09-27T18:41:10.547Z |
 | [DC-F196028B](./DC-F196028B.md) | UEFI 직접 부팅 - 메모리맵/ACPI RSDP를 kMain에 전달하는 방법 | approved | 2026-09-24T09:43:10.521Z |
 | [DC-F367AD5D](./DC-F367AD5D.md) | 커널 정상 종료(clean shutdown/reboot) 경로 부재 - 설계 필요 | approved | 2026-09-23T08:45:47.135Z |
 | [DC-FB38F86F](./DC-FB38F86F.md) | Paging::mapPage() 중간 테이블 생성 동시성 보호 - 락 전략 결정 요청 | approved | 2026-09-17T05:38:21.741Z |
