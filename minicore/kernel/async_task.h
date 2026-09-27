@@ -321,7 +321,18 @@ struct AsyncTask {
     // 모른 채 이미 해제된 메모리를 깨우려는 잠재적 UAF를 막는다 -
     // `.lock()`이 실패하면(대상이 이미 release()됨) 조용히 깨우기를
     // 건너뛴다.
-    WeakPtr<Task> waitingTask;
+    //
+    // [변경, 2026-09-28, DC-C4A011C7, QU-F920162D 설계자 답변 "(C)
+    // 전용 원자적 타입"] `WeakPtr<Task>`에서 `AtomicWeakRef<Task>`로
+    // 교체 - 쓰기(syscall.cpp의 대기자 등록)와 읽기(이 파일의 완료
+    // 처리)가 서로 다른 코어에서 일어날 수 있는데, `WeakPtr::operator=`
+    // 는 원자성이 전혀 없는 평범한 두 포인터 대입이라 완료 통지가
+    // 조용히 유실될 수 있었다(DC-C4A011C7 정적 추적 확인, 아직 gdb
+    // 미확정이나 authmgr E2E 무응답의 유력 원인 후보 - PN-24A2B6F5).
+    // `AtomicWeakRef`는 `WeakPtr`이 이 용도(대입+`.lock()`)에 실제로
+    // 쓰이는 API와 호환되도록 만들어 이 필드를 쓰는 다른 코드는
+    // 전혀 안 바뀐다(libkenv/shared_ptr.h 그 클래스 문서 참고).
+    AtomicWeakRef<Task> waitingTask;
 
     // [신규, 2026-09-22, PN-6EDED542, SP-F682B889 §9.5-3 - QU-FF7044DA가
     // 실측으로 드러낸 공백 해소] `waitingTask`(진짜 kernel::Task용)의

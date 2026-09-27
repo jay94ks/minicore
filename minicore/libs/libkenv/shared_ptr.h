@@ -238,6 +238,9 @@ private:
 template <typename T, typename Deleter>
 class WeakPtr;
 
+template <typename T, typename Deleter>
+class AtomicWeakRef;
+
 // RAII 강한 참조 - 대상을 살아있게 유지한다. Deleter는 기본값을
 // 쓰면 기존 코드와 동일하게 SharedPtr<T>로만 써도 된다(템플릿 기본
 // 인자라 명시할 필요 없음) - 커스텀 삭제자를 쓸 때만 SharedPtr<T,
@@ -316,6 +319,11 @@ private:
     friend class SharedPtr;
     template <typename U, typename D>
     friend class WeakPtr;
+    // [신규, 2026-09-28, DC-C4A011C7] AtomicWeakRef::lock()이 이 private
+    // 생성자로 SharedPtr을 직접 조립한다 - WeakPtr::lock()과 동일한
+    // 이유의 friend(위 kMakeShared friend와 같은 패턴).
+    template <typename U, typename D>
+    friend class AtomicWeakRef;
     // [버그 수정, 2026-09-16, PN-68871BC9 착수 2번째 증분 실측 컴파일 중
     // 발견] 이 friend 선언이 원안에 빠져 있었다 - kMakeShared가 이 아래
     // private 생성자를 직접 부르는데, EnableSharedFromThis<T> 쪽엔 같은
@@ -390,6 +398,106 @@ private:
     friend class SharedPtr;
     template <typename U, typename D>
     friend class WeakPtr;
+    template <typename U, typename D>
+    friend class AtomicWeakRef;
+    ControlBlockBase* _block = nullptr;
+    T* _ptr = nullptr;
+};
+
+// [신규, 2026-09-28, DC-C4A011C7, QU-F920162D 설계자 답변 "(C) 전용
+// 원자적 타입"] `AsyncTask::waitingTask`처럼 "쓰기는 대기자 등록 코어,
+// 읽기는 완료를 처리하는 (다를 수 있는) 코어"가 되는 자리 전용 -
+// `WeakPtr<T>::operator=`는 `_block`/`_ptr` 두 포인터를 원자성 없이
+// 그냥 대입하므로(평범한 대입문 두 개), 이런 크로스코어 공유 슬롯에
+// 그대로 쓰면 한쪽이 쓰는 도중 다른 쪽이 읽어 찢긴 값(torn read)을
+// 보거나, 메모리 가시성 보장이 없어 완료 통지 자체가 조용히 유실될
+// 수 있다(DC-C4A011C7이 정적 추적으로 확인).
+//
+// 내부에 전용 `IrqSpinlock` 하나로 "포인터 조회+참조카운트 증감"을
+// 원자적 단위로 묶는다 - DC-2CB9DDA0이 이 커널 전체에 이미 확립한
+// "짧고 유계인 크로스코어 공유 상태는 IrqSpinlock으로 보호" 패턴
+// 그대로 재사용(임계구역이 포인터 대입 몇 개+원자 카운터 증감뿐이라
+// 그 기준(b) 그대로 만족) - `WeakPtr<T>` 자신이나 그 다른 사용처는
+// 전혀 안 건드린다(설계자가 명시적으로 배제한 "(B) WeakPtr 자체를
+// 원자적으로" 방향과 구분되는 지점).
+//
+// 공개 API는 `WeakPtr<T>`가 이 용도(대입+`.lock()`)에 실제로 쓰이는
+// 부분과 그대로 호환되도록 맞췄다 - `AsyncTask::waitingTask`의 기존
+// 호출부(`task->waitingTask = self->weakAsTask();`, `task->waitingTask
+// = WeakPtr<Task>();`, `task->waitingTask.lock()`) 전부 코드 변경
+// 없이 그대로 컴파일된다. 복사/이동은 지원하지 않는다(이 슬롯 자신이
+// 필드로 박히는 용도라 필요 없음, `WeakPtr`처럼 자유롭게 복사되는
+// 값 타입이 아니라는 걸 타입으로도 드러낸다).
+//
+// **`lock()`의 안전성**: `_block`을 읽고 그 `addWeakRef()`를 호출하는
+// 것까지를 락 안에서 한 단위로 묶는다 - 그래야 락을 놓은 뒤
+// `tryAddStrongRef()`를 시도하는 사이에 다른 코어의 `operator=`/
+// `reset()`이 그 컨트롤 블록을 완전히 반납해 버리는 use-after-free를
+// 막을 수 있다(이 임시로 붙든 weak 참조가 그 사이 내내 대상을 살려
+// 둔다 - `tryAddStrongRef()` 이후 곧바로 반납).
+template <typename T, typename Deleter = void (*)(T*)>
+class AtomicWeakRef {
+public:
+    AtomicWeakRef() = default;
+    ~AtomicWeakRef() { reset(); }
+
+    AtomicWeakRef(const AtomicWeakRef&) = delete;
+    AtomicWeakRef& operator=(const AtomicWeakRef&) = delete;
+    AtomicWeakRef(AtomicWeakRef&&) = delete;
+    AtomicWeakRef& operator=(AtomicWeakRef&&) = delete;
+
+    AtomicWeakRef& operator=(const WeakPtr<T, Deleter>& src) {
+        ControlBlockBase* newBlock = src._block;
+        T* newPtr = src._ptr;
+        // 새 대상의 weak ref는 락 밖에서 먼저 잡아도 안전하다 - src가
+        // 이미 그 컨트롤 블록을 살아있게 유지하는 자기 몫의 weak ref를
+        // 갖고 있으므로(호출자가 들고 있는 WeakPtr) newBlock이 이
+        // 호출 도중 사라질 수 없다.
+        if (newBlock) newBlock->addWeakRef();
+        ControlBlockBase* oldBlock;
+        {
+            IrqSpinlockGuard guard(_lock);
+            oldBlock = _block;
+            _block = newBlock;
+            _ptr = newPtr;
+        }
+        if (oldBlock) oldBlock->releaseWeak();
+        return *this;
+    }
+
+    void reset() {
+        ControlBlockBase* oldBlock;
+        {
+            IrqSpinlockGuard guard(_lock);
+            oldBlock = _block;
+            _block = nullptr;
+            _ptr = nullptr;
+        }
+        if (oldBlock) oldBlock->releaseWeak();
+    }
+
+    SharedPtr<T, Deleter> lock() const {
+        ControlBlockBase* block;
+        T* ptr;
+        {
+            IrqSpinlockGuard guard(_lock);
+            block = _block;
+            ptr = _ptr;
+            if (block) block->addWeakRef();  // 위 클래스 문서 "lock()의 안전성" 참고
+        }
+        if (!block) {
+            return SharedPtr<T, Deleter>();
+        }
+        SharedPtr<T, Deleter> result;
+        if (block->tryAddStrongRef()) {
+            result = SharedPtr<T, Deleter>(block, ptr);
+        }
+        block->releaseWeak();  // 위에서 임시로 잡아 둔 weak ref 반납
+        return result;
+    }
+
+private:
+    mutable IrqSpinlock _lock;
     ControlBlockBase* _block = nullptr;
     T* _ptr = nullptr;
 };
