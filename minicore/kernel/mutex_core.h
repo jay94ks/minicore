@@ -48,7 +48,7 @@ public:
     }
 
     bool tryAcquire() {
-        SpinlockGuard guard(_guard);
+        IrqSpinlockGuard guard(_guard);
         if (_locked) return false;
         _locked = true;
         return true;
@@ -58,13 +58,16 @@ public:
     // 상태만 풀고 통지는 Policy 몫.
     template <typename NotifyFn>
     void release(NotifyFn&& notifyOne) {
-        SpinlockGuard guard(_guard);
+        IrqSpinlockGuard guard(_guard);
         _locked = false;
         notifyOne();
     }
 
 private:
-    Spinlock _guard;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1)] IrqSpinlock 교체 -
+    // lock()/tryAcquire()/release() 전부 리스트/플래그 조작뿐인 짧은
+    // 임계구역(QU-BF7EBD8C 방향 1 감사 대상).
+    IrqSpinlock _guard;
     bool _locked = false;
 };
 
@@ -79,7 +82,7 @@ private:
 struct ParkingPolicy {
     WaitQueue waitQueue;
     Waitable* waitable() { return &waitQueue; }
-    void onContended(Spinlock& guard, const WeakPtr<Waitable>& self) {
+    void onContended(IrqSpinlock& guard, const WeakPtr<Waitable>& self) {
         waitQueue.parkCurrentAndUnlock(guard, self);
     }
     void onRelease() { waitQueue.wakeOne(); }
@@ -88,7 +91,7 @@ struct ParkingPolicy {
 // §10.2의 yield 반복을 그대로 재사용하는 정책 - 리액터를 블로킹하지 않음.
 struct YieldingPolicy {
     Waitable* waitable() { return nullptr; }
-    void onContended(Spinlock& guard, const WeakPtr<Waitable>& /*self*/) {
+    void onContended(IrqSpinlock& guard, const WeakPtr<Waitable>& /*self*/) {
         guard.unlock();
         AsyncTask::yield();
     }
@@ -122,7 +125,7 @@ public:
     BasicMutex() { _core.init(); }
 
     void lock() {
-        _core.lock([this](Spinlock& guard) {
+        _core.lock([this](IrqSpinlock& guard) {
             Waitable* w = _policy.waitable();
             WeakPtr<Waitable> self = w ? WeakPtr<Waitable>(this->sharedFromThis(), w) : WeakPtr<Waitable>();
             _policy.onContended(guard, self);
@@ -201,7 +204,7 @@ public:
     // 같은 소유자의 중첩 unlock()일 뿐이라 아무도 깨울 필요가 없다.
     template <typename NotifyFn>
     void release(NotifyFn&& notifyOne) {
-        SpinlockGuard guard(_guard);
+        IrqSpinlockGuard guard(_guard);
         if (--_recursionDepth > 0) {
             return;
         }
@@ -211,7 +214,9 @@ public:
     }
 
 private:
-    Spinlock _guard;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1)] MutexCore::_guard와
+    // 동일한 이유로 IrqSpinlock 교체.
+    IrqSpinlock _guard;
     bool _locked = false;
     const void* _owner = nullptr;
     uint32_t _recursionDepth = 0;
@@ -221,7 +226,8 @@ private:
 // 조회 가능)로 식별한다. **[정정, 2026-09-22, PN-4D60D49C 구현 세션]**
 // SP-0666DB3C §16.1 원 스케치는 `_waitQueue.parkCurrentAndUnlock(guard)`를
 // 인자 1개로 불렀으나, 실제 `WaitQueue::parkCurrentAndUnlock()`(wait_queue.h)
-// 시그니처는 `(Spinlock&, const WeakPtr<Waitable>&)` 2개를 요구한다 -
+// 시그니처는 `(IrqSpinlock&, const WeakPtr<Waitable>&)` 2개를 요구한다
+// (2026-09-27, DC-2CB9DDA0 방향(1) 감사로 `Spinlock&`에서 교체됨) -
 // 위 `Mutex`(`BasicMutex<ParkingPolicy>`)와 동일한 이유(§9.5 강제
 // cancel()이 `Task::blockedOn`으로 이 WaitQueue를 찾으려면 그 자신의
 // 컨트롤 블록을 별칭한 `WeakPtr<Waitable>`이 필요)로 `EnableSharedFromThis`
@@ -236,7 +242,7 @@ public:
 
     void lock() {
         const void* owner = static_cast<const void*>(Scheduler::currentTask());
-        _core.lock(owner, [this](Spinlock& guard) {
+        _core.lock(owner, [this](IrqSpinlock& guard) {
             WeakPtr<Waitable> self(this->sharedFromThis(), static_cast<Waitable*>(&_waitQueue));
             _waitQueue.parkCurrentAndUnlock(guard, self);
         });
@@ -261,7 +267,7 @@ class ReentrantAsyncMutex {
 public:
     void lock() {
         const void* owner = static_cast<const void*>(AsyncTask::current());
-        _core.lock(owner, [](Spinlock& guard) {
+        _core.lock(owner, [](IrqSpinlock& guard) {
             guard.unlock();
             AsyncTask::yield();
         });
@@ -352,7 +358,7 @@ public:
         bool await_ready() noexcept { return false; }
         bool await_suspend(std::coroutine_handle<>) noexcept {
             AsyncTask* self = AsyncTask::current();
-            SpinlockGuard guard(_mutex._lock);
+            IrqSpinlockGuard guard(_mutex._lock);
             if (!_mutex._locked) {
                 _mutex._locked = true;
                 return false;  // 무경합 - 정지 없이 즉시 재개(락 획득 완료)
@@ -370,7 +376,7 @@ public:
     // 즉시 시도 - 기존 MutexCore::tryAcquire()와 동일한 의미(비-코루틴
     // 호출부/점진 이행 호환용).
     bool tryAcquire() {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         if (_locked) return false;
         _locked = true;
         return true;
@@ -396,7 +402,7 @@ public:
         AsyncTask* next = nullptr;
         for (;;) {
             {
-                SpinlockGuard guard(_lock);
+                IrqSpinlockGuard guard(_lock);
                 next = _waiters.popFront();
                 if (!next) {
                     _locked = false;
@@ -420,7 +426,7 @@ public:
     // 관례 - 대기자 수가 많지 않다는 전제, kMaxSubscribersPerVector류
     // 상한과 같은 급).
     bool removeIfWaiting(AsyncTask* task) {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         return _waiters.remove(task);
     }
 
@@ -480,7 +486,9 @@ private:
         }
     };
 
-    Spinlock _lock;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1)] IrqSpinlock 교체 - 짧은
+    // 리스트 push/pop뿐인 임계구역(QU-BF7EBD8C 방향 1 감사 대상).
+    IrqSpinlock _lock;
     bool _locked = false;
     Waiters _waiters;
 };

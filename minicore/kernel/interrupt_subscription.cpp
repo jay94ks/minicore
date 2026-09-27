@@ -83,14 +83,16 @@ void kSortSubscribers(InterruptSubscriber* subs, uint32_t count) {
     }
 }
 
-// [SP-71DA77B3 §5] ISR 쪽 처리 - 인터럽트 게이트(0x8E/0xEE)로 진입해
-// IF가 하드웨어에 의해 자동으로 꺼져 있으므로, 같은 코어에서 실행
-// 중인 syscall 핸들러의 SpinlockGuard와 데드락할 수 없다(다른
-// 코어에서의 동시 진입만 Spinlock으로 막으면 된다).
+// [SP-71DA77B3 §5] ISR 쪽 처리. [변경, 2026-09-27, DC-2CB9DDA0 방향(1)]
+// 원래는 "인터럽트 게이트(0x8E/0xEE)가 IF를 자동으로 꺼서 같은 코어의
+// syscall 핸들러와 데드락할 수 없다(다른 코어 동시 진입만 Spinlock으로
+// 막으면 된다)"고 가정했으나, sub.lock 자체가 IrqSpinlock으로 바뀌어
+// 이 가정 없이도 안전하다 - 락 보유 구간 자체가 이미 로컬 cli라 같은
+// 코어 재진입도, 다른 코어 동시 진입도 이 lock 하나로 전부 막힌다.
 void kInterruptSubscriptionIsr(InterruptFrame* frame) {
     const uint32_t vector = static_cast<uint32_t>(frame->vector);
     InterruptSubscription& sub = gSubscriptions[vector];
-    SpinlockGuard guard(sub.lock);
+    IrqSpinlockGuard guard(sub.lock);
 
     uint64_t cr2 = 0;
     uint64_t cr3 = 0;
@@ -174,7 +176,7 @@ public:
                     result = InterruptSubscriptionError::ExclusiveRequiresKernelService;
                 } else {
                     InterruptSubscription& sub = gSubscriptions[args->vector];
-                    SpinlockGuard guard(sub.lock);
+                    IrqSpinlockGuard guard(sub.lock);
                     if (kFindSubscriberByOwner(sub, owner)) {
                         result = InterruptSubscriptionError::AlreadySubscribed;
                     } else {
@@ -225,7 +227,7 @@ public:
             SharedPtr<Task> submitter = task->submitterTask.lock();
             if (submitter) {
                 InterruptSubscription& sub = gSubscriptions[args->vector];
-                SpinlockGuard guard(sub.lock);
+                IrqSpinlockGuard guard(sub.lock);
                 if (InterruptSubscriber* slot = kFindSubscriberByOwner(sub, submitter.get())) {
                     *slot = InterruptSubscriber{};  // used=false로 리셋 + 큐/대기자 비움(§6)
                     kSortSubscribers(sub.subscribers, kMaxSubscribersPerVector);
@@ -262,7 +264,7 @@ public:
                 // [§3 "onExec 원자성 계약"] 확인과 대기열 등록 사이에
                 // 락이 풀리는 구간이 있으면 안 된다(lost-wakeup 방지,
                 // MutexCore::tryAcquireOrKeepLock과 동일한 계약).
-                SpinlockGuard guard(sub.lock);
+                IrqSpinlockGuard guard(sub.lock);
                 InterruptSubscriber* slot = kFindSubscriberByOwner(sub, owner);
                 if (!slot) {
                     args->error = InterruptSubscriptionError::NotSubscribed;
@@ -330,7 +332,7 @@ public:
             return;
         }
         InterruptSubscription& sub = gSubscriptions[args->vector];
-        SpinlockGuard guard(sub.lock);
+        IrqSpinlockGuard guard(sub.lock);
         for (auto& subscriber : sub.subscribers) {
             subscriber.waiters.remove(task);
         }
@@ -346,7 +348,7 @@ public:
         InterruptSubscriptionError result = InterruptSubscriptionError::DumpNotFound;
         if (vector < 256) {
             InterruptSubscription& sub = gSubscriptions[vector];
-            SpinlockGuard guard(sub.lock);
+            IrqSpinlockGuard guard(sub.lock);
             for (uint32_t i = 0; i < sub.dumpCount; ++i) {
                 const InterruptFullDump& dump = sub.dumps[(sub.dumpHead + i) % kInterruptDumpRingCapacity];
                 if (dump.dumpId == args->dumpId) {
@@ -387,7 +389,7 @@ void InterruptSubscriptionService::releaseAllForTask(Task* task) {
         return;
     }
     for (auto& sub : gSubscriptions) {
-        SpinlockGuard guard(sub.lock);
+        IrqSpinlockGuard guard(sub.lock);
         if (InterruptSubscriber* slot = kFindSubscriberByOwner(sub, task)) {
             *slot = InterruptSubscriber{};
             kSortSubscribers(sub.subscribers, kMaxSubscribersPerVector);

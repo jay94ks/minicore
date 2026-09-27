@@ -31,7 +31,7 @@ public:
     }
 
     bool tryAcquire() {
-        SpinlockGuard guard(_guard);
+        IrqSpinlockGuard guard(_guard);
         if (_count == 0) return false;
         --_count;
         return true;
@@ -40,13 +40,15 @@ public:
     // 카운트++ 후 통지는 Policy 몫(재경쟁 철학, §2.1과 동일).
     template <typename NotifyFn>
     void release(NotifyFn&& notifyOne) {
-        SpinlockGuard guard(_guard);
+        IrqSpinlockGuard guard(_guard);
         ++_count;
         notifyOne();
     }
 
 private:
-    Spinlock _guard;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1)] MutexCore::_guard와
+    // 동일한 이유로 IrqSpinlock 교체(QU-BF7EBD8C 방향 1 감사 대상).
+    IrqSpinlock _guard;
     uint32_t _count = 0;
 };
 
@@ -66,7 +68,7 @@ public:
     explicit BasicSemaphore(uint32_t initialCount) { _core.init(initialCount); }
 
     void acquire() {
-        _core.acquire([this](Spinlock& guard) {
+        _core.acquire([this](IrqSpinlock& guard) {
             Waitable* w = _policy.waitable();
             WeakPtr<Waitable> self = w ? WeakPtr<Waitable>(this->sharedFromThis(), w) : WeakPtr<Waitable>();
             _policy.onContended(guard, self);

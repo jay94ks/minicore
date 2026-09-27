@@ -14,7 +14,10 @@ struct NamedObjectSlot {
 };
 
 NamedObjectSlot gSlots[kernel::kMaxNamedObjects];
-kernel::Spinlock gLock;
+// [변경, 2026-09-27, DC-2CB9DDA0 방향(1)] IrqSpinlock 교체 - 임계구역이
+// kMaxNamedObjects(128)개 고정 슬롯의 선형 스캔뿐이라 짧고 유계
+// (QU-BF7EBD8C 방향 1 감사 대상).
+kernel::IrqSpinlock gLock;
 
 bool kNameEquals(const char* name, kernel::uint64_t nameLength, const NamedObjectSlot& slot) {
     return slot.nameLength == nameLength && memcmp(slot.name, name, nameLength) == 0;
@@ -28,7 +31,7 @@ bool NamedObjectTable::reserve(const char* name, uint64_t nameLength, NamedObjec
     if (nameLength == 0 || nameLength > kMaxNamedObjectNameLength) {
         return false;
     }
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     int freeSlot = -1;
     for (uint32_t i = 0; i < kMaxNamedObjects; ++i) {
         if (!gSlots[i].used) {
@@ -57,7 +60,7 @@ bool NamedObjectTable::resolve(const char* name, uint64_t nameLength, NamedObjec
     if (nameLength == 0 || nameLength > kMaxNamedObjectNameLength) {
         return false;
     }
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     for (uint32_t i = 0; i < kMaxNamedObjects; ++i) {
         if (gSlots[i].used && kNameEquals(name, nameLength, gSlots[i])) {
             *outKind = gSlots[i].kind;
@@ -72,7 +75,7 @@ void NamedObjectTable::release(const char* name, uint64_t nameLength) {
     if (nameLength == 0 || nameLength > kMaxNamedObjectNameLength) {
         return;
     }
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     for (uint32_t i = 0; i < kMaxNamedObjects; ++i) {
         if (gSlots[i].used && kNameEquals(name, nameLength, gSlots[i])) {
             gSlots[i].used = false;
@@ -82,7 +85,7 @@ void NamedObjectTable::release(const char* name, uint64_t nameLength) {
 }
 
 bool NamedObjectTable::getByIndex(uint32_t index, char* outName, uint32_t* outNameLength) {
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     uint32_t seen = 0;
     for (uint32_t i = 0; i < kMaxNamedObjects; ++i) {
         if (!gSlots[i].used) {

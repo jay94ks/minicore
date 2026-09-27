@@ -5,9 +5,90 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-2CB9DDA0
   status: review
-  updatedAt: 2026-09-27T12:50:07.397Z
+  updatedAt: 2026-09-27T14:28:40.633Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [구현+검증 완료, 2026-09-27] 방향(1) 채택(설계자 답변, QU-BF7EBD8C) - AsyncReactor/스케줄러 핫패스 전역 감사, dbgdriver 60회 배치 0/60 - 완전 해소
+
+설계자가 방향 **(1)**(AsyncReactor/스케줄러 핫패스에서 도달 가능한
+모든 짧은-임계구역 `Spinlock`을 체계적으로 감사해 `IrqSpinlock`으로
+전환 - `gExecQueues` 등 구조적으로 동일한 자매 락 포함)을 답변했다.
+
+**감사 방법**: 코드베이스 전체의 `Spinlock` 필드 선언(~30건)을 찾아
+각각 (a) AsyncReactor/스케줄러 핫패스 또는 ISR 인접 경로에서 도달
+가능한지, (b) 임계구역이 짧고 유계(순수 자료구조 조작, I/O 없음,
+무계 루프 없음)인지 두 기준으로 분류했다 - (b)는 `gWriteLock`(방향
+E)에서 얻은 교훈을 그대로 적용한 것(느린 I/O를 감싼 락을
+`IrqSpinlock`으로 바꾸면 그 구간 내내 `cli`가 걸려 오히려 워치독을
+악화시킬 수 있음).
+
+**전환(10개 파일)**:
+- `async_task.cpp` - `AsyncTaskQueue::_lock`(`gExecQueues`+
+  `gPreemptiveQueues` - 이번 조사가 확정한 원 잔여 원인).
+- `scheduler.h` - `TaskQueue::_lock`(`gImmediateQueues`/`gRtQueues`/
+  `gCleanupQueues`).
+- `scheduler.cpp` - `NormalQueue::_lock`(`gNormalQueues`, vruntime
+  정렬 OrderedList 래퍼).
+- `wait_queue.h`/`wait_queue.cpp` - `WaitQueue::_lock` +
+  `parkCurrentAndUnlock()` 시그니처(`Spinlock&` → `IrqSpinlock&`).
+- `mutex_core.h` - `MutexCore::_guard`/`ReentrantMutexCore::_guard`/
+  `AsyncCoroMutex::_lock` + `ParkingPolicy`/`YieldingPolicy::
+  onContended()` 시그니처 + `BasicMutex`/`ReentrantMutex`/
+  `ReentrantAsyncMutex`의 콜백 람다 3곳.
+- `semaphore_core.h` - `SemaphoreCore::_guard` + `BasicSemaphore`
+  콜백 람다.
+- `named_object.cpp` - `gLock`(`kMaxNamedObjects=128` 유계 스캔).
+- `interrupt_subscription.h`/`interrupt_subscription.cpp` -
+  `InterruptSubscription::lock` - 필드 자신의 기존 주석이 이미
+  "ISR과 syscall 양쪽에서 잡는다"고 명시해 둔, 이 감사가 정확히
+  겨냥하는 이중 컨텍스트 위험의 가장 뚜렷한 사례. 임계구역은
+  `kMaxSubscribersPerVector`/`kInterruptDumpRingCapacity`(둘 다 8)
+  범위의 유계 스캔뿐이라 (b)도 만족. 기존 ISR 쪽 주석("인터럽트
+  게이트가 IF를 자동으로 꺼서 같은 코어 데드락이 불가능하다")이
+  전제했던 안전 가정 자체가 이제 이 락 타입으로 직접 보장돼 그
+  전제에 더 이상 의존하지 않는다.
+
+**제외(문서화된 사유)**:
+- `channel.h`의 `RingBuffer`/`Channel` 락 - 임계구역이 호출자가
+  지정한 `maxLength`만큼 스케일하는 가변 길이 바이트 복사 루프를
+  포함(기준 (b) 위반).
+- `channel.cpp`의 `gChannelTableLock` - 기존 주석은 "짧게"라고
+  적혀 있지만 실제로는 `kAllocateChannelId()`가 최악의 경우
+  `kMaxChannelTableSlots=65536`개를 선형 스캔한다(기준 (b) 위반,
+  주석이 부정확했던 사례로 별도 기록 가치가 있음).
+- `libkmm/slab.h`의 `_rawLock` - 매거진/디폿 계층 밑의 콜드패스
+  폴백만 보호하나, 커널 힙 할당 전체의 중심 컴포넌트라 이번 감사
+  범위에서는 다루지 않고 별도 전담 검토로 미룬다.
+- `process.cpp`의 `gProcessTableLock`/`scheduler.cpp`의
+  `gCurrentTaskLock` - `RwSpinlock`(다른 클래스)이라 이번 `Spinlock`
+  전용 감사 대상이 아니다. `IrqRwSpinlock`류가 필요한지는 별도 판단.
+- `page_frame_allocator.cpp`/`paging.cpp`/`address_space.*`/
+  `concurrent_rbtree.h`/`concurrent_map.h`/`dma_buffer.cpp`/
+  `pnp.cpp`/`resource_group.h`/`event_topic.cpp`/`user_sync.cpp`/
+  `task.cpp`/`tls.cpp`/`libext4/ext4_driver.cpp` - 이번 감사에서
+  아직 점검하지 않음(필요해지면 후속 조사).
+
+**검증**: 표준 회귀 4종(PVH SMP1/SMP4, GRUB SMP4+실제initrd, GRUB
+SMP4+AHCI) 전부 클린. dbgdriver 60회 배치 재검증 - **0/60(0%)** -
+gLock(9/60) → gWriteLock(1/60, 다른 메커니즘) → gPreemptiveQueues
+(1/60) 순으로 이어져 온 캐스케이딩 재현이 완전히 사라졌다. TEMP
+kmain.cpp 훅(`kSpawnDbgdriverForInvestigation` 등)은 전부 원복
+완료, `git diff`로 kmain.cpp가 이전 커밋과 byte-identical함을
+확인했다.
+
+**결정 제안**: 91%→100% 개선이 확인됐으므로, 이 DC를 `approved`로
+전이하는 것을 제안한다 - 다만 최종 판단은 설계자 몫이다.
+PN-6360E6E9/PN-D44504D1은 이 결과로 `completed` 전이 대상이다(아래
+참고 절 갱신).
+
+## 참고 (추가)
+- 이 audit 전체는 코드 변경만(문서 변경 없음) - commit은 아래 git
+  발행 절 참고.
+- `PN-6360E6E9`/`PN-D44504D1` - 60회 배치 원 소유 계획, 0/60 완전
+  해소로 `completed` 전이.
+
+---
 
 ## [구현+검증, 2026-09-27] 방향(E) 채택(설계자 답변, QU-9243F8AB) - Serial 링버퍼+인터럽트 구동 재설계, commit 3a27b4b - 잔여는 또 다른 락(gPreemptiveQueues)으로 확정, 계속 추적 필요
 

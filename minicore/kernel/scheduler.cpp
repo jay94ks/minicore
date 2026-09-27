@@ -32,7 +32,7 @@ namespace kernel {
 
 void TaskQueue::pushBack(Task* task) {
     {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         task->next.store(nullptr);
         if (_tail) {
             _tail->next.store(task);
@@ -48,7 +48,7 @@ void TaskQueue::pushBack(Task* task) {
 
 void TaskQueue::pushFront(Task* task) {
     {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         task->next.store(_head);
         _head = task;
         if (!_tail) {
@@ -61,7 +61,7 @@ void TaskQueue::pushFront(Task* task) {
 Task* TaskQueue::popFront() {
     Task* task;
     {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         task = _head;
         if (task) {
             _head = task->next.load();
@@ -130,7 +130,7 @@ public:
     void init() { _list.init(); }
 
     void insert(Task* task) {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         _list.insert(task);
         _approxLength.fetchAdd(1);
     }
@@ -138,7 +138,7 @@ public:
     // §2.3 굶주림 방지 보정용 - 삽입 없이 현재 최솟값 vruntime만 읽는다.
     // 비어 있으면 true(호출부가 보정을 건너뛰게).
     bool minVruntime(uint64_t* outValue) const {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         Task* task = _list.first();
         if (!task) {
             return false;
@@ -149,7 +149,7 @@ public:
 
     // 최솟값(vruntime)을 큐에서 제거하며 반환 - 비어 있으면 nullptr.
     Task* popMin() {
-        SpinlockGuard guard(_lock);
+        IrqSpinlockGuard guard(_lock);
         Task* task = _list.first();
         if (task) {
             OrderedList<Task, TaskVruntimeTraits>::remove(task);
@@ -161,7 +161,10 @@ public:
     uint32_t approxLength() const { return _approxLength.load(); }
 
 private:
-    mutable Spinlock _lock;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1), 설계자 지시] TaskQueue와
+    // 동일한 이유로 IrqSpinlock 교체(임계구역이 OrderedList 삽입/
+    // first()/remove()뿐인 짧은 락).
+    mutable IrqSpinlock _lock;
     OrderedList<Task, TaskVruntimeTraits> _list;
     AtomicU32 _approxLength;
 };

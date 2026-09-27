@@ -44,7 +44,12 @@ public:
     // 없음) 빈 WeakPtr을 넘겨도 안전하다(task.h의 blockedOn 주석 참고
     // - 파킹 자체는 이 필드와 무관하게 정상 동작, 강제 cancel()만
     // 무력화됨).
-    void parkCurrentAndUnlock(Spinlock& guard, const WeakPtr<Waitable>& selfAsWaitable);
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1), 설계자 지시] 호출부
+    // (MutexCore/SemaphoreCore 등)의 상위 락도 함께 IrqSpinlock으로
+    // 바뀌므로 이 파라미터도 같이 바뀐다 - 짧은 임계구역 락 전체를
+    // 일관되게 IrqSpinlock으로 통일하는 감사(QU-BF7EBD8C 방향 1)의
+    // 일부.
+    void parkCurrentAndUnlock(IrqSpinlock& guard, const WeakPtr<Waitable>& selfAsWaitable);
 
     // 큐 머리에서 하나 꺼내 즉시 재개시킨다(Scheduler::scheduleImmediate
     // 재사용 - 파킹된 Task는 이중 스케줄링 걱정이 없다고 이미 문서화돼
@@ -88,7 +93,9 @@ public:
     bool isCompleted() const override { return false; }
 
 private:
-    Spinlock _lock;  // _queue/각 Task의 blockedOn 정리를 보호(짧게만 보유)
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1)] IrqSpinlock 교체 - 이미
+    // "짧게만 보유"로 설계돼 있던 락이라 이 감사의 전형적 전환 대상.
+    IrqSpinlock _lock;  // _queue/각 Task의 blockedOn 정리를 보호(짧게만 보유)
     Queue<Task, WaitQueueTraits> _queue;
 };
 

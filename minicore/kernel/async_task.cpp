@@ -177,11 +177,17 @@ constexpr kernel::uint32_t kMaxCores = kernel::kAcpiMaxCpus;
 
 // AsyncTask::next 침습적 포인터를 재사용하는 단일 연결 리스트 -
 // scheduler.h의 TaskQueue와 정확히 같은 패턴(Spinlock 폴백).
+// [변경, 2026-09-27, DC-2CB9DDA0 방향(1), 설계자 지시] 임계구역이
+// 짧은(리스트 push/pop만) 전역/코어별 공유 락이라 `IrqSpinlock`으로
+// 교체 - gPreemptiveQueues[2][0]._lock에서 gdb로 실측 확인된 잔여
+// NMI 워치독(다른 코어가 이 락을 기다리다 자기 스케줄러 틱을 못
+// 받음)의 재발을 막는다. gExecQueues도 구조적으로 완전히 동일해
+// 함께 교체.
 class AsyncTaskQueue {
 public:
     void pushBack(kernel::AsyncTask* task) {
         {
-            kernel::SpinlockGuard guard(_lock);
+            kernel::IrqSpinlockGuard guard(_lock);
             task->next.store(nullptr);
             if (_tail) {
                 _tail->next.store(task);
@@ -199,7 +205,7 @@ public:
     kernel::AsyncTask* popFront() {
         kernel::AsyncTask* task;
         {
-            kernel::SpinlockGuard guard(_lock);
+            kernel::IrqSpinlockGuard guard(_lock);
             task = _head;
             if (task) {
                 _head = task->next.load();
@@ -220,7 +226,7 @@ public:
     kernel::uint32_t approxLength() const { return _approxLength.load(); }
 
 private:
-    kernel::Spinlock _lock;
+    kernel::IrqSpinlock _lock;
     kernel::AsyncTask* _head = nullptr;
     kernel::AsyncTask* _tail = nullptr;
     kernel::AtomicU32 _approxLength;

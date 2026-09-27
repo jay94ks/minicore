@@ -5,7 +5,7 @@
 
 namespace kernel {
 
-void WaitQueue::parkCurrentAndUnlock(Spinlock& guard, const WeakPtr<Waitable>& selfAsWaitable) {
+void WaitQueue::parkCurrentAndUnlock(IrqSpinlock& guard, const WeakPtr<Waitable>& selfAsWaitable) {
     Task* self = Scheduler::currentTask();
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
 

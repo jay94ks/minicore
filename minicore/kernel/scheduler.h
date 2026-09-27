@@ -75,7 +75,11 @@ public:
     uint32_t approxLength() const;
 
 private:
-    Spinlock _lock;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1), 설계자 지시] 임계구역이
+    // 짧은(리스트 push/pop만) 락이라 `IrqSpinlock`으로 교체 - 이
+    // 큐를 쥔 코어가 NMI 워치독을 유발할 수 있었던 gPreemptiveQueues
+    // (async_task.cpp)와 구조적으로 완전히 동일해 함께 교체.
+    IrqSpinlock _lock;
     Task* _head = nullptr;
     Task* _tail = nullptr;
     AtomicU32 _approxLength;

@@ -145,7 +145,18 @@ struct InterruptSubscription {
     uint32_t dumpHead = 0;
     uint32_t dumpCount = 0;
     uint64_t nextDumpId = 1;  // 이 벡터 안에서만 유일 - 실제 공개 dumpId는 (vector<<32|이 값)으로 인코딩(GetInterruptDump가 벡터를 즉시 역산해 256개 링 전체를 훑지 않게 하는 구현 세부)
-    Spinlock lock;  // ISR과 syscall 양쪽에서 잡는다 - 구독자 슬롯 + 덤프 링 전부 이 하나로 보호
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(1), 설계자 지시] IrqSpinlock
+    // 교체 - "ISR과 syscall 양쪽에서 잡는다"는 원래 주석이 이미 명시한
+    // 대로 정확히 이 감사(QU-BF7EBD8C 방향 1)가 겨냥하는 이중 컨텍스트
+    // 위험 패턴이다. interrupt_subscription.cpp의 kInterruptSubscriptionIsr
+    // 옆 기존 주석은 "인터럽트 게이트가 IF를 자동으로 꺼서 같은 코어
+    // 안에서는 데드락할 수 없다"고 주장하지만, 그 전제(같은 코어의
+    // syscall 경로가 이 락을 쥔 채로 인터럽트에 의해 선점될 수 없다는
+    // 것)를 이 lock 타입 자체가 보장하지 않았다 - 이번 교체로 그 전제
+    // 자체가 필요 없어진다(cli가 이미 원천 차단). 임계구역은 전부
+    // kMaxSubscribersPerVector/kInterruptDumpRingCapacity(둘 다 8)
+    // 범위의 유계 스캔뿐이라 자격 요건(b)도 만족.
+    IrqSpinlock lock;
 };
 
 // [갱신, 2026-09-17, SP-E9B44929] Interrupt 그룹(5).

@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-26T18:22:13.504Z
+  updatedAt: 2026-09-27T14:11:28.101Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2524,6 +2524,42 @@ bind)은 구현+실측 검증까지 완료했다(commit 9fb5180/bae84a0). 다만
 "남은 범위"로 이미 정확히 추적 중이다(이 문서 §0의 취지 그대로
 자체 추적이 이미 되고 있는 경우) - 이 항목은 순수 교차 참조 목적.
 
+## §1-U. [발견, 2026-09-27] `SP-6350DEBB`(epoll, approved) - 설계자
+Opinion이 명시적으로 v1 범위에 포함시킨 4항목이 실제 구현에서 전부
+후속으로 밀림(이미 자체 추적 중이라 정보만 교차 기록)
+
+§2-추가7에서 "구현 자체가 아직 없다"로 기록했던 것과 달리, 같은 날
+후속 틱에 `PN-7562DA62`(commit `8e350f1`)가 실제로 `EpollCreate`/
+`EpollCtl`/`EpollWait`(그룹6 call3-5)를 구현+커밋했다 - 재점검 결과
+드러난 갭:
+
+이 문서 §2(edge 트리거)/§2-D(OneShot)/§2-E(Exclusive)/§3-A(중첩
+epoll) 넷 모두 "최초안은 범위 밖으로 뒀으나 설계자 Opinion이
+명시적으로 v1 범위에 포함하라고 지시"라고 적혀 있다(§2-D: "구체적
+소비자가 없더라도 포함해", §3-A: "명시적으로 구현+검증 범위에
+포함하라고 지시했다") - 즉 이 문서 자신의 "확정된 설계"는 이 넷을
+전부 v1 필수로 확정해 뒀다.
+
+그런데 실제 구현(`minicore/kernel/epoll.h`)은 "**레벨 트리거만
+구현**... 이번 증분 범위 밖"이라고 명시하며 `EdgeTriggered`/
+`OneShot`/`Exclusive` 비트를 지정해도 전부 무시하고(`EpollWatch`
+구조체 자체에 edge/OneShot 전용 필드조차 없음), 중첩 epoll(§3-A의
+`FileDescriptor::Kind::Epoll` 분기)도 구현되지 않았다 - 이 문서가
+"확정"이라고 못박은 것과 정반대 스코프로 축소돼 출시됐다.
+
+**은폐된 갭은 아니다** - `epoll.h` 자신이 "PN-7562DA62 체크리스트
+5/6/7/8번 항목으로 남아 있다"고 명시하고, `PN-7562DA62` 본문도 이
+넷을 "edge/OneShot/Exclusive/중첩epoll... DC-54D69BEE 해소 후 별도
+증분으로 진행"이라고 스스로 추적 중이다 - `SP-231493CB`(§1-T)와
+동일한 패턴(구현 세션이 정직하게 후속으로 미루며 자체 기록도 남김).
+다만 **설계 문서(SP-6350DEBB) 자신은 아직 이 스코프 축소를 반영하는
+정정 각주가 없다** - §1-T가 지적한 패턴과 달리 여기는 설계자 Opinion
+으로 "v1 필수"까지 명시적으로 못박힌 항목들이 빠졌다는 점에서 더
+눈에 띄는 이탈이라, 설계자가 이 축소를 그대로 승인할지(문서에 정정
+각주 추가) 아니면 실제로 이번 증분에 마저 포함시킬지 판단이 필요해
+보인다 - 순수 교차 기록, 이 문서 자신의 범위(코드 대조)를 넘는
+의사결정은 하지 않는다.
+
 ## §2-추가6. [점검 완료, 2026-09-27] `DC-E441CB59`(VFS StatArgs 파일 타입 확장, approved) - 갭 없음
 
 승인된 답변 (B) `enum class FileType` 전면 통합이 `PN-4BDA31FC`
@@ -2537,7 +2573,7 @@ resourcegroupfs/ext4/FAT32/FAT16/exFAT/NTFS) 전부의 Stat 핸들러가
 `bool`로 남아 있는 것은 갭이 아니다 - `PN-4BDA31FC` 본문이 이 경계를
 명시적으로 기록해 뒀다.
 
-## §2-추가7. [점검 완료(해당 없음), 2026-09-27] `SP-6350DEBB`(epoll)/`SP-A7479F83`(timerfd/signalfd) - 둘 다 구현 자체가 아직 없음(이 방법론의 대상 아님)
+## §2-추가7. [점검 완료(해당 없음), 2026-09-27; **SP-6350DEBB 부분만 2026-09-27 후속 틱에 §1-U로 갱신 - 이제 구현됨, 갭 발견**] `SP-6350DEBB`(epoll)/`SP-A7479F83`(timerfd/signalfd)
 
 `docs git grep`/저장소 전수 검색으로 `EpollInstance`/`EpollCreate`/
 `Timerfd`/`Signalfd`류 심볼이 코드베이스 어디에도 없음을 확인 -
