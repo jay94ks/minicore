@@ -5,9 +5,54 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-2CB9DDA0
   status: review
-  updatedAt: 2026-09-27T09:10:47.340Z
+  updatedAt: 2026-09-27T10:38:05.304Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [구현+검증, 2026-09-27] 방향(A) 채택(설계자 답변, QU-05F4B63B) - IrqSpinlock 신설+gLock 적용, commit 8567fe0 - 9/60 -> 1/60로 대폭 개선, 완전 해소는 아님
+
+설계자가 방향 **(A)**(`gLock`을 cli/sti로 감싸는 `IrqSpinlock`으로
+교체)를 답변했다.
+
+**구현**: `minicore/libs/libkenv/spinlock.h`에 `IrqSpinlock`/
+`IrqSpinlockGuard` 신설 - 기존 `Spinlock`과 같은 TAS 스핀 루프에
+`pci.cpp`의 `PciConfigAccessGuard`/`scheduler.cpp`의 `enqueue()`/
+`scheduleImmediate()`와 완전히 같은 RFLAGS 저장/복원 기법(`pushfq;
+pop; cli` → `push; popfq`)을 결합했다 - 무조건 `sti`가 아니라 진입
+시점의 실제 IF 값을 그대로 복원하므로, 이미 cli된 인터럽트 핸들러
+도중 이 락을 잡아도 `PN-9326B06F`류의 IF=0 불변조건 파괴가 재발하지
+않는다. `minicore/kernel/delayed_exec.cpp`의 `gLock`(및 `init`/
+`schedule`/`cancel`/`pump`/`hasPending` 5개 사용처 전부)을 `Spinlock`
+→ `IrqSpinlock`으로 교체.
+
+**검증**: 표준 회귀 4종(PVH SMP1/SMP4, GRUB SMP4+실제initrd, GRUB
+SMP4+AHCI) 전부 클린. dbgdriver 60회 배치 재검증 - **9/60(15%) →
+1/60(1.7%)** - 유의미하게 개선됐으나 **완전히 0은 아니다.**
+
+**잔여 1건(run9) 분석**: 같은 `rip=0xffffffff80110086`, 재빌드된
+바이너리로 다시 `nm -n` 해석해도 동일하게 `kernel::Spinlock::lock()
++0x10`을 가리킨다 - **단, `Spinlock::lock()`은 이 커널 전체에서
+공유되는 단일 비템플릿 구현이라, 이 심볼만으로는 "어느 `Spinlock`
+인스턴스"가 걸렸는지 구분할 수 없다.** `gLock`은 이제 `IrqSpinlock`
+이므로 이 잔여 1건은 (a) 같은 캐스케이딩 패턴이 **다른** 전역
+`Spinlock` 인스턴스(async reactor/스케줄러 경로에서 도달 가능한 것)
+에서 재발한 것이거나, (b) 우연히 같은 지점을 지나가는 완전히
+무관한 저확률 타이밍 문제일 수 있다 - gdb 확인 없이는 구분 불가.
+
+**결정이 필요한 지점(추가)**: 91%(9→1) 개선을 "충분한 하드닝"으로
+받아들여 이 DC를 종결할지, 아니면 잔여 1/60을 gdb로 재확인해 다른
+`Spinlock` 인스턴스까지 계속 추적할지 - 본문 원래의 "결정이 필요한
+지점" 후보 중 (D)(먼저 gdb로 재확인)를 이 잔여분에도 다시 적용할지
+설계자 판단이 필요하다. **완전 종결(approved 전이)은 이 추가 질의
+답변까지 보류한다.**
+
+## 참고 (추가)
+- commit `8567fe0` - 방향(A) 실제 구현.
+- `PN-6360E6E9`/`PN-D44504D1`(scheduled) - 60회 배치 원 소유 계획,
+  9→1 개선 결과를 교차 기록했으나 완전 해소가 아니라 아직 completed
+  전이 보류.
+
+---
 
 DC-54D69BEE 방향(B)(commit 76c9bff) 적용 이후, PN-6360E6E9/PN-D44504D1의
 원 재현 도구(`minicore/dbgdriver`, GRUB SMP4+실제initrd, TEMP
