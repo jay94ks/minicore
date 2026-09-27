@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-EECFE2E0
   status: review
-  updatedAt: 2026-09-27T19:06:32.612Z
+  updatedAt: 2026-09-27T19:12:59.396Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -127,6 +127,14 @@ authtest와 **정확히 동일한 시그니처**로 영구 정지하는 것을 g
 - `PN-AA9D7030` - 이 근본 원인을 확정한 조사(23/23 재현, TEMP
   브레드크럼 전부 원복 완료).
 - `PN-0556C759` - 두 번째 독립 희생자 확인 사례(dbgdriver).
+- `PN-E4C6AF72`/`PN-0B461E6F`(둘 다 scheduled) - "레이아웃 민감
+  heisenbug, 최근 재현 안 됨"으로 분류돼 온 다른 두 계획 - 아직
+  직접 확인은 안 했지만(별도 재현 시도 비용이 커서 이번엔 보류),
+  이 DC가 해소된 뒤 재현을 다시 시도해 "진짜 원인 해소"와 "이
+  스케줄러 기아에 막혀 도달 못 함"을 구분할 가치가 있는 후보로
+  교차 기록해 둔다 - 다만 이 둘의 원 증상(실제 크래시/PANIC)은
+  authtest/dbgdriver의 증상(조용한 영구 정지)과 종류가 달라
+  직접적 연관성은 dbgdriver 사례보다 약하다.
 - `PN-24A2B6F5` - authmgr E2E 완성 계획, 이 DC의 결정에 의존.
 - `PN-ECCAD541`(rejected) - 먼저 기각된 Channel 계층 가설.
 - `DC-C4A011C7`(approved) - 이전에 고친 waitingTask 크로스코어
