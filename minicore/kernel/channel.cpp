@@ -1065,6 +1065,31 @@ void kCloseBridgeSync(const SharedPtr<Task>& caller, uint64_t bridgeHandle, Chan
     *outError = ChannelError::None;
 }
 
+// [신규, 2026-09-27, SP-231493CB §5] channel.h의 문서 주석 참고 -
+// kCloseBridgeSync를 거의 그대로 재사용하되 `bridges->erase(slot)`을
+// 빼서 핸들을 계속 열어 둔다.
+void kShutdownBridgeWrite(const SharedPtr<Task>& caller, uint64_t bridgeHandle, ChannelError* outError) {
+    OpenBridgeList* bridges = kOwnerOpenBridgesOf(caller.get());
+    if (!bridges) {
+        *outError = ChannelError::InvalidHandle;
+        return;
+    }
+    auto* rawTarget = reinterpret_cast<BridgePipe*>(bridgeHandle);
+    auto* slot = bridges->find([rawTarget](const SharedPtr<BridgePipe>& sp) { return sp.get() == rawTarget; });
+    if (!slot) {
+        *outError = ChannelError::InvalidHandle;
+        return;
+    }
+    SharedPtr<BridgePipe> bridge = slot->value;
+    bridge->closedLocal = true;
+
+    AsyncTaskWaitQueue woken = kWakeForClose(bridge.get());
+    for (AsyncTask* t = woken.popFront(); t; t = woken.popFront()) {
+        AsyncReactor::submitCompletion(t);
+    }
+    *outError = ChannelError::None;
+}
+
 void Channel::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointOpenChannel, &gOpenChannelHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointConnectChannel, &gConnectChannelHandler);

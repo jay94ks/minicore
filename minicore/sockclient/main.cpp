@@ -14,6 +14,11 @@
 // 의 Bind()가 아직 안 끝났으면 NotFound가 날 수 있다 - 몇 차례
 // 재시도한다(dbgdriver의 kPollGetRegisters/kPollDebugContinue와 동일한
 // 이유의 폴링).
+//
+// exitCode: 0=전 구간 성공, 1=Socket 실패, 2=Connect 실패,
+// 3=Write 실패, 4=[신규, 2026-09-27] Shutdown(Write) 실패,
+// 5=[신규] Shutdown(Write) 이후 Write가 BrokenPipe가 아님(핸들이
+// 여전히 유효해야 하는데 다른 에러가 났거나 성공해 버림).
 #include "libmc/socket.h"
 #include "libmc/syscall.h"
 #include "libmc/vfs.h"
@@ -72,6 +77,28 @@ extern "C" void _start() {
     if (token == 0 || !mc::wait(token) || writeArgs.error != mc::ChannelError::None ||
         writeArgs.bytesWritten != kMsgLen) {
         kFinish(3);
+    }
+
+    // [신규, 2026-09-27, SP-231493CB §5, Shutdown 구현 검증] Shutdown(Write) -
+    // 이 fd는 계속 열려 있어야 한다(Close와 달리 InvalidHandle이 아니라
+    // BrokenPipe로 구분돼야 함, 바로 아래 재확인).
+    mc::SocketShutdownArgs shutdownArgs;
+    shutdownArgs.fd = static_cast<mc::int32_t>(sockB.fd);
+    shutdownArgs.how = mc::ShutdownHow::Write;
+    token = mc::submit(mc::kSyscallEndpointSocketShutdown, &shutdownArgs);
+    if (token == 0 || !mc::wait(token) || shutdownArgs.error != mc::ChannelError::None) {
+        kFinish(4);
+    }
+    // Shutdown(Write) 이후의 Write는 반드시 BrokenPipe여야 한다(핸들
+    // 자체는 여전히 유효 - InvalidHandle이면 안 됨, kShutdownBridgeWrite가
+    // 실제로는 Close처럼 핸들을 제거해 버린 게 아닌지 구분하는 지점).
+    writeArgs = mc::WriteArgs{};
+    writeArgs.fd = static_cast<mc::int32_t>(sockB.fd);
+    writeArgs.buf = kMsg;
+    writeArgs.len = kMsgLen;
+    token = mc::submit(mc::kSyscallEndpointWrite, &writeArgs);
+    if (token == 0 || !mc::wait(token) || writeArgs.error != mc::ChannelError::BrokenPipe) {
+        kFinish(5);
     }
 
     mc::CloseArgs closeArgs;

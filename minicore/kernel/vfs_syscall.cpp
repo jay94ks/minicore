@@ -449,6 +449,15 @@ public:
                 args->error = ChannelError::BrokenPipe;  // 아직 연결 안 됨(POSIX ENOTCONN과 동일한 취지)
                 co_return;
             }
+            // [신규, 2026-09-27, SP-231493CB §5] Shutdown(fd, Read|Both)이
+            // 세운 순수 로컬 신호 - Channel은 전혀 건드리지 않고 여기서
+            // 곧장 EOF(POSIX shutdown(SHUT_RD) 이후 recv()의 관례 그대로 -
+            // 에러가 아니라 0바이트 성공)를 돌려준다.
+            if (socket->readShutdown) {
+                args->bytesRead = 0;
+                args->error = ChannelError::None;
+                co_return;
+            }
             ChannelReadArgs readArgs;
             readArgs.bridge = socket->bridge;
             readArgs.buffer = args->buf;

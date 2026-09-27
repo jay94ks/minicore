@@ -35,6 +35,16 @@ enum class SocketType : uint32_t {
     Datagram = 2,
 };
 
+// [신규, 2026-09-27, SP-231493CB §5] POSIX shutdown()의 how 인자 -
+// SHUT_RD/SHUT_WR/SHUT_RDWR과 동일한 값 배치(비트 조합으로 Both를
+// 표현 - 값 자체는 POSIX 상수와 일치시킬 필요가 없어 이 커널 내부
+// 전용 인코딩).
+enum class ShutdownHow : uint32_t {
+    Read = 1,
+    Write = 2,
+    Both = 3,
+};
+
 // UnixSocket - `Process::FileDescriptor::socket`(kind==MountKind::Socket
 // 일 때만 유효)이 `kMakeShared`로 소유하는 상태 블록 - `Channel`/
 // `BridgePipe`와 동일한 관례(`destroy()`는 이 아래 정의, 소유
@@ -82,6 +92,16 @@ struct UnixSocket {
     char boundPath[kMaxNamedObjectNameLength] = {};
     uint32_t boundPathLength = 0;
 
+    // [신규, 2026-09-27, SP-231493CB §5] `Shutdown(fd, Read|Both)`가
+    // 세운다 - 순수 로컬 신호(상대에게 알릴 필요 없음, POSIX SHUT_RD와
+    // 동일한 취지: "나는 더 이상 받지 않겠다"). ReadHandler(vfs_syscall.cpp)
+    // 가 ChannelRead에 위임하기 전에 이 플래그를 먼저 확인해 즉시
+    // EOF(bytesRead=0, error=None)를 돌려준다 - Channel/BridgePipe
+    // 상태는 전혀 건드리지 않는다(Write 방향은 대칭으로 channel.h의
+    // `kShutdownBridgeWrite`가 처리 - 그쪽은 상대에게 EOF를 알려야
+    // 하므로 이미 있는 `closedLocal` 신호를 재사용한다).
+    bool readShutdown = false;
+
     // `kMakeShared`의 기본 삭제자(`kDestroyAndFree<UnixSocket>`)가
     // 마지막 강한 참조 해제 시 호출한다(`Channel::destroy()`와 동일한
     // 이유) - 정리할 힙 자원이 없어(모든 필드가 값 타입) no-op이지만,
@@ -105,12 +125,11 @@ constexpr SyscallEndpointId kSyscallEndpointSocketBind = kMakeSyscallEndpointId(
 constexpr SyscallEndpointId kSyscallEndpointSocketListen = kMakeSyscallEndpointId(11, 2);
 constexpr SyscallEndpointId kSyscallEndpointSocketAccept = kMakeSyscallEndpointId(11, 3);
 constexpr SyscallEndpointId kSyscallEndpointSocketConnect = kMakeSyscallEndpointId(11, 4);
-// [예약, 미구현, 2026-09-27] Shutdown - 밑바탕 Channel 계층에 "핸들은
-// 열어 둔 채 한쪽 방향만 닫기"에 대응하는 기존 프리미티브가 없다
-// (`CloseBridge`/`kCloseBridgeSync`는 항상 완전히 닫고 그 자리에서
-// 호출자의 openBridges에서 바로 제거한다, channel.cpp 참고) - 새
-// Channel 프리미티브 설계가 필요해 이번 증분 범위 밖(PN-CC0F4EAC
-// 후속으로 명시적으로 남겨 둠).
+// [구현 완료, 2026-09-27, PN-CC0F4EAC 후속] Shutdown - 처음엔 "밑바탕
+// Channel 계층에 새 프리미티브가 필요하다"고 봤으나, 실측 코드 추적
+// 결과 기존 `BridgePipe::closedLocal`/`kIsBridgeBroken()` 신호 하나로
+// Write 방향이 이미 정확히 처리됨을 확인해(channel.h의
+// `kShutdownBridgeWrite` 문서 주석 참고) 새 프리미티브 없이 구현했다.
 constexpr SyscallEndpointId kSyscallEndpointSocketShutdown = kMakeSyscallEndpointId(11, 5);
 
 struct SocketArgs {
@@ -152,10 +171,16 @@ struct SocketConnectArgs {
     ChannelError error = ChannelError::None;
 };
 
+struct SocketShutdownArgs {
+    int32_t fd = -1;
+    ShutdownHow how = ShutdownHow::Both;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 class Socket {
 public:
-    // 부팅 시 한 번 호출 - 위 5개 endpoint(Shutdown 제외, 아직 미구현)를
-    // SyscallRegistry에 등록한다.
+    // 부팅 시 한 번 호출 - 위 6개 endpoint를 전부 SyscallRegistry에 등록한다.
     static void registerSyscallEndpoints();
 };
 

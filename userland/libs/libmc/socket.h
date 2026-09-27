@@ -25,14 +25,20 @@ enum class SocketType : uint32_t {
     Datagram = 2,
 };
 
-// [RM-48E1E610 그룹11] Shutdown(call 5)은 커널 쪽에 아직 미구현이라
-// 이 거울에도 옮기지 않는다(socket.h 문서 주석 참고) - 실제로
-// 구현되는 시점에 함께 추가.
+// [신규, 2026-09-27, SP-231493CB §5] 커널 socket.h의 ShutdownHow와
+// 바이트 단위로 동일해야 한다.
+enum class ShutdownHow : uint32_t {
+    Read = 1,
+    Write = 2,
+    Both = 3,
+};
+
 constexpr SyscallEndpointId kSyscallEndpointSocket = kMakeSyscallEndpointId(11, 0);
 constexpr SyscallEndpointId kSyscallEndpointSocketBind = kMakeSyscallEndpointId(11, 1);
 constexpr SyscallEndpointId kSyscallEndpointSocketListen = kMakeSyscallEndpointId(11, 2);
 constexpr SyscallEndpointId kSyscallEndpointSocketAccept = kMakeSyscallEndpointId(11, 3);
 constexpr SyscallEndpointId kSyscallEndpointSocketConnect = kMakeSyscallEndpointId(11, 4);
+constexpr SyscallEndpointId kSyscallEndpointSocketShutdown = kMakeSyscallEndpointId(11, 5);
 
 struct SocketArgs {
     SocketDomain domain = SocketDomain::Unix;
@@ -68,6 +74,13 @@ struct SocketConnectArgs {
     int32_t fd = -1;
     const char* path = nullptr;
     uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+struct SocketShutdownArgs {
+    int32_t fd = -1;
+    ShutdownHow how = ShutdownHow::Both;
     // out
     ChannelError error = ChannelError::None;
 };

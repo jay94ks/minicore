@@ -122,6 +122,26 @@ void kOpenNamelessChannelSync(const SharedPtr<Task>& caller, ChannelId* outChann
 // 호출하도록 리팩터링됨 - 로직 중복 없음).
 void kCloseBridgeSync(const SharedPtr<Task>& caller, uint64_t bridgeHandle, ChannelError* outError);
 
+// [신규, 2026-09-27, SP-231493CB §5, PN-CC0F4EAC 후속 Shutdown 구현]
+// POSIX `shutdown(fd, SHUT_WR)`에 대응 - `kCloseBridgeSync`와 달리
+// 호출자의 openBridges에서 이 핸들을 제거하지도, `BridgePipe` 자체를
+// 반납하지도 않는다(fd는 계속 열려 있고 Read는 여전히 가능해야 함) -
+// 그저 "이 반쪽은 더 이상 새 데이터를 write()하지 않는다"는 기존
+// 신호(`BridgePipe::closedLocal`)만 세운다. 이 신호 하나로 두 방향
+// 다 기존 로직이 그대로 올바르게 동작한다 - 기존 `ChannelWriteHandler`
+// 가 매 호출마다 자기 자신의 `closedLocal`을 `kIsBridgeBroken()`으로
+// 먼저 확인하므로 이후 이 핸들로의 Write는 즉시 `BrokenPipe`, 상대의
+// `ChannelReadHandler`도 버퍼가 비면 같은 검사(상대 쪽에서 본
+// `peer->closedLocal`)로 EOF에 해당하는 `BrokenPipe`를 본다 - 새
+// 검사를 추가할 필요가 전혀 없었다(당초 socket.h가 "새 Channel
+// 프리미티브 설계가 필요"로 남겨 뒀던 걱정은 기각됨, 실측 코드 추적
+// 결과). `kWakeForClose`도 `kCloseBridgeSync`와 동일하게 재사용해
+// 이미 블로킹 중인 대기자들을 즉시 깨운다. POSIX `SHUT_RD`는 이
+// Channel 계층과 무관하게 순수 로컬 플래그(`UnixSocket::readShutdown`,
+// socket.h)로 socket.cpp/vfs_syscall.cpp가 직접 처리한다(상대에게
+// 알릴 필요가 없는 방향이라 여기 내려올 이유가 없음).
+void kShutdownBridgeWrite(const SharedPtr<Task>& caller, uint64_t bridgeHandle, ChannelError* outError);
+
 // AsyncTask 여러 개를 FIFO로 대기시키는 침습적 큐 - AsyncTask::next를
 // 재사용한다(파킹돼 있는 동안엔 AsyncReactor 실행 큐에 없어 비어
 // 있음 - kernel::Task가 WaitQueue에서 Task::next를 재사용하는 것과

@@ -498,11 +498,66 @@ public:
     void onCancel(AsyncTask*, void*) override {}
 };
 
+class SocketShutdownHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<SocketShutdownArgs*>(argsRaw);
+        if (args->how != ShutdownHow::Read && args->how != ShutdownHow::Write && args->how != ShutdownHow::Both) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+        SharedPtr<Process> process = kProcessFromSubmitter(task);
+        if (!process) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        const int32_t fd = args->fd;
+        auto* slot = process->fileDescriptors.find([fd](const Process::FileDescriptor& e) { return e.fd == fd; });
+        if (!slot || slot->value.kind != MountKind::Socket) {
+            args->error = ChannelError::InvalidHandle;
+            co_return;
+        }
+        UnixSocket* socket = slot->value.socket.get();
+        if (socket->bridge == 0) {
+            args->error = ChannelError::BrokenPipe;  // POSIX ENOTCONN과 동일한 취지(ReadHandler/WriteHandler와 일관)
+            co_return;
+        }
+        const bool wantRead = args->how == ShutdownHow::Read || args->how == ShutdownHow::Both;
+        const bool wantWrite = args->how == ShutdownHow::Write || args->how == ShutdownHow::Both;
+        if (wantRead) {
+            // [socket.h UnixSocket::readShutdown 문서 참고] 순수 로컬
+            // 신호 - Channel/BridgePipe는 전혀 건드리지 않는다.
+            socket->readShutdown = true;
+        }
+        if (wantWrite) {
+            // [channel.h kShutdownBridgeWrite 문서 참고] 실패(핸들
+            // 무효)는 이 시점엔 사실상 불가능하다 - 위에서 이미
+            // socket->bridge가 이 fd 소유의 유효한 연결임을 확인했고,
+            // 그 값 자체가 이 태스크의 submitterTask 소유 openBridges
+            // 안에 있어야만 여기까지 세팅될 수 있었다(SocketConnectHandler/
+            // SocketAcceptHandler 참고) - 그래도 방어적으로 반환값을
+            // 확인한다.
+            SharedPtr<Task> caller = task->submitterTask.lock();
+            ChannelError shutdownError = ChannelError::None;
+            kShutdownBridgeWrite(caller, socket->bridge, &shutdownError);
+            if (shutdownError != ChannelError::None) {
+                args->error = shutdownError;
+                co_return;
+            }
+        }
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
 SocketHandler gSocketHandler;
 SocketBindHandler gSocketBindHandler;
 SocketListenHandler gSocketListenHandler;
 SocketAcceptHandler gSocketAcceptHandler;
 SocketConnectHandler gSocketConnectHandler;
+SocketShutdownHandler gSocketShutdownHandler;
 
 }  // namespace
 
@@ -520,10 +575,7 @@ void Socket::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointSocketListen, &gSocketListenHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointSocketAccept, &gSocketAcceptHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointSocketConnect, &gSocketConnectHandler);
-    // kSyscallEndpointSocketShutdown - 아직 미구현(socket.h 문서 주석
-    // 참고), 등록하지 않는다(등록 안 된 endpoint는 SyscallRegistry가
-    // 이미 안전하게 NotFound류로 거절한다 - 다른 "번호만 예약" 상태
-    // endpoint들과 동일한 관례).
+    SyscallRegistry::registerHandler(kSyscallEndpointSocketShutdown, &gSocketShutdownHandler);
 }
 
 }  // namespace kernel

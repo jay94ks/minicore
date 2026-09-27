@@ -47,6 +47,8 @@
 //   5 = Read(accepted) 실패
 //   6 = Read된 바이트 수 불일치
 //   7 = Read된 내용 불일치
+//   8 = [신규, 2026-09-27, SP-231493CB §5] Shutdown(Read) 실패
+//   9 = Shutdown(Read) 이후 Read가 즉시 EOF(0바이트, error=None)가 아님
 #include "libmc/socket.h"
 #include "libmc/syscall.h"
 #include "libmc/vfs.h"
@@ -119,6 +121,24 @@ extern "C" void _start() {
         if (buf[i] != static_cast<mc::uint8_t>(kMsg[i])) {
             kFinish(7);
         }
+    }
+
+    // 5.5) [신규, 2026-09-27, SP-231493CB §5] Shutdown(Read) - 순수
+    // 로컬 신호라 상대(sockclient)와 무관하게 즉시 적용돼야 한다.
+    mc::SocketShutdownArgs shutdownArgs;
+    shutdownArgs.fd = static_cast<mc::int32_t>(acceptArgs.newFd);
+    shutdownArgs.how = mc::ShutdownHow::Read;
+    token = mc::submit(mc::kSyscallEndpointSocketShutdown, &shutdownArgs);
+    if (token == 0 || !mc::wait(token) || shutdownArgs.error != mc::ChannelError::None) {
+        kFinish(8);
+    }
+    readArgs = mc::ReadArgs{};
+    readArgs.fd = static_cast<mc::int32_t>(acceptArgs.newFd);
+    readArgs.buf = buf;
+    readArgs.len = sizeof(buf);
+    token = mc::submit(mc::kSyscallEndpointRead, &readArgs);
+    if (token == 0 || !mc::wait(token) || readArgs.error != mc::ChannelError::None || readArgs.bytesRead != 0) {
+        kFinish(9);
     }
 
     // 6) 정리 - Close(그룹3)가 리스너/연결 fd 둘 다 정상 반납하는지.
