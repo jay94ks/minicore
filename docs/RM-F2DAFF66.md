@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-26T04:48:36.005Z
+  updatedAt: 2026-09-26T18:22:13.504Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2488,6 +2488,63 @@ SP/DC가 approved로 전환될 때마다(규칙 14) 이 절에 다시 채워질
 것이다. 다음 틱들은 `document_list`로 새로 approved된 문서가
 있는지부터 확인하고, 없으면 이 §3 스윕은 건너뛰고 §0-2(메시지/
 계획) 루틴에 집중한다.
+
+**[2026-09-27] `document_list(status=approved)` 재확인 결과 §3 마지막
+스윕 이후 approved 전환된 SP/DC 4건 발견** - `SP-231493CB`(소켓 계층)/
+`SP-6350DEBB`(epoll)/`SP-A7479F83`(timerfd/signalfd)/`DC-E441CB59`
+(VFS FileType 통합). 이번 세션이 이 넷을 처리 - `SP-231493CB`는 갭
+발견(§1-T로 기록), `DC-E441CB59`는 갭 없음(§2-추가6), `SP-6350DEBB`/
+`SP-A7479F83`는 둘 다 구현 자체가 아직 없어 §2-추가5(SP-E35FD36C)와
+동일하게 "해당 없음"(§2-추가7). 다음 approved 전환 시까지 이 §3
+스윕은 다시 건너뛴다.
+
+## §1-T. [발견, 2026-09-27] `SP-231493CB`(소켓 계층, approved) - §4-2/§6이 확정한 항목 중 뒷부분이 아직 미구현(이미 자체 추적 중이라 정보만 교차 기록)
+
+`PN-CC0F4EAC`가 이 설계의 핵심(§3 Channel 파사드 모델, syscall
+Socket/Bind/Listen/Accept/Connect 5종, §4-1 자동 등록, named object
+bind)은 구현+실측 검증까지 완료했다(commit 9fb5180/bae84a0). 다만
+이 문서가 "확정된 설계"로 명시한 항목 중 다음은 아직 미구현으로
+남아 있다 - 목록 뒷부분이 조용히 누락되는 이 문서 특유의 패턴과
+정확히 일치하는 위치(§4-2 항목2/3, §6, §5 call5)라 교차 기록해 둔다:
+
+- §4-2 항목2/3 - `/`로 시작하는 실제 VFS 경로 bind/connect(소켓
+  특수 파일 생성/판별) - `PN-4BDA31FC`(FileType 통합)가 선행 조건을
+  해소했음에도 미착수.
+- §5 - `Shutdown`(call5) syscall - 밑바탕 `Channel`에 "핸들 유지한
+  채 한쪽만 닫기" 프리미티브가 없어 새 설계 필요.
+- §6 - `SpawnProcess`의 `inheritFds`/`LISTEN_FDS`/`LISTEN_PID` fd
+  상속(소켓 활성화) - 미착수.
+- (부가 발견, §7이 미리 범위 밖으로 뒀던 것과 별개) Datagram 소켓의
+  실제 connect/read/write - 이 구현의 connect/accept 핸드셰이크가
+  Channel 기반이라 핸드셰이크 없는 POSIX 데이터그램 connect()와
+  근본적으로 안 맞아 `NotSupported`로 명시적으로 막아 둔 상태
+  (조용한 hang 방지 안전장치, commit bae84a0).
+
+**은폐된 갭이 아니다** - `PN-CC0F4EAC` 본문 자신이 이 넷 전부를
+"남은 범위"로 이미 정확히 추적 중이다(이 문서 §0의 취지 그대로
+자체 추적이 이미 되고 있는 경우) - 이 항목은 순수 교차 참조 목적.
+
+## §2-추가6. [점검 완료, 2026-09-27] `DC-E441CB59`(VFS StatArgs 파일 타입 확장, approved) - 갭 없음
+
+승인된 답변 (B) `enum class FileType` 전면 통합이 `PN-4BDA31FC`
+(commit 688746c)로 정확히 구현됐다 - `StatArgs`/`KernelFsStatArgs`
+둘 다 `isDirectory: bool`에서 `type: FileType`(`Regular`/`Directory`/
+`Socket`)으로 교체됐고, 이를 구현하는 드라이버 8곳(livefs/procfs/
+resourcegroupfs/ext4/FAT32/FAT16/exFAT/NTFS) 전부의 Stat 핸들러가
+동시에 수정됐다(이 DC가 명시한 범위 그대로). `Readdir` 계열
+(`VfsDirEntry`)/`Open` 계열(`OpenResult`, `Process::FileDescriptor`)
+의 `isDirectory`는 이 DC의 결정 범위 밖(별도 필드, 별도 syscall)이라
+`bool`로 남아 있는 것은 갭이 아니다 - `PN-4BDA31FC` 본문이 이 경계를
+명시적으로 기록해 뒀다.
+
+## §2-추가7. [점검 완료(해당 없음), 2026-09-27] `SP-6350DEBB`(epoll)/`SP-A7479F83`(timerfd/signalfd) - 둘 다 구현 자체가 아직 없음(이 방법론의 대상 아님)
+
+`docs git grep`/저장소 전수 검색으로 `EpollInstance`/`EpollCreate`/
+`Timerfd`/`Signalfd`류 심볼이 코드베이스 어디에도 없음을 확인 -
+`SP-E35FD36C`(USB 스택, §2-추가5)와 정확히 같은 이유로 "해당 없음"
+(구현이 전혀 없어 "뒷부분 누락" 패턴 자체가 성립하지 않음, `PN-7562DA62`/
+`PN-0F56DE4B`가 각각 scheduled로 이미 추적 중) - 실제 착수 시점에
+이 방법론을 다시 적용할 것.
 
 ## §4. 예방 조치 (아직 코드가 없어 "갭"은 아니지만, 착수 시 누락 위험을
 미리 체크리스트에 못박아 둔 것)

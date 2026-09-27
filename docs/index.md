@@ -29,6 +29,7 @@
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
+| [DC-D8951156](./DC-D8951156.md) | 블로킹 syscall(parkCurrent)이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는 문제 - 수정 방향 결정 필요 | review | 2026-09-26T23:58:58.452Z |
 | [DC-DC9B2C3E](./DC-DC9B2C3E.md) | ext4 inode 테이블 블록 read-modify-write 경쟁(고아 블록) - 락 세분화 단위 결정 요청 | approved | 2026-09-26T04:21:13.790Z |
 | [DC-E441CB59](./DC-E441CB59.md) | VFS StatArgs에 파일 타입 필드가 없음 - 소켓 특수 파일 지원을 위한 확장 방식 결정 요청 | approved | 2026-09-26T15:02:15.978Z |
 | [DC-F196028B](./DC-F196028B.md) | UEFI 직접 부팅 - 메모리맵/ACPI RSDP를 kMain에 전달하는 방법 | approved | 2026-09-24T09:43:10.521Z |
@@ -61,7 +62,7 @@
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-26T14:53:45.979Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-26T14:58:25.400Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-26T04:48:36.005Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-26T18:22:13.504Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-22T02:13:51.590Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-19T01:32:40.139Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-22T01:55:07.723Z |
