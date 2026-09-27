@@ -2143,7 +2143,11 @@ void Scheduler::runLoop() {
             // 확인하고, 정말 아무 것도 없을 때만(false) hlt한다 - hlt는
             // 어떤 인터럽트로도 즉시 깨어나므로(스케줄러 틱 100Hz 포함)
             // 그 자체로 안전하다는 게 이번 재설계의 핵심 전제다.
-            if (AsyncReactor::drainOnce(coreIndex)) {
+            // [갱신, PN-D4F7BB66] 전용 리액터 Task가 스케줄 순번을 못
+            // 받을 만큼 극단적으로 굶거나(이론상), 아직 리액터 Task
+            // 스폰 이전(부팅 극초반)인 경우를 위한 폴백 - drainAny()로
+            // 이 코어의 모든 reactorIndex를 훑는다.
+            if (AsyncReactor::drainAny(coreIndex)) {
                 continue;
             }
             // [신규, PN-2CD26587/SP-BF0B31B5 §3.2-4] AsyncTask Pull -
@@ -2163,7 +2167,16 @@ void Scheduler::runLoop() {
             if (victimCore != coreIndex) {
                 Task* stolen = gNormalQueues[victimCore].popMin();
                 if (stolen) {
-                    if (kCanMigrateFpuSafely(stolen, victimCore)) {
+                    // [신규, PN-D4F7BB66] 이 Pull(steal)이 지금까지는
+                    // affinityMask를 전혀 안 봤다 - Push 쪽(위 kTaskAffinityAllCores
+                    // 비교 가드)과 달리 이 경로는 코어에 고정된 Task도
+                    // 그냥 훔쳐갈 수 있는 구멍이었다(리액터 Task 도입
+                    // 전에는 실질적 피해자가 없어 안 드러났을 뿐). 특정
+                    // 코어에만 묶인 Task는 애초에 그 코어의 큐를 벗어나면
+                    // 안 되므로 되돌려 놓는다.
+                    if (stolen->affinityMask != kTaskAffinityAllCores) {
+                        gNormalQueues[victimCore].insert(stolen);
+                    } else if (kCanMigrateFpuSafely(stolen, victimCore)) {
                         // pickNext()와 동일한 관례 - 큐에서 실제로
                         // 빠져나오는 순간 inRunQueue를 내린다.
                         stolen->inRunQueue = false;

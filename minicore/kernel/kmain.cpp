@@ -1000,6 +1000,11 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kSpawnServiceProcesses();
     kSpawnDevmgrKernelThread();
     kSpawnFsKernelThread();
+    // [신규, 2026-09-27, PN-D4F7BB66] devmgr/fs와 같은 시점(Smp::
+    // startApCores() 이후, gCoreCount 확정 이후) - 코어마다
+    // kAsyncReactorsPerCore개의 전용 AsyncReactor KernelThread를
+    // 스폰/고정한다(async_task.cpp).
+    kernel::kSpawnAsyncReactorTasks();
     // [비활성화, 2026-09-23, PN-0B461E6F] SMP4에서 100% 재현되는 PANIC
     // 발견 - kSpawnPowerKernelThreadIfSupported() 문서 주석 참고. 이
     // 한 줄만 주석 처리하면 원래 안전한 상태(SCI 감시 없음, Shutdown/

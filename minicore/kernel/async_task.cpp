@@ -11,6 +11,7 @@
 #include "libkenv/spinlock.h"
 #include "libkenv/types.h"
 #include "libkmm/slab.h"
+#include "logger.h"
 #include "paging.h"
 #include "rcu.h"
 #include "scheduler.h"
@@ -225,26 +226,24 @@ private:
     kernel::AtomicU32 _approxLength;
 };
 
-AsyncTaskQueue gExecQueues[kMaxCores];
+// [갱신, 2026-09-27, PN-D4F7BB66] 코어당 큐 하나에서 (코어, 리액터)
+// 큐 쌍으로 - kAsyncReactorsPerCore==1(기본값)이면 완전히 동일한
+// 메모리 배치([core][0] 하나뿐)라 기존 동작과 바이트 단위로 동등하다.
+kernel::AsyncTask* gCurrentAsyncTask[kMaxCores][kernel::kAsyncReactorsPerCore] = {};
+AsyncTaskQueue gExecQueues[kMaxCores][kernel::kAsyncReactorsPerCore];
 
 // 선점 큐(SP-00CA7175 §2.2, PN-7AC01E6E 항목 6) - exclusivePreemptive
 // Channel의 connectChannel/acceptFromChannel 핸드셰이크 완료에서만
-// 채워진다(async_task.h의 submitCompletion 주석 참고). reactorTaskEntry가
+// 채워진다(async_task.h의 submitCompletion 주석 참고). 리액터 Task가
 // 매 루프마다 이 큐를 gExecQueues보다 먼저 비운다 - 그 외에는 완전히
 // 동일한 큐 구현을 재사용.
-AsyncTaskQueue gPreemptiveQueues[kMaxCores];
+AsyncTaskQueue gPreemptiveQueues[kMaxCores][kernel::kAsyncReactorsPerCore];
 
-// 이 코어에서 지금 실행/재개 중인 AsyncTask - reactorTaskEntry만
-// 갱신한다. nullptr이면 리액터가 popFront()/parkCurrent() 사이 어딘가.
-kernel::AsyncTask* gCurrentAsyncTask[kMaxCores] = {};
-
-// 이 코어에서 "지금 이 자리"(runLoop()의 idle 인라인 호출이든, §4 (C)
-// 경로의 IPI 핸들러든)가 AsyncTask로 전환하기 직전의 자기 자신
-// TaskTcb* - AsyncTask::yield()가 돌아올 자리(옛 "리액터 Task 컨텍스트"와
-// 정확히 같은 역할, 이름만 유지 - 별도 Task가 아니게 됐다고 해서 이
-// 슬롯 자체의 의미가 바뀌지는 않는다). [갱신, 2026-09-20, PN-81E49523
-// 2단계] `uint64_t`에서 `TaskTcb*`로 - kContextSwitch에 변환 없이
-// 바로 넘기기 위함.
+// 이 코어에서 "지금 이 자리"(전용 리액터 Task든, §4 (C) 경로의 IPI
+// 핸들러든, idle 폴백이든)가 AsyncTask로 전환하기 직전의 자기 자신
+// TaskTcb* - AsyncTask::yield()가 돌아올 자리. [갱신, 2026-09-20,
+// PN-81E49523 2단계] `uint64_t`에서 `TaskTcb*`로 - kContextSwitch에
+// 변환 없이 바로 넘기기 위함.
 //
 // [수정, 2026-09-20, PN-81E49523 2단계 - minicore-3c 교차 진단 +
 // 실측으로 확인] 이 배열은 예전엔 `uint64_t`(RSP 값 자체)라 그냥
@@ -260,16 +259,43 @@ kernel::AsyncTask* gCurrentAsyncTask[kMaxCores] = {};
 // 0x8=offsetof(TaskTcb,rbx), 이전 세션이 보고한 그 신호 그대로) -
 // `gIdleTaskTcb`/`gDiscardedBootTcb`와 같은 패턴으로 전용 정적 버퍼를
 // 만들고 `AsyncReactor::init()`에서 한 번에 연결한다.
-kernel::TaskTcb gReactorTcbStorage[kMaxCores];
-kernel::TaskTcb* gReactorSavedRsp[kMaxCores] = {};
+// [갱신, 2026-09-27, PN-D4F7BB66] (코어, 리액터) 쌍으로 - 이제 여러
+// 리액터 Task가 같은 코어에서 각자 독립적으로 AsyncTask를 디스패치할
+// 수 있으므로 재개 지점 슬롯도 리액터별로 분리해야 한다.
+kernel::TaskTcb gReactorTcbStorage[kMaxCores][kernel::kAsyncReactorsPerCore];
+kernel::TaskTcb* gReactorSavedRsp[kMaxCores][kernel::kAsyncReactorsPerCore] = {};
 
 // AsyncReactor::drainOnce()의 재진입 방지 플래그(2026-09-16 재구조,
-// PN-FEAAF154) - 이미 이 코어에서 드레인이 진행 중일 때(gReactorSavedRsp
-// 슬롯이 사용 중일 때) §4 (C) 경로의 IPI가 겹쳐 들어와도 또 다른
-// drainOnce() 호출이 같은 슬롯을 건드리지 않도록 막는다. 옛
-// `gReactorParked`(리액터 Task의 park/wake 상태 추적)와는 목적이
-// 다르다 - Task 자체가 없어졌으므로 그 개념은 폐기됐다.
-bool gDraining[kMaxCores] = {};
+// PN-FEAAF154) - 이미 이 (코어, 리액터)에서 드레인이 진행 중일 때
+// (gReactorSavedRsp 슬롯이 사용 중일 때) §4 (C) 경로의 IPI가 겹쳐
+// 들어와도 또 다른 drainOnce() 호출이 같은 슬롯을 건드리지 않도록
+// 막는다. [갱신, 2026-09-27, PN-D4F7BB66] (코어, 리액터) 쌍으로.
+bool gDraining[kMaxCores][kernel::kAsyncReactorsPerCore] = {};
+
+// [신규, 2026-09-27, PN-D4F7BB66] 지금 이 코어 위에서 실제로 실행
+// 중인(디스패치된) reactorIndex - 한 코어에는 물리적으로 하나의 실행
+// 흐름만 있을 수 있으므로(리액터 Task가 몇 개든) 코어당 하나면
+// 충분하다. `AsyncTask::current()`/`yield()`가 "지금 이 자리가 어느
+// (coreIndex, reactorIndex) 큐 쌍을 드레인하다 여기까지 왔는지"를
+// 되짚어 찾을 유일한 방법 - `drainOnce()`가 디스패치 직전/직후에만
+// 갱신한다(리액터/idle 컨텍스트 자신에서는 의미 없는 값이라 읽지
+// 않음).
+kernel::uint32_t gCurrentReactorIndex[kMaxCores] = {};
+
+// [신규, 2026-09-27, PN-D4F7BB66] submitCompletion()이 targetCore 안에서
+// 어느 reactorIndex로 큐잉할지 고르는 라운드로빈 커서 - 인터럽트
+// 컨텍스트에서도 호출되므로(async_task.h submitCompletion 문서 참고)
+// AtomicU32. kAsyncReactorsPerCore==1이면 나머지 연산이 항상 0이라
+// 사실상 이 카운터 자체가 무해하다.
+kernel::AtomicU32 gNextReactorIndex[kMaxCores];
+
+// [신규, 2026-09-27, PN-D4F7BB66] kSpawnAsyncReactorTasks()가 채우는
+// 이 (코어, 리액터) 전용 리액터 Task 포인터 - 현재는 진단/향후 확장
+// 용도로만 보관한다(지금 구현은 Scheduler::enqueue()로 이 Task를
+// 깨우는 대신 yieldCurrent() 기반 능동 폴링을 쓰므로 - 위
+// AsyncReactor 클래스 문서의 DC-D8951156 관련 설명 참고 - 아직 실제로
+// 참조하는 코드는 없다).
+kernel::Task* gReactorTask[kMaxCores][kernel::kAsyncReactorsPerCore] = {};
 
 // §4 (C) 경로("다른 Task 실행 중일 때"의 즉시 개입, QU-3BDEE348 답변)
 // 전용 IPI 벡터 - RM-28225668에 배정(0xE3, kForcedMigrationVector
@@ -319,6 +345,15 @@ bool kIsMigratableAsyncTask(const kernel::AsyncTask* task) { return task->coroHa
 // coreIndex를 제외한 코어 중 gExecQueues 근사 길이가 가장 짧은/긴
 // 코어 - scheduler.cpp의 kFindLeastLoadedCore/kFindMostLoadedCore와
 // 동일한 O(코어 수) 선형 스캔 패턴(NUMA 인식은 이 SP 범위 밖).
+//
+// [범위 제한, 2026-09-27, PN-D4F7BB66] 코어 간 이관(Push/Pull)은 v1에서
+// 여전히 각 코어의 **reactorIndex 0 큐만** 비교/이관 대상으로 삼는다 -
+// kAsyncReactorsPerCore==1(기본값)이면 그게 그 코어의 유일한 큐라
+// 기존과 완전히 동일하고, >1이면 라운드로빈으로 슬롯 1..N-1에 쌓인
+// 항목은 이 코어 간 밸런싱 대상에서 빠진다(의도적 v1 스코프 축소 -
+// 이 개편의 핵심 목적은 코어 "안"의 진짜 동시성이지 코어 "간" 정교한
+// 밸런싱 확장이 아니다, 계획 문서 "정책은 착수 세션이 정함" 위임 범위
+// 안). 필요해지면 후속 계획으로 다룬다.
 kernel::uint32_t kFindLeastLoadedAsyncCore(kernel::uint32_t excludeCore) {
     const kernel::uint32_t coreCount = kernel::Acpi::cpuCount();
     kernel::uint32_t best = excludeCore;
@@ -327,7 +362,7 @@ kernel::uint32_t kFindLeastLoadedAsyncCore(kernel::uint32_t excludeCore) {
         if (i == excludeCore) {
             continue;
         }
-        const kernel::uint32_t len = gExecQueues[i].approxLength();
+        const kernel::uint32_t len = gExecQueues[i][0].approxLength();
         if (len < bestLen) {
             bestLen = len;
             best = i;
@@ -344,7 +379,7 @@ kernel::uint32_t kFindMostLoadedAsyncCore(kernel::uint32_t excludeCore) {
         if (i == excludeCore) {
             continue;
         }
-        const kernel::uint32_t len = gExecQueues[i].approxLength();
+        const kernel::uint32_t len = gExecQueues[i][0].approxLength();
         if (len > bestLen) {
             bestLen = len;
             best = i;
@@ -391,19 +426,21 @@ kernel::AsyncTask* kExtractOneMigratableAsyncTask(AsyncTaskQueue& queue) {
 // 코어의 큐는 idle 분기 스캔으로는 영원히 못 볼 수 있다(SP-BF0B31B5
 // §2 배경의 실측 워크로드가 정확히 이 경우).
 void kAsyncTaskTryPush(kernel::uint32_t targetCore) {
-    if (gExecQueues[targetCore].approxLength() <= kAsyncPushThresholdLength()) {
+    // [범위 제한, PN-D4F7BB66] 위 kFindLeastLoadedAsyncCore와 동일 -
+    // reactorIndex 0 큐만 대상.
+    if (gExecQueues[targetCore][0].approxLength() <= kAsyncPushThresholdLength()) {
         return;
     }
-    kernel::AsyncTask* candidate = kExtractOneMigratableAsyncTask(gExecQueues[targetCore]);
+    kernel::AsyncTask* candidate = kExtractOneMigratableAsyncTask(gExecQueues[targetCore][0]);
     if (!candidate) {
         return;
     }
     const kernel::uint32_t dest = kFindLeastLoadedAsyncCore(targetCore);
     if (dest == targetCore) {
-        gExecQueues[targetCore].pushBack(candidate);  // 옮길 곳이 없음(다들 이미 이만큼 참) - 되돌림
+        gExecQueues[targetCore][0].pushBack(candidate);  // 옮길 곳이 없음(다들 이미 이만큼 참) - 되돌림
         return;
     }
-    gExecQueues[dest].pushBack(candidate);
+    gExecQueues[dest][0].pushBack(candidate);
     kernel::Lapic::sendFixedIpi(kernel::Acpi::cpuApicId(dest), static_cast<kernel::uint8_t>(kAsyncDrainVector));
 }
 
@@ -428,10 +465,42 @@ void kAsyncTaskTryPush(kernel::uint32_t targetCore) {
 // 숫자값 수준은 구현 중 결정 가능한 범위).
 constexpr kernel::uint32_t kAsyncDrainBatchLimit = 32;
 
+// [신규, 2026-09-27, PN-D4F7BB66] 코어당 전용 리액터 Task 진입점 -
+// kSpawnAsyncReactorTasks()가 (coreIndex, reactorIndex)를 정수 하나로
+// 인코딩해 entryArg로 넘긴다(이 코드베이스에서 entryArg에 정수를 싣는
+// 첫 사례라 별도 구조체 없이 `coreIndex * kAsyncReactorsPerCore +
+// reactorIndex` 하나로 packing - 두 값 다 작은 정수라 uint64_t 범위
+// 안에서 왕복이 정확하다).
+//
+// **park/wake 대신 yieldCurrent() 기반 능동 폴링을 쓰는 이유**
+// (async_task.h AsyncReactor 클래스 문서의 DC-D8951156 설명과 동일) -
+// `Scheduler::parkCurrent()`로 진짜 파킹하면 계획 문서가 지시한
+// "IPI/enqueue()로 깨우기"가 더 정확한 설계겠지만, 그러려면 이 Task가
+// 실제로 "지금 실행 중인지"를 인터럽트 컨텍스트에서 안전하게 판별해야
+// 하고(그렇지 않으면 이미 실행 중인 Task를 다시 큐에 넣는 이중
+// 스케줄링 위험) 또 parkCurrent() 자체가 DC-D8951156이 확정한
+// 미해결 결함(블로킹 syscall 재개 지점을 코어 공유 인터럽트 디스패치
+// 스택에 저장)을 그대로 물려받는다 - 그 DC가 아직 열려 있는 채로
+// (QU-02D75506 답변 대기) 새 파킹 경로를 하나 더 늘리는 위험을 피하고,
+// `AsyncTaskWaitGroup::waitAll()`이 이미 검증한 안전한 패턴을 그대로
+// 재사용한다.
+void kAsyncReactorTaskMain(void* arg) {
+    const kernel::uint64_t packed = reinterpret_cast<kernel::uint64_t>(arg);
+    const kernel::uint32_t coreIndex = static_cast<kernel::uint32_t>(packed / kernel::kAsyncReactorsPerCore);
+    const kernel::uint32_t reactorIndex = static_cast<kernel::uint32_t>(packed % kernel::kAsyncReactorsPerCore);
+    for (;;) {
+        if (!kernel::AsyncReactor::drainOnce(coreIndex, reactorIndex)) {
+            kernel::Scheduler::yieldCurrent();
+        }
+    }
+}
+
 void kAsyncDrainIsr(kernel::InterruptFrame*) {
     const kernel::uint32_t coreIndex = kernel::Scheduler::currentCoreIndex();
     kernel::uint32_t processed = 0;
-    while (kernel::AsyncReactor::drainOnce(coreIndex)) {
+    // [갱신, PN-D4F7BB66] 이 IPI 핸들러는 어느 reactorIndex가 대상인지
+    // 모른다(라운드로빈으로 골라졌을 뿐) - drainAny()로 전부 훑는다.
+    while (kernel::AsyncReactor::drainAny(coreIndex)) {
         if (++processed >= kAsyncDrainBatchLimit) {
             kernel::kDiagRingLog(kernel::DiagRingEvent::AsyncDrainBatchLimitHit, coreIndex, processed, 0, coreIndex);
             kernel::Lapic::sendFixedIpi(kernel::Acpi::cpuApicId(coreIndex), static_cast<kernel::uint8_t>(kAsyncDrainVector));
@@ -648,7 +717,11 @@ void AsyncTask::init(AsyncTaskSubjectCode subjectCodeIn, AsyncTaskManageCode man
 
 void AsyncTask::yield() {
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
-    AsyncTask* self = gCurrentAsyncTask[coreIndex];
+    // [갱신, PN-D4F7BB66] 여러 리액터가 같은 코어에 있을 수 있으므로
+    // "지금 이 자리가 어느 reactorIndex인지"를 gCurrentReactorIndex로
+    // 되짚는다 - drainOnce()가 디스패치 직전에 이미 세팅해 뒀다.
+    const uint32_t reactorIndex = gCurrentReactorIndex[coreIndex];
+    AsyncTask* self = gCurrentAsyncTask[coreIndex][reactorIndex];
     if (!self) {
         return;  // 리액터 컨텍스트에서(즉 AsyncTask 밖에서) 잘못 호출된 경우
     }
@@ -664,15 +737,17 @@ void AsyncTask::yield() {
     // 쪽의 "같은 Task가 큐와 currentTask에 동시에 존재" 경쟁과 달리,
     // submitCompletion은 이 AsyncTask 자체를 currentTask 여부로 분기하지
     // 않고 그냥 큐에 넣기만 하므로 이중 스케줄링 경로가 없다.
-    kContextSwitch(&self->tcb, gReactorSavedRsp[coreIndex]);
+    kContextSwitch(&self->tcb, gReactorSavedRsp[coreIndex][reactorIndex]);
     // 리액터가 이 AsyncTask를 다시 뽑아 재개하면 이 지점으로 돌아온다.
 }
 
 // [신규, 2026-09-22, PN-4D60D49C] async_task.h 선언 참고 - 기존
 // `gCurrentAsyncTask[coreIndex]`(위 yield() 등이 이미 참조하는 그
-// 배열)를 그대로 노출하는 얇은 접근자.
+// 배열)를 그대로 노출하는 얇은 접근자. [갱신, PN-D4F7BB66] 리액터
+// 차원 추가 - gCurrentReactorIndex로 되짚는다(위 yield() 참고).
 AsyncTask* AsyncTask::current() {
-    return gCurrentAsyncTask[Scheduler::currentCoreIndex()];
+    const uint32_t coreIndex = Scheduler::currentCoreIndex();
+    return gCurrentAsyncTask[coreIndex][gCurrentReactorIndex[coreIndex]];
 }
 
 AsyncTask* AsyncTask::submit(AsyncTaskSubjectCode subjectCode, AsyncTaskManageCode manageCode, void* args,
@@ -780,8 +855,11 @@ void AsyncTaskWaitGroup::waitAll() {
     // 시도하고 - 정말 할 일이 없을 때만(false) yieldCurrent()로 다른
     // Task에게 양보한다.
     const uint32_t coreIndex = Scheduler::currentCoreIndex();
+    // [갱신, PN-D4F7BB66] 이 호출자는 자신이 기다리는 AsyncTask들이
+    // 라운드로빈으로 어느 reactorIndex에 큐잉됐는지 알 수 없다 -
+    // drainAny()로 이 코어의 모든 리액터 슬롯을 훑는다.
     while (_group.pendingCount() > 0) {
-        if (!AsyncReactor::drainOnce(coreIndex)) {
+        if (!AsyncReactor::drainAny(coreIndex)) {
             Scheduler::yieldCurrent();
         }
     }
@@ -802,9 +880,10 @@ void AsyncTaskAwaiter::await() {
     // 뽑히도록 만든다 - AsyncTask 구조체에 새 필드를 추가하지 않고도
     // (QU-86DD998F 답변 그대로) 이 AsyncTask 자신의 기존 재개
     // 메커니즘만으로 해결된다.
-    const uint32_t coreIndex = Scheduler::currentCoreIndex();
+    // [갱신, PN-D4F7BB66] gCurrentAsyncTask 직접 첨자 대신 리액터
+    // 차원을 이미 정확히 되짚어 주는 AsyncTask::current()를 재사용.
     while (!kIsAsyncTaskTerminal(_target->state)) {
-        AsyncTask* self = gCurrentAsyncTask[coreIndex];
+        AsyncTask* self = AsyncTask::current();
         if (self) {
             AsyncReactor::submitCompletion(self);
         }
@@ -833,49 +912,88 @@ AsyncTaskHandler* AsyncCallbackRegistry::resolve(AsyncTaskSubjectCode subjectCod
 void AsyncReactor::init() {
     // 전역 IDT 등록이라 BSP에서 한 번만(tlb_shootdown.cpp와 동일한
     // 이유) - AP는 이 클래스를 위해 더 이상 아무것도 부를 필요가 없다
-    // (코어별 큐는 이미 정적 배열, 전용 Task 자체가 없어졌다).
+    // (코어별 큐는 이미 정적 배열). 리액터 Task 자신의 스폰은
+    // `kSpawnAsyncReactorTasks()`(kmain.cpp가 서비스 스폰 시점에
+    // 호출) - 이 함수보다 훨씬 뒤(Smp::startApCores() 이후, gCoreCount
+    // 확정 이후)라 여기서는 하지 않는다.
     Idt::registerHandler(kAsyncDrainVector, kAsyncDrainIsr);
     // [신규, 2026-09-20, PN-81E49523 2단계] gReactorSavedRsp 문서 주석
     // 참고 - 모든 코어의 슬롯이 첫 drainOnce() 이전에 이미 유효한
     // 버퍼를 가리키도록 여기서 한 번에 연결한다(순수 정적 배열 쓰기라
     // 이 코어/저 코어 구분 없이 BSP 혼자 전부 채워도 안전).
+    // [갱신, PN-D4F7BB66] (코어, 리액터) 쌍 전부.
     for (uint32_t i = 0; i < kMaxCores; ++i) {
-        gReactorSavedRsp[i] = &gReactorTcbStorage[i];
+        for (uint32_t r = 0; r < kAsyncReactorsPerCore; ++r) {
+            gReactorSavedRsp[i][r] = &gReactorTcbStorage[i][r];
+        }
     }
 }
 
-bool AsyncReactor::drainOnce(uint32_t coreIndex) {
+bool AsyncReactor::drainAny(uint32_t coreIndex) {
+    for (uint32_t r = 0; r < kAsyncReactorsPerCore; ++r) {
+        if (drainOnce(coreIndex, r)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AsyncReactor::drainOnce(uint32_t coreIndex, uint32_t reactorIndex) {
     // [신규, 2026-09-17, PN-495C11B7, SP-B1E258D8 §5.3] RCU call_rcu
     // 콜백 드레인 - "콜백 실행은 반드시 리액터 컨텍스트에서"라는
     // §3.5 인터럽트 통합 규칙 그대로, 이 함수가 실제 리액터 드레인
     // 지점이므로 AsyncTask 재진입 가드(gDraining, 아래)와 무관하게
     // 매 호출마다 먼저 확인한다(AsyncTask 코루틴 재개 상태를 전혀
     // 건드리지 않아 재진입 중에도 안전).
-    Rcu::drainCallbacksOnThisCore();
+    //
+    // [범위 제한, 2026-09-27, PN-D4F7BB66 §검증 2 중 실측 발견 -
+    // DC-D8951156 관련] 이 코어 전체에 걸친(리액터별이 아닌) 유지보수라
+    // reactorIndex==0인 호출자만 수행한다 - kAsyncReactorsPerCore를
+    // 임시로 2로 올려 검증하던 중, 두 리액터 Task가 스케줄러 틱으로
+    // 서로 선점하며 이 호출(과 아래 pump())을 "한쪽이 중간에 멈춘 채
+    // 남아 있고 다른 쪽이 처음부터 다시 시작"하는 방식으로 뒤섞을 수
+    // 있음을 확인했다(원래 주석의 "재진입 가드와 무관하게 안전"이라는
+    // 전제는 인터럽트 중첩 - 항상 LIFO로 풀림 - 만 상정했었다). 이
+    // 게이트로 되짚어 좁혔으나 **완전히 해소되지는 않았다** - 여전히
+    // 낮은/불안정한 빈도로 NMI watchdog(코어 하나가 Logger의
+    // Spinlock::lock() 안에서 응답 없음)가 재현된다(drainOnce() 자체를
+    // 우회한 순수 yieldCurrent() 루프에서는 재현 안 됨 - drainOnce()
+    // 안의 무언가가 원인이라는 것까지만 좁혀졌다). 이 프로젝트가
+    // 여러 세션째 쫓고 있는 미해결 스케줄러/Task 동시성 결함군
+    // (DC-D8951156/PN-6360E6E9/PN-D44504D1)과 같은 계열일 가능성이 커
+    // 이 세션에서 더 깊이 파고들지 않고, kAsyncReactorsPerCore는 다시
+    // 1(기본값)로 되돌린다 - 그 기본값에서는 reactorIndex가 항상 0이라
+    // 이 게이트/버그 전부와 무관(사실상 no-op, 기존 N=1 동작과 완전히
+    // 동일). >1로 올리는 시도는 저 세 계획이 해소된 뒤 다시 검증한다.
+    if (reactorIndex == 0) {
+        Rcu::drainCallbacksOnThisCore();
 
-    // [신규, 2026-09-20, SP-5130284C, PN-4137C88C] 인터럽트 컨텍스트
-    // (onTick()/onForcedMigration() 등)에서 SharedPtr가 마지막 강한
-    // 참조를 잃어 지연됐던 무거운 소멸(예: Process::destroy())을
-    // 지금(이 안전한 리액터 컨텍스트) 대신 실행한다 - 위 Rcu 드레인과
-    // 동일한 이유로 gDraining 재진입 가드와 무관하게 매 호출마다 먼저
-    // 확인한다.
-    kDrainDeferredDestructions();
+        // [신규, 2026-09-20, SP-5130284C, PN-4137C88C] 인터럽트 컨텍스트
+        // (onTick()/onForcedMigration() 등)에서 SharedPtr가 마지막 강한
+        // 참조를 잃어 지연됐던 무거운 소멸(예: Process::destroy())을
+        // 지금(이 안전한 리액터 컨텍스트) 대신 실행한다 - 위 Rcu 드레인과
+        // 동일한 이유로 gDraining 재진입 가드와 무관하게 매 호출마다 먼저
+        // 확인한다.
+        kDrainDeferredDestructions();
+    }
 
-    if (gDraining[coreIndex]) {
-        // 이미 이 코어에서(runLoop() 인라인 호출이든 §4 (C) IPI
-        // 핸들러든) 드레인이 진행 중 - gReactorSavedRsp[coreIndex]를
-        // 두 번 건드리면 진행 중인 AsyncTask의 재개 지점이 깨진다.
-        // 새로 큐잉된 항목은 바깥쪽 호출이 이어서 처리하므로 유실
-        // 걱정 없다.
+    if (gDraining[coreIndex][reactorIndex]) {
+        // 이미 이 (코어, 리액터)에서 드레인이 진행 중 -
+        // gReactorSavedRsp[coreIndex][reactorIndex]를 두 번 건드리면
+        // 진행 중인 AsyncTask의 재개 지점이 깨진다. 새로 큐잉된 항목은
+        // 바깥쪽 호출이 이어서 처리하므로 유실 걱정 없다.
         return false;
     }
 
     // 선점 큐(§2.2)를 항상 먼저 확인한다 - 비어 있으면 일반 큐로.
-    AsyncTask* task = gPreemptiveQueues[coreIndex].popFront();
+    AsyncTask* task = gPreemptiveQueues[coreIndex][reactorIndex].popFront();
     if (!task) {
-        task = gExecQueues[coreIndex].popFront();
+        task = gExecQueues[coreIndex][reactorIndex].popFront();
     }
-    if (!task) {
+    // [범위 제한, PN-D4F7BB66 §검증 2] 위 Rcu/deferred-destruction과
+    // 동일한 이유(위 상세 설명 참고)로 이 코어 전체에 걸친 pump()도
+    // reactorIndex==0 전용으로 좁힌다.
+    if (!task && reactorIndex == 0) {
         // 지연 실행 큐(SP-F15B4A63, PN-C46DF296) - 전용 커널 Task를
         // 새로 만들지 않고 이 코어의 idle 분기에서 만료 타이머를
         // 처리한다(§3, QU-A8C0CC2C 설계자 답변). pump()가 만료된
@@ -883,21 +1001,22 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         // 넣을 수 있으므로, 포기하기 전에 먼저 실행 큐를 한 번 더
         // 확인한다.
         DelayedExecutionQueue::pump();
-        task = gPreemptiveQueues[coreIndex].popFront();
+        task = gPreemptiveQueues[coreIndex][reactorIndex].popFront();
         if (!task) {
-            task = gExecQueues[coreIndex].popFront();
+            task = gExecQueues[coreIndex][reactorIndex].popFront();
         }
     }
     if (!task) {
-        // 정말 아무 것도 없다 - 호출부(runLoop()의 idle 분기)가 그대로
-        // hlt로 진행한다. 아직 만료 안 된 타이머가 남아 있어도 별도
-        // 조치가 필요 없다(2026-09-16 재구조로 해소) - 스케줄러 틱이
-        // 이미 100Hz로 모든 idle 코어를 hlt에서 깨우므로, 다음 틱에서
-        // 이 함수가 다시 호출되면 그때 다시 확인된다.
+        // 정말 아무 것도 없다 - 호출부(리액터 Task 자신의 루프,
+        // §4 (C) IPI 핸들러, idle 폴백)가 각자의 방식대로 다음 기회를
+        // 기다린다. 아직 만료 안 된 타이머가 남아 있어도 별도 조치가
+        // 필요 없다(2026-09-16 재구조로 해소) - 스케줄러 틱이 이미
+        // 100Hz로 모든 idle 코어를 hlt에서 깨우므로, 다음 틱에서 이
+        // 함수가 다시 호출되면 그때 다시 확인된다.
         return false;
     }
 
-    gDraining[coreIndex] = true;
+    gDraining[coreIndex][reactorIndex] = true;
 
     // [신규, 2026-09-23, PN-E4C6AF72 3차 실측의 "남은 것" 1번] queue
     // pop이 성공적으로 끝난 직후 - vector 필드에 subjectCode를 실어
@@ -933,7 +1052,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         if (task->autoFree) {
             kReleaseAsyncTask(task);
         }
-        gDraining[coreIndex] = false;
+        gDraining[coreIndex][reactorIndex] = false;
         return true;
     }
 
@@ -968,7 +1087,12 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         // `kRestoreCr3AfterAsyncExecEntry`)를 그대로 재사용한다.
         const uint64_t savedPml4ForResume = kSyncCr3ForAsyncExecEntry(task);
         task->state = AsyncTaskState::Running;
-        gCurrentAsyncTask[coreIndex] = task;
+        gCurrentAsyncTask[coreIndex][reactorIndex] = task;
+        // [신규, PN-D4F7BB66] AsyncTask::current()/yield()가 이 자리를
+        // 되짚을 수 있도록 디스패치 직전에 세팅 - 실행 중 다른 인터럽트/
+        // 리액터가 이 코어의 이 슬롯을 바꿀 수 없으므로(gDraining 가드로
+        // 이미 재진입 차단) resume() 도중에도 유효하다.
+        gCurrentReactorIndex[coreIndex] = reactorIndex;
         {
             // 아래 스택풀 경로와 동일한 이유로 이 구간도 Task 수준
             // 선점 대상에서 제외한다(같은 "AsyncTask가 실행 슬롯을
@@ -977,7 +1101,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             PreemptionGuard guard;
             task->coroHandle.resume();
         }
-        gCurrentAsyncTask[coreIndex] = nullptr;
+        gCurrentAsyncTask[coreIndex][reactorIndex] = nullptr;
         // [PN-0EB2FABF] kAsyncTaskEntryWrapper와 동일 - 리액터/idle
         // 컨텍스트로 돌아가기 전 CR3를 이 재개 이전 값으로 되돌린다.
         kRestoreCr3AfterAsyncExecEntry(savedPml4ForResume);
@@ -1001,7 +1125,8 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
         if (task->state == AsyncTaskState::Ready || task->state == AsyncTaskState::Suspended) {
             task->state = AsyncTaskState::Running;
         }
-        gCurrentAsyncTask[coreIndex] = task;
+        gCurrentAsyncTask[coreIndex][reactorIndex] = task;
+        gCurrentReactorIndex[coreIndex] = reactorIndex;  // [신규, PN-D4F7BB66] 코루틴 분기와 동일한 이유
         // [신규, 2026-09-19, PN-584DB994 재검증 중 실측 발견 - 위
         // coroHandle 분기가 이미 고친 것과 정확히 같은 CR3 미동기화
         // 버그의 두 번째 사례] 이 분기는 최초 진입(kTaskStartTrampoline
@@ -1051,13 +1176,13 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
             // 있었는지(그 이전 구간의 문제) 아니면 이 kContextSwitch
             // 자체가 오염을 유발하는지를 구분하기 위한 것.
             kDiagRingLog(DiagRingEvent::StackfulDispatchBegin, coreIndex, 0, 0, kReadCurrentCodeSegment());
-            kContextSwitch(&gReactorSavedRsp[coreIndex], task->tcb);
+            kContextSwitch(&gReactorSavedRsp[coreIndex][reactorIndex], task->tcb);
             kDiagRingLog(DiagRingEvent::StackfulDispatchEnd, coreIndex, 0, 0, kReadCurrentCodeSegment());
         }
         // [PN-584DB994] coroHandle 분기와 동일 - 리액터/idle 컨텍스트로
         // 돌아가기 전 CR3를 이 재개/진입 이전 값으로 되돌린다.
         kRestoreCr3AfterAsyncExecEntry(savedPml4ForStackpoolResume);
-        gCurrentAsyncTask[coreIndex] = nullptr;
+        gCurrentAsyncTask[coreIndex][reactorIndex] = nullptr;
     }
 
     if (task->state == AsyncTaskState::Completed || task->state == AsyncTaskState::Failed) {
@@ -1086,7 +1211,7 @@ bool AsyncReactor::drainOnce(uint32_t coreIndex) {
     }
     // Suspended면 아무 것도 안 함 - 나중에 submitCompletion으로 다시
     // 큐에 들어와야 재개된다.
-    gDraining[coreIndex] = false;
+    gDraining[coreIndex][reactorIndex] = false;
     return true;
 }
 
@@ -1099,26 +1224,33 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
     // (channel.cpp의 accepter/connector 핸드셰이크 등)에서 target을
     // 엉뚱한 코어의 큐에 넣어버리는 실측 버그가 있었다.
     const uint32_t targetCore = task->allowCoreMigration ? Scheduler::currentCoreIndex() : task->homeCoreIndex;
+    // [신규, PN-D4F7BB66] async_task.h submitCompletion 문서의 "어느
+    // reactorIndex로 큐잉할지" 절 참고 - targetCore 안에서 라운드로빈.
+    // kAsyncReactorsPerCore==1이면 나머지가 항상 0.
+    const uint32_t targetReactor = gNextReactorIndex[targetCore].fetchAdd(1) % kAsyncReactorsPerCore;
     if (preemptive) {
-        gPreemptiveQueues[targetCore].pushBack(task);
+        gPreemptiveQueues[targetCore][targetReactor].pushBack(task);
     } else {
-        gExecQueues[targetCore].pushBack(task);
+        gExecQueues[targetCore][targetReactor].pushBack(task);
         // [신규, PN-2CD26587/SP-BF0B31B5 §3.2-2/3] Push - 위
-        // kAsyncTaskTryPush() 문서 주석 참고.
+        // kAsyncTaskTryPush() 문서 주석 참고(reactorIndex 0 큐 전용,
+        // targetReactor와 무관하게 항상 그 코어의 대표 큐만 본다).
         kAsyncTaskTryPush(targetCore);
     }
-    // [재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]
-    // 리액터가 더 이상 Task가 아니므로(async_task.h 주석 참고) "파킹돼
-    // 있으면 강제 스케줄링" 판단 자체가 사라졌다 - preemptive==false
-    // (A)는 조치 없이 그냥 반환(그 코어가 다음 idle 분기에서 자연히
-    // 처리), preemptive==true(C)만 targetCore에게 kAsyncDrainVector
-    // IPI를 보내 그 코어의 인터럽트가 다시 켜지는 즉시 drainOnce()가
-    // 반복 호출되게 한다. 이 함수는 인터럽트 컨텍스트에서도 호출
-    // 가능하다고 문서화돼 있어(async_task.h) IPI 발사 자체는 안전하다
-    // (targetCore가 호출자 자신이 아닐 수도 있게 된 뒤에도 여전히
-    // 안전 - Lapic::sendFixedIpi()는 그저 ICR에 쓰는 것뿐이고, 다른
-    // 코어를 깨우는 이 패턴 자체는 scheduler.cpp의 Push/Pull
-    // 로드밸런싱 kWakeCoreIfIdle이 이미 같은 방식으로 쓰고 있다).
+    // [2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C), 큐잉/IPI
+    // 판단 자체는 유지, 2026-09-27 PN-D4F7BB66로 소비 쪽만 갱신]
+    // preemptive==false(A)는 조치 없이 그냥 반환 - 이제는 그
+    // (targetCore, targetReactor) 전용 리액터 Task(kAsyncReactorTaskMain)가
+    // 정상 스케줄 순번을 받으면 자연히 처리한다(async_task.h 문서
+    // 참고 - PN-4FA5F13B 굶주림 시나리오의 근본적 완화). preemptive==true
+    // (C)만 targetCore에게 kAsyncDrainVector IPI를 보내 그 코어의
+    // 인터럽트가 다시 켜지는 즉시 drainAny()가 반복 호출되게 한다.
+    // 이 함수는 인터럽트 컨텍스트에서도 호출 가능하다고 문서화돼
+    // 있어(async_task.h) IPI 발사 자체는 안전하다(targetCore가 호출자
+    // 자신이 아닐 수도 있게 된 뒤에도 여전히 안전 - Lapic::sendFixedIpi()
+    // 는 그저 ICR에 쓰는 것뿐이고, 다른 코어를 깨우는 이 패턴 자체는
+    // scheduler.cpp의 Push/Pull 로드밸런싱 kWakeCoreIfIdle이 이미 같은
+    // 방식으로 쓰고 있다).
     if (preemptive) {
         Lapic::sendFixedIpi(Acpi::cpuApicId(targetCore), static_cast<uint8_t>(kAsyncDrainVector));
     }
@@ -1131,16 +1263,42 @@ void AsyncReactor::submitCompletion(AsyncTask* task, bool preemptive) {
 // 곧바로 pickNext()/drainOnce()로 돌아가 처리하므로 별도 IPI가
 // 필요 없다(Push와 달리 호출자 자신이 이미 깨어있는 소비자).
 bool AsyncReactor::tryPull(uint32_t coreIndex) {
+    // [범위 제한, PN-D4F7BB66] kFindMostLoadedAsyncCore와 동일 -
+    // reactorIndex 0 큐만 대상.
     const uint32_t victim = kFindMostLoadedAsyncCore(coreIndex);
     if (victim == coreIndex) {
         return false;
     }
-    AsyncTask* stolen = kExtractOneMigratableAsyncTask(gExecQueues[victim]);
+    AsyncTask* stolen = kExtractOneMigratableAsyncTask(gExecQueues[victim][0]);
     if (!stolen) {
         return false;
     }
-    gExecQueues[coreIndex].pushBack(stolen);
+    gExecQueues[coreIndex][0].pushBack(stolen);
     return true;
+}
+
+void kSpawnAsyncReactorTasks() {
+    const uint32_t coreCount = Acpi::cpuCount();
+    for (uint32_t coreIndex = 0; coreIndex < coreCount; ++coreIndex) {
+        for (uint32_t reactorIndex = 0; reactorIndex < kAsyncReactorsPerCore; ++reactorIndex) {
+            const uint64_t packed = static_cast<uint64_t>(coreIndex) * kAsyncReactorsPerCore + reactorIndex;
+            KernelThread* thread = kSpawnKernelThread(&kAsyncReactorTaskMain, reinterpret_cast<void*>(packed));
+            if (!thread) {
+                Logger::error("minicore: AsyncReactor KernelThread allocation FAILED (core=%x reactor=%x)",
+                              coreIndex, reactorIndex);
+                continue;
+            }
+            // [신규, PN-D4F7BB66] 계획 문서 §2 - 이 리액터 Task는
+            // 반드시 배정된 코어에만 고정돼야 한다(Push/Pull 로드밸런싱
+            // 대상에서 제외 - scheduler.cpp의 kTaskAffinityAllCores
+            // 비교 가드를 통과하지 못하게 해 자동으로 빠진다).
+            thread->affinityMask = 1U << coreIndex;
+            gReactorTask[coreIndex][reactorIndex] = thread;
+            Scheduler::enqueue(coreIndex, thread);
+        }
+    }
+    Logger::info("minicore: AsyncReactor tasks spawned (%x core(s) x %x reactor(s))", coreCount,
+                 kAsyncReactorsPerCore);
 }
 
 // [신규, 2026-09-22, PN-A0CEF82D/QU-CC8A31F6] async_task.h의

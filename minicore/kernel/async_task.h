@@ -33,6 +33,17 @@ enum class AsyncTaskState { Ready, Running, Suspended, Completed, Failed, Cancel
 // 가능하다(페이지 하나를 그대로 받는다).
 constexpr uint64_t kAsyncTaskStackSize = 4096;
 
+// [신규, 2026-09-27, PN-D4F7BB66, 설계자 Opinion("코어당 리액터를
+// 실행하는 커널 Task 갯수가 변동되는거야")] 코어당 이 개수만큼의 전용
+// `kernel::Task`(async_task.cpp의 kAsyncReactorTaskMain)를 두고, 각자
+// 정확히 하나의 (coreIndex, reactorIndex) 큐 쌍만 무한 루프로 드레인한다
+// - 기본값 1이면 리액터 Task가 코어당 딱 하나뿐이라 큐/드레인 결과
+// 자체는 기존과 동일하지만("인라인 동기 드레인" -> "Task로 위임"이라는
+// 구조 변경 자체는 발생, 계획 문서 §검증 1 참고), >1이면 진짜 여러
+// 실행 흐름이 그 코어의 CPU 시간을 나눠 써서 하나가 (락 대기 등으로)
+// 못 움직여도 다른 리액터가 계속 진행될 수 있다(계획 문서의 핵심 목적).
+constexpr uint32_t kAsyncReactorsPerCore = 1;
+
 class AsyncToken;  // 전방 선언 - AsyncTokenSource::token()이 필요로 함
 
 // SP-F682B889 §8(설계자 지시, 2026-09-14) - "AsyncTask에 AsyncToken,
@@ -775,58 +786,95 @@ public:
     void await_resume() const noexcept {}
 };
 
-// 커널 전용 비동기 프레임워크의 디스패치 계층(SP-F682B889 §3.4/§4,
-// 2026-09-16 재구조 - QU-96BBB769/QU-4034561A/QU-3BDEE348 답변,
-// PN-FEAAF154) - **더 이상 코어당 전용 kernel::Task가 아니다.** 예전
-// (PN-C46DF296까지)에는 리액터가 각 코어에 하나씩 배치되는 전용
-// Task로 존재했으나, "리액터가 idle을 흡수한다"는 설계자 지시에 따라
-// `Scheduler::runLoop()`의 idle 폴백(코어에 실행할 Task가 없을 때)이
-// `drainOnce()`를 직접 호출하는 방식으로 전면 교체됐다 - 새 kernel::
-// Task/전용 스택/park-wake 프로토콜이 전혀 없다.
+// 커널 전용 비동기 프레임워크의 디스패치 계층(SP-F682B889 §3.4/§4).
+//
+// [갱신, 2026-09-27, PN-D4F7BB66, 설계자 Opinion] **다시 코어당 전용
+// kernel::Task로 되돌아간다** - 2026-09-16 재구조(QU-96BBB769/
+// QU-4034561A/QU-3BDEE348 답변, PN-FEAAF154)가 "리액터가 idle을
+// 흡수한다"는 이유로 이 개념을 없앴었으나(그 재구조가 버그 때문이
+// 아니라 순수 설계 선호였다는 배경은 PN-D4F7BB66 조사 기록 참고),
+// 이번 지시는 "하나가 못 움직여도 다른 리액터가 그 코어에서 계속
+// 스케줄될 수 있어야 한다"는 진짜 동시성이 필요해 그 결정을 다시
+// 뒤집는다 - `kSpawnAsyncReactorTasks()`(kmain.cpp)가 코어마다
+// `kAsyncReactorsPerCore`개의 전용 `KernelThread`를 만들어 각자 정확히
+// 하나의 (coreIndex, reactorIndex) 큐 쌍만 담당하게 한다(async_task.cpp
+// `kAsyncReactorTaskMain`). **다만 이 Task는 `Scheduler::parkCurrent()`로
+// 진짜 파킹하지 않는다** - `DC-D8951156`(아직 미해결, `QU-02D75506`
+// 답변 대기 중)이 확정한 대로 `parkCurrent()`는 블로킹 syscall 경로에서
+// 재개 지점을 코어 공유 인터럽트 디스패치 스택에 저장하는 근본 결함이
+// 있어, 지금 새로 이 프리미티브를 쓰는 대기 경로를 하나 더 늘리면 같은
+// 버그 클래스를 또 만들게 된다 - 대신 `AsyncTaskWaitGroup::waitAll()`이
+// 이미 검증해 쓰고 있는 `Scheduler::yieldCurrent()` 기반 능동 폴링을
+// 그대로 재사용한다(큐가 비면 양보, 다음 스케줄 차례에 다시 확인 -
+// park/wake 프로토콜을 새로 발명하지 않아 경쟁 조건 여지가 없다).
+// `DC-D8951156`이 해소되면 진짜 park/wake로 다시 바꾸는 걸 후속 계획으로
+// 남겨 둔다.
 class AsyncReactor {
 public:
     // 전역 1회(BSP에서만, Idt::init() 이후) - "다른 Task가 실행
     // 중일 때"의 즉시 개입 경로(§4 (C), async_task.cpp의
     // kAsyncDrainVector) IDT 벡터를 등록한다. 코어별 상태는 전혀
     // 없다(gExecQueues/gPreemptiveQueues는 이미 정적 배열) - AP는
-    // 더 이상 이 클래스를 위해 아무것도 호출할 필요가 없다.
+    // 더 이상 이 클래스를 위해 아무것도 호출할 필요가 없다. 리액터
+    // Task 자체의 스폰은 별도(`kSpawnAsyncReactorTasks()`, kmain.cpp) -
+    // 이 함수는 여전히 IDT 벡터 등록/전역 슬롯 초기화만 담당한다.
     static void init();
 
-    // 이 코어의 실행 큐(선점 큐 우선)에서 정확히 하나를 꺼내 실행/
-    // 재개하거나(kContextSwitch), 만료된 지연 타이머(DelayedExecutionQueue,
-    // SP-F15B4A63)를 처리한다 - 할 일을 하나 처리했으면 true, 정말
-    // 아무 것도 없었으면 false(그 결과에 따라 호출부가 계속 반복할지
-    // 결정한다). **재진입 방지**: 이미 이 코어에서 드레인이 진행 중이면
-    // (runLoop()의 인라인 호출이든 §4 (C) 경로의 IPI 핸들러든) 즉시
-    // false를 반환한다 - 그렇지 않으면 AsyncTask의 kContextSwitch
-    // 재개 지점(gReactorSavedRsp[coreIndex])을 두 실행 흐름이 동시에
-    // 덮어쓸 수 있다(같은 코어 안에서 인터럽트로만 발생 가능한 중첩 -
-    // 새로 큐잉된 항목은 바깥쪽에서 이미 진행 중인 호출이 이어서
-    // 처리하므로 유실되지 않는다). `Scheduler::runLoop()`의 idle
-    // 분기와 §4 (C)의 IPI 핸들러(kAsyncDrainVector) 둘 다 이 함수를
-    // 호출한다.
-    static bool drainOnce(uint32_t coreIndex);
+    // 정확히 이 (coreIndex, reactorIndex) 큐 쌍의 실행 큐(선점 큐
+    // 우선)에서 하나를 꺼내 실행/재개하거나(kContextSwitch), 만료된
+    // 지연 타이머(DelayedExecutionQueue, SP-F15B4A63)/RCU 콜백/지연된
+    // 소멸을 처리한다 - 할 일을 하나 처리했으면 true, 정말 아무 것도
+    // 없었으면 false(그 결과에 따라 호출부가 계속 반복할지 결정한다).
+    // **재진입 방지**: 이미 이 (coreIndex, reactorIndex)에서 드레인이
+    // 진행 중이면(그 전용 리액터 Task 자신의 재귀 호출은 없지만, §4 (C)
+    // 경로의 IPI 핸들러/idle 폴백이 같은 슬롯을 동시에 건드릴 수 있다)
+    // 즉시 false를 반환한다 - 그렇지 않으면 AsyncTask의 kContextSwitch
+    // 재개 지점(gReactorSavedRsp[coreIndex][reactorIndex])을 두 실행
+    // 흐름이 동시에 덮어쓸 수 있다(새로 큐잉된 항목은 바깥쪽에서 이미
+    // 진행 중인 호출이 이어서 처리하므로 유실되지 않는다). 이 코어의
+    // 전용 리액터 Task(`kAsyncReactorTaskMain`)가 주 호출자이고,
+    // §4 (C)의 IPI 핸들러/idle 폴백/`waitAll()`은 아래 `drainAny()`로
+    // 모든 reactorIndex를 순회한다.
+    static bool drainOnce(uint32_t coreIndex, uint32_t reactorIndex);
+
+    // [신규, PN-D4F7BB66] "어느 reactorIndex인지 상관없이 이 코어에
+    // 뭔가 처리할 게 있으면 하나 처리" - reactorIndex를 특정할 수 없는
+    // 호출부(§4 (C) IPI 핸들러, idle 폴백, `AsyncTaskWaitGroup::
+    // waitAll()`)가 쓴다. `kAsyncReactorsPerCore==1`(기본값)이면
+    // `drainOnce(coreIndex, 0)`과 완전히 동일 - 그 이상이면 0부터
+    // 순서대로 하나라도 처리될 때까지 시도한다(공정성보다 "빠짐없이
+    // 훑는다"가 목적인 폴백 경로라 라운드로빈 등 정교한 순서는 아직
+    // 불필요).
+    static bool drainAny(uint32_t coreIndex);
 
     // 인터럽트 컨텍스트에서 호출 가능 - 완료(또는 새로 생성)된
     // AsyncTask를 **그 task의 큐잉 대상 코어**(아래 참고)의 실행
     // 큐에 push한다.
     //
-    // **[재설계, 2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C)]**
-    // 리액터가 더 이상 Task가 아니므로 "파킹돼 있으면 강제 스케줄링"
-    // 개념 자체가 사라졌다 - 대신:
-    // - **preemptive=false → (A)**: 그냥 큐에 넣기만 한다. 그 코어가
-    //   다음에 idle 분기(pickNext()==nullptr)에 도달하는 순간 자연히
-    //   처리된다(그 사이 다른 Task가 실행 중이었다면 그 Task가 곧
-    //   블로킹되거나 스스로 끝나 idle로 돌아오는 게 일반적인 패턴 -
-    //   실측 근거: `Syscall::submit()`이 유일한 "다른 Task 실행 중"
-    //   실사용처이고, 그 직후 관례상 `Syscall::wait()`로 곧 자기
-    //   자신을 파킹한다).
+    // **[2026-09-16, QU-3BDEE348 답변 - 하이브리드 (A)+(C), 큐잉/IPI
+    // 판단 자체는 그대로 유지]**
+    // - **preemptive=false → (A)**: 그냥 큐에 넣기만 한다. 이제(§PN-D4F7BB66)
+    //   그 (targetCore, targetReactor) 전용 리액터 Task가 정상적인
+    //   스케줄러 순번을 받으면 자연히 처리된다 - 예전(리액터가 Task가
+    //   아니던 시절)의 "idle 분기 도달"이라는 유일한 소비 경로에 더해,
+    //   이제는 그 코어가 아예 idle해지지 않아도(다른 Task들과 나눠
+    //   쓰는 정상 스케줄링만으로도) 처리될 수 있다는 게 이번 개편의
+    //   핵심 개선이다(PN-4FA5F13B 굶주림 시나리오의 근본적 완화 -
+    //   다만 여전히 즉시성이 필요하면 preemptive=true를 써야 한다).
     // - **preemptive=true → (C)**: 선점 큐에 넣은 뒤 그 코어에게
     //   `kAsyncDrainVector` IPI를 보낸다(async_task.cpp) - 인터럽트가
-    //   다시 켜지는 즉시 그 ISR이 `drainOnce()`를 큐가 빌 때까지
-    //   반복 호출해 즉시 처리를 보장한다. exclusivePreemptive
+    //   다시 켜지는 즉시 그 ISR이 `drainAny()`를 더 이상 처리할 게
+    //   없을 때까지 반복 호출해 즉시 처리를 보장한다(어느 리액터
+    //   Task가 실행 중이든 상관없이 인터럽트 컨텍스트에서 먼저
+    //   가로채는 기존 저지연 경로 그대로). exclusivePreemptive
     //   Channel(SP-00CA7175 Tier B) 핸드셰이크 완료 등 지연시간이
     //   중요한 경로가 이 값을 넘긴다.
+    // - **[신규, PN-D4F7BB66] 어느 reactorIndex로 큐잉할지**: targetCore
+    //   안에서 라운드로빈(`gNextReactorIndex[targetCore]`)으로 고른다 -
+    //   `kAsyncReactorsPerCore==1`이면 항상 0(기존과 동일). 계획 문서가
+    //   "정책은 착수 세션이 정함"으로 명시적으로 위임한 순수 구현
+    //   세부다 - 코어 간 이관 없음 불변조건(§task->homeCoreIndex)과는
+    //   별개 축(코어는 이미 정해진 뒤, 그 코어 안에서 리액터만 고름).
     //
     // **[수정, 2026-09-16, PN-622BA93C/QU-FDB32CCE]** 큐잉 대상 코어는
     // 더 이상 항상 "호출자 자신의 현재 코어"가 아니다 - `task->
@@ -854,6 +902,18 @@ public:
     // drainOnce()처럼 즉시 pickNext()부터 다시 돌게 하기 위함).
     static bool tryPull(uint32_t coreIndex);
 };
+
+// [신규, 2026-09-27, PN-D4F7BB66] 부팅 시(kmain.cpp가
+// `Smp::startApCores()` 이후, devmgr/fs KernelThread 스폰과 같은
+// 시점에) 한 번 호출 - 지금 이 시점에 확정된 `Acpi::cpuCount()`개
+// 코어 각각에 `kAsyncReactorsPerCore`개씩, 정확히 하나의
+// (coreIndex, reactorIndex) 큐 쌍만 담당하는 전용 `KernelThread`를
+// 만들어 그 코어에 고정(`Task::affinityMask`)한 뒤 그 코어의 Ready
+// 큐에 올린다. `kSpawnDevmgrKernelThread()`/`kSpawnFsKernelThread()`
+// 와 동일한 실패 처리 관례(할당 실패는 로그만 남기고 계속 진행 -
+// 이 코어는 그냥 리액터 Task 없이 기존 idle/IPI 폴백에만 의존하게
+// 된다, 완전한 부팅 실패로 치지 않음).
+void kSpawnAsyncReactorTasks();
 
 }  // namespace kernel
 
