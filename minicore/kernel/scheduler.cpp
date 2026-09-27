@@ -1022,9 +1022,12 @@ void kFinalizeProcessTermination(SharedPtr<Process>& process) {
         // 그대로 적용되는 쪽). 이 프로세스의 이름은 spawnName이
         // memcpy(exactLength)로만 채워지고 나머지는 정적 초기화로
         // 이미 0(널)이라 항상 안전하게 널종단 문자열로 읽힌다.
-        Serial::write("minicore: PANIC - essential service died: ");
-        Serial::write(process->spawnName);
-        Serial::write("\n");
+        // [변경, 2026-09-27, DC-2CB9DDA0 방향(E)] 이 직후 kPanic()이
+        // 결국 영구 정지로 이어지므로 동기 경로를 쓴다 - 비동기
+        // write()면 인터럽트가 다시 안 켜져 이 로그가 유실될 수 있다.
+        Serial::writeSync("minicore: PANIC - essential service died: ");
+        Serial::writeSync(process->spawnName);
+        Serial::writeSync("\n");
         kPanic("Essential service died");
     } else if (startFlags.resurrect && startFlags.respawn) {
         // §6.3 2번 - 더 이상 "즉시" 재스폰하지 않는다. §6.4의

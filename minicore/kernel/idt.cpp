@@ -393,7 +393,11 @@ void kPrintFrameDiagnostics(kernel::InterruptFrame* frame, const char* header) {
     pos = kAppendDiagStr(buf, kBufSize, pos, "\n");
 
     buf[pos] = '\0';
-    kernel::Serial::write(buf);
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(E)] 이 함수는 호출부(kPanic/
+    // kHandleNmi)가 직후 cli+hlt로 영구 정지하는 경로에서만 쓰인다 -
+    // 비동기 write()를 쓰면 인터럽트가 다시 안 켜져 이 진단 로그
+    // 자체가 유실될 수 있어 반드시 동기 경로를 쓴다.
+    kernel::Serial::writeSync(buf);
 }
 
 // [PN-F443FE73, SP-677210E6 "#DB(Debug) 상세 설계"] #DB는 NMI/#MC와
@@ -510,8 +514,11 @@ void kHandleNmi(kernel::InterruptFrame* frame) {
         default:
             // 설명 안 되는 NMI(진짜 하드웨어 NMI 등 극히 드문 경우) -
             // 로그만 남기고 계속(과잉 대응 방지, RM-23F4B687 §4 원칙 -
-            // 실제로 겪어본 뒤 재검토).
-            kernel::Serial::write("\nminicore: NMI - unexplained, continuing\n");
+            // 실제로 겪어본 뒤 재검토). NMI 컨텍스트(인터럽트 게이트라
+            // 이 핸들러 동안 IF=0)라 동기 경로로 즉시 내보낸다 -
+            // 다른 두 분기(DebugHalt/WatchdogTrap)와 동일한 이유
+            // (DC-2CB9DDA0 방향(E) 참고).
+            kernel::Serial::writeSync("\nminicore: NMI - unexplained, continuing\n");
             return;
     }
 }

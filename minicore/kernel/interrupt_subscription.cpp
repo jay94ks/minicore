@@ -28,6 +28,12 @@ bool kIsFixedVector(uint32_t vector) {
     if (vector == 0xE2) return true;  // kForcedMigrationVector(scheduler.h)
     if (vector == 0xE3) return true;  // kAsyncDrainVector(async_task.cpp)
     if (vector == 0xE4) return true;  // kDebugRegSyncVector(debug_session.cpp)
+    // [드리프트 수정, 2026-09-27] kAcpiSciVector(RM-28225668 §2에는
+    // 이미 등록돼 있었으나 이 하드코딩 목록엔 누락돼 있었다 - 0xE4
+    // 사례와 같은 종류의 "문서 vs 코드" 드리프트, DC-2CB9DDA0 작업
+    // 중 새 벡터(0xE6)를 예약하려고 재확인하다 발견).
+    if (vector == 0xE5) return true;  // kAcpiSciVector(power.cpp)
+    if (vector == 0xE6) return true;  // kSerialTxVector(serial.cpp)
     if (vector == 0xFF) return true;  // spurious(lapic.h 관례)
     return false;
 }

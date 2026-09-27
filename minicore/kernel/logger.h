@@ -12,7 +12,12 @@ namespace kernel {
 class LoggingDriver {
 public:
     virtual ~LoggingDriver() = default;
-    virtual void writeLine(const char* line) = 0;
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(E)] sync=true는 "이 호출
+    // 직후 인터럽트가 영구히 꺼지고 이 코어가 멈출 수 있는 경로"
+    // (Fatal/Panic 레벨)라는 뜻 - 백엔드가 비동기 큐를 쓴다면 이때는
+    // 반드시 동기적으로 실제 출력까지 끝내야 한다(안 그러면 그
+    // 로그가 영영 유실될 수 있음).
+    virtual void writeLine(const char* line, bool sync) = 0;
 };
 
 // Verbose는 기존 "Debug" 개념을 포함한다(설계자 지시, 별도 Debug
@@ -57,7 +62,7 @@ public:
 // 범위 밖(미정).
 class SerialLoggingDriver : public LoggingDriver {
 public:
-    void writeLine(const char* line) override;
+    void writeLine(const char* line, bool sync) override;
 };
 
 }  // namespace kernel

@@ -234,9 +234,13 @@ void kLogImpl(kernel::LogLevel level, const char* fmt, va_list args) {
     }
     buf[pos] = '\0';
 
+    // [변경, 2026-09-27, DC-2CB9DDA0 방향(E)] Fatal/Panic은 이 호출
+    // 직후 호출부가 결국 cli+hlt로 영구 정지할 수 있는 경로다 -
+    // 백엔드에 "동기로 반드시 실제 출력까지 끝내라"고 알린다.
+    const bool sync = (level == kernel::LogLevel::Fatal || level == kernel::LogLevel::Panic);
     for (kernel::LoggingDriver* driver : gDrivers) {
         if (driver) {
-            driver->writeLine(buf);
+            driver->writeLine(buf, sync);
         }
     }
 }
@@ -247,11 +251,15 @@ kernel::SerialLoggingDriver gSerialDriver;
 
 namespace kernel {
 
-void SerialLoggingDriver::writeLine(const char* line) {
-    // Serial::write() 자신이 이미 한 줄 전체를 Spinlock으로 감싼다
-    // (serial.cpp의 gWriteLock) - 이 한 번의 호출로 목표 5(SMP 안전성,
-    // 코어 간 줄 단위 비섞임)가 그대로 만족된다. 별도 락 불필요.
-    Serial::write(line);
+void SerialLoggingDriver::writeLine(const char* line, bool sync) {
+    // Serial::write()/writeSync() 둘 다 이미 한 줄 전체를 Spinlock으로
+    // 감싼다(serial.cpp의 gWriteLock) - 이 한 번의 호출로 목표 5(SMP
+    // 안전성, 코어 간 줄 단위 비섞임)가 그대로 만족된다. 별도 락 불필요.
+    if (sync) {
+        Serial::writeSync(line);
+    } else {
+        Serial::write(line);
+    }
 }
 
 void Logger::init() {
