@@ -13,11 +13,21 @@
 // 실제로 이 증상의 원인이었는지(사라졌으면) 아니면 별개 원인이
 // 남아있는지(여전히 실패하면) 가른다.
 //
-// exitCode: 0=전 구간 성공(CreateUser+LookupByUid 왕복+필드 일치),
-// 1=Connect 실패, 2=CreateUser Write 실패, 3=CreateUser Read 실패,
-// 4=CreateUser 응답 에러, 5=LookupByUid Write 실패, 6=LookupByUid
-// Read 실패, 7=LookupByUid 응답 에러, 8=uid/gid 필드 불일치,
-// 9=loginName 필드 불일치.
+// [갱신, 2026-09-28, PN-24A2B6F5 재조사 2단계] 축소 재현 추가 - CreateUser
+// 이전에 Ping 왕복 하나를 먼저 시도한다. PN-BDEAA9B5가 다른 클라이언트
+// 조합으로는 Ping 왕복 성공을 기록해 뒀지만, 이 authtest 구현 자체로도
+// 성공하는지는 확인된 적이 없다 - 여기서 성공하면 문제가 CreateUser/
+// LookupByUid 프레이밍 특유의 버그로 좁혀지고, 여기서도 실패하면
+// authtest 구현 자체나 authmgr의 멀티플렉싱 accept 루프
+// (waitAnyForMultipleSyscall) 쪽 문제로 좁혀진다(PN-24A2B6F5 "다음
+// 조사 단계" 2번 참고).
+//
+// exitCode: 0=전 구간 성공(Ping+CreateUser+LookupByUid 왕복+필드 일치),
+// 1=Connect 실패, 2=Ping Write 실패, 3=Ping Read 실패, 4=Ping 응답
+// 에러, 5=CreateUser Write 실패, 6=CreateUser Read 실패, 7=CreateUser
+// 응답 에러, 8=LookupByUid Write 실패, 9=LookupByUid Read 실패,
+// 10=LookupByUid 응답 에러, 11=uid/gid 필드 불일치, 12=loginName
+// 필드 불일치.
 #include "libmc/authmgr.h"
 #include "libmc/channel.h"
 #include "libmc/syscall.h"
@@ -60,8 +70,41 @@ extern "C" void _start() {
     }
     const mc::BridgeHandle bridge = connectArgs.bridge;
 
-    // ---- CreateUser(uid=42, loginName="testuser") ----
+    // ---- Ping (축소 재현 - CreateUser/LookupByUid보다 먼저) ----
     mc::uint8_t sendBuf[mc::kAuthmgrMaxMessageBytes];
+    auto* pingReq = reinterpret_cast<mc::AuthmgrRequestHeader*>(sendBuf);
+    *pingReq = mc::AuthmgrRequestHeader{};
+    pingReq->requestType = mc::AuthmgrRequestType::Ping;
+    const mc::uint32_t pingTotalLen = sizeof(mc::AuthmgrRequestHeader);
+    pingReq->header.totalLength = pingTotalLen;
+    pingReq->header.frameKind = mc::AuthmgrFrameKind::Request;
+
+    mc::ChannelWriteArgs pingWriteArgs;
+    pingWriteArgs.bridge = bridge;
+    pingWriteArgs.data = sendBuf;
+    pingWriteArgs.length = pingTotalLen;
+    mc::SyscallToken pingToken = mc::submit(mc::kSyscallEndpointChannelWrite, &pingWriteArgs);
+    if (pingToken == 0 || !mc::wait(pingToken) || pingWriteArgs.error != mc::ChannelError::None ||
+        pingWriteArgs.bytesWritten != pingTotalLen) {
+        kFinish(2);
+    }
+
+    mc::uint8_t pingRecvBuf[mc::kAuthmgrMaxMessageBytes];
+    mc::ChannelReadArgs pingReadArgs;
+    pingReadArgs.bridge = bridge;
+    pingReadArgs.buffer = pingRecvBuf;
+    pingReadArgs.maxLength = sizeof(pingRecvBuf);
+    pingToken = mc::submit(mc::kSyscallEndpointChannelRead, &pingReadArgs);
+    if (pingToken == 0 || !mc::wait(pingToken) || pingReadArgs.error != mc::ChannelError::None ||
+        pingReadArgs.bytesRead < sizeof(mc::AuthmgrResponseHeader)) {
+        kFinish(3);
+    }
+    auto* pingResp = reinterpret_cast<mc::AuthmgrResponseHeader*>(pingRecvBuf);
+    if (pingResp->requestType != mc::AuthmgrRequestType::Ping || pingResp->error != 0) {
+        kFinish(4);
+    }
+
+    // ---- CreateUser(uid=42, loginName="testuser") ----
     auto* createReq = reinterpret_cast<mc::AuthmgrRequestHeader*>(sendBuf);
     *createReq = mc::AuthmgrRequestHeader{};
     createReq->requestType = mc::AuthmgrRequestType::CreateUser;
@@ -84,7 +127,7 @@ extern "C" void _start() {
     mc::SyscallToken token = mc::submit(mc::kSyscallEndpointChannelWrite, &writeArgs);
     if (token == 0 || !mc::wait(token) || writeArgs.error != mc::ChannelError::None ||
         writeArgs.bytesWritten != createTotalLen) {
-        kFinish(2);
+        kFinish(5);
     }
 
     mc::uint8_t recvBuf[mc::kAuthmgrMaxMessageBytes];
@@ -95,11 +138,11 @@ extern "C" void _start() {
     token = mc::submit(mc::kSyscallEndpointChannelRead, &readArgs);
     if (token == 0 || !mc::wait(token) || readArgs.error != mc::ChannelError::None ||
         readArgs.bytesRead < sizeof(mc::AuthmgrResponseHeader)) {
-        kFinish(3);
+        kFinish(6);
     }
     auto* createResp = reinterpret_cast<mc::AuthmgrResponseHeader*>(recvBuf);
     if (createResp->requestType != mc::AuthmgrRequestType::CreateUser || createResp->error != 0) {
-        kFinish(4);
+        kFinish(7);
     }
 
     // ---- LookupByUid(42) ----
@@ -121,7 +164,7 @@ extern "C" void _start() {
     token = mc::submit(mc::kSyscallEndpointChannelWrite, &writeArgs);
     if (token == 0 || !mc::wait(token) || writeArgs.error != mc::ChannelError::None ||
         writeArgs.bytesWritten != lookupTotalLen) {
-        kFinish(5);
+        kFinish(8);
     }
 
     readArgs = mc::ChannelReadArgs{};
@@ -131,19 +174,19 @@ extern "C" void _start() {
     token = mc::submit(mc::kSyscallEndpointChannelRead, &readArgs);
     if (token == 0 || !mc::wait(token) || readArgs.error != mc::ChannelError::None ||
         readArgs.bytesRead < sizeof(mc::AuthmgrResponseHeader) + sizeof(mc::AuthmgrUserRecord)) {
-        kFinish(6);
+        kFinish(9);
     }
     auto* lookupResp = reinterpret_cast<mc::AuthmgrResponseHeader*>(recvBuf);
     if (lookupResp->requestType != mc::AuthmgrRequestType::LookupByUid || lookupResp->error != 0) {
-        kFinish(7);
+        kFinish(10);
     }
     auto* foundRecord = reinterpret_cast<mc::AuthmgrUserRecord*>(recvBuf + sizeof(mc::AuthmgrResponseHeader));
     if (foundRecord->uid != kTestUid || foundRecord->gid != kTestUid) {
-        kFinish(8);
+        kFinish(11);
     }
     for (mc::uint32_t i = 0; i < sizeof(kTestLoginName) - 1; ++i) {
         if (foundRecord->loginName[i] != kTestLoginName[i]) {
-            kFinish(9);
+            kFinish(12);
         }
     }
 
