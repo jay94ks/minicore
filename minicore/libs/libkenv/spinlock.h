@@ -45,6 +45,57 @@ private:
     Spinlock& _lock;
 };
 
+// [신규, 2026-09-27, DC-2CB9DDA0 방향(A), 설계자 지시] `Spinlock`은
+// `cli`를 하지 않아 락을 쥔 코어가 인터럽트에 의해 임의로 오래
+// 선점당하면(예: 우선순위가 높은 IPI 폭주) 락을 반납하지 못한 채
+// 멈출 수 있고, 그 락이 여러 코어가 공유하는 전역 락이면 나머지
+// 모든 코어가 죽은 락에서 캐스케이딩으로 함께 멈춘다(`DC-54D69BEE`
+// "[보강]" 절이 처음 지목, `DC-2CB9DDA0`가 dbgdriver 60회 배치에서
+// 실측 재확인 - `DelayedExecutionQueue::gLock`). 이 락은 보유 구간
+// 동안 로컬 코어의 인터럽트 자체를 꺼서(pci.cpp의 `PciConfigAccessGuard`
+// /scheduler.cpp의 `enqueue()`/`scheduleImmediate()`와 완전히 같은
+// "진입 시점의 실제 RFLAGS를 저장했다가 그대로 복원"기법 재사용 -
+// 이미 cli된 인터럽트 핸들러 도중 잡혀도 무조건 `sti`로 IF=1을
+// 강제하지 않아 `PN-9326B06F`류의 재발을 피한다) 그 선점 경로 자체를
+// 원천 차단한다 - 짧은 임계구역에만 쓸 것(길게 쥐면 그 코어의 인터럽트
+// 응답성 자체가 그만큼 떨어진다).
+class IrqSpinlock {
+public:
+    void lock() {
+        uint64_t savedRflags;
+        asm volatile("pushfq; pop %0; cli" : "=r"(savedRflags) : : "memory");
+        while (__atomic_test_and_set(&_locked, __ATOMIC_ACQUIRE)) {
+            while (_locked) {
+                asm volatile("pause");
+            }
+        }
+        _savedRflags = savedRflags;
+    }
+
+    void unlock() {
+        const uint64_t savedRflags = _savedRflags;
+        __atomic_clear(&_locked, __ATOMIC_RELEASE);
+        asm volatile("push %0; popfq" : : "r"(savedRflags) : "memory", "cc");
+    }
+
+private:
+    uint8_t _locked = 0;
+    uint64_t _savedRflags = 0;
+};
+
+// lock()/unlock()을 스코프에 맞춰 자동으로 걸고 푸는 RAII 래퍼.
+class IrqSpinlockGuard {
+public:
+    explicit IrqSpinlockGuard(IrqSpinlock& lock) : _lock(lock) { _lock.lock(); }
+    ~IrqSpinlockGuard() { _lock.unlock(); }
+
+    IrqSpinlockGuard(const IrqSpinlockGuard&) = delete;
+    IrqSpinlockGuard& operator=(const IrqSpinlockGuard&) = delete;
+
+private:
+    IrqSpinlock& _lock;
+};
+
 // [SP-201238BB §0, PN-68871BC9 착수 1번째 증분] 원래 여기 각자 따로
 // 있던 `AtomicU32`/`AtomicPtr<T>`를 하나의 템플릿으로 통합했다 -
 // 설계자 지시("AtomicU32 이런 종류도 Atomic<T>로 일반화하는 것을

@@ -19,13 +19,19 @@ struct DeadlineTraits {
 };
 
 OrderedList<DelayedTimerEntry, DeadlineTraits> gList;
-Spinlock gLock;
+// [변경, 2026-09-27, DC-2CB9DDA0 방향(A), 설계자 지시] 평범한
+// `Spinlock`(cli 없음)에서 `IrqSpinlock`으로 - 이 락을 쥔 코어가
+// 인터럽트로 임의로 오래 선점당해 반납을 못 하면 다른 모든 코어가
+// 이 전역 단일 락에서 캐스케이딩으로 함께 멈추는 문제(`DC-54D69BEE`
+// "[보강]" 절, `DC-2CB9DDA0` 실측)를 원천 차단한다 - `IrqSpinlock`
+// 문서 주석 참고.
+IrqSpinlock gLock;
 uint64_t gNextToken = 1;  // 0은 "실패/무효 토큰" 전용(schedule() 주석 참고)
 
 }  // namespace
 
 void DelayedExecutionQueue::init() {
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     gList.init();
     gNextToken = 1;
 }
@@ -47,14 +53,14 @@ uint64_t DelayedExecutionQueue::schedule(uint64_t delayTicks, DelayedCallback ca
     entry->deadlineLink.prev = &entry->deadlineLink;
     entry->deadlineLink.next = &entry->deadlineLink;
 
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     entry->token = gNextToken++;
     gList.insert(entry);
     return entry->token;
 }
 
 bool DelayedExecutionQueue::cancel(uint64_t token) {
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     for (DelayedTimerEntry* cur : gList) {
         if (cur->token == token) {
             OrderedList<DelayedTimerEntry, DeadlineTraits>::remove(cur);
@@ -83,7 +89,7 @@ void DelayedExecutionQueue::pump() {
     List<DelayedTimerEntry, DeadlineTraits> expired;
     const uint64_t now = Timer::tickCount();
     {
-        SpinlockGuard guard(gLock);
+        IrqSpinlockGuard guard(gLock);
         for (;;) {
             DelayedTimerEntry* front = gList.first();
             if (!front || front->deadlineTick > now) {
@@ -103,7 +109,7 @@ void DelayedExecutionQueue::pump() {
 }
 
 bool DelayedExecutionQueue::hasPending() {
-    SpinlockGuard guard(gLock);
+    IrqSpinlockGuard guard(gLock);
     return !gList.empty();
 }
 
