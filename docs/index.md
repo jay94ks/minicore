@@ -30,7 +30,7 @@
 | [DC-91ABD922](./DC-91ABD922.md) | devmgr/fs를 유저랜드 프로세스에서 커널로 흡수 - 범위/방식 미정 | approved | 2026-09-22T07:19:54.448Z |
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
-| [DC-C4A011C7](./DC-C4A011C7.md) | AsyncTask::waitingTask 크로스코어 데이터 레이스 - raw ConnectChannel/AcceptFromChannel 핸드셰이크(및 모든 유저랜드 raw syscall 완료 통지)가 가끔 유실되는 근본 원인 후보 | review | 2026-09-27T15:45:24.889Z |
+| [DC-C4A011C7](./DC-C4A011C7.md) | AsyncTask::waitingTask 크로스코어 데이터 레이스 - raw ConnectChannel/AcceptFromChannel 핸드셰이크(및 모든 유저랜드 raw syscall 완료 통지)가 가끔 유실되는 근본 원인 후보 | approved | 2026-09-27T16:44:29.559Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
 | [DC-D8951156](./DC-D8951156.md) | 블로킹 syscall(parkCurrent)이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는 문제 - 수정 방향 결정 필요 | approved | 2026-09-27T01:38:17.356Z |
 | [DC-DC9B2C3E](./DC-DC9B2C3E.md) | ext4 inode 테이블 블록 read-modify-write 경쟁(고아 블록) - 락 세분화 단위 결정 요청 | approved | 2026-09-26T04:21:13.790Z |
