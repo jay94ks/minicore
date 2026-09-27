@@ -4,10 +4,56 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-54D69BEE
-  status: pending
-  updatedAt: 2026-09-27T07:09:21.690Z
+  status: approved
+  updatedAt: 2026-09-27T07:54:19.060Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [구현+검증 완료, 2026-09-27] 방향(B) 채택 - self-IPI 재예약 백오프, commit 76c9bff
+
+`QU-D22ADEB7`에서 설계자가 방향 **(B로 회귀)**("self-IPI 재예약에
+배치 횟수 기반 백오프 추가")를 최종 승인했다 - 방향 (A)(벡터
+우선순위 재배정)는 `RM-28225668`의 `0xE0`~`0xFD` 범위 규칙과
+산술적으로 양립 불가능함이 드러나 기각됐다(위 "[구현 착수 중 충돌
+발견]" 절).
+
+**구현**: `async_task.cpp`의 `kAsyncDrainIsr()`가 배치 상한(32)에
+도달할 때마다 무조건 self-IPI를 재예약하던 것을, 코어별
+`gAsyncDrainConsecutiveRearmCount[coreIndex]`로 **연속** 재예약
+횟수를 세다가 임계치(`kAsyncDrainConsecutiveRearmLimit = 4`)를
+넘으면 그 즉시 조용히 반환하도록 바꿨다 - 벡터 우선순위 정책
+(`kAsyncDrainVector`/`kSchedulerTickVector` 값 자체, `RM-28225668`
+범위 규칙)은 전혀 안 건드린다. 남은 작업은 `kAsyncReactorTaskMain`
+의 기존 `yieldCurrent()` 폴링 루프(정상 우선순위 경로)가 다음
+라운드로빈 차례에 이어서 처리하므로, 그 사이에 스케줄러 틱을 포함한
+모든 낮은 우선순위 인터럽트가 최소 한 번은 반드시 끼어들 창이
+강제로 열린다. 큐가 배치 상한에 안 걸리고 정상적으로 비면(연속
+사슬이 끊기면) 카운터를 리셋한다.
+
+**검증**:
+- 표준 회귀 4종(PVH SMP1/SMP4, GRUB SMP4+실제initrd, GRUB SMP4+AHCI)
+  전부 클린.
+- **`PN-93C26459`의 원 100% 재현 시나리오**(`sockinherit`+`sockclient`,
+  이 DC의 근본 원인을 gdb로 처음 확정한 바로 그 재현) - **15/15
+  무재현**(정확한 grep 패턴 `'panic\|watchdog'` 사용).
+- `PN-7562DA62`(epoll 구현) 검증 중 발견한 세 번째, 가장 재현하기
+  쉬운 사례(`epolltest`+`sockclient`, 단 2개 프로세스의 순수
+  `Socket()` 호출만으로도 수정 전 최대 26/30 무응답)를 **45회
+  반복 부팅 - watchdog/panic 0건**. 다만 이 워크로드는 epoll
+  구현 자체의 별개 이슈(두 번째 `EpollWait`까지 항상 완주하지는
+  못함, 크래시/행 없이 단순 미완주)가 있어 `PN-7562DA62`에서 계속
+  추적한다 - 이 DC의 범위(전체 정지/watchdog)는 완전히 해소됐다.
+- `dbgdriver`(캐스케이딩 `gLock` 데드락 발현, `PN-6360E6E9`/
+  `PN-D44504D1`의 원 재현 도구) 전용 대규모(~60회) 재검증은 아직
+  안 함 - 위 두 검증(sockinherit 15/15, epolltest 45회)이 이미
+  같은 근본 원인(self-IPI 사슬)을 강하게 뒷받침하지만, 정직하게
+  기록: `PN-6360E6E9`/`PN-D44504D1`가 자기 재현 도구로 직접
+  재검증할 것을 남겨 둔다.
+
+**상태 전이**: 이 DC를 `approved`로 전이한다 - 근본 원인 확정,
+방향 결정, 구현, 표준 검증까지 전부 완료됐다.
+
+---
 
 ## [새 재현 사례, 2026-09-27, PN-7562DA62] 2-프로세스 순수 Socket() 호출만으로도 73%(22/30) 무응답 - watchdog조차 안 뜨는 더 심한 발현
 
