@@ -404,6 +404,10 @@ bool InterruptDelegation::isAllowed(uint32_t vector) {
     return vector < 256 && gDelegationAllowed[vector];
 }
 
+bool InterruptDelegation::isFixed(uint32_t vector) {
+    return vector < 256 && kIsFixedVector(vector);
+}
+
 void InterruptSubscriptionService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointSubscribeInterrupt, &gSubscribeInterruptHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointWaitInterrupt, &gWaitInterruptHandler);

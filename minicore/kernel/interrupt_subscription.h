@@ -28,6 +28,14 @@ public:
     // 범위(0-255) 밖이면 false.
     static bool allow(uint32_t vector);
     static bool isAllowed(uint32_t vector);
+
+    // [신규, 2026-09-27, PN-8938C727] 동적 벡터 풀(pnp.cpp의
+    // kAllocateMsiVector 등)이 후보를 고르는 단계에서부터 고정
+    // 벡터를 걸러낼 수 있도록 하드코딩된 배제 목록(이 파일의
+    // 익명 네임스페이스 kIsFixedVector)을 그대로 노출한다 - allow()는
+    // "이미 위임 시도가 있었던 뒤"에야 이 검사를 하므로, 후보 생성
+    // 자체에서 걸러내려면 이 함수가 필요하다.
+    static bool isFixed(uint32_t vector);
 };
 
 // [SP-71DA77B3 §4] 경량 페이로드 - 모든 구독자에게 매번 복사되는

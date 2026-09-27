@@ -394,6 +394,18 @@ void kEnumerateDevicesSync(uint32_t startIndex, uint32_t* capacity, DeviceDescri
 // 카운터만으로는 wraparound 시 이미 배정된 번호와 부딪힐 수 있어,
 // `InterruptDelegation::isAllowed()`로 이미 위임된 벡터는 건너뛰는
 // 최소한의 방어를 둔다(그래도 33-254 전체가 소진되면 실패로 처리).
+//
+// [수정, 2026-09-27, PN-8938C727] 이 범위(33-254) 안에는
+// `kSchedulerTickVector`(0x24)/`kSyscallVector`(0x80)/`kTlbShootdownVector`
+// (0xE0) 등 고정 벡터도 다수 포함돼 있는데, `isAllowed()`는 "이미
+// 동적으로 위임됐는지"만 볼 뿐 "애초에 배정 대상에서 제외돼야 하는
+// 고정 벡터인지"는 몰라 후보로 반환할 수 있었다 - 그 후보가 아래
+// 호출부(`kRequestIoPermissionSync`)에서 `Pci::enableMsi()`로
+// 검증 없이 먼저 프로그램된 뒤에야 `InterruptDelegation::allow()`가
+// 뒤늦게 거부하는 순서라, 실패해도 PCI 장치의 MSI capability가 이미
+// 그 고정 벡터를 가리키는 채로 활성화된 상태로 남는 위험이 있었다
+// (DC-54D69BEE 검토 중 발견). `isFixed()`도 함께 확인해 후보 생성
+// 단계에서부터 걸러낸다.
 constexpr uint32_t kMsiVectorRangeStart = 33;
 constexpr uint32_t kMsiVectorRangeEnd = 254;  // inclusive
 uint32_t gNextMsiVector = kMsiVectorRangeStart;
@@ -403,7 +415,7 @@ uint32_t kAllocateMsiVector() {
     for (uint32_t attempts = 0; attempts < kRangeCount; ++attempts) {
         const uint32_t candidate = gNextMsiVector;
         gNextMsiVector = (gNextMsiVector >= kMsiVectorRangeEnd) ? kMsiVectorRangeStart : gNextMsiVector + 1;
-        if (!InterruptDelegation::isAllowed(candidate)) {
+        if (!InterruptDelegation::isAllowed(candidate) && !InterruptDelegation::isFixed(candidate)) {
             return candidate;
         }
     }
