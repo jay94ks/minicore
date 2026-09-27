@@ -11,6 +11,7 @@
 | [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
+| [DC-2CB9DDA0](./DC-2CB9DDA0.md) | DC-54D69BEE 방향(B) 적용 후에도 dbgdriver는 9/60(15%) 재현 - 캐스케이딩 gLock 데드락 하드닝 방향 결정 요청 | review | 2026-09-27T09:10:47.340Z |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived | 2026-09-15T05:47:02.266Z |
 | [DC-427BB6B2](./DC-427BB6B2.md) | 부트 경로 구현 착수 순서 및 부트로더 구현 방식 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-47000304](./DC-47000304.md) | DebugGetRegisters/SetRegisters - 정지된 유저 Task의 전체 레지스터 스냅숏 위치 미확정 | approved | 2026-09-17T09:33:30.400Z |
