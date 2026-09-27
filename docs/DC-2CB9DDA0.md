@@ -5,9 +5,55 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-2CB9DDA0
   status: review
-  updatedAt: 2026-09-27T11:16:56.673Z
+  updatedAt: 2026-09-27T12:50:07.397Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
+
+## [구현+검증, 2026-09-27] 방향(E) 채택(설계자 답변, QU-9243F8AB) - Serial 링버퍼+인터럽트 구동 재설계, commit 3a27b4b - 잔여는 또 다른 락(gPreemptiveQueues)으로 확정, 계속 추적 필요
+
+설계자가 방향 **(E)**(Serial을 링버퍼+인터럽트 구동으로 재설계)를
+답변했다.
+
+**구현**: `Serial::write()`가 이제 4KB 링버퍼에 채워 넣기만(락
+보유시간이 memcpy 수준) 하고, 실제 UART 전송은 새 `kSerialTxVector`
+(`0xE6`, `RM-28225668` §3에 신규 등록, COM1 IRQ4를
+`IoApic::setRedirectionForIsaIrq`로 라우팅 - `timer.cpp`의 legacy
+PIT 배선과 동일 패턴) 인터럽트 핸들러가 비동기로 처리한다.
+**중요 발견**: panic/NMI/워치독 진단 덤프(`idt.cpp`/`scheduler.cpp`
+의 essential-service-died 경로)는 이 호출 직후 인터럽트를 영구히
+끄고 코어가 멈추므로, 그대로 비동기화하면 크래시 진단 로그 자체가
+유실될 뻔했다 - `Serial::writeSync()`(항상 동기 폴링)를 신설해 이
+경로들과 `Logger::fatal()`/`Logger::panic()`(`LoggingDriver::
+writeLine`에 `sync` 플래그 추가)만 분리했다. 겸사겸사
+`interrupt_subscription.cpp`의 `kIsFixedVector()`에서 발견한 기존
+드리프트(`0xE5`/`kAcpiSciVector` 누락, `0xE4` 사례와 같은 종류)도
+수정.
+
+**검증**: 표준 회귀 4종 클린, 시리얼 출력 무결성을 SMP1/SMP4 양쪽
+직접 확인(줄 비섞임/문자 손상 없음). dbgdriver 60회 재검증 -
+**여전히 1/60** - 통계적으로 이전(방향 A 이후 1/60)과 다르지 않지만,
+**잔여 1건의 정체는 이번에도 gWriteLock이 아니라 완전히 다른 락**
+이었다(gdb로 확인) - `rdi` 역추적 결과 `(anonymous namespace)::
+gPreemptiveQueues[2][0]._lock`(`async_task.cpp:240`, Push/Pull
+로드밸런싱 "preemptive" AsyncTask 큐, `SP-BF0B31B5`) - `AsyncTaskQueue`
+의 `_lock`은 `gLock`처럼 짧은 임계구역(리스트 push/pop만)이라
+`IrqSpinlock` 전환이 적합할 후보로 보인다.
+
+**패턴 확인**: `gLock`(방향 A로 해소) → `gWriteLock`(방향 E로 해소,
+단 다른 성격) → `gPreemptiveQueues[_]._lock`(신규 발견) - 매번
+"하나를 고치면 다음 락이 드러나는" 패턴이 세 번째로 반복됐다. 이제
+이 결함이 "특정 락 하나의 문제"가 아니라 **AsyncReactor/스케줄러
+핫패스에서 경합이 잦은 모든 plain `Spinlock` 인스턴스가 공유하는
+구조적 취약점**이라는 최초 우려(이 DC 최초 등록 시점의 "결정이
+필요한 지점" 서술)가 실측으로 뒷받침되는 것으로 보인다.
+
+## 참고 (추가)
+- commit `3a27b4b` - 방향(E) 실제 구현.
+- `minicore/kernel/async_task.cpp:180-227,240` - `AsyncTaskQueue`/
+  `gPreemptiveQueues` 정의(신규 발견된 잔여 락).
+- `RM-28225668` §3 - `kSerialTxVector`(`0xE6`) 신규 등록.
+
+---
 
 ## [gdb 확인, 2026-09-27, QU-2CEB2339 답변("gdb로 재확인해 계속 추적")] 잔여 1/60의 정체 확정 - gLock이 아니라 serial.cpp의 gWriteLock, 완전히 다른 메커니즘
 
