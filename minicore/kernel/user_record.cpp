@@ -1,5 +1,6 @@
 #include "user_record.h"
 
+#include "authmgr_client.h"
 #include "process.h"
 #include "timer.h"
 
@@ -154,6 +155,70 @@ ChannelError kSetuid(Process& caller, Uid targetUid) {
         return lookupFailure;
     }
     return ChannelError::PermissionDenied;
+}
+
+// [신규, 2026-09-28, DC-90A66932 (A) 채택] 위 kSetuid()가 캐시 미스로
+// ServiceUnavailable을 돌려주면, authmgr_client.h를 통해 authmgr에
+// LookupByUid로 비동기 질의해 캐시를 채운 뒤 kSetuid()를 다시 시도한다
+// - 동시 호출은 고정 연결 하나를 공유하므로 kAuthmgrClientLock()/
+// Unlock()으로 반드시 직렬화한다(연결 자체는 authmgr_client.cpp의
+// 전역 상태로 고정 유지 - 끊어지면 다음 호출이 자동 재연결 시도).
+AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw) {
+    auto* args = static_cast<SetuidArgs*>(argsRaw);
+
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+    SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+    if (!proc) {
+        args->error = ChannelError::NotFound;
+        co_return;
+    }
+
+    ChannelError result = kSetuid(*proc, args->targetUid);
+    if (result != ChannelError::ServiceUnavailable) {
+        args->error = result;
+        co_return;
+    }
+
+    kAuthmgrClientLock();
+    UserRecord fetched{};
+    bool queried = false;
+    AsyncTask* connectTask = kAuthmgrBeginConnect();
+    if (connectTask) {
+        // [실측으로 확정, 2026-09-28] 이 함수(kSetuidOnExecImpl)는 이
+        // 지점을 포함해 끝까지 `co_await`를 절대 쓰지 않는다 - 한 번이라도
+        // 진짜 C++ `co_await`로 정지하면 이 AsyncTask는 drainOnce()의
+        // coroutine-handle 재개 모드로 영구 전환되는데(async_task.cpp
+        // drainOnce() 문서 주석), 바로 아래
+        // `kAuthmgrWriteLookupRequest`/`kAuthmgrReadLookupResponse`가
+        // 내부적으로 쓰는 raw `AsyncTask::yield()`(스택풀 전용
+        // kContextSwitch)와 섞이면 이미 못 쓰게 된 재개 지점으로 잘못
+        // 점프해 실행이 중복/오염된다(setuidtest E2E 검증 중 응답 처리가
+        // 두 번 실행되는 것으로 실측 확인). 그렇다고 `co_await` 없이 단순
+        // `while (!done) AsyncTask::yield();`도 안 된다 - 아무도 이
+        // AsyncTask를 다시 큐에 넣어 주지 않아 첫 yield에서 영원히
+        // 멈춘다. `AsyncTaskAwaiter::await()`가 바로 이 조합(스택풀
+        // 모드 + "임의의 관계없는 AsyncTask 기다리기")을 위해 이미
+        // "매 yield 직전 스스로를 submitCompletion()으로 재제출"을
+        // 구현해 뒀으므로 그대로 재사용한다 - "코루틴 안에서 부르면
+        // 무한 대기"라는 그 클래스의 경고는 호출자 자신이 이미
+        // coroHandle 모드로 전환된 뒤에만 해당하고(Ext4Driver 사례),
+        // 이 함수는 그 상태에 절대 들어가지 않으므로 안전하다.
+        AsyncTaskAwaiter(connectTask).await();
+        kAuthmgrFinishConnect(connectTask);
+    }
+    if (kAuthmgrWriteLookupRequest(args->targetUid) && kAuthmgrReadLookupResponse(&fetched)) {
+        queried = true;
+    }
+    kAuthmgrClientUnlock();
+
+    if (!queried) {
+        args->error = ChannelError::ServiceUnavailable;
+        co_return;
+    }
+    UserRecordCache::insertOrUpdate(fetched);
+    args->error = kSetuid(*proc, args->targetUid);
+    co_return;
 }
 
 }  // namespace kernel

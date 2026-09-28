@@ -1,6 +1,7 @@
 #ifndef MINICORE_KERNEL_USER_RECORD_H
 #define MINICORE_KERNEL_USER_RECORD_H
 
+#include "async_task.h"
 #include "channel.h"
 #include "libkenv/permission.h"
 #include "libkenv/types.h"
@@ -72,6 +73,17 @@ public:
 // 어떤 uid가 캐시에 없어 판정을 끝까지 못 하는 경우)는
 // `ChannelError::ServiceUnavailable`.
 ChannelError kSetuid(Process& caller, Uid targetUid);
+
+// [신규, 2026-09-28, DC-90A66932 (A) 채택] `SetuidHandler::onExec()`의
+// 실제 구현 - 위 `kSetuid()`로 먼저 시도해 캐시 히트면 즉시 끝내고,
+// `ServiceUnavailable`(캐시 미스)이면 `authmgr_client.h`를 통해
+// authmgr에 비동기 질의해 캐시를 채운 뒤 다시 `kSetuid()`를 시도한다.
+// `process.cpp`의 `SetuidHandler::onExec()`가 이 함수를 그대로
+// 반환(위임)하는 방식으로 연결한다 - `AsyncExecCoro`는 다른
+// `AsyncExecCoro`를 `co_await`로 합성할 수 없다는 이 프로젝트의 기존
+// 제약(ext4/fat32 VFS 통합이 이미 겪음) 때문에, "코루틴을 co_await"가
+// 아니라 "코루틴 객체를 그대로 반환"하는 위임으로 연결한다.
+AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw);
 
 }  // namespace kernel
 

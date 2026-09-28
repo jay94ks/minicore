@@ -1,6 +1,7 @@
 #include "acpi.h"
 #include "address_space.h"
 #include "async_task.h"
+#include "authmgr_client.h"
 #include "boot_info.h"
 #include "channel.h"
 #include "debug_session.h"
@@ -1013,6 +1014,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     kSpawnServiceProcesses();
     kSpawnDevmgrKernelThread();
     kSpawnFsKernelThread();
+    // [신규, 2026-09-28, DC-90A66932 (B) 채택] authmgr 커널 전용 Channel
+    // 클라이언트의 전용 소유자 KernelThread도 devmgr/fs와 같은 시점에
+    // 스폰한다(authmgr_client.h 문서 주석 - "devmgr/fs와 동일한 패턴").
+    // 실제 연결 시도는 첫 Setuid 캐시 미스 때 지연 수행되므로 이 시점에
+    // AsyncReactor 워커가 아직 없어도 안전하다.
+    kernel::kInitAuthmgrClient();
+    kernel::Logger::info("minicore: authmgr channel client owner spawned (Process-less)");
     // [신규, 2026-09-27, PN-D4F7BB66] devmgr/fs와 같은 시점(Smp::
     // startApCores() 이후, gCoreCount 확정 이후) - 코어마다
     // kAsyncReactorsPerCore개의 전용 AsyncReactor KernelThread를

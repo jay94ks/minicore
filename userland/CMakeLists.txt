@@ -139,3 +139,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/authtest ${CMAKE_CURREN
 # 그대로 재사용해 짝을 이룬다 - minicore/epolltest/main.cpp 상단
 # 주석 참고. **socktest와 같은 부팅 훅에 절대 함께 켜지 않는다.**
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/epolltest ${CMAKE_CURRENT_BINARY_DIR}/minicore-epolltest)
+
+# setuidtest(DC-90A66932 (A), authmgr_client.h 커널 전용 Channel
+# 클라이언트의 캐시미스 왕복 E2E 검증) - authtest와 동일한 이유의
+# out-of-tree add_subdirectory - kmain.cpp의 TEMP 스폰 경로로
+# 이름("setuidtest")이 매치돼 부팅 시 자동 실행된다(minicore/setuidtest/
+# main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/setuidtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-setuidtest)

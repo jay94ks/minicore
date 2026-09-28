@@ -42,6 +42,7 @@ add_library(minicore_kernel OBJECT
     epoll.cpp
     process.cpp
     user_record.cpp
+    authmgr_client.cpp
     debug_session.cpp
     address_space.cpp
     tlb_shootdown.cpp

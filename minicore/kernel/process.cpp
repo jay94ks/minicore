@@ -1850,24 +1850,18 @@ public:
 DetachHandler gDetachHandler;
 
 // [신규, 2026-09-23, SP-30FCC8AE §1-A, PN-B6DB692C] `Setuid` 본체 -
-// DetachHandler와 동일한 논블로킹 패턴(이번 증분은 캐시만 보고
-// authmgr 비동기 질의를 안 하므로 co_await 없이 즉시 끝남).
+// 캐시 히트면 즉시 끝나고, 캐시 미스면 authmgr에 비동기 질의해 캐시를
+// 채운 뒤 재시도한다(DC-90A66932 (A) 채택 - 실제 구현은 아래 위임 참고).
 class SetuidHandler : public AsyncTaskHandler {
 public:
-    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
-        auto* args = static_cast<SetuidArgs*>(argsRaw);
-
-        SharedPtr<Task> submitter = task->submitterTask.lock();
-        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
-        SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
-        if (!proc) {
-            args->error = ChannelError::NotFound;
-            co_return;
-        }
-
-        args->error = kSetuid(*proc, args->targetUid);
-        co_return;
-    }
+    // [갱신, 2026-09-28, DC-90A66932 (A) 채택] 캐시 미스 시 authmgr에
+    // 비동기 질의하는 로직이 추가되면서 user_record.cpp의
+    // kSetuidOnExecImpl()로 옮겨졌다 - AsyncExecCoro는 다른
+    // AsyncExecCoro를 co_await로 합성할 수 없다는 기존 제약(ext4/fat32가
+    // 이미 겪음) 때문에 co_await가 아니라 반환값 위임으로 연결한다
+    // (onExec 자신은 co_await를 전혀 쓰지 않으므로 이 위임 자체는
+    // 코루틴 합성이 아니다).
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override { return kSetuidOnExecImpl(task, argsRaw); }
     void onFailure(AsyncTask*) override {}
     void onCancel(AsyncTask*, void*) override {}
 };

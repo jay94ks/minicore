@@ -833,10 +833,10 @@ struct DetachArgs {
 
 // [신규, 2026-09-23, SP-30FCC8AE §1-A, PN-B6DB692C] `Setuid`
 // (RM-48E1E610 그룹0 #11) - user_record.h의 `kSetuid()`를 그대로
-// 감싼 논블로킹 syscall(이번 증분은 authmgr 비동기 질의를 아직
-// 배선하지 않아 캐시만 보므로 co_await 없이 즉시 끝난다 - 다음
-// 증분이 캐시 미스 경로를 authmgr Channel IPC로 확장하면 그때
-// 블로킹으로 바뀔 수 있다).
+// 감싼 syscall. 캐시 히트면 즉시 끝나고, 캐시 미스면 `authmgr_client.h`
+// 를 통해 authmgr에 비동기 질의해 캐시를 채운 뒤 재시도한다(DC-90A66932
+// (A) 채택, kSetuidOnExecImpl 참고) - 캐시 미스 경로는 busy-yield로
+// 블로킹한다.
 constexpr SyscallEndpointId kSyscallEndpointSetuid = kMakeSyscallEndpointId(0, 11);
 
 struct SetuidArgs {

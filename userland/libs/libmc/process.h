@@ -1,6 +1,7 @@
 #ifndef USERLAND_LIBS_LIBMC_MC_PROCESS_H
 #define USERLAND_LIBS_LIBMC_MC_PROCESS_H
 
+#include "libmc/pnp.h"  // mc::ChannelError(SetuidArgs::error용, channel.h와 동일한 재사용 관례)
 #include "libmc/syscall.h"
 #include "libmc/types.h"
 
@@ -98,6 +99,19 @@ struct CreateThreadArgs {
     // out
     ThreadId threadId = kInvalidThreadId;
     CreateThreadError error = CreateThreadError::None;
+};
+
+// [신규, 2026-09-28, DC-90A66932 (A) 채택] process.h의
+// kSyscallEndpointSetuid(그룹0.call11)와 동일한 값 - 이 커널 최초의
+// 실제 유저랜드 Setuid 소비자(minicore/setuidtest, authmgr 캐시미스
+// 왕복 E2E 검증용)를 위해 추가.
+constexpr SyscallEndpointId kSyscallEndpointSetuid = kMakeSyscallEndpointId(0, 11);
+
+// kernel::SetuidArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
+struct SetuidArgs {
+    uint32_t targetUid = 0;  // in
+    // out
+    ChannelError error = ChannelError::None;
 };
 
 }  // namespace mc
