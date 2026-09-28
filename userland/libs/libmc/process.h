@@ -145,6 +145,21 @@ struct CreateUserArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-29, DC-2B22FBF0 답변("(A-2) 조상-자손 규칙 재사용")
+// 반영] process.h의 kSyscallEndpointGrantSudoPermission(그룹0.call13)과
+// 동일한 값 - authmgr에 직접 Channel로 GrantSudoPermission을 보내는
+// 대신(무검증), 커널이 caller uid 기준 조상-자손 판정을 마친 뒤 대신
+// 요청하게 하는 새 문(CreateUser와 대칭).
+constexpr SyscallEndpointId kSyscallEndpointGrantSudoPermission = kMakeSyscallEndpointId(0, 13);
+
+// kernel::GrantSudoPermissionArgs와 바이트 단위로 정확히 같은 필드
+// 순서/타입.
+struct GrantSudoPermissionArgs {
+    uint32_t targetUid = 0;  // in - 호출자가 이 uid로 sudo/su할 자격을 얻는다
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_PROCESS_H

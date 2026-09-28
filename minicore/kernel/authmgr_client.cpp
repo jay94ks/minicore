@@ -501,4 +501,36 @@ bool kAuthmgrCreateUser(const UserRecord& record) {
     return response.error == 0;
 }
 
+// [신규, 2026-09-29, DC-2B22FBF0 답변 반영] GrantSudoPermission 요청 -
+// kAuthmgrCheckSudoPermission과 완전히 동일한 와이어 모양
+// (WireSudoPermissionRequestBody, 응답 본문 없음).
+bool kAuthmgrGrantSudoPermission(Uid callerUid, Uid targetUid) {
+    WireRequestHeader header{};
+    header.header.totalLength = sizeof(WireRequestHeader) + sizeof(WireSudoPermissionRequestBody);
+    header.header.frameKind = WireFrameKind::Request;
+    header.requestType = WireRequestType::GrantSudoPermission;
+    WireSudoPermissionRequestBody body{};
+    body.callerUid = callerUid;
+    body.targetUid = targetUid;
+
+    uint8_t buf[sizeof(WireRequestHeader) + sizeof(WireSudoPermissionRequestBody)];
+    memcpy(buf, &header, sizeof(header));
+    memcpy(buf + sizeof(header), &body, sizeof(body));
+    if (!kAuthmgrWriteAll(buf, sizeof(buf))) {
+        return false;
+    }
+
+    WireResponseHeader response{};
+    if (!kAuthmgrReadAll(reinterpret_cast<uint8_t*>(&response), sizeof(response))) {
+        return false;
+    }
+    if (response.header.frameKind != WireFrameKind::Response ||
+        response.requestType != WireRequestType::GrantSudoPermission ||
+        response.header.totalLength != sizeof(WireResponseHeader)) {
+        gAuthmgrBridge.reset();
+        return false;
+    }
+    return response.error == 0;
+}
+
 }  // namespace kernel

@@ -109,6 +109,16 @@ bool kAuthmgrCheckSudoPermission(Uid callerUid, Uid targetUid);
 // (응답 본문 없음, error 하나뿐). 통신 오류는 false(실패)로 접는다.
 bool kAuthmgrCreateUser(const UserRecord& record);
 
+// [신규, 2026-09-29, DC-2B22FBF0 답변("(A-2) 조상-자손 규칙 재사용")
+// 반영] authmgr의 sudo 화이트리스트에 (callerUid, targetUid) 쌍을
+// 등록해 달라고 요청한다 - 이 함수를 부르는 시점엔 이미 호출부
+// (user_record.cpp의 kGrantSudoPermissionOnExecImpl)가 callerUid
+// 기준 조상-자손 판정을 끝낸 뒤다(권한 판정은 커널 책임, authmgr은
+// 그대로 실행만 - CreateUser와 완전히 동일한 신뢰 모델).
+// kAuthmgrCheckSudoPermission과 동일한 write+read 왕복 모양(응답
+// 본문 없음, error 하나뿐). 통신 오류는 false(실패)로 접는다.
+bool kAuthmgrGrantSudoPermission(Uid callerUid, Uid targetUid);
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_AUTHMGR_CLIENT_H

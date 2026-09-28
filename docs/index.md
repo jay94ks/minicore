@@ -12,7 +12,7 @@
 | [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
-| [DC-2B22FBF0](./DC-2B22FBF0.md) | authmgr GrantSudoPermission 권한 검사 - 누구나 임의 (callerUid,targetUid) 쌍을 sudo 화이트리스트에 등록 가능 | review | 2026-09-28T15:20:42.491Z |
+| [DC-2B22FBF0](./DC-2B22FBF0.md) | authmgr GrantSudoPermission 권한 검사 - 누구나 임의 (callerUid,targetUid) 쌍을 sudo 화이트리스트에 등록 가능 | approved | 2026-09-28T17:26:48.790Z |
 | [DC-2CB9DDA0](./DC-2CB9DDA0.md) | DC-54D69BEE 방향(B) 적용 후에도 dbgdriver는 9/60(15%) 재현 - 캐스케이딩 gLock 데드락 하드닝 방향 결정 요청 | approved | 2026-09-28T13:40:05.514Z |
 | [DC-34764C25](./DC-34764C25.md) | sudo/su 메커니즘(SP-30FCC8AE §1-B/SP-CC1CF30E §7) - 5개 세부 결정 필요 | approved | 2026-09-28T13:59:23.269Z |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived | 2026-09-15T05:47:02.266Z |
@@ -65,8 +65,8 @@
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-27T11:39:19.768Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-28T16:21:15.088Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-28T16:20:45.561Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-28T17:27:59.627Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-28T17:26:19.284Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-28T02:28:35.965Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-26T14:53:45.979Z |
@@ -121,7 +121,7 @@
 | [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | approved | 2026-09-22T07:19:02.888Z |
 | [SP-A252E82F](./SP-A252E82F.md) | 인터럽트 컨텍스트 재설계 - 회피 불가능한 예외만 IST로 격리, 일반 인터럽트는 단일 스택 통일, gInterruptDepth 폐기 | approved | 2026-09-21T23:03:58.039Z |
 | [SP-A658A124](./SP-A658A124.md) | libvfat — FAT32/16 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-23T00:51:34.903Z |
-| [SP-A7479F83](./SP-A7479F83.md) | timerfd/signalfd - epoll 호환 타이머/시그널 fd — 설계 제안 | approved | 2026-09-26T15:09:31.943Z |
+| [SP-A7479F83](./SP-A7479F83.md) | timerfd/signalfd - epoll 호환 타이머/시그널 fd — 설계 제안 | approved | 2026-09-28T17:11:16.650Z |
 | [SP-AA6DF406](./SP-AA6DF406.md) | libntfs — NTFS 온디스크 포맷 읽기 라이브러리 설계 (1차 증분: 읽기 전용) | approved | 2026-09-22T06:19:30.570Z |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-17T20:01:50.983Z |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |

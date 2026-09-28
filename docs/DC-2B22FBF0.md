@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-2B22FBF0
-  status: review
-  updatedAt: 2026-09-28T15:20:42.491Z
+  status: approved
+  updatedAt: 2026-09-28T17:26:48.790Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -87,17 +87,66 @@ syscall(그룹0 call13, `RM-48E1E610` 다음 미사용 번호)로 노출하고
 구체적으로 필요해지는 시점까지 이 결정을 미룬다. `PN-812A139B` 본문이
 이미 이 선택지도 유효하다고 적어 뒀다.
 
+## [답변, 2026-09-28, `QU-74FC561E`] (A-2) 조상-자손 규칙 재사용 채택
+
+설계자 답변: "(A-2) 조상-자손 규칙 재사용" - `GrantSudoPermission`을
+`CreateUser`와 대칭인 커널 중개 syscall(그룹0 call13,
+`RM-48E1E610` 다음 미사용 번호)로 노출하고, 허용 판정은
+`kIsDescendantUser`(`DC-CC83F7BE`가 `CreateUser`에 쓴 것과 동일한
+tree-walk)를 그대로 재사용한다 - callerUid가 root이거나
+targetUid의 조상이면 허용. 비-root가 자기 자손에게 임의 targetUid로
+승격할 sudo 권한을 부여할 수 있게 되는 것이 이 답변으로 의도적으로
+확정됐다(§ "왜 지금 결정이 필요한가"가 제기했던 우려에 대한 명시적
+답변).
+
+착수 세션은 `kernel::authmgr_client.h`에 `kAuthmgrCreateUser()`/
+`kAuthmgrCheckSudoPermission()`과 같은 패턴으로
+`kAuthmgrGrantSudoPermission()`을 추가하고, 새 `GrantSudoPermission`
+syscall 핸들러가 `kIsDescendantUser(callerUid, targetUid)`(root
+예외 포함) 판정을 통과했을 때만 이를 호출하도록 구현하면 된다.
+
+## [구현+실측 검증 완료, 2026-09-29]
+
+설계자 답변("(A-2) 조상-자손 규칙 재사용") 반영해 구현 완료.
+`kSyscallEndpointGrantSudoPermission`(그룹0 call13) 신설 -
+`GrantSudoPermissionHandler`(process.cpp)가
+`kGrantSudoPermissionOnExecImpl`(user_record.cpp)로 위임
+(`CreateUserHandler`/`kCreateUserOnExecImpl`과 완전히 동일한 패턴).
+권한 판정은 `kIsDescendantUser(proc->uid, args->targetUid)` -
+callerUid(=caller 자신의 실제 uid)가 root이거나 targetUid의 조상일
+때만 authmgr에 (callerUid, targetUid) 쌍 등록을 대신 요청한다
+(`kAuthmgrGrantSudoPermission()`, authmgr_client.h 신설 - 기존
+`kAuthmgrCheckSudoPermission()`과 동일한 와이어 왕복 모양).
+
+`minicore/granttest`(신규, 영구 보존)로 3가지 시나리오 실측 검증:
+(1) root가 임의 targetUid에 대해 GrantSudoPermission - 허용, (2)
+비-root(uid80)가 자기 직계 자식(uid82)에 대해 GrantSudoPermission -
+허용, (3) 비-root(uid80)가 무관한 uid(uid83, 80의 자손이 아님)에
+대해 시도 - `PermissionDenied`(권한 상승 회귀 없음 확인). 부팅 경합
+재시도(lrutest/createusertest와 동일 패턴) 적용 후 GRUB SMP4에서
+4회 연속 통과, 기대값을 의도적으로 틀리게 바꾼 음성 대조군에서도
+정직하게 실패 코드 반환 확인. 표준 회귀 3종(PVH/GRUB SMP1/SMP4)
+클린. TEMP 스폰/진단 훅은 검증 직후 완전히 원복(`git status` 클린).
+
+**의도적으로 남긴 잔여 공백**(CreateUser와 동일한 이유) - authmgr의
+raw Channel(이름 "authmgr")에 직접 연결해 GrantSudoPermission을
+보내는 경로는 여전히 무검증이다. 설계자가 (A)를 선택하고 (B)(Channel
+레벨 peer 신원 첨부)를 선택하지 않았으므로, 이 syscall은 "올바른
+문"을 새로 만든 것이지 "예전 문을 잠근" 것은 아니다.
+
+`PN-812A139B`가 이걸로 완료됐다.
+
 ## 참고
 
-- `PN-812A139B`(scheduled) - 이 공백을 사후 등록한 계획.
+- `PN-812A139B`(completed) - 이 공백을 사후 등록한 계획.
 - `DC-CC83F7BE`(approved, 구현 완료) - `CreateUser`의 동일한 구조적
   문제를 해결한 선례((A) 채택, 조상-자손 규칙).
 - `DC-34764C25`(approved) - `GrantSudoPermission`/`CheckSudoPermission`을
   최초로 도입한 결정(항목1).
 - `minicore/kernel/authmgr_client.h` - `kAuthmgrCheckSudoPermission()`/
-  `kAuthmgrCreateUser()`, (A)가 재사용할 기존 패턴.
+  `kAuthmgrCreateUser()`/`kAuthmgrGrantSudoPermission()`(신규),
+  (A)가 재사용한 기존 패턴.
 - `userland/libs/libmc/authmgr.h` - `GrantSudoPermission` 요청/
   `AuthmgrSudoPermissionRequestBody` 실제 와이어 정의.
-- `RM-48E1E610` 그룹0(Process) - 다음 미사용 call 13((A) 채택 시
-  `GrantSudoPermission`이 예약할 번호).
+- `RM-48E1E610` 그룹0(Process) call13 - 구현 완료로 갱신.
 

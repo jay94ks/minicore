@@ -893,6 +893,26 @@ struct CreateUserArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-29, DC-2B22FBF0 답변("(A-2) 조상-자손 규칙 재사용")
+// 반영] `GrantSudoPermission`(RM-48E1E610 그룹0 다음 미사용 번호) -
+// authmgr의 `AuthmgrRequestType::GrantSudoPermission`을 유저랜드가
+// 직접 두드리는 대신, `CreateUser`와 완전히 대칭적인 커널 중개
+// 방식으로 노출한다 - caller의 실제 `Process::uid`가 root이거나
+// `targetUid`의 조상(`kIsDescendantUser`)일 때만 sudo 화이트리스트에
+// (callerUid, targetUid) 쌍을 등록한다. callerUid는 args에 담지
+// 않는다(유저가 자기 자신 아닌 값을 주장할 수 없도록 - CreateUser의
+// parentUid와 달리 이건 "누가 요청했는지" 자체이므로 커널이 아는
+// caller uid를 그대로 쓴다). **알려진 잔여 공백** - CreateUser와
+// 동일한 이유로 authmgr 자신의 raw Channel GrantSudoPermission
+// 요청은 여전히 무검증이다.
+constexpr SyscallEndpointId kSyscallEndpointGrantSudoPermission = kMakeSyscallEndpointId(0, 13);
+
+struct GrantSudoPermissionArgs {
+    Uid targetUid = kRootUid;  // in - 호출자가 이 uid로 sudo/su할 자격을 얻는다
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 // [신규, 2026-09-18, PN-44C91D6E, SP-6BEAE0C1] `fork()` - 이 syscall만
 // `int 0x80` 경로에서 유일하게 지원된다(`syscall` 명령 경로는 SYSRET용
 // rcx/r11만 보존해 자식 재개에 필요한 나머지 GPR 스냅샷이 아예 없다 -

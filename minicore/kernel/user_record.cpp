@@ -282,4 +282,36 @@ AsyncExecCoro kCreateUserOnExecImpl(AsyncTask* task, void* argsRaw) {
     co_return;
 }
 
+// [신규, 2026-09-29, DC-2B22FBF0 답변("(A-2) 조상-자손 규칙 재사용")
+// 반영] kCreateUserOnExecImpl과 완전히 같은 골격 - callerUid는 args가
+// 아니라 커널이 아는 실제 submitter Process::uid를 쓴다(CreateUser의
+// parentUid 자리에 targetUid를 그대로 대입한 것과 동치 - "callerUid가
+// root이거나 targetUid의 조상일 때만 허용"이라는 설계자 답변과
+// kIsDescendantUser의 기존 의미가 정확히 일치한다).
+AsyncExecCoro kGrantSudoPermissionOnExecImpl(AsyncTask* task, void* argsRaw) {
+    auto* args = static_cast<GrantSudoPermissionArgs*>(argsRaw);
+
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+    SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+    if (!proc) {
+        args->error = ChannelError::NotFound;
+        co_return;
+    }
+
+    if (proc->uid != kRootUid) {
+        ChannelError lookupFailure = ChannelError::None;
+        if (!kIsDescendantUser(proc->uid, args->targetUid, &lookupFailure)) {
+            args->error = lookupFailure != ChannelError::None ? lookupFailure : ChannelError::PermissionDenied;
+            co_return;
+        }
+    }
+
+    kAuthmgrClientLock();
+    const bool granted = kAuthmgrEnsureConnected() && kAuthmgrGrantSudoPermission(proc->uid, args->targetUid);
+    kAuthmgrClientUnlock();
+    args->error = granted ? ChannelError::None : ChannelError::ServiceUnavailable;
+    co_return;
+}
+
 }  // namespace kernel

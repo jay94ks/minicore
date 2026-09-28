@@ -109,6 +109,13 @@ AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw);
 // AsyncTaskAwaiter와의 dispatch-mode 혼용 금지, DC-90A66932 참고).
 AsyncExecCoro kCreateUserOnExecImpl(AsyncTask* task, void* argsRaw);
 
+// [신규, 2026-09-29, DC-2B22FBF0 답변("(A-2) 조상-자손 규칙 재사용")
+// 반영] `GrantSudoPermissionHandler::onExec()`의 실제 구현 -
+// kCreateUserOnExecImpl과 완전히 같은 패턴(caller의 실제 Process::uid로
+// root-또는-조상 판정, 통과하면 authmgr_client.h로 대신 요청). 같은
+// 이유로 co_await를 쓰지 않는다.
+AsyncExecCoro kGrantSudoPermissionOnExecImpl(AsyncTask* task, void* argsRaw);
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_USER_RECORD_H
