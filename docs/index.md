@@ -8,12 +8,13 @@
 | [DC-01434F82](./DC-01434F82.md) | 비동기 프레임워크(SP-F682B889) 세부 결정 미정 | archived | 2026-09-15T05:46:52.264Z |
 | [DC-06FC78E8](./DC-06FC78E8.md) | PN-584DB994 근본 원인 확정 - onTick()/onForcedMigration()의 EOI~kContextSwitchFromISR 창이 자기 자신에 대해 재진입 보호가 없음 - 수정 설계 확인 요청 | approved | 2026-09-20T14:30:21.387Z |
 | [DC-0CC88ABB](./DC-0CC88ABB.md) | HPET 없는 환경에서 스케줄러 LAPIC 틱과 Timer 전역 틱의 하드웨어 소유권 충돌 | archived | 2026-09-15T05:47:07.531Z |
-| [DC-1526389A](./DC-1526389A.md) | sudo/su S 비트 exec-time 승격 - VFS에 파일 소유자(uid/mode) 메타데이터가 아예 없음(착수 전 구조적 공백 발견) | review | 2026-09-28T08:55:10.545Z |
+| [DC-1526389A](./DC-1526389A.md) | sudo/su S 비트 exec-time 승격 - VFS에 파일 소유자(uid/mode) 메타데이터가 아예 없음(착수 전 구조적 공백 발견) | approved | 2026-09-28T13:53:33.057Z |
 | [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
-| [DC-2CB9DDA0](./DC-2CB9DDA0.md) | DC-54D69BEE 방향(B) 적용 후에도 dbgdriver는 9/60(15%) 재현 - 캐스케이딩 gLock 데드락 하드닝 방향 결정 요청 | review | 2026-09-27T14:28:40.633Z |
-| [DC-34764C25](./DC-34764C25.md) | sudo/su 메커니즘(SP-30FCC8AE §1-B/SP-CC1CF30E §7) - 5개 세부 결정 필요 | review | 2026-09-28T05:26:32.003Z |
+| [DC-2B22FBF0](./DC-2B22FBF0.md) | authmgr GrantSudoPermission 권한 검사 - 누구나 임의 (callerUid,targetUid) 쌍을 sudo 화이트리스트에 등록 가능 | review | 2026-09-28T15:20:42.491Z |
+| [DC-2CB9DDA0](./DC-2CB9DDA0.md) | DC-54D69BEE 방향(B) 적용 후에도 dbgdriver는 9/60(15%) 재현 - 캐스케이딩 gLock 데드락 하드닝 방향 결정 요청 | approved | 2026-09-28T13:40:05.514Z |
+| [DC-34764C25](./DC-34764C25.md) | sudo/su 메커니즘(SP-30FCC8AE §1-B/SP-CC1CF30E §7) - 5개 세부 결정 필요 | approved | 2026-09-28T13:59:23.269Z |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived | 2026-09-15T05:47:02.266Z |
 | [DC-427BB6B2](./DC-427BB6B2.md) | 부트 경로 구현 착수 순서 및 부트로더 구현 방식 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-47000304](./DC-47000304.md) | DebugGetRegisters/SetRegisters - 정지된 유저 Task의 전체 레지스터 스냅숏 위치 미확정 | approved | 2026-09-17T09:33:30.400Z |
@@ -29,7 +30,7 @@
 | [DC-6E2500A6](./DC-6E2500A6.md) | 커널 ↔ 커널 서비스 전용 고속 통신 채널 - 결정 요구사항 | archived | 2026-09-16T00:33:55.662Z |
 | [DC-79A2387A](./DC-79A2387A.md) | 커널 C++ 런타임/코딩 컨벤션 세부 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-8EA1E7F6](./DC-8EA1E7F6.md) | 스케줄러: 프로세스/스레드 모델 및 컨텍스트 스위칭 구조 미정 | archived | 2026-09-16T19:03:38.956Z |
-| [DC-90A66932](./DC-90A66932.md) | 커널이 authmgr에 캐시미스 시 보내는 비동기 질의 - Channel 연결 수명주기 결정 필요(커널이 Channel 클라이언트가 되는 최초 사례) | approved | 2026-09-28T05:03:31.737Z |
+| [DC-90A66932](./DC-90A66932.md) | 커널이 authmgr에 캐시미스 시 보내는 비동기 질의 - Channel 연결 수명주기 결정 필요(커널이 Channel 클라이언트가 되는 최초 사례) | approved | 2026-09-28T14:04:55.840Z |
 | [DC-91ABD922](./DC-91ABD922.md) | devmgr/fs를 유저랜드 프로세스에서 커널로 흡수 - 범위/방식 미정 | approved | 2026-09-22T07:19:54.448Z |
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
@@ -70,7 +71,7 @@
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-26T14:53:45.979Z |
 | [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-26T14:58:25.400Z |
-| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-27T14:11:28.101Z |
+| [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-28T14:10:17.059Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-22T02:13:51.590Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-19T01:32:40.139Z |
 | [SP-0666DB3C](./SP-0666DB3C.md) | 커널 동기화 프리미티브(Mutex/Semaphore) 및 Signal 전달 — 설계 제안 | approved | 2026-09-22T01:55:07.723Z |
@@ -78,7 +79,7 @@
 | [SP-1DB13F61](./SP-1DB13F61.md) | 가상 함수(vtable) 타입의 슬랩 할당 초기화 관례 - placement new 예외 설계 제안 | approved | 2026-09-16T16:48:17.214Z |
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-21T20:00:11.552Z |
 | [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
-| [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-26T15:08:59.108Z |
+| [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-28T13:41:54.366Z |
 | [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | approved | 2026-09-22T02:14:20.261Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-22T01:15:53.326Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-17T08:01:20.217Z |
@@ -109,7 +110,7 @@
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved | 2026-09-21T23:30:25.605Z |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | approved | 2026-09-21T14:43:57.320Z |
 | [SP-8D206F11](./SP-8D206F11.md) | Minicore CPU 캐시 관리 정책 | approved | 2026-09-18T13:06:14.505Z |
-| [SP-9039F955](./SP-9039F955.md) | VFS 파일 소유자/모드(uid/gid/mode) 메타데이터 + Chmod/Chown + EXEC_SETUID | review | 2026-09-28T08:04:21.929Z |
+| [SP-9039F955](./SP-9039F955.md) | VFS 파일 소유자/모드(uid/gid/mode) 메타데이터 + Chmod/Chown + EXEC_SETUID | approved | 2026-09-28T13:53:25.515Z |
 | [SP-94C6A764](./SP-94C6A764.md) | PageFrame 캐시 타입 불일치(PAT aliasing) 처리 정책 — 설계 제안 (SP-6CEFBE9B §3 후속, PN-81223433) | approved | 2026-09-26T09:36:23.181Z |
 | [SP-94CD958D](./SP-94CD958D.md) | systemd 포팅 준비 사전조사 | review | 2026-09-26T14:13:03.798Z |
 | [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-17T12:27:37.052Z |

@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-27T14:11:28.101Z
+  updatedAt: 2026-09-28T14:10:17.059Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2322,7 +2322,34 @@ DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영�
 **결론: 갭 없음** - 문서 자체에 이미 devmgr/fs 역할 관련 자기 정정
 각주(2026-09-24)가 있어 그 부분은 별도 처리 불필요.
 
+## §1-V. [발견, 2026-09-28] `SP-9039F955`(VFS 소유자/모드+Chmod/Chown+EXEC_SETUID, approved) - §4가 확정한 항목 중 일부가 아직 미구현(이미 자체 추적 중이라 정보만 교차 기록)
+
+`DC-1526389A`(commit `acf8b91`)가 이 설계의 핵심(uid/gid/mode
+메타데이터 확장, Chmod/Chown syscall 그룹3 call15/16, EXEC_SETUID
+승격 로직)을 구현+livefs 경로 실측까지 완료했다. 다만 이 문서 §4가
+제안한 항목 중 다음은 미구현으로 남아 있다 - `PN-2A0981B7`(scheduled)
+로 이미 정확히 추적 중이라 순수 교차 참조 목적:
+
+- exFAT/NTFS의 실제 Chmod 쓰기 경로(둘 다 지금은 `NotSupported`).
+- ext4/FAT류 Stat/Chmod/Chown의 디스크 이미지 기반 실측 검증
+  (이번 증분은 livefs 경로만 검증).
+- EXEC_SETUID 승격 경로 자체의 E2E 검증(구현은 완료, 실제 S 비트
+  파일로 SpawnProcess를 호출하는 테스트는 아직 없음).
+
+**은폐된 갭이 아니다** - 전부 `PN-2A0981B7` 본문이 "남은 항목"으로
+이미 정확히 열거해 뒀다.
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
+
+**[2026-09-28, minicore-3c 세션 갱신] `document_list(status=approved)`
+재확인 결과 §3 마지막 스윕 이후 approved 전환된 SP/DC 4건 발견** -
+`SP-9039F955`(VFS 소유자/모드+Chmod/Chown+EXEC_SETUID, 위 §1-V로
+기록)/`DC-1526389A`(같은 구현의 결정 문서, §1-V와 동일 대상이라
+중복 점검 생략)/`DC-34764C25`(sudo/su 5개 결정, 항목별로 이미
+개별 구현 완료 기록이 있어 별도 갭 없음)/`DC-2CB9DDA0`(dbgdriver
+캐스케이딩 gLock 하드닝, 여러 필드/단계/API를 나열하는 체크리스트형
+문서가 아니라 이 방법론의 대상 아님 - "해당 없음"). 다음 approved
+전환 시까지 이 §3 스윕은 다시 건너뛴다.
 
 **[2026-09-25, 갱신] `document_list(status=approved)` 재확인 결과
 `DC-F196028B` 이후 approved로 전환된 SP 4건 발견** -
@@ -2523,6 +2550,17 @@ bind)은 구현+실측 검증까지 완료했다(commit 9fb5180/bae84a0). 다만
 **은폐된 갭이 아니다** - `PN-CC0F4EAC` 본문 자신이 이 넷 전부를
 "남은 범위"로 이미 정확히 추적 중이다(이 문서 §0의 취지 그대로
 자체 추적이 이미 되고 있는 경우) - 이 항목은 순수 교차 참조 목적.
+
+**[정정, 2026-09-28]** 위 목록 중 §5(Shutdown)와 §6(fd 상속/소켓
+활성화)는 그 뒤 `PN-CC0F4EAC`가 실제로 구현+실측 검증까지 마치고
+`completed`로 전이됐다(항목7 E2E 15/15 무결함, 위 기록 시점엔 아직
+진행 중이었음) - 지금 실제로 미구현으로 남은 것은 §4-2 항목2/3
+(VFS 경로 bind/connect)와 Datagram 두 가지뿐이다. 또한 §4-1/§4-2가
+쓰던 `NamedObjectTable` 공유 방식 자체도 설계자 지시(`QU-0795993D`)로
+`SP-231493CB` §4를 재설계(전용 `SocketBindTable` + fd 테이블 투영)
+했다 - 구현은 여전히 옛 설계를 쓰고 있어(`PN-E310E23A`로 추적) 이
+문서가 앞으로 "코드 대조"를 다시 할 땐 옛 §4 서술이 아니라 갱신된
+§4를 기준으로 삼아야 한다.
 
 ## §1-U. [발견, 2026-09-27] `SP-6350DEBB`(epoll, approved) - 설계자
 Opinion이 명시적으로 v1 범위에 포함시킨 4항목이 실제 구현에서 전부
