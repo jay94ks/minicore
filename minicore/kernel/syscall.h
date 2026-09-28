@@ -61,7 +61,25 @@ constexpr uint8_t kSyscallCallOf(SyscallEndpointId id) {
 // userland/libs/libmc/syscall.cpp의 `for(;;){}` 스텁)이 이 종료
 // 시퀀스를 어떻게 트리거할지는 별도로 확인 필요(userland의 syscall
 // 트랩이 절대 ring3로 돌아가면 안 된다는 점이 일반 syscall과 다름).
+//
+// [갱신, 2026-09-29, PN-5EDE3C96 항목1, SP-76250478 §3.2 배선] 이제
+// exitCode를 실제로 쓴다 - 아래 `SelfTerminateArgs`(RSI가 가리키는
+// 유저 포인터)를 통해 명시적 `mc::selfTerminate(exitCode)` 호출에서
+// 커널까지 전달된다(`SelfTerminateThreadArgs`와 완전히 동일한 관례,
+// idt.cpp `kDispatchSyscallVerbBody`가 유저 포인터 검증 후 읽음).
+// 신호/미처리 예외로 인한 강제 종료(§3 항목1, `kCheckSignalCheckpoint`/
+// #PF·#UD 폴트 경로)는 여전히 exitCode=0 고정 - "강제종료 사유"를
+// exitCode 하나에 어떻게 인코딩할지는 이 증분의 범위 밖(PN-5EDE3C96
+// 참고, 실사용처가 생기면 후속 결정).
 constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpointId(0, 0);
+
+// SelfTerminate 인자 - `SelfTerminateThreadArgs`와 동일한 패턴(유일한
+// 입력은 exitCode 하나, out 파라미터 없음 - 호출부로 절대 안 돌아옴).
+// 유저가 널 포인터를 넘기거나(v1 기존 관례) 유효하지 않은 포인터를
+// 넘기면 방어적으로 exitCode=0 취급(idt.cpp 참고).
+struct SelfTerminateArgs {
+    int32_t exitCode = 0;
+};
 
 // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `SelfTerminate`
 // (위)의 스레드 전용 대칭(RM-48E1E610 그룹0 #9) - `SelfTerminate`는

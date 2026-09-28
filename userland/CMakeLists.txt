@@ -171,3 +171,11 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/createusertest ${CMAKE_
 # TEMP 스폰 경로로 이름("lrutest")이 매치돼 부팅 시 자동 실행된다
 # (minicore/lrutest/main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/lrutest ${CMAKE_CURRENT_BINARY_DIR}/minicore-lrutest)
+
+# exittest/exitwaiter(PN-5EDE3C96 항목1, Process::exitCode 배선 E2E
+# 검증) - sockinherit/sockinheritchild와 동일한 이유(exitwaiter가 진짜
+# SpawnProcess로 exittest를 직접 스폰하므로 둘 다 필요) - kmain.cpp의
+# TEMP 스폰 경로는 exitwaiter만 이름으로 매치한다(minicore/exitwaiter/
+# main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/exittest ${CMAKE_CURRENT_BINARY_DIR}/minicore-exittest)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/exitwaiter ${CMAKE_CURRENT_BINARY_DIR}/minicore-exitwaiter)

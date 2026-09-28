@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-28T14:10:17.059Z
+  updatedAt: 2026-09-28T15:51:36.593Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2339,6 +2339,36 @@ DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영�
 **은폐된 갭이 아니다** - 전부 `PN-2A0981B7` 본문이 "남은 항목"으로
 이미 정확히 열거해 뒀다.
 
+## §1-W. [발견 및 해소, 2026-09-29] `SP-76250478`(멀티스레드 유저 프로세스 지원, approved) §3.2 - "Process::exitCode는 마지막 스레드의 exitCode를 물려받는다"가 실제로는 미구현이었음(§4의 2026-09-18 "갭 없음" 점검이 §3.2를 누락한 사례)
+
+`PN-5EDE3C96`(`DC-90A66932` 검증 중 발견해 사후 등록한 계획) 항목1 -
+`scheduler.cpp`의 `kFinalizeProcessTermination()`이 `Process::exitCode`를
+호출부와 무관하게 항상 `0`으로 못박고 있었다(주석에 "후속 증분(Join
+완료 시점)에 배선한다"고 이미 스스로 적어 뒀던 자리). `mc::selfTerminate
+(exitCode)`도 그 인자를 아예 커널에 전달하지 않는 스텁이었다
+(`kSyscallEndpointSelfTerminate` args가 `Task*` 하나뿐이라 exitCode를
+실을 슬롯 자체가 없었음).
+
+**왜 §4의 기존 "갭 없음" 점검(2026-09-18)이 이걸 놓쳤는지**: 그 점검은
+§2.1/§2.2/§3 항목2-3/§3.1(총 4개 하위 절)이 각각 커밋으로 반영됐는지만
+대조했고, **§3.2("프로세스 자신의 좀비/exitCode와의 관계")는 그 목록에
+아예 없었다** - §3이 항목1/2/3 세 갈래로 나열되고 §3.2가 그 뒤에 별도
+소제목으로 붙어 있는 문서 구조상, "§3 항목1-3"까지만 훑고 그 아래
+§3.2를 별개 절로 착각해 건너뛴 것으로 보인다(RM 규칙 14가 경계하는
+"여러 필드/단계를 나열하는 문서의 뒷부분 항목 누락" 패턴과 정확히 같은
+모양 - 이번엔 필드가 아니라 소절 단위로 발생).
+
+**해소**: `kSyscallEndpointSelfTerminate`에 `SelfTerminateArgs{exitCode}`
+신설(`SelfTerminateThreadArgs`와 동일 패턴) + `kTaskOnFallingToEndWithCode()`
+경로로 유저 포인터의 exitCode를 실제로 읽어 `UserThread::exitCode`에
+심고, `kFinalizeProcessTermination()`이 그 값을 그대로 `Process::exitCode`에
+반영하도록 배선 완료(커밋 예정, `PN-5EDE3C96` 참고). `minicore/exittest`+
+`minicore/exitwaiter`(신규, 영구 보존)로 실제 SpawnProcess+Wait() 왕복을
+통해 exitCode=77이 정확히 전달됨을 실측 확인(음성 대조군 - 기대값을
+의도적으로 틀리게 바꿔 실패 코드가 정직하게 나오는 것까지 확인). 표준
+회귀 3종(PVH/GRUB SMP1/SMP4) 클린, TEMP 스폰/진단 훅은 검증 직후 완전히
+원복(`git status` 클린).
+
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
 **[2026-09-28, minicore-3c 세션 갱신] `document_list(status=approved)`
@@ -2635,7 +2665,8 @@ resourcegroupfs/ext4/FAT32/FAT16/exFAT/NTFS) 전부의 Stat 핸들러가
   가능성이 있는 항목이 **이번엔 미착수 상태로나마 openly 추적**된
   사례 - 이 문서(§4)의 목적이 실제로 작동함을 확인.
 
-- **[점검 완료, 2026-09-18, 갭 없음] `SP-76250478`(멀티스레드 유저
+- **[점검 완료, 2026-09-18, 갭 없음 - [정정, 2026-09-29] 실제로는 갭
+  있었음, §1-W 참고] `SP-76250478`(멀티스레드 유저
   프로세스 지원) → `PN-0EB2FABF`(completed)**: 예고했던 다섯 항목
   전부 커밋으로 반영됨을 `PN-0EB2FABF` 완료 기록으로 대조 확인 -
   §2.1(commit b0f2753, `Process::threads`/`ThreadId`/`UserThread`

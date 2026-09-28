@@ -642,6 +642,14 @@ constexpr kernel::uint64_t kSyscallVerbFork = 3;
 // 딜따 호출부만 존재).
 extern "C" void kTaskOnFallingToEnd();
 
+// [신규, 2026-09-29, PN-5EDE3C96 항목1] `kTaskOnFallingToEnd`(위)와 같은
+// 본문을 공유하지만 exitCode를 받는 버전(scheduler.cpp의
+// `kTaskOnFallingToEndImpl` 참고) - `SelfTerminate` 트랩 특별 취급(아래
+// kDispatchSyscallVerbBody)이 명시적 `mc::selfTerminate(exitCode)` 호출을
+// 처리할 때만 부른다. 자연 종료/신호/폴트 강제종료는 여전히 위
+// exitCode 없는 버전을 쓴다.
+extern "C" void kTaskOnFallingToEndWithCode(kernel::int32_t exitCode);
+
 // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `kTaskOnFallingToEnd`
 // 바로 위와 동일한 이유로 헤더 없이 직접 선언(scheduler.cpp 정의) -
 // `SelfTerminateThread` 트랩 특별 취급(아래 kDispatchSyscallVerbBody)이
@@ -778,7 +786,21 @@ uint64_t kDispatchSyscallVerbBody(uint64_t verb, uint64_t arg0, uint64_t arg1, k
             // 이 커널 스택을 회수할 때까지, 이 hlt 루프가 그 자리를
             // 지킨다(kTaskFallingToEndHalt와 동일한 역할).
             if (endpointId == kSyscallEndpointSelfTerminate) {
-                kTaskOnFallingToEnd();
+                // [신규, 2026-09-29, PN-5EDE3C96 항목1, SP-76250478 §3.2]
+                // exitCode를 유저 포인터(arg1)에서 읽는다 - 아래
+                // kSyscallEndpointSelfTerminateThread 분기와 완전히 동일한
+                // 패턴(SelfTerminateArgs, syscall.h 문서 주석 참고). 포인터가
+                // 없거나(v1 기존 관례, 0) 유효하지 않으면 방어적으로 0.
+                kernel::int32_t exitCode = 0;
+                auto* callerTask = kernel::Scheduler::currentTask();
+                if (arg1 != 0 && callerTask && callerTask->isUserLevel) {
+                    auto* callerThread = static_cast<kernel::UserThread*>(callerTask);
+                    if (kernel::Paging::isUserRangeValid(arg1, sizeof(kernel::SelfTerminateArgs),
+                                                          callerThread->userPml4Phys)) {
+                        exitCode = reinterpret_cast<kernel::SelfTerminateArgs*>(arg1)->exitCode;
+                    }
+                }
+                kTaskOnFallingToEndWithCode(exitCode);
                 // [수정, 2026-09-21, PN-1DFCB337] kCheckSignalCheckpoint와
                 // 동일한 이유 - frame이 있으면(int 0x80) parkFromISR로
                 // 이 인터럽트분의 카운터까지 정확히 닫는다.

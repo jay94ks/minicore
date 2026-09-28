@@ -922,7 +922,13 @@ void kResurrectSpawnTrampoline(void* arg) {
 // 코드를 순수 이동한 것뿐(동작 변화 없음, 두 번째 호출부가 생겨 뺐다).
 // `process->destroy()`(주소공간 반납)부터 고아 입양/좀비 마킹/essential
 // 패닉/resurrect 예약까지 전부 담당한다.
-void kFinalizeProcessTermination(SharedPtr<Process>& process) {
+//
+// [갱신, 2026-09-29, PN-5EDE3C96 항목1, SP-76250478 §3.2 "Process::exitCode는
+// 그 마지막 스레드의 exitCode를 그대로 물려받는다"] `exitCode` 파라미터
+// 신설 - 호출부가 이 프로세스를 실제로 끝낸 마지막 스레드의 exitCode를
+// 넘긴다(call0은 userThread->exitCode, call9은 이미 release()된 스레드의
+// exitCode를 release 직전에 캡처해 둔 값 - 아래 두 호출부 참고).
+void kFinalizeProcessTermination(SharedPtr<Process>& process, int32_t exitCode) {
     // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변("Process가 죽을 때
     // 커널은 그걸 감지할 수 있어. 그 때 그걸 정리하는 것으로 구현해")]
     // InterruptSubscriber::owner(interrupt_subscription.h)의 "종료 시
@@ -1002,14 +1008,11 @@ void kFinalizeProcessTermination(SharedPtr<Process>& process) {
     // 이 지역 변수 `process`가 스코프를 벗어나도 파괴되지 않는다.
     if (SharedPtr<Process> parent = process->parent.lock()) {
         process->isZombie = true;
-        // exitCode(§6) - 프로세스 트리 좀비의 exitCode는 여전히 0
-        // 고정이다(§6이 다루는 건 Process::exitCode, UserThread::
-        // exitCode - SelfTerminateThread가 기록하는 값, §3 항목2 - 와는
-        // 별개 축이라는 점이 이번 증분으로 더 분명해졌다. 프로세스
-        // exitCode에 실제 값을 물려주는 건 §3.2 "마지막 스레드의
-        // exitCode를 그대로 물려받는다"의 몫으로 후속 증분(Join 완료
-        // 시점)에 배선한다).
-        process->exitCode = 0;
+        // [갱신, 2026-09-29, PN-5EDE3C96 항목1] §3.2 "마지막 스레드의
+        // exitCode를 그대로 물려받는다" 배선 완료 - 이제 파라미터로
+        // 받은 값을 그대로 쓴다(호출부가 각자의 방식으로 마지막
+        // 스레드의 exitCode를 캡처해 넘긴다, 위 함수 문서 주석 참고).
+        process->exitCode = exitCode;
         // [신규, 2026-09-19, PN-485132FF, SP-68182FBD §4] 자식 종료를
         // 부모에게 실제로 통지한다 - `kCheckSignalCheckpoint()`(idt.cpp)
         // 가 이제 Kill/Terminate 전용 하드코딩이 아니라 dispositions[]를
@@ -1083,7 +1086,11 @@ public:
             // 이 핸들러(call0)는 언제나 무조건 프로세스 전체를 끝낸다
             // (POSIX `exit()` 의미, 다른 스레드가 살아있어도 무관 -
             // §3 항목1 미처리 예외/신호/자연 종료가 전부 이 경로).
-            kFinalizeProcessTermination(process);
+            // [갱신, 2026-09-29, PN-5EDE3C96 항목1] userThread는 아직
+            // release()되지 않았으므로 exitCode를 그대로 읽어 넘긴다
+            // (kTaskOnFallingToEndImpl/kThreadOnFallingToEnd가 이미
+            // 심어 둔 값 - 자연 종료/신호/폴트 강제종료는 0).
+            kFinalizeProcessTermination(process, userThread->exitCode);
         }
         co_return;
     }
@@ -1168,6 +1175,11 @@ public:
             // kFinalizeProcessTermination()의 순회로는 더 이상 안 잡힌다 -
             // release() 직전(포인터가 아직 유효할 때)에 직접 정리한다.
             InterruptSubscriptionService::releaseAllForTask(userThread);
+            // [신규, 2026-09-29, PN-5EDE3C96 항목1] release() 이후엔
+            // userThread가 슬랩에 반납돼 더 이상 읽으면 안 되므로, 이
+            // 스레드가 마지막 스레드일 경우에 대비해 exitCode를 미리
+            // 캡처해 둔다.
+            const int32_t lastExitCode = userThread->exitCode;
             UserThread::release(userThread);
             // 이 필드가 쥐고 있던 "joiner 몫" 하나를 내려놓는다(AsyncTask
             // 자신의 몫은 그 AsyncTask가 나중에 반납될 때 별도로 처리).
@@ -1183,7 +1195,7 @@ public:
             const bool anyThreadLeft = process->threads.find([](const SharedPtr<UserThread>&) { return true; }) !=
                                         nullptr;
             if (!anyThreadLeft) {
-                kFinalizeProcessTermination(process);
+                kFinalizeProcessTermination(process, lastExitCode);
             }
         } else if (userThread->detached) {
             // §3 항목3 - 좀비 단계를 건너뛰고 그 자리에서 즉시 회수.
@@ -1197,6 +1209,9 @@ public:
             // [신규, 2026-09-21, PN-4048116F, QU-5BC539E2 답변] 위 join 분기와
             // 동일한 이유 - release() 직전에 이 스레드가 owner인 구독을 정리한다.
             InterruptSubscriptionService::releaseAllForTask(userThread);
+            // [신규, 2026-09-29, PN-5EDE3C96 항목1] 위 join 분기와 동일한
+            // 이유 - release() 이후 참조를 피하기 위해 미리 캡처.
+            const int32_t lastExitCode = userThread->exitCode;
             UserThread::release(userThread);
 
             // [신규, 2026-09-18, SP-76250478 §3.2, PN-0EB2FABF] "프로세스의
@@ -1211,7 +1226,7 @@ public:
             const bool anyThreadLeft = process->threads.find([](const SharedPtr<UserThread>&) { return true; }) !=
                                         nullptr;
             if (!anyThreadLeft) {
-                kFinalizeProcessTermination(process);
+                kFinalizeProcessTermination(process, lastExitCode);
             }
         }
         // 좀비고 detached도 joinerAsyncTask도 없으면: `threads`에 그대로
@@ -2717,13 +2732,14 @@ extern "C" void kSyncCr3OnTaskStart() {
     }
 }
 
-// context_switch.S의 kTaskFallingToEnd(entry가 반환해 Task 실행이
-// 자연 종료되는 지점)가 호출한다 - PL-2D3184BC "Task 종료 프로토콜"
-// (QU-26F9420E 설계자 답변, 2026-09-14)의 두 분기를 그대로 구현한다.
-// 이 함수 자체가 반환하면(User-Level 분기) 호출부가 이어서 hlt
-// 루프로 들어간다 - Kernel-Level 분기(retireCurrentTask())는 절대
-// 반환하지 않는다.
-extern "C" void kTaskOnFallingToEnd() {
+// [신규, 2026-09-29, PN-5EDE3C96 항목1] kTaskOnFallingToEnd()/
+// kTaskOnFallingToEndWithCode()가 공유하는 실제 본문 - 유일한 차이는
+// exitCode 값뿐이다(kThreadOnFallingToEnd가 userThread->exitCode에
+// 심어 두는 것과 동일한 관례, 이쪽은 Task 자신이 아직 UserThread로
+// 캐스팅되기 전이라 이 함수 안에서 캐스팅한다 - isUserLevel 분기는
+// 항상 UserThread라는 기존 전제 그대로).
+namespace {
+void kTaskOnFallingToEndImpl(kernel::int32_t exitCode) {
     // [신규, 2026-09-19, PN-05162577] entry()가 막 반환한 이 시점부터
     // 아래에서 이 Task가 실제로 Zombie로 표시되거나(Kernel-Level) 자기
     // 종료 syscall 제출을 마치기(User-Level) 전까지, gCurrentTask/
@@ -2752,6 +2768,12 @@ extern "C" void kTaskOnFallingToEnd() {
         // 문서 주석 참고) - 그래야 잠시 뒤 이 Task가 스위칭되어 나갈
         // 때 `Scheduler::onTick()`이 라운드로빈 재삽입을 건너뛰어, 다시는
         // 이 Task가 pickNext에 뽑히지 않는다는 보장이 성립한다.
+        // [신규, 2026-09-29, PN-5EDE3C96 항목1, SP-76250478 §3.2] 나중에
+        // SelfTerminateHandler::onExec/kFinalizeProcessTermination가 읽을
+        // exitCode를 미리 심어 둔다 - kThreadOnFallingToEnd와 완전히
+        // 같은 이유(별도 힙 할당 없이 Task* 하나만 args로 넘기는 기존
+        // 관례를 그대로 재사용).
+        static_cast<kernel::UserThread*>(self)->exitCode = exitCode;
         // 자기종료 syscall은 wait 없이 제출만 하고(Syscall::
         // submitDetached - autoFree라 결과를 아무도 안 봐도 리액터가
         // 알아서 정리한다) 반환한다 - 리액터가 나중에 비동기적으로
@@ -2771,15 +2793,37 @@ extern "C" void kTaskOnFallingToEnd() {
     // 상태라 그저 무해한 재확인이다.
     kernel::Scheduler::retireCurrentTask();
 }
+}  // namespace
+
+// context_switch.S의 kTaskFallingToEnd(entry가 반환해 Task 실행이
+// 자연 종료되는 지점)가 호출한다 - PL-2D3184BC "Task 종료 프로토콜"
+// (QU-26F9420E 설계자 답변, 2026-09-14)의 두 분기를 그대로 구현한다.
+// 이 함수 자체가 반환하면(User-Level 분기) 호출부가 이어서 hlt
+// 루프로 들어간다 - Kernel-Level 분기(retireCurrentTask())는 절대
+// 반환하지 않는다. 자연 종료/신호 강제종료/폴트 강제종료 세 호출부
+// (kCheckSignalCheckpoint, 위 kPageFaultKillProcess류, context_switch.S)
+// 는 전부 이 exitCode=0 버전을 그대로 쓴다 - "강제종료 사유"를
+// exitCode로 인코딩하는 문제는 PN-5EDE3C96 범위 밖(syscall.h
+// kSyscallEndpointSelfTerminate 문서 주석 참고).
+extern "C" void kTaskOnFallingToEnd() { kTaskOnFallingToEndImpl(0); }
+
+// [신규, 2026-09-29, PN-5EDE3C96 항목1] 명시적 `mc::selfTerminate(exitCode)`
+// 호출(idt.cpp `kDispatchSyscallVerbBody`의 kSyscallEndpointSelfTerminate
+// 분기)만 이 exitCode 버전을 쓴다 - 위 kTaskOnFallingToEnd()는 그
+// 값이 없는 나머지 호출부 전용으로 그대로 남긴다(asm 등 기존 zero-arg
+// 호출부를 건드리지 않기 위함).
+extern "C" void kTaskOnFallingToEndWithCode(kernel::int32_t exitCode) { kTaskOnFallingToEndImpl(exitCode); }
 
 // [신규, 2026-09-18, SP-76250478 §3 항목2, PN-0EB2FABF] `kTaskOnFallingToEnd`
 // (위)의 스레드 전용 대칭 - `idt.cpp`의 `kDispatchSyscallVerbBody`가
 // `kSyscallEndpointSelfTerminateThread` submit을 가로챌 때만 부른다
 // (자연 종료/`syscall` fast path 어느 쪽에서도 호출되지 않는다 - 이
-// syscall은 언제나 명시적이라 자연 반환 경로 자체가 없다). `exitCode`
-// 를 받는다는 점만 `kTaskOnFallingToEnd`와 다르다 - `SelfTerminate`는
-// 아직 종료 코드를 안 쓰지만(그 syscall 문서 주석 참고) `SelfTerminateThread`
-// 는 §3.1의 `Join`이 돌려줄 값이 필요해 애초부터 받는다. Kernel-Level
+// syscall은 언제나 명시적이라 자연 반환 경로 자체가 없다). [갱신,
+// 2026-09-29, PN-5EDE3C96 항목1] `SelfTerminate`도 이제 exitCode를
+// 쓰지만(`kTaskOnFallingToEndWithCode`, 위) 항상 값을 받는 이쪽과
+// 달리 그쪽은 자연 종료/신호/폴트 강제종료 경로에서 여전히 0 고정
+// (syscall.h 문서 주석 참고) - `SelfTerminateThread`는 §3.1의 `Join`이
+// 돌려줄 값이 필요해 애초부터(항상) 받는다는 점이 다르다. Kernel-Level
 // Task 분기가 없다 - 이 syscall은 항상 UserThread 실행 흐름에서만 온다
 // (`syscall.h`의 `Syscall` 클래스 문서 주석과 동일한 전제).
 extern "C" void kThreadOnFallingToEnd(kernel::int32_t exitCode) {

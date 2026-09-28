@@ -8,19 +8,23 @@ void selfTerminate(int32_t exitCode) {
     // 트랩 지점에서 이 UserThread를 즉시 끝내고 절대 ring3로 복귀시키지
     // 않는다(QU-D96B1DCE 설계자 답변 - kHandleSyscallTrap이 이 endpoint를
     // 특별 취급) - 그래서 아래 `int $0x80` 다음 줄은 정상적으로는 절대
-    // 실행되지 않는다. exitCode는 args로 아직 전달하지 않는다(v1 -
-    // 커널 쪽 self-terminate 핸들러가 아직 종료 코드를 안 씀, 필요해지면
-    // args 포인터로 확장).
-    (void)exitCode;
+    // 실행되지 않는다. [갱신, 2026-09-29, PN-5EDE3C96 항목1] exitCode를
+    // 이제 args(RSI)로 전달한다(SelfTerminateArgs, 커널 쪽
+    // kSyscallEndpointSelfTerminate 문서 주석 참고) - args가 스택
+    // 지역변수라 `int $0x80`이 반환하지 않아도 상관없다(커널이 트랩
+    // 안에서 즉시 읽는다).
+    SelfTerminateArgs args;
+    args.exitCode = exitCode;
     const uint64_t endpointId = kSyscallEndpointSelfTerminate;
+    // submit()과 동일한 이유로 "D"/"S" 제약 사용(레지스터 배정 경합
+    // 방지, 위 submit() 문서 주석 참고) - 이미 그 레지스터를 피연산자로
+    // 묶었으므로 clobber 목록에 다시 적으면 안 된다(asm 제약 충돌).
     asm volatile(
         "mov $0, %%rax\n\t"
-        "mov %0, %%rdi\n\t"
-        "xor %%esi, %%esi\n\t"
         "int $0x80\n\t"
         :
-        : "r"(endpointId)
-        : "rax", "rdi", "rsi", "memory");
+        : "D"(endpointId), "S"(&args)
+        : "rax", "memory");
     // 방어적 - 위 트랩이 정상적으로는 절대 반환하지 않으므로 도달
     // 불가하지만, 컴파일러에게 [[noreturn]] 계약을 지키려면 필요하다.
     for (;;) {

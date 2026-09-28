@@ -33,9 +33,18 @@ constexpr SyscallEndpointId kMakeSyscallEndpointId(uint8_t group, uint8_t call) 
 // 참고). group.call = 0.0이라 우연히 종전 값(0)과 동일.
 constexpr SyscallEndpointId kSyscallEndpointSelfTerminate = kMakeSyscallEndpointId(0, 0);
 
+// [신규, 2026-09-29, PN-5EDE3C96 항목1] kernel::SelfTerminateArgs
+// (minicore/kernel/syscall.h)와 바이트 단위로 정확히 같은 레이아웃 -
+// exitCode 하나뿐(SelfTerminateThreadArgs와 동일 패턴).
+struct SelfTerminateArgs {
+    int32_t exitCode = 0;
+};
+
 // 이 프로세스를 종료한다 - 커널이 트랩 지점에서 이 UserThread를 즉시
 // 끝내고 절대 ring3로 복귀시키지 않으므로(PN-71C3D483, QU-D96B1DCE
-// 설계자 답변) 실제로 반환하지 않는다.
+// 설계자 답변) 실제로 반환하지 않는다. [갱신, 2026-09-29, PN-5EDE3C96
+// 항목1] exitCode가 이제 실제로 커널까지 전달된다(Process::exitCode로
+// 이어짐, SP-76250478 §3.2).
 [[noreturn]] void selfTerminate(int32_t exitCode);
 
 // [신규, 2026-09-19, PN-44C91D6E/PN-A0F72A3A, QU-FB7A0CFF 답변 - "fork
