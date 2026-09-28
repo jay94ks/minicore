@@ -63,6 +63,21 @@ kernel::AsyncTask* kSubmitReadSectors(fs::BlockDevice* device, uint32_t sectorSi
                                      outResult);
 }
 
+// [신규, 2026-09-29, SP-9039F955 §4, PN-2A0981B7 항목1] kSubmitReadSectors와
+// 동일한 LBA 변환의 쓰기 짝 - ext4_driver.cpp의 kSubmitWriteExtBlocks와
+// 동일한 패턴. 이 드라이버 최초의 실제 온디스크 쓰기(Chmod의 fileAttributes
+// 갱신)에 쓰인다.
+kernel::AsyncTask* kSubmitWriteSectors(fs::BlockDevice* device, uint32_t sectorSize, uint64_t sectorStart,
+                                        uint32_t sectorCount, const void* buf, fs::BlockIoResult* outResult) {
+    const kernel::uint32_t devBlockSize = device->blockSize();
+    if (devBlockSize == 0 || sectorSize % devBlockSize != 0) {
+        return nullptr;
+    }
+    const kernel::uint32_t devBlocksPerSector = sectorSize / devBlockSize;
+    return device->submitWriteBlocks(sectorStart * devBlocksPerSector, buf, sectorCount * devBlocksPerSector,
+                                      outResult);
+}
+
 // 클러스터 번호를 장치 섹터 번호로 바꾼다(순수 계산) - exfat.cpp에
 // 있던 ExfatVolume::clusterToSector와 동일한 판별.
 bool kClusterToSector(uint32_t clusterHeapOffset, uint32_t sectorsPerCluster, uint32_t cluster, uint32_t* outSector) {
@@ -813,21 +828,295 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
             static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw)->error = kernel::VfsError::PermissionDenied;
             break;
         }
-        // [신규, 2026-09-28, SP-9039F955 §4] Chmod/Chown - libexfat은
-        // 아직 쓰기 경로가 전혀 없다(Write/Mkdir/Rmdir/Unlink 전부
-        // PermissionDenied 스텁, §4 미결 그대로). exFAT의 디렉터리
-        // 엔트리 집합은 Primary+Stream Extension+FileName들이 클러스터
-        // 경계를 넘을 수도 있고(FAT32 LFN과 달리 이 코드베이스에 그
-        // 경계-안-넘음 보장이 없음) 속성 변경 시 집합 체크섬(§
-        // kExfatEntrySetChecksum, 지금은 읽기 검증에만 쓰임)도 다시
-        // 계산해 써야 해 - libvfat처럼 기존 Unlink 패턴을 그대로
-        // 재사용할 수 없는 첫 쓰기 경로다. 이번 증분은 Stat의 소유자/
-        // mode 노출까지만 다루고, 실제 쓰기는 별도 계획으로 미룬다
-        // (PN-24A2B6F5류 후속 항목 등록 - CLAUDE.md 규칙7).
+        // [구현, 2026-09-29, SP-9039F955 §4, PN-2A0981B7 항목1] Chmod -
+        // libexfat 최초의 실제 온디스크 쓰기. Stat과 동일한 경로 탐색을
+        // 반복하되, 마지막으로 매치된 엔트리의 Primary 슬롯이 정확히
+        // 어느 클러스터/클러스터 내 바이트 오프셋에 있었는지(entryPrimaryCluster/
+        // entryPrimaryPosInCluster)와 그 엔트리 집합 전체 바이트
+        // (entrySet, 이미 co_await 없이 메모리에 조립돼 있음)를 함께
+        // 남겨 둔다 - 엔트리 집합이 클러스터 경계를 넘어도(Stream
+        // Extension/FileName 슬롯들이 다른 클러스터에 있어도) 실제로
+        // 고쳐 쓸 대상은 언제나 Primary 슬롯 32바이트 하나뿐이라
+        // (fileAttributes+setChecksum 필드가 둘 다 Primary 안에 있음)
+        // 그 위치만 정확히 추적하면 충분하다. libvfat과 동일한 근사
+        // (owner-write 비트 하나만 kFileAttrReadOnly로 반영, S 비트
+        // 설정 시도는 저장할 곳이 없어 NotSupported)를 그대로 쓴다.
         case kernel::KernelFsOpCode::Chmod: {
-            static_cast<kernel::KernelFsChmodArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
+            auto* args = static_cast<kernel::KernelFsChmodArgs*>(argsRaw);
+            if (readOnly_) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
+            if (args->mode & kernel::kPermSpecialS) {
+                args->error = kernel::VfsError::NotSupported;
+                break;
+            }
+            if (args->callerUid != kernel::kRootUid && args->callerUid != args->mountUid) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
+
+            uint32_t currentCluster = volume_.rootFirstCluster();
+            bool currentIsDir = true;
+            uint64_t currentFileSize = 0;
+            bool currentNoFatChain = false;
+            bool failed = false;
+
+            uint8_t primaryEntrySet[kMaxEntrySetSlots * 32];
+            uint32_t primaryEntrySetCount = 0;
+            uint32_t primaryCluster = 0;
+            uint32_t primaryPosInCluster = 0;
+            bool haveTarget = false;
+
+            uint32_t pos = 0;
+            while (pos < args->relPathLen && !failed) {
+                while (pos < args->relPathLen && args->relPath[pos] == '/') {
+                    ++pos;
+                }
+                if (pos >= args->relPathLen) {
+                    break;
+                }
+                const uint32_t segStart = pos;
+                while (pos < args->relPathLen && args->relPath[pos] != '/') {
+                    ++pos;
+                }
+                const uint32_t segLen = pos - segStart;
+                if (!currentIsDir || segLen > kMaxNameUtf16) {
+                    failed = true;
+                    break;
+                }
+
+                uint16_t queryUpper[kMaxNameUtf16];
+                for (uint32_t i = 0; i < segLen; ++i) {
+                    queryUpper[i] = kWidenAscii(args->relPath[segStart + i]);
+                }
+                kUpcaseCodeUnits(upcaseTable, queryUpper, segLen);
+
+                ExfatParsedEntry matched;
+                bool foundInThisDir = false;
+                bool ioFailed = false;
+                uint32_t matchedCluster = 0;
+                uint32_t matchedPosInCluster = 0;
+                {
+                    uint32_t cluster = currentCluster;
+                    uint64_t clusterIndex = 0;
+                    uint32_t posInCluster = clusterSize;
+                    const uint64_t clusterLimit =
+                        currentNoFatChain ? kCeilDiv(currentFileSize, clusterSize) : ~static_cast<uint64_t>(0);
+                    SlabBuf clusterBuf(clusterSize);
+                    if (!clusterBuf) {
+                        ioFailed = true;
+                    }
+                    uint8_t entrySet[kMaxEntrySetSlots * 32];
+                    uint32_t entrySetFilled = 0;
+                    uint32_t entrySetNeeded = 0;
+                    uint32_t entryPrimaryCluster = 0;
+                    uint32_t entryPrimaryPosInCluster = 0;
+                    bool dirEnded = false;
+
+                    while (!ioFailed && !dirEnded && !foundInThisDir) {
+                        if (posInCluster >= clusterSize) {
+                            if (clusterIndex != 0) {
+                                if (currentNoFatChain) {
+                                    ++cluster;
+                                } else {
+                                    uint32_t fatSector = 0;
+                                    uint32_t fatByteOffset = 0;
+                                    kFatEntryLocation(fatOffset, sectorSize, cluster, &fatSector, &fatByteOffset);
+                                    SlabBuf fatBuf(sectorSize);
+                                    if (!fatBuf) {
+                                        ioFailed = true;
+                                        break;
+                                    }
+                                    fs::BlockIoResult fatIoResult;
+                                    kernel::AsyncTask* fatIoTask = kSubmitReadSectors(
+                                        device, sectorSize, fatSector, 1, fatBuf.get(), &fatIoResult);
+                                    if (!fatIoTask) {
+                                        ioFailed = true;
+                                        break;
+                                    }
+                                    co_await kernel::AsyncTaskCoroAwaiter(fatIoTask);
+                                    if (!fatIoResult.ok) {
+                                        ioFailed = true;
+                                        break;
+                                    }
+                                    uint32_t raw = 0;
+                                    memcpy(&raw, fatBuf.get() + fatByteOffset, sizeof(raw));
+                                    uint32_t next = 0;
+                                    if (!kInterpretFatEntry(raw, &next)) {
+                                        dirEnded = true;
+                                        break;
+                                    }
+                                    cluster = next;
+                                }
+                            }
+                            ++clusterIndex;
+                            if (clusterIndex > clusterLimit) {
+                                dirEnded = true;
+                                break;
+                            }
+                            uint32_t sector = 0;
+                            if (!kClusterToSector(clusterHeapOffset, sectorsPerCluster, cluster, &sector)) {
+                                ioFailed = true;
+                                break;
+                            }
+                            fs::BlockIoResult ioResult;
+                            kernel::AsyncTask* ioTask = kSubmitReadSectors(device, sectorSize, sector,
+                                                                            sectorsPerCluster, clusterBuf.get(),
+                                                                            &ioResult);
+                            if (!ioTask) {
+                                ioFailed = true;
+                                break;
+                            }
+                            co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                            if (!ioResult.ok) {
+                                ioFailed = true;
+                                break;
+                            }
+                            posInCluster = 0;
+                        }
+
+                        uint8_t slot[32];
+                        memcpy(slot, clusterBuf.get() + posInCluster, 32);
+                        posInCluster += 32;
+
+                        if (entrySetFilled == 0) {
+                            if (slot[0] == kExfatEntryTypeEndOfDirectory) {
+                                dirEnded = true;
+                                break;
+                            }
+                            if (slot[0] != kExfatEntryTypeFile) {
+                                continue;
+                            }
+                            ExfatFileDirEntry primary;
+                            memcpy(&primary, slot, sizeof(primary));
+                            if (primary.secondaryCount >= kMaxEntrySetSlots) {
+                                ioFailed = true;
+                                break;
+                            }
+                            memcpy(entrySet, slot, 32);
+                            entryPrimaryCluster = cluster;
+                            entryPrimaryPosInCluster = posInCluster - 32;
+                            entrySetNeeded = primary.secondaryCount + 1;
+                            entrySetFilled = 1;
+                            if (entrySetFilled < entrySetNeeded) {
+                                continue;
+                            }
+                        } else {
+                            memcpy(entrySet + entrySetFilled * 32, slot, 32);
+                            ++entrySetFilled;
+                            if (entrySetFilled < entrySetNeeded) {
+                                continue;
+                            }
+                        }
+
+                        const ExfatParsedEntry parsed = kParseFileEntrySet(entrySet, entrySetNeeded - 1);
+                        entrySetFilled = 0;
+                        if (!parsed.valid) {
+                            continue;
+                        }
+
+                        if (parsed.nameLen == segLen) {
+                            uint16_t normalized[kMaxNameUtf16];
+                            for (uint32_t i = 0; i < parsed.nameLen; ++i) {
+                                normalized[i] = parsed.nameUtf16[i];
+                            }
+                            kUpcaseCodeUnits(upcaseTable, normalized, parsed.nameLen);
+                            bool matches = true;
+                            for (uint32_t i = 0; i < parsed.nameLen; ++i) {
+                                if (normalized[i] != queryUpper[i]) {
+                                    matches = false;
+                                    break;
+                                }
+                            }
+                            if (matches) {
+                                matched = parsed;
+                                foundInThisDir = true;
+                                matchedCluster = entryPrimaryCluster;
+                                matchedPosInCluster = entryPrimaryPosInCluster;
+                                memcpy(primaryEntrySet, entrySet, entrySetNeeded * 32);
+                                primaryEntrySetCount = entrySetNeeded;
+                            }
+                        }
+                    }
+                }
+
+                if (ioFailed || !foundInThisDir) {
+                    failed = true;
+                    break;
+                }
+                currentCluster = matched.firstCluster;
+                currentIsDir = matched.isDir;
+                currentFileSize = matched.fileSize;
+                currentNoFatChain = matched.noFatChain;
+                primaryCluster = matchedCluster;
+                primaryPosInCluster = matchedPosInCluster;
+                haveTarget = true;
+            }
+
+            if (failed || !haveTarget) {
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+
+            uint16_t attrs = 0;
+            memcpy(&attrs, primaryEntrySet + 4, sizeof(attrs));
+            if (args->mode & kernel::kPermOwnerWrite) {
+                attrs &= static_cast<uint16_t>(~kFileAttrReadOnly);
+            } else {
+                attrs |= kFileAttrReadOnly;
+            }
+            memcpy(primaryEntrySet + 4, &attrs, sizeof(attrs));
+            const uint16_t newChecksum = kExfatEntrySetChecksum(primaryEntrySet, primaryEntrySetCount);
+            memcpy(primaryEntrySet + 2, &newChecksum, sizeof(newChecksum));
+
+            uint32_t targetSector = 0;
+            if (!kClusterToSector(clusterHeapOffset, sectorsPerCluster, primaryCluster, &targetSector)) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            targetSector += primaryPosInCluster / sectorSize;
+            const uint32_t byteOffsetInSector = primaryPosInCluster % sectorSize;
+
+            SlabBuf sectorBuf(sectorSize);
+            if (!sectorBuf) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            fs::BlockIoResult readIo;
+            kernel::AsyncTask* readTask =
+                kSubmitReadSectors(device, sectorSize, targetSector, 1, sectorBuf.get(), &readIo);
+            if (!readTask) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            co_await kernel::AsyncTaskCoroAwaiter(readTask);
+            if (!readIo.ok) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+
+            memcpy(sectorBuf.get() + byteOffsetInSector, primaryEntrySet, 32);
+
+            fs::BlockIoResult writeIo;
+            kernel::AsyncTask* writeTask =
+                kSubmitWriteSectors(device, sectorSize, targetSector, 1, sectorBuf.get(), &writeIo);
+            if (!writeTask) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            co_await kernel::AsyncTaskCoroAwaiter(writeTask);
+            if (!writeIo.ok) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+
+            args->error = kernel::VfsError::None;
             break;
         }
+        // [신규, 2026-09-28, SP-9039F955 §4] Chown - exFAT은 FAT32와
+        // 동일하게 개별 파일 소유자를 저장할 곳이 없다(mountUid를
+        // 그대로 반사하는 구조) - NotSupported 유지.
         case kernel::KernelFsOpCode::Chown: {
             static_cast<kernel::KernelFsChownArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
             break;
