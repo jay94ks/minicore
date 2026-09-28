@@ -204,3 +204,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/diskmetatest ${CMAKE_CU
 # ("fatdisktest")이 매치돼 부팅 시 자동 실행된다(minicore/fatdisktest/
 # main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/fatdisktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-fatdisktest)
+
+# setuidspawntest(PN-2A0981B7 항목4, EXEC_SETUID 승격 경로 E2E 검증) -
+# exitwaiter와 동일한 이유의 out-of-tree add_subdirectory - kmain.cpp의
+# TEMP 스폰 경로로 이름("setuidspawntest")이 매치돼 부팅 시 자동
+# 실행된다(minicore/setuidspawntest/main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/setuidspawntest ${CMAKE_CURRENT_BINARY_DIR}/minicore-setuidspawntest)
