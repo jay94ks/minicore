@@ -46,6 +46,13 @@ enum class ChannelError : uint32_t {
     PermissionDenied,
     AlreadyExists,
     Interrupted,  // [신규, PN-B5C2845A] 대기 도중 Kill/Terminate 대상이 돼 강제로 실패 완료됨
+    // [추가, 2026-09-28] 커널 쪽에 이미 있었으나 이 거울이 못 따라가고
+    // 있던 3개 값을 마저 동기화(minicore/kernel/channel.h와 다시 완전히
+    // 일치) - lrutest가 ServiceUnavailable을 이름으로 참조해야 해서
+    // 발견됨.
+    NotEmpty,           // [PN-4190BBD3] ResourceGroupDestroy - 자식/멤버가 남은 그룹 삭제 거부
+    NotOwner,           // [PN-E82744B1] MutexUnlock - 호출자가 마지막 lock 성공자가 아님
+    ServiceUnavailable,  // [PN-B6DB692C] authmgr read-through 캐시 미스 - 즉시 실패, 재시도는 호출부 몫
 };
 
 struct EnumerateDevicesArgs {

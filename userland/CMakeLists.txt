@@ -165,3 +165,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/vfsmetatest ${CMAKE_CUR
 # ("createusertest")이 매치돼 부팅 시 자동 실행된다
 # (minicore/createusertest/main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/createusertest ${CMAKE_CURRENT_BINARY_DIR}/minicore-createusertest)
+
+# lrutest(PN-B6DB692C, UserRecordCache LRU 축출 E2E 검증) - 위
+# 테스트들과 동일한 이유의 out-of-tree add_subdirectory - kmain.cpp의
+# TEMP 스폰 경로로 이름("lrutest")이 매치돼 부팅 시 자동 실행된다
+# (minicore/lrutest/main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/lrutest ${CMAKE_CURRENT_BINARY_DIR}/minicore-lrutest)
