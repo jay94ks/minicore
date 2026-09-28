@@ -2840,6 +2840,16 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
         // 자신이 판정한다(vfs_syscall.cpp ChmodHandler 주석 참고).
         case kernel::KernelFsOpCode::Chmod: {
             auto* args = static_cast<kernel::KernelFsChmodArgs*>(argsRaw);
+            // [수정, 2026-09-29, PN-2A0981B7 항목3 실측 검증 중 발견 -
+            // Mkdir/Write/Unlink/Rmdir와 달리 이 분기만 readOnly_ 게이트가
+            // 빠져 있었다 - kTryAutoMountBlockDevice()가 항상 readOnly=true
+            // 로 마운트하는데도(fs.cpp) Chmod가 실제로 디스크에 써지는
+            // 회귀였다(libvfat의 동일 케이스는 이미 이 게이트를 갖고
+            // 있었음 - vfat_driver.cpp 대조로 발견).
+            if (readOnly_) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
             const bool metadataCsum = (sb.featureRoCompat & kRoCompatMetadataCsum) != 0;
             uint32_t currentInode = kRootInodeNumber;
             bool currentIsDir = true;
@@ -3105,6 +3115,12 @@ kernel::AsyncExecCoro Ext4Driver::onExec(kernel::AsyncTask* task, void* argsRaw)
         // 불필요). 탐색/쓰기 골격은 위 Chmod 케이스와 완전히 동일.
         case kernel::KernelFsOpCode::Chown: {
             auto* args = static_cast<kernel::KernelFsChownArgs*>(argsRaw);
+            // [수정, 2026-09-29, PN-2A0981B7 항목3 실측 검증 중 발견 -
+            // 위 Chmod와 동일한 누락(readOnly_ 게이트 없음)].
+            if (readOnly_) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
             const bool metadataCsum = (sb.featureRoCompat & kRoCompatMetadataCsum) != 0;
             uint32_t currentInode = kRootInodeNumber;
             bool currentIsDir = true;
