@@ -16,7 +16,13 @@ namespace {
 // 유저랜드 전용인 libmc를 직접 include할 수 없어(별개 툴체인) 여기
 // 다시 정의한다. **한쪽을 바꾸면 반드시 다른 쪽도 함께 바꿀 것.**
 enum class WireFrameKind : uint8_t { Request = 1, Response = 2, Notification = 3 };
-enum class WireRequestType : uint8_t { Ping = 1, LookupByUid = 2, CreateUser = 3 };
+enum class WireRequestType : uint8_t {
+    Ping = 1,
+    LookupByUid = 2,
+    CreateUser = 3,
+    CheckSudoPermission = 4,
+    GrantSudoPermission = 5,
+};
 
 struct WireMessageHeader {
     uint32_t totalLength = 0;
@@ -30,6 +36,10 @@ struct WireRequestHeader {
 };
 struct WireLookupByUidRequestBody {
     uint32_t uid = 0;
+};
+struct WireSudoPermissionRequestBody {
+    uint32_t callerUid = 0;
+    uint32_t targetUid = 0;
 };
 struct WireResponseHeader {
     WireMessageHeader header;
@@ -238,7 +248,26 @@ bool kAuthmgrFinishConnect(AsyncTask* connectTask) {
     return ok;
 }
 
-bool kAuthmgrWriteLookupRequest(Uid uid) {
+bool kAuthmgrEnsureConnected() {
+    AsyncTask* connectTask = kAuthmgrBeginConnect();
+    if (!connectTask) {
+        return static_cast<bool>(gAuthmgrBridge);  // 이미 연결돼 있었거나(true) 오너 미초기화(false)
+    }
+    // authmgr_client.h의 kAuthmgrBeginConnect() 문서 주석 참고 - 여기도
+    // co_await가 아니라 AsyncTaskAwaiter로 기다린다.
+    AsyncTaskAwaiter(connectTask).await();
+    return kAuthmgrFinishConnect(connectTask);
+}
+
+namespace {
+
+// channel.cpp의 ChannelWriteHandler::onExec와 동일한 busy-yield 쓰기
+// 루프 - kValidateUserBuffer/kResolveOwnedBridge 둘 다 없다(buf는
+// 호출부 자신의 커널 스택, gAuthmgrBridge는 이미 검증된 채로 들고
+// 있음). kAuthmgrReadAll과 대칭인 범용 헬퍼 - 원래
+// kAuthmgrWriteLookupRequest 안에 있던 것을 뽑아 sudo 화이트리스트
+// 질의(kAuthmgrCheckSudoPermission)와 공유한다.
+bool kAuthmgrWriteAll(const uint8_t* buf, uint64_t length) {
     if (!gAuthmgrBridge) {
         return false;
     }
@@ -246,25 +275,9 @@ bool kAuthmgrWriteLookupRequest(Uid uid) {
     if (!task) {
         return false;
     }
-
-    WireRequestHeader header{};
-    header.header.totalLength = sizeof(WireRequestHeader) + sizeof(WireLookupByUidRequestBody);
-    header.header.frameKind = WireFrameKind::Request;
-    header.requestType = WireRequestType::LookupByUid;
-    WireLookupByUidRequestBody body{};
-    body.uid = uid;
-
-    uint8_t buf[sizeof(WireRequestHeader) + sizeof(WireLookupByUidRequestBody)];
-    memcpy(buf, &header, sizeof(header));
-    memcpy(buf + sizeof(header), &body, sizeof(body));
-
-    // channel.cpp의 ChannelWriteHandler::onExec와 동일한 busy-yield
-    // 쓰기 루프 - kValidateUserBuffer/kResolveOwnedBridge 둘 다 없다
-    // (buf는 이 함수 자신의 커널 스택, gAuthmgrBridge는 이미 검증된
-    // 채로 들고 있음).
     RingBuffer& ring = gAuthmgrBridge->outbound;
     uint64_t sent = 0;
-    while (sent < sizeof(buf)) {
+    while (sent < length) {
         AsyncTask* wakeReader = nullptr;
         bool broken = false;
         bool progressed = false;
@@ -275,7 +288,7 @@ bool kAuthmgrWriteLookupRequest(Uid uid) {
             } else {
                 const uint64_t space = ring.capacity - ring.used;
                 if (space > 0) {
-                    const uint64_t remaining = sizeof(buf) - sent;
+                    const uint64_t remaining = length - sent;
                     const uint64_t n = space < remaining ? space : remaining;
                     for (uint64_t i = 0; i < n; ++i) {
                         ring.data[(ring.writePos + i) % ring.capacity] = buf[sent + i];
@@ -302,6 +315,22 @@ bool kAuthmgrWriteLookupRequest(Uid uid) {
         }
     }
     return true;
+}
+
+}  // namespace
+
+bool kAuthmgrWriteLookupRequest(Uid uid) {
+    WireRequestHeader header{};
+    header.header.totalLength = sizeof(WireRequestHeader) + sizeof(WireLookupByUidRequestBody);
+    header.header.frameKind = WireFrameKind::Request;
+    header.requestType = WireRequestType::LookupByUid;
+    WireLookupByUidRequestBody body{};
+    body.uid = uid;
+
+    uint8_t buf[sizeof(WireRequestHeader) + sizeof(WireLookupByUidRequestBody)];
+    memcpy(buf, &header, sizeof(header));
+    memcpy(buf + sizeof(header), &body, sizeof(body));
+    return kAuthmgrWriteAll(buf, sizeof(buf));
 }
 
 namespace {
@@ -396,6 +425,44 @@ bool kAuthmgrReadLookupResponse(UserRecord* outRecord) {
     memcpy(outRecord->passwordHash, wire.passwordHash, sizeof(outRecord->passwordHash));
     memcpy(outRecord->defaultShell, wire.defaultShell, sizeof(outRecord->defaultShell));
     return true;
+}
+
+// [신규, 2026-09-28, DC-34764C25 항목1 답변] write+read를 한 번에
+// 묶은 왕복 - LookupByUid와 달리 호출부(kSetuidOnExecImpl)가 응답
+// 본문을 따로 채울 게 없어(허용 여부 하나뿐) 별도 write/read 함수
+// 쌍으로 안 쪼갠다. 통신 오류는 전부 false(불허)로 접는다 - 권한
+// 승격 경로라 "확실히 허용됨"이 확인된 경우에만 true를 반환해야
+// 한다(fail-closed, kAuthmgrReadLookupResponse의 "실패=재시도 유도"
+// 관례와 달리 여기는 "실패=거부"가 맞다).
+bool kAuthmgrCheckSudoPermission(Uid callerUid, Uid targetUid) {
+    WireRequestHeader header{};
+    header.header.totalLength = sizeof(WireRequestHeader) + sizeof(WireSudoPermissionRequestBody);
+    header.header.frameKind = WireFrameKind::Request;
+    header.requestType = WireRequestType::CheckSudoPermission;
+    WireSudoPermissionRequestBody body{};
+    body.callerUid = callerUid;
+    body.targetUid = targetUid;
+
+    uint8_t buf[sizeof(WireRequestHeader) + sizeof(WireSudoPermissionRequestBody)];
+    memcpy(buf, &header, sizeof(header));
+    memcpy(buf + sizeof(header), &body, sizeof(body));
+    if (!kAuthmgrWriteAll(buf, sizeof(buf))) {
+        return false;
+    }
+
+    WireResponseHeader response{};
+    if (!kAuthmgrReadAll(reinterpret_cast<uint8_t*>(&response), sizeof(response))) {
+        return false;
+    }
+    if (response.header.frameKind != WireFrameKind::Response ||
+        response.requestType != WireRequestType::CheckSudoPermission ||
+        response.header.totalLength != sizeof(WireResponseHeader)) {
+        // 프로토콜이 어긋났다 - kAuthmgrReadLookupResponse와 동일한
+        // 이유로 재연결을 유도한다.
+        gAuthmgrBridge.reset();
+        return false;
+    }
+    return response.error == 0;  // 0 == mc::ChannelError::None
 }
 
 }  // namespace kernel

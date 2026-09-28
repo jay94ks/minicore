@@ -12,7 +12,17 @@
 // `AuthmgrRequestType::CreateUser` 문서 주석 참고) - 지금은 이
 // 서비스 자신의 libkvdb 배선을 검증하기 위한 내부용/테스트 전용
 // 요청이고, 어떤 kernel syscall도 아직 이 요청을 트리거하지 않는다.
-// sudo/su 판정, libkproto로의 추출은 여전히 후속 세션 몫.
+// libkproto로의 추출은 여전히 후속 세션 몫.
+//
+// **[갱신, 2026-09-28, DC-34764C25 항목1 답변] sudo/su 화이트리스트
+// 판정 추가** - `CheckSudoPermission`/`GrantSudoPermission` 2종을
+// `gSudoWhitelist`(callerUid,targetUid 쌍의 존재 여부만 보는 KV
+// Store)로 처리한다. 커널의 `kSetuidOnExecImpl`(authmgr_client.h를
+// 통해)이 root/조상-자손 판정에 실패했을 때 이 화이트리스트를 마지막
+// 수단으로 질의한다. `GrantSudoPermission`도 `CreateUser`와 동일한
+// 이유로 아직 권한 검사가 없다(DC-1526389A 답변 대기 - 관리 API
+// 설계). S 비트+exec-time 승격(항목2/3/4)은 VFS에 파일 소유자
+// 메타데이터 자체가 없어(`DC-1526389A`) 아직 구현하지 않는다.
 #include "libkvdb/kvdb.h"
 #include "libmc/authmgr.h"
 #include "libmc/channel.h"
@@ -35,6 +45,24 @@ constexpr char kAuthmgrChannelName[] = "authmgr";
 constexpr mc::uint32_t kMaxUserRecords = 1024;
 kvdb::Store<kMaxUserRecords, sizeof(mc::uint32_t), sizeof(mc::AuthmgrUserRecord)> gUserRecordsByUid;
 kvdb::Store<kMaxUserRecords, mc::kAuthmgrLoginNameMaxBytes, sizeof(mc::uint32_t)> gUidByLoginName;
+
+// [신규, 2026-09-28, DC-34764C25 항목1 답변 "authmgr 내부의 별도
+// 화이트 리스트 (계정별로 화이트 리스트가 별도로 존재)"] (callerUid,
+// targetUid) 쌍의 존재 여부만 보는 멤버십 집합 - 키는 두 uid를 이어
+// 붙인 8바이트(값은 존재 자체가 정보라 1바이트 더미). v1 용량은
+// gUserRecordsByUid와 같은 규모 근거로 1024(실사용 패턴이 드러나면
+// 재검토, RM-23F4B687 §4).
+constexpr mc::uint32_t kMaxSudoGrants = 1024;
+kvdb::Store<kMaxSudoGrants, sizeof(mc::uint32_t) * 2, 1> gSudoWhitelist;
+
+void kSudoKey(mc::uint32_t callerUid, mc::uint32_t targetUid, unsigned char out[sizeof(mc::uint32_t) * 2]) {
+    const auto* callerSrc = reinterpret_cast<const unsigned char*>(&callerUid);
+    const auto* targetSrc = reinterpret_cast<const unsigned char*>(&targetUid);
+    for (mc::uint32_t i = 0; i < sizeof(mc::uint32_t); ++i) {
+        out[i] = callerSrc[i];
+        out[sizeof(mc::uint32_t) + i] = targetSrc[i];
+    }
+}
 
 // [설계 확정, 2026-09-17] root(uid=0)는 authmgr 가용성과 무관하게
 // 항상 성립해야 하므로 커널도 부팅 시 하드코딩한다(user_record.cpp
@@ -201,6 +229,35 @@ mc::uint32_t kHandleRequest(Connection* conn, const mc::uint8_t* body, mc::uint3
                                      sizeof(newRecord->uid));
             }
             resp->error = 0;  // None
+            break;
+        }
+
+        case mc::AuthmgrRequestType::CheckSudoPermission: {
+            if (variableBodyLen < sizeof(mc::AuthmgrSudoPermissionRequestBody)) {
+                return 0;
+            }
+            const auto* reqBody = reinterpret_cast<const mc::AuthmgrSudoPermissionRequestBody*>(variableBody);
+            unsigned char key[sizeof(mc::uint32_t) * 2];
+            kSudoKey(reqBody->callerUid, reqBody->targetUid, key);
+            resp->error = gSudoWhitelist.contains(key, sizeof(key))
+                              ? 0  // None - 허용
+                              : static_cast<mc::uint32_t>(mc::ChannelError::PermissionDenied);
+            break;
+        }
+
+        case mc::AuthmgrRequestType::GrantSudoPermission: {
+            // [알려진 제약, libmc/authmgr.h 문서 주석 참고] CreateUser와
+            // 동일한 이유로 권한 검사 없음 - DC-1526389A 답변(관리 API
+            // 설계) 전까지 테스트/시딩 전용.
+            if (variableBodyLen < sizeof(mc::AuthmgrSudoPermissionRequestBody)) {
+                return 0;
+            }
+            const auto* reqBody = reinterpret_cast<const mc::AuthmgrSudoPermissionRequestBody*>(variableBody);
+            unsigned char key[sizeof(mc::uint32_t) * 2];
+            kSudoKey(reqBody->callerUid, reqBody->targetUid, key);
+            const unsigned char dummyValue[1] = {1};
+            kvdb::ErrorCode kvErr = gSudoWhitelist.put(key, sizeof(key), dummyValue, sizeof(dummyValue));
+            resp->error = kvErr == kvdb::ErrorCode::None ? 0 : static_cast<mc::uint32_t>(mc::ChannelError::ResourceExhausted);
             break;
         }
 

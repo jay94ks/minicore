@@ -55,27 +55,31 @@ void kAuthmgrClientUnlock();
 // 뒤 kAuthmgrFinishConnect()를 불러야 한다.
 // **`co_await AsyncTaskCoroAwaiter(...)`로 기다리지 않는다**(실측으로
 // 발견한 버그, 2026-09-28) - 이 헤더의 나머지 함수들(WriteLookupRequest/
-// ReadLookupResponse)이 내부적으로 raw `AsyncTask::yield()`(스택풀
+// ReadLookupResponse 등)이 내부적으로 raw `AsyncTask::yield()`(스택풀
 // 방식)를 쓰는데, 호출부 코루틴이 `co_await`로 한 번이라도 진짜
 // 정지하면 그 AsyncTask는 `drainOnce()`의 coroutine-handle 재개
 // 모드로 영구 전환돼(async_task.cpp 문서 주석) 이후의 raw yield가
 // 더 이상 쓰지 않는 스택풀 재개 지점으로 잘못 점프한다(실행 중복/
-// 오염 - user_record.cpp kSetuidOnExecImpl에서 실측). 대신 아래처럼
-// `connectTask->state`를 직접 확인하는 raw busy-yield 루프를 쓴다
-// (channel.cpp ConnectChannelHandler::onExec과 동일한 관례):
-//   while (connectTask->state != AsyncTaskState::Completed &&
-//          connectTask->state != AsyncTaskState::Failed &&
-//          connectTask->state != AsyncTaskState::Cancelled) {
-//       AsyncTask::yield();
-//   }
-//   kAuthmgrFinishConnect(connectTask);
-// (`AsyncTaskAwaiter::await()`도 코루틴 안에서는 무한 대기로 이미
-// 확인돼 있어(async_task.h 문서) 대안이 될 수 없다.)
+// 오염 - user_record.cpp kSetuidOnExecImpl에서 실측). 대신
+// `AsyncTaskAwaiter(connectTask).await()`를 쓴다 - 이 클래스는
+// 매 yield 직전 스스로를 submitCompletion()으로 재제출하는 스택풀
+// 전용 범용 대기자라(async_task.cpp) 위 문제를 겪지 않는다("코루틴
+// 안에서 부르면 무한 대기"라는 그 클래스의 경고는 호출자 자신이
+// 이미 co_await로 coroHandle 모드에 들어간 뒤에만 해당 - Ext4Driver
+// 사례. 이 헤더의 함수들을 쓰는 호출부가 co_await를 전혀 안 쓰는 한
+// 안전하다, user_record.cpp kSetuidOnExecImpl 실사용 참고).
 AsyncTask* kAuthmgrBeginConnect();
 // kAuthmgrBeginConnect()가 반환한 태스크의 대기가 끝난 뒤 호출 -
 // 연결 결과를 내부 상태에 반영한다(성공 시 이후 read/write가 그
 // 연결을 쓴다). 반환값은 "이제 연결돼 있는지" 여부.
 bool kAuthmgrFinishConnect(AsyncTask* connectTask);
+
+// [신규, 2026-09-28] 위 BeginConnect/AsyncTaskAwaiter::await()/
+// FinishConnect 세 단계를 한 번에 묶은 편의 함수 - 이미 연결돼
+// 있으면 즉시 true, 아니면 연결을 시도하고 결과를 반환한다. 이제
+// 호출부(LookupByUid 재시도, CheckSudoPermission 둘 다)가 매번 이
+// 세 단계를 손으로 다시 쓰지 않는다.
+bool kAuthmgrEnsureConnected();
 
 // LookupByUid 요청 전송 - 연결돼 있다고 가정(호출 전 kAuthmgrBeginConnect/
 // FinishConnect로 확인), busy-yield로 전송 완료까지 돈다(별도 대기
@@ -88,6 +92,14 @@ bool kAuthmgrWriteLookupRequest(Uid uid);
 // 자체는 NotFound일 땐 살아있는 채로 유지 - 오류일 때만 끊어진
 // 것으로 표시).
 bool kAuthmgrReadLookupResponse(UserRecord* outRecord);
+
+// [신규, 2026-09-28, DC-34764C25 항목1 답변] callerUid가 targetUid로
+// sudo/su할 자격이 있는지 authmgr의 화이트리스트에 질의한다 - 위
+// LookupByUid 함수들과 동일한 호출 규약(연결돼 있다고 가정, 호출 전
+// kAuthmgrBeginConnect/FinishConnect로 확인, busy-yield). 통신 자체가
+// 실패하면(연결 끊김 등) 안전하게 false(불허)로 처리한다 - 권한
+// 승격 경로라 통신 실패를 "허용"으로 잘못 해석하면 안 된다(fail-closed).
+bool kAuthmgrCheckSudoPermission(Uid callerUid, Uid targetUid);
 
 }  // namespace kernel
 

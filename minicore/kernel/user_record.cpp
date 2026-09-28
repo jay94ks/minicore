@@ -157,10 +157,13 @@ ChannelError kSetuid(Process& caller, Uid targetUid) {
     return ChannelError::PermissionDenied;
 }
 
-// [신규, 2026-09-28, DC-90A66932 (A) 채택] 위 kSetuid()가 캐시 미스로
-// ServiceUnavailable을 돌려주면, authmgr_client.h를 통해 authmgr에
-// LookupByUid로 비동기 질의해 캐시를 채운 뒤 kSetuid()를 다시 시도한다
-// - 동시 호출은 고정 연결 하나를 공유하므로 kAuthmgrClientLock()/
+// [신규, 2026-09-28, DC-90A66932 (A) 채택 + DC-34764C25 항목1 답변]
+// 위 kSetuid()가 캐시 미스로 ServiceUnavailable을 돌려주면,
+// authmgr_client.h를 통해 authmgr에 LookupByUid로 비동기 질의해
+// 캐시를 채운 뒤 kSetuid()를 다시 시도한다. 그래도 PermissionDenied
+// (root도 조상-자손도 아님)면 authmgr의 sudo 화이트리스트를 마지막
+// 수단으로 질의한다(sudo/su - "sudo -u <유저>"류, root가 아닌 대상도
+// 가능). 동시 호출은 고정 연결 하나를 공유하므로 kAuthmgrClientLock()/
 // Unlock()으로 반드시 직렬화한다(연결 자체는 authmgr_client.cpp의
 // 전역 상태로 고정 유지 - 끊어지면 다음 호출이 자동 재연결 시도).
 AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw) {
@@ -174,50 +177,51 @@ AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw) {
         co_return;
     }
 
+    // [실측으로 확정, 2026-09-28] 이 함수(kSetuidOnExecImpl)는 끝까지
+    // `co_await`를 절대 쓰지 않는다 - 한 번이라도 진짜 C++ `co_await`로
+    // 정지하면 이 AsyncTask는 drainOnce()의 coroutine-handle 재개
+    // 모드로 영구 전환되는데(async_task.cpp drainOnce() 문서 주석),
+    // 아래 `kAuthmgr*` 함수들이 내부적으로 쓰는 raw `AsyncTask::yield()`
+    // (스택풀 전용 kContextSwitch)와 섞이면 이미 못 쓰게 된 재개
+    // 지점으로 잘못 점프해 실행이 중복/오염된다(setuidtest E2E 검증
+    // 중 실측 확인). `kAuthmgrEnsureConnected()`가 내부적으로 쓰는
+    // `AsyncTaskAwaiter::await()`(매 yield 직전 스스로를
+    // submitCompletion()으로 재제출)가 이 스택풀 전용 조합을 위한
+    // 올바른 대기자다 - "코루틴 안에서 부르면 무한 대기"라는 그
+    // 클래스의 경고는 호출자가 이미 coroHandle 모드로 전환된 뒤에만
+    // 해당한다(Ext4Driver 사례).
     ChannelError result = kSetuid(*proc, args->targetUid);
-    if (result != ChannelError::ServiceUnavailable) {
-        args->error = result;
-        co_return;
+    if (result == ChannelError::ServiceUnavailable) {
+        kAuthmgrClientLock();
+        UserRecord fetched{};
+        const bool queried =
+            kAuthmgrEnsureConnected() && kAuthmgrWriteLookupRequest(args->targetUid) && kAuthmgrReadLookupResponse(&fetched);
+        kAuthmgrClientUnlock();
+        if (!queried) {
+            args->error = ChannelError::ServiceUnavailable;
+            co_return;
+        }
+        UserRecordCache::insertOrUpdate(fetched);
+        result = kSetuid(*proc, args->targetUid);
     }
 
-    kAuthmgrClientLock();
-    UserRecord fetched{};
-    bool queried = false;
-    AsyncTask* connectTask = kAuthmgrBeginConnect();
-    if (connectTask) {
-        // [실측으로 확정, 2026-09-28] 이 함수(kSetuidOnExecImpl)는 이
-        // 지점을 포함해 끝까지 `co_await`를 절대 쓰지 않는다 - 한 번이라도
-        // 진짜 C++ `co_await`로 정지하면 이 AsyncTask는 drainOnce()의
-        // coroutine-handle 재개 모드로 영구 전환되는데(async_task.cpp
-        // drainOnce() 문서 주석), 바로 아래
-        // `kAuthmgrWriteLookupRequest`/`kAuthmgrReadLookupResponse`가
-        // 내부적으로 쓰는 raw `AsyncTask::yield()`(스택풀 전용
-        // kContextSwitch)와 섞이면 이미 못 쓰게 된 재개 지점으로 잘못
-        // 점프해 실행이 중복/오염된다(setuidtest E2E 검증 중 응답 처리가
-        // 두 번 실행되는 것으로 실측 확인). 그렇다고 `co_await` 없이 단순
-        // `while (!done) AsyncTask::yield();`도 안 된다 - 아무도 이
-        // AsyncTask를 다시 큐에 넣어 주지 않아 첫 yield에서 영원히
-        // 멈춘다. `AsyncTaskAwaiter::await()`가 바로 이 조합(스택풀
-        // 모드 + "임의의 관계없는 AsyncTask 기다리기")을 위해 이미
-        // "매 yield 직전 스스로를 submitCompletion()으로 재제출"을
-        // 구현해 뒀으므로 그대로 재사용한다 - "코루틴 안에서 부르면
-        // 무한 대기"라는 그 클래스의 경고는 호출자 자신이 이미
-        // coroHandle 모드로 전환된 뒤에만 해당하고(Ext4Driver 사례),
-        // 이 함수는 그 상태에 절대 들어가지 않으므로 안전하다.
-        AsyncTaskAwaiter(connectTask).await();
-        kAuthmgrFinishConnect(connectTask);
+    // [신규, 2026-09-28, DC-34764C25 항목1 답변] 캐시는 채워졌지만(두
+    // uid 모두 유효) root도 아니고 조상-자손 관계도 아니라
+    // `PermissionDenied`인 경우 - authmgr의 sudo 화이트리스트를 마지막
+    // 수단으로 질의한다("authmgr 내부의 별도 화이트 리스트, 계정별로
+    // 화이트 리스트가 별도로 존재" - sudo -u <root가 아닌 유저>도
+    // 허용).
+    if (result == ChannelError::PermissionDenied) {
+        kAuthmgrClientLock();
+        const bool allowed = kAuthmgrEnsureConnected() && kAuthmgrCheckSudoPermission(proc->uid, args->targetUid);
+        kAuthmgrClientUnlock();
+        if (allowed) {
+            proc->uid = args->targetUid;
+            result = ChannelError::None;
+        }
     }
-    if (kAuthmgrWriteLookupRequest(args->targetUid) && kAuthmgrReadLookupResponse(&fetched)) {
-        queried = true;
-    }
-    kAuthmgrClientUnlock();
 
-    if (!queried) {
-        args->error = ChannelError::ServiceUnavailable;
-        co_return;
-    }
-    UserRecordCache::insertOrUpdate(fetched);
-    args->error = kSetuid(*proc, args->targetUid);
+    args->error = result;
     co_return;
 }
 

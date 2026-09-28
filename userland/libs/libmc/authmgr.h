@@ -57,6 +57,21 @@ enum class AuthmgrRequestType : uint8_t {
     // 노출하려면 caller uid 전달 규약을 먼저 확정할 것(CLAUDE.md
     // 규칙 4 - 미정 설계를 임의로 채우지 않음).
     CreateUser = 3,
+    // [신규, 2026-09-28, DC-34764C25 항목1 답변 "authmgr 내부의 별도
+    // 화이트 리스트 (계정별로 화이트 리스트가 별도로 존재)"] callerUid
+    // 가 targetUid로 sudo/su할 자격이 있는지 조회 - error==None이면
+    // 허용, PermissionDenied면 불허(본문 없음, CreateUser와 동일한
+    // "error만" 응답 관례). 커널의 kSetuid()가 root/조상-자손 판정에
+    // 실패했을 때(캐시된 두 uid 모두 유효한데도 PermissionDenied)
+    // 마지막 수단으로 이 요청을 보낸다(authmgr_client.h 참고).
+    CheckSudoPermission = 4,
+    // [신규, 2026-09-28, DC-34764C25 항목1] 화이트리스트에 항목을
+    // 추가 - CreateUser와 동일한 이유로 **아직 권한 검사가 전혀
+    // 없다**(누가 이 항목을 추가할 수 있는지는 "S 비트를 설정하는
+    // 것 자체가 해당 파일의 소유자만 가능해야" 같은 더 넓은 관리
+    // API 설계가 필요 - DC-1526389A 답변 대기, 지금은 테스트/시딩
+    // 전용).
+    GrantSudoPermission = 5,
 };
 
 // [신규, 2026-09-23, PN-B6DB692C] `kernel::UserRecord`(user_record.h)
@@ -81,13 +96,21 @@ struct AuthmgrLookupByUidRequestBody {
     uint32_t uid = 0;
 };
 
+// CheckSudoPermission/GrantSudoPermission 공용 본문 - 둘 다 같은
+// (callerUid, targetUid) 쌍만 있으면 된다(DC-34764C25 항목1).
+struct AuthmgrSudoPermissionRequestBody {
+    uint32_t callerUid = 0;
+    uint32_t targetUid = 0;
+};
+
 struct AuthmgrRequestHeader {
     AuthmgrMessageHeader header;  // frameKind = Request
     AuthmgrRequestType requestType = AuthmgrRequestType::Ping;
     uint8_t reserved[3] = {};
     // requestType별 고정 폭 본문이 있다면 이 구조체 바로 뒤에 이어짐
     // (Ping은 본문 없음, LookupByUid는 AuthmgrLookupByUidRequestBody,
-    // CreateUser는 AuthmgrUserRecord).
+    // CreateUser는 AuthmgrUserRecord, CheckSudoPermission/
+    // GrantSudoPermission은 AuthmgrSudoPermissionRequestBody).
 };
 
 struct AuthmgrResponseHeader {
