@@ -5,8 +5,8 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-28T16:21:52.508Z
-  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
+  updatedAt: 2026-09-28T18:41:01.179Z
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t C:\GitHub\minicore\docs
 -->
 
 ﻿﻿# Minicore 설계공백 검수
@@ -2339,7 +2339,7 @@ DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영�
 **은폐된 갭이 아니다** - 전부 `PN-2A0981B7` 본문이 "남은 항목"으로
 이미 정확히 열거해 뒀다.
 
-## §1-X. [발견 및 부분 해소, 2026-09-29] `SP-A7479F83`(timerfd/signalfd, approved) - timerfd(§2/§3, call6/7)만 구현, signalfd 전체(call8/9)·절대시각(§6-A)·RT신호(§6-B)·epoll 통합(§5)은 여전히 미구현
+## §1-X. [발견 및 부분 해소, 2026-09-29; **같은 날 후속 틱에 절대시각(§6-A)/Close 정리(§6-C)/epoll 통합(§5) 추가 해소 - 아래 "추가 해소" 참고, 남은 갭은 signalfd(call8/9)·RT신호(§6-B)뿐**] `SP-A7479F83`(timerfd/signalfd, approved) - timerfd(§2/§3, call6/7)만 구현, signalfd 전체(call8/9)·절대시각(§6-A)·RT신호(§6-B)·epoll 통합(§5)은 여전히 미구현
 
 `PN-96265AE4`(주기 타이머 Read가 AsyncReactor/DelayedExecutionQueue
 쪽에서 영원히 안 깨어나던 결함)를 해소하면서 `PN-0F56DE4B`의 원래
@@ -2357,8 +2357,20 @@ signalfd 쪽은 그대로 유효): signalfd 전체(call8/9, `SignalfdState`
 자체가 없음), 절대시각 타이머(§6-A, `TimerfdSetTime`에 `absolute`
 파라미터 없음), RT 신호 큐잉(§6-B), epoll 통합(§5 - `PN-7562DA62`
 자신은 완료됐지만 `kIsFdReadable`에 Timerfd 분기가 아직 없음). 이
-잔여 범위는 새 계획으로 분리 등록할 가치가 있으나(CLAUDE.md 규칙7),
-`PN-0F56DE4B` 자신이 이미 그 체크리스트를 갖고 있어 별도 신규 계획
+**추가 해소(같은 날 후속 틱, 2026-09-29)**: 절대시각 타이머(§6-A,
+`TimerfdSetTimeArgs::absolute`)와 Close(fd) 경쟁 정리(§6-C,
+`TimerfdState::closing`)를 구현+커밋(`PN-0F56DE4B` 참고), 이어서
+epoll 통합(§5)도 마저 구현했다 - `epoll.cpp`의 `kQueryFdState`/
+`kUpdateFdObserver`/`kIsWatchableKind`에 `MountKind::Timerfd` 분기
+추가, `TimerfdState::epollReadObservers`(신규, `EpollObserverQueue` -
+블로킹 Read 전용 `pendingReaders`와 별도 노드 필요, channel.h의 소켓
+readObservers와 동일한 이유)를 `kOnTimerfdFire`가 만료마다 함께
+드레인. `minicore/timerfdtest`에 timerfd+epoll 통합 시나리오(exitCode
+33-44) 추가해 GRUB SMP4로 실측 확인(TEMP 스폰 훅으로 검증 후 되돌림,
+RM-23F4B687 §4 관례). **남은 갭은 signalfd 전체(call8/9)·RT신호
+큐잉(§6-B)뿐**(둘 다 `SignalfdState`/`RtSignalInstance` 자체가
+없음) - 이 둘은 새 계획으로 분리 등록할 가치가 있으나(CLAUDE.md
+규칙7), `PN-0F56DE4B` 자신이 이미 그 체크리스트를 갖고 있어 별도 신규 계획
 없이 그 문서 갱신으로 충분(아래 참고).
 
 ## §1-W. [발견 및 해소, 2026-09-29] `SP-76250478`(멀티스레드 유저 프로세스 지원, approved) §3.2 - "Process::exitCode는 마지막 스레드의 exitCode를 물려받는다"가 실제로는 미구현이었음(§4의 2026-09-18 "갭 없음" 점검이 §3.2를 누락한 사례)
