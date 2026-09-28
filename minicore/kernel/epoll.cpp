@@ -9,6 +9,7 @@
 #include "process.h"
 #include "socket.h"
 #include "timer.h"
+#include "timerfd.h"
 
 namespace kernel {
 
@@ -182,6 +183,18 @@ EpollFdState kQueryFdState(AsyncTask* callerTask, Process::FileDescriptor* fdEnt
             state.writable = true;
             return state;
         }
+        case MountKind::Timerfd: {
+            // [신규, 2026-09-29, SP-6350DEBB §5 통합, PN-0F56DE4B 잔여
+            // 범위] timerfd는 read만 있고 쓰기 개념이 없다 - 만료 횟수가
+            // 0보다 크면 readable(vfs_syscall.cpp ReadHandler의 즉시
+            // 반환 조건과 동일한 판정).
+            EpollFdState state;
+            if (fdEntry->timerfd) {
+                SpinlockGuard guard(fdEntry->timerfd->lock);
+                state.readable = fdEntry->timerfd->expirationCount > 0;
+            }
+            return state;
+        }
         default:
             // Channel(원 IPC, 미구현)/Epoll(중첩, v1 미구현) - 준비 안 됨
             // 취급. EpollCtl(Add)가 애초에 이 kind들을 거절하므로(아래
@@ -192,6 +205,22 @@ EpollFdState kQueryFdState(AsyncTask* callerTask, Process::FileDescriptor* fdEnt
 
 void kUpdateFdObserver(AsyncTask* callerTask, Process::FileDescriptor* fdEntry, uint32_t interestMask,
                         EpollObserverNode* readNode, EpollObserverNode* writeNode, bool add) {
+    if (fdEntry->kind == MountKind::Timerfd) {
+        // [신규, 2026-09-29, SP-6350DEBB §5 통합] Readable만 의미가
+        // 있다(위 kQueryFdState와 동일한 전제) - kOnTimerfdFire가
+        // epollReadObservers를 만료마다 전부 드레인한다(timerfd.cpp).
+        if (!fdEntry->timerfd || (interestMask & static_cast<uint32_t>(EpollEventMask::Readable)) == 0) {
+            return;
+        }
+        SpinlockGuard guard(fdEntry->timerfd->lock);
+        if (add) {
+            readNode->task = callerTask;
+            fdEntry->timerfd->epollReadObservers.pushBack(readNode);
+        } else {
+            fdEntry->timerfd->epollReadObservers.remove(readNode);
+        }
+        return;
+    }
     if (fdEntry->kind != MountKind::Socket) {
         return;  // KernelDriver는 항상 준비됨이라 관찰 대상이 될 상태 변화 자체가 없음
     }
@@ -201,7 +230,9 @@ void kUpdateFdObserver(AsyncTask* callerTask, Process::FileDescriptor* fdEntry, 
                           writeNode, add);
 }
 
-bool kIsWatchableKind(MountKind kind) { return kind == MountKind::Socket || kind == MountKind::KernelDriver; }
+bool kIsWatchableKind(MountKind kind) {
+    return kind == MountKind::Socket || kind == MountKind::KernelDriver || kind == MountKind::Timerfd;
+}
 
 class EpollCreateHandler : public AsyncTaskHandler {
 public:

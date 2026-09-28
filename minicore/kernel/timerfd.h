@@ -48,6 +48,13 @@ struct TimerfdState {
     WeakPtr<Process> ownerProcess;
     int32_t ownerFd = -1;
     AsyncTaskWaitQueue pendingReaders;
+    // [신규, 2026-09-29, SP-6350DEBB §5 통합(PN-0F56DE4B 잔여 범위)]
+    // 블로킹 Read 전용인 `pendingReaders`(AsyncTaskWaitQueue, 노드=
+    // AsyncTask 자신)와 달리 epoll 관찰자는 channel.h의 소켓
+    // readObservers와 동일하게 별도 노드(EpollObserverNode)로 등록해야
+    // 한다 - 한 AsyncTask가 EpollWait 하나로 여러 fd를 동시에 감시할 수
+    // 있어야 하기 때문(epoll.cpp의 EpollObserverQueue 문서 주석 참고).
+    EpollObserverQueue epollReadObservers;
     void destroy() {}
 };
 

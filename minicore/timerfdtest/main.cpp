@@ -42,6 +42,18 @@
 //   30/31 = §6-A "미래" 산술 경로 - 생성/SetTime(absolute=true, 먼
 //     미래 타임스탬프) 실패(오버플로/스케줄 실패가 있다면 여기서 드러남)
 //   32 = §6-A "미래" 경로 Close(취소) 실패
+//   33/34 = SP-6350DEBB §5 epoll 통합(PN-0F56DE4B 잔여 범위) - 1회성
+//     타이머 생성/SetTime(15틱) 실패
+//   35 = epoll 통합 - EpollCreate 실패
+//   36 = epoll 통합 - EpollCtl(Add, Readable) 실패
+//   37 = epoll 통합 - EpollWait(submit/wait) 실패
+//   38 = epoll 통합 - EpollWait error!=None 이거나 count==0(타임아웃 -
+//     kOnTimerfdFire가 epollReadObservers를 안 깨웠다는 뜻)
+//   39 = epoll 통합 - 보고된 이벤트에 Readable 비트가 없음
+//   40/41 = epoll 통합 - 이벤트 확인 후 Read(만료 횟수 회수) 실패
+//   42 = epoll 통합 - Read expirationCount==0
+//   43 = epoll 통합 - timerfd Close 실패
+//   44 = epoll 통합 - epoll Close 실패
 //
 // §6-A 참고: 유저랜드에 아직 wall-clock 조회 API가 없어(userland/libs/
 // libmc에 Rtc 거울 없음) "미래 목표 시각까지 정확히 기다리는지"는 이
@@ -50,6 +62,7 @@
 // 경로(TimerfdSetTimeHandler, timerfd.cpp)가 크래시 없이 즉시
 // 만료시키는지만 확인한다 - 환산 산술(목표-현재)*kSchedulerTickHz
 // 자체는 간단해 코드 리뷰로 충분하다고 판단.
+#include "libmc/epoll.h"
 #include "libmc/syscall.h"
 #include "libmc/timerfd.h"
 #include "libmc/vfs.h"
@@ -264,6 +277,82 @@ extern "C" void _start() {
     token = mc::submit(mc::kSyscallEndpointClose, &futureCloseArgs);
     if (token == 0 || !mc::wait(token) || futureCloseArgs.error != mc::ChannelError::None) {
         kFinish(32);
+    }
+
+    // 6) SP-6350DEBB §5 epoll 통합(PN-0F56DE4B 잔여 범위 중 하나) -
+    // timerfd를 epoll로 감시했을 때 만료 시 실제로 Readable로 깨어나는지
+    // 확인한다(epoll.cpp의 kQueryFdState/kUpdateFdObserver Timerfd 분기,
+    // timerfd.cpp의 kOnTimerfdFire epollReadObservers 드레인).
+    mc::TimerfdCreateArgs epollTimerCreateArgs;
+    epollTimerCreateArgs.periodic = false;
+    token = mc::submit(mc::kSyscallEndpointTimerfdCreate, &epollTimerCreateArgs);
+    if (token == 0 || !mc::wait(token) || epollTimerCreateArgs.error != mc::ChannelError::None) {
+        kFinish(33);
+    }
+    const mc::int32_t epollTimerFd = static_cast<mc::int32_t>(epollTimerCreateArgs.fd);
+
+    mc::TimerfdSetTimeArgs epollTimerSetArgs;
+    epollTimerSetArgs.fd = epollTimerFd;
+    epollTimerSetArgs.initialTicks = 15;
+    epollTimerSetArgs.intervalTicks = 0;
+    token = mc::submit(mc::kSyscallEndpointTimerfdSetTime, &epollTimerSetArgs);
+    if (token == 0 || !mc::wait(token) || epollTimerSetArgs.error != mc::ChannelError::None) {
+        kFinish(34);
+    }
+
+    mc::EpollCreateArgs epollCreateArgs;
+    token = mc::submit(mc::kSyscallEndpointEpollCreate, &epollCreateArgs);
+    if (token == 0 || !mc::wait(token) || epollCreateArgs.error != mc::ChannelError::None) {
+        kFinish(35);
+    }
+    const mc::int32_t epfd = static_cast<mc::int32_t>(epollCreateArgs.fd);
+
+    mc::EpollCtlArgs ctlArgs;
+    ctlArgs.epfd = epfd;
+    ctlArgs.op = mc::EpollCtlOp::Add;
+    ctlArgs.targetFd = epollTimerFd;
+    ctlArgs.mask = static_cast<mc::uint32_t>(mc::EpollEventMask::Readable);
+    ctlArgs.userData = 0x7415;
+    token = mc::submit(mc::kSyscallEndpointEpollCtl, &ctlArgs);
+    if (token == 0 || !mc::wait(token) || ctlArgs.error != mc::ChannelError::None) {
+        kFinish(36);
+    }
+
+    // 15틱(=150ms @100Hz)보다 넉넉한 2000ms 타임아웃 - 만료 전에 깨어나면
+    // 버그, 타임아웃까지 못 깨어나도 count==0으로 버그(아래 38에서 검출).
+    mc::EpollReadyEvent events[1];
+    mc::EpollWaitArgs waitArgs;
+    waitArgs.epfd = epfd;
+    waitArgs.outEvents = events;
+    waitArgs.maxEvents = 1;
+    waitArgs.timeoutMs = 2000;
+    token = mc::submit(mc::kSyscallEndpointEpollWait, &waitArgs);
+    if (token == 0 || !mc::wait(token)) {
+        kFinish(37);
+    }
+    if (waitArgs.error != mc::ChannelError::None || waitArgs.count == 0) {
+        kFinish(38);
+    }
+    if ((events[0].events & static_cast<mc::uint32_t>(mc::EpollEventMask::Readable)) == 0) {
+        kFinish(39);
+    }
+
+    if (kReadExpirationCount(epollTimerFd, 40, 41) == 0) {
+        kFinish(42);
+    }
+
+    mc::CloseArgs epollTimerCloseArgs;
+    epollTimerCloseArgs.fd = epollTimerFd;
+    token = mc::submit(mc::kSyscallEndpointClose, &epollTimerCloseArgs);
+    if (token == 0 || !mc::wait(token) || epollTimerCloseArgs.error != mc::ChannelError::None) {
+        kFinish(43);
+    }
+
+    mc::CloseArgs epollCloseArgs;
+    epollCloseArgs.fd = epfd;
+    token = mc::submit(mc::kSyscallEndpointClose, &epollCloseArgs);
+    if (token == 0 || !mc::wait(token) || epollCloseArgs.error != mc::ChannelError::None) {
+        kFinish(44);
     }
 
     kFinish(0);

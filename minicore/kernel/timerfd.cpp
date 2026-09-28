@@ -69,6 +69,7 @@ void kOnTimerfdFire(void* arg) {
     AsyncTask* wake = nullptr;
     bool reschedule = false;
     uint64_t intervalTicks = 0;
+    EpollObserverQueue wakeEpollObservers;
     {
         SpinlockGuard guard(state->lock);
         isClosing = state->closing;
@@ -76,6 +77,14 @@ void kOnTimerfdFire(void* arg) {
             state->expirationCount += 1;
             state->activeToken = 0;
             wake = state->pendingReaders.popFront();
+            // [신규, 2026-09-29, SP-6350DEBB §5 통합] 레벨 트리거 재스캔
+            // 신호일 뿐이라 전부 드레인한다(channel.cpp의 소켓 쓰기/읽기
+            // 완료 시 readObservers/writeObservers를 전부 깨우는 것과
+            // 동일한 관례).
+            for (EpollObserverNode* n = state->epollReadObservers.popFront(); n;
+                 n = state->epollReadObservers.popFront()) {
+                wakeEpollObservers.pushBack(n);
+            }
             if (state->periodic && state->intervalTicks > 0) {
                 reschedule = true;
                 intervalTicks = state->intervalTicks;
@@ -89,6 +98,13 @@ void kOnTimerfdFire(void* arg) {
     }
     if (wake) {
         AsyncReactor::submitCompletion(wake, /*preemptive=*/true);
+    }
+    // [신규, 2026-09-29] pendingReaders 깨우기와 동일한 이유(timerfd.h
+    // 문서 주석) - 이 콜백은 DelayedExecutionQueue::pump()의 idle-fallback
+    // 경로에서 임의의 코어가 실행하므로, 관찰자의 homeCoreIndex가 다른
+    // 코어면 preemptive=true로 즉시 IPI를 보내야 한다.
+    for (EpollObserverNode* n = wakeEpollObservers.popFront(); n; n = wakeEpollObservers.popFront()) {
+        AsyncReactor::submitCompletion(n->task, /*preemptive=*/true);
     }
     if (reschedule) {
         const uint64_t token = DelayedExecutionQueue::schedule(intervalTicks, &kOnTimerfdFire, ctx);
