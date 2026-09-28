@@ -586,6 +586,20 @@ kernel::AsyncExecCoro NtfsDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 // 있어 ext4의 Stat과 달리 별도 "타깃 재조회"가 필요 없다.
                 args->size = currentFileSize;
                 args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
+                // [신규, 2026-09-28, SP-9039F955 §3.2] NTFS는 ACL 파싱이
+                // 전혀 없다(§1) - FAT류와 동일하게 마운트한 유저 소유로
+                // 취급하되, FAT의 kAttrReadOnly 같은 근거조차 파싱해
+                // 두지 않아(§3.2, NTFS 실제 ACL 파싱은 범위 밖) 읽기
+                // 전용 여부를 구분할 방법이 없다 - 고정값(파일 0644,
+                // 디렉터리 0755)만 노출한다.
+                args->uid = args->mountUid;
+                args->gid = args->mountGid;
+                args->mode = currentIsDir
+                                 ? (kernel::kPermOwnerRead | kernel::kPermOwnerWrite | kernel::kPermOwnerExec |
+                                    kernel::kPermGroupRead | kernel::kPermGroupExec | kernel::kPermOtherRead |
+                                    kernel::kPermOtherExec)   // 0755
+                                 : (kernel::kPermOwnerRead | kernel::kPermOwnerWrite | kernel::kPermGroupRead |
+                                    kernel::kPermOtherRead);  // 0644
                 args->error = kernel::VfsError::None;
             }
             break;
@@ -601,6 +615,23 @@ kernel::AsyncExecCoro NtfsDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
         }
         case kernel::KernelFsOpCode::Unlink: {
             static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw)->error = kernel::VfsError::PermissionDenied;
+            break;
+        }
+        // [신규, 2026-09-28, SP-9039F955 §3.2/§4] Chmod/Chown -
+        // libntfs는 Write/Mkdir/Rmdir/Unlink 전부가 이미 무조건
+        // PermissionDenied인, 애초부터 설계상 읽기 전용인 드라이버다
+        // (`readOnly_` 조건부가 아니라 매 op가 그냥 거부). 이 SP의
+        // §4가 NTFS도 FAT류처럼 Chmod 근사를 제안했지만, 그러려면
+        // 이 드라이버 역사상 첫 온디스크 쓰기(MFT 레코드의
+        // $STANDARD_INFORMATION 갱신 + fixup 재적용)를 새로 만들어야
+        // 해 이번 증분 범위를 넘는다 - NotSupported로 정직하게
+        // 남겨 두고 별도 계획으로 등록한다(CLAUDE.md 규칙7).
+        case kernel::KernelFsOpCode::Chmod: {
+            static_cast<kernel::KernelFsChmodArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
+            break;
+        }
+        case kernel::KernelFsOpCode::Chown: {
+            static_cast<kernel::KernelFsChownArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
             break;
         }
 

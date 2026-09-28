@@ -92,11 +92,15 @@ cp "${BUILD_USERLAND_DIR}/minicore-setuidtest/setuidtest" "${STAGE_DIR}/setuidte
 # 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행된다(main.cpp
 # 상단 주석 참고). 검증이 끝나면 이 줄도 TEMP 스폰 경로와 함께 되돌린다.
 cp "${BUILD_USERLAND_DIR}/minicore-sudotest/sudotest" "${STAGE_DIR}/sudotest"
+# vfsmetatest(SP-9039F955, 2026-09-28) 추가 - setuidtest/sudotest와
+# 동일한 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행된다
+# (main.cpp 상단 주석 참고).
+cp "${BUILD_USERLAND_DIR}/minicore-vfsmetatest/vfsmetatest" "${STAGE_DIR}/vfsmetatest"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\nsetuidtest\nsudotest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\nsetuidtest\nsudotest\nvfsmetatest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest+setuidtest+sudotest)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest+setuidtest+sudotest+vfsmetatest)"

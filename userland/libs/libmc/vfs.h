@@ -30,6 +30,11 @@ constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9)
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
 constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
 constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
+// [신규, 2026-09-28, SP-9039F955 §4] 커널 쪽 kSyscallEndpointRmdir(call
+// 14)는 이 거울 파일이 아직 못 따라간 기존 공백 - Chmod/Chown 번호
+// 자체는 그 공백과 무관하게 커널과 동일한 15/16을 그대로 쓴다.
+constexpr SyscallEndpointId kSyscallEndpointChmod = kMakeSyscallEndpointId(3, 15);
+constexpr SyscallEndpointId kSyscallEndpointChown = kMakeSyscallEndpointId(3, 16);
 
 struct MountArgs {
     const char* path = nullptr;
@@ -135,12 +140,20 @@ enum class FileType : uint8_t {
 };
 
 // [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] fd 없이 경로만으로 동작.
+// [갱신, 2026-09-28, SP-9039F955 §2] uid/gid/mode 신설 - 커널
+// kernel::Uid/Gid/Permission과 동일한 폭(각각 uint32_t/uint32_t/
+// uint16_t)의 plain 정수로 거울(freestanding 유저랜드는 libkenv를
+// include할 수 없어 mode.h의 kPermSpecialS 등 비트 상수는 필요해지면
+// 이 파일에 직접 재선언).
 struct StatArgs {
     const char* path = nullptr;
     uint32_t pathLen = 0;
     // out
     uint64_t size = 0;
     FileType type = FileType::Regular;
+    uint32_t uid = 0;
+    uint32_t gid = 0;
+    uint16_t mode = 0;
     ChannelError error = ChannelError::None;
 };
 
@@ -155,6 +168,33 @@ struct MkdirArgs {
 struct UnlinkArgs {
     const char* path = nullptr;
     uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-28, SP-9039F955 §4] 커널 kernel::kPermSpecialS(1u<<9)와
+// 동일한 값 - S 비트를 세우려는 Chmod 요청을 유저랜드에서도 조립할 수
+// 있게 재선언.
+constexpr uint16_t kPermSpecialS = 1u << 9;
+constexpr uint16_t kPermOwnerRead = 1u << 8;
+constexpr uint16_t kPermOwnerWrite = 1u << 7;
+constexpr uint16_t kPermOwnerExec = 1u << 6;
+
+// [신규, 2026-09-28, SP-9039F955 §4] fd 없이 경로만으로 동작(Mkdir/
+// Unlink와 동일한 모양).
+struct ChmodArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    uint16_t mode = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+struct ChownArgs {
+    const char* path = nullptr;
+    uint32_t pathLen = 0;
+    uint32_t uid = 0;
+    uint32_t gid = 0;
     // out
     ChannelError error = ChannelError::None;
 };

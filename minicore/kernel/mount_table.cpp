@@ -40,7 +40,7 @@ void MountTable::init() {
 
 bool MountTable::resolve(const char* path, uint32_t pathLen, MountKind* outKind,
                           uint64_t* outChannelId, KernelFsDriver** outKernelDriver,
-                          uint32_t* outRelOffset) {
+                          uint32_t* outRelOffset, Uid* outMountUid, Gid* outMountGid) {
     if (!path || pathLen == 0) {
         return false;
     }
@@ -80,6 +80,12 @@ bool MountTable::resolve(const char* path, uint32_t pathLen, MountKind* outKind,
     if (outRelOffset) {
         *outRelOffset = bestRelOffset;
     }
+    if (outMountUid) {
+        *outMountUid = best->mountUid;
+    }
+    if (outMountGid) {
+        *outMountGid = best->mountGid;
+    }
     return true;
 }
 
@@ -118,7 +124,7 @@ MountEntry* kFindMountSlot(const char* path, uint32_t pathLen) {
 
 }  // namespace
 
-bool MountTable::mount(const char* path, uint32_t pathLen, uint64_t channelId) {
+bool MountTable::mount(const char* path, uint32_t pathLen, uint64_t channelId, Uid mountUid, Gid mountGid) {
     MountEntry* slot = kFindMountSlot(path, pathLen);
     if (!slot) {
         return false;
@@ -130,6 +136,8 @@ bool MountTable::mount(const char* path, uint32_t pathLen, uint64_t channelId) {
     slot->pathLen = pathLen;
     slot->kind = MountKind::Channel;
     slot->ownerChannelId = channelId;
+    slot->mountUid = mountUid;
+    slot->mountGid = mountGid;
     slot->used = true;
     return true;
 }

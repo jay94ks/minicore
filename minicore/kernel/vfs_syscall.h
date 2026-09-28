@@ -139,12 +139,17 @@ struct LseekArgs {
 // "경로만으로 동작, fd 불필요" 오퍼레이션(§9.4) - `ResolvePathArgs`와
 // 거의 같은 모양이다. `MountKind::Channel` 마운트는 Open과 동일한
 // 이유(§9.1 IPC 와이어 포맷 미정)로 아직 NotSupported.
+// [갱신, 2026-09-28, SP-9039F955 §2] uid/gid/mode 메타데이터 신설 -
+// KernelFsStatArgs와 동일한 결(StatHandler가 그대로 복사).
 struct StatArgs {
     const char* path = nullptr;  // in: 절대 경로
     uint32_t pathLen = 0;
     // out
     uint64_t size = 0;
     FileType type = FileType::Regular;  // [변경, PN-4BDA31FC, DC-E441CB59] isDirectory:bool -> FileType
+    Uid uid = kRootUid;
+    Gid gid = kRootGid;
+    Permission mode = 0;
     ChannelError error = ChannelError::None;
 };
 
@@ -174,6 +179,33 @@ struct UnlinkArgs {
 struct RmdirArgs {
     const char* path = nullptr;
     uint32_t pathLen = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-28, SP-9039F955 §4] Chmod - MkdirArgs/UnlinkArgs와
+// 동일하게 경로 기반. 권한 판정(호출자가 root이거나 파일 소유자)은
+// ChmodHandler가 caller uid/gid를 실어 KernelFsChmodArgs로 내려보내고
+// 각 드라이버가 자신의 소유자 개념(ext4=inode uid, FAT류/NTFS=마운트한
+// 유저)과 비교해 최종 판정한다(§4). S 비트(kPermSpecialS) 설정은
+// FAT32/exFAT/NTFS에서 NotSupported(§3.2/3.3).
+struct ChmodArgs {
+    const char* path = nullptr;  // in
+    uint32_t pathLen = 0;
+    Permission mode = 0;  // in - rwx 9비트 + S 비트(kPermSpecialS)
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-28, SP-9039F955 §4] Chown - root만 허용(Linux 관례,
+// ChownHandler 단계에서 파일시스템과 무관하게 판정). ext4에 대해서만
+// 실제로 동작 - NTFS/FAT32/exFAT/livefs는 NotSupported(소유자가
+// "마운트한 유저"로 고정돼 개별 파일 단위로 바꿀 방법이 없음, §4).
+struct ChownArgs {
+    const char* path = nullptr;  // in
+    uint32_t pathLen = 0;
+    Uid uid = kRootUid;  // in
+    Gid gid = kRootGid;  // in
     // out
     ChannelError error = ChannelError::None;
 };
@@ -211,10 +243,16 @@ constexpr SyscallEndpointId kSyscallEndpointReaddir = kMakeSyscallEndpointId(3, 
 constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
 constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
 constexpr SyscallEndpointId kSyscallEndpointRmdir = kMakeSyscallEndpointId(3, 14);
+// [신규, 2026-09-28, SP-9039F955 §4] 설계안 작성 시점엔 Rmdir이 아직
+// call 13이라 착각해 문서엔 14/15로 적혀 있었으나, 실제 코드는 이미
+// Rmdir=14까지 예약돼 있어(위 줄) 15/16으로 한 칸씩 밀어 예약한다
+// (RM-48E1E610도 이 번호로 갱신).
+constexpr SyscallEndpointId kSyscallEndpointChmod = kMakeSyscallEndpointId(3, 15);
+constexpr SyscallEndpointId kSyscallEndpointChown = kMakeSyscallEndpointId(3, 16);
 
 class VfsSyscallService {
 public:
-    // 부팅 시 한 번 호출 - 위 15개 endpoint를 등록한다.
+    // 부팅 시 한 번 호출 - 위 17개 endpoint를 등록한다.
     static void registerSyscallEndpoints();
 };
 

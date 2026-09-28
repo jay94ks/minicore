@@ -485,6 +485,22 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
             } else {
                 kLiveFsStatImpl(args);
             }
+            // [신규, 2026-09-28, SP-9039F955 §3.4] 지금 존재하는 모든
+            // livefs 엔트리(named/initrd.cpio/kernel/<name>/proc/
+            // resourcegroup 전부)는 항상 root 소유, 읽기 전용 -
+            // 위 세 분기 중 어느 쪽이 채웠든 여기서 한 번에 확정한다.
+            // "프로세스/유저별로 자동 노출되는" 미래 서브트리(예:
+            // proc/self 안쪽)는 아직 존재하지 않으므로 이 규칙의
+            // 예외가 실제로 생기는 건 그 서브트리가 생기는 시점(§3.4
+            // 향후 규칙 - 그때 이 자리에 분기 추가).
+            if (args->error == VfsError::None) {
+                args->uid = kRootUid;
+                args->gid = kRootGid;
+                args->mode = (args->type == FileType::Directory)
+                                 ? (kPermOwnerRead | kPermOwnerExec | kPermGroupRead | kPermGroupExec |
+                                    kPermOtherRead | kPermOtherExec)   // 0555
+                                 : (kPermOwnerRead | kPermGroupRead | kPermOtherRead);  // 0444
+            }
             break;
         }
         case KernelFsOpCode::Mkdir: {
@@ -497,6 +513,19 @@ AsyncExecCoro LiveFs::onExec(AsyncTask* task, void* argsRaw) {
         }
         case KernelFsOpCode::Unlink: {
             static_cast<KernelFsUnlinkArgs*>(argsRaw)->error = VfsError::PermissionDenied;
+            break;
+        }
+        // [신규, 2026-09-28, SP-9039F955 §4] Chmod/Chown - livefs 전체가
+        // 본질적으로 읽기 전용(Write와 동일한 정책, mount_table.h "v1
+        // 축소 범위" 참고)이라 Chmod는 PermissionDenied, Chown은
+        // 개별 파일 소유자를 저장할 방법이 없어 NotSupported(§3.4,
+        // 소유자는 항상 root 고정).
+        case KernelFsOpCode::Chmod: {
+            static_cast<KernelFsChmodArgs*>(argsRaw)->error = VfsError::PermissionDenied;
+            break;
+        }
+        case KernelFsOpCode::Chown: {
+            static_cast<KernelFsChownArgs*>(argsRaw)->error = VfsError::NotSupported;
             break;
         }
         case KernelFsOpCode::Readdir: {

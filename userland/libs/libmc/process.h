@@ -45,6 +45,11 @@ enum SpawnProcessFlags : unsigned int {
     // LISTEN_PID/LISTEN_FDS를 envp에 자동 주입한다(소켓 fd만 대상,
     // process.h 커널 측 문서 주석 참고).
     kSpawnInheritFds = 1u << 1,
+    // [신규, 2026-09-28, SP-9039F955 §5.1] kernel::SpawnProcessFlags::
+    // kSpawnAllowSetuid와 값을 맞춘다 - imagePath가 가리키는 파일에
+    // S 비트가 있으면 커널이 새 프로세스의 uid를 그 파일 소유자로
+    // 승격한다.
+    kSpawnAllowSetuid = 1u << 2,
 };
 
 // kernel::SpawnProcessArgs와 바이트 단위로 정확히 같은 필드 순서/타입 -
@@ -55,6 +60,11 @@ struct SpawnProcessArgs {
     char* const* argv = nullptr;  // in, 유저 포인터, NULL 종단(nullptr이면 빈 argv)
     char* const* envp = nullptr;  // in, 유저 포인터, NULL 종단(nullptr이면 빈 envp)
     uint32_t flags = SpawnProcessFlags::kSpawnNone;
+    // [신규, 2026-09-28, SP-9039F955 §5.1] in, 유저 포인터, optional
+    // (nullptr이면 kSpawnAllowSetuid를 쓸 수 없다 - 커널이 InvalidArgument로
+    // 거부).
+    const char* imagePath = nullptr;
+    uint32_t imagePathLen = 0;
     // out
     SpawnProcessError error = SpawnProcessError::None;
     int64_t pid = kInvalidProcessId;

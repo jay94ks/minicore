@@ -168,6 +168,10 @@ constexpr uint8_t kExfatEntryTypeVolumeLabel = 0x83;
 constexpr uint8_t kExfatEntryTypeEndOfDirectory = 0x00;  // 더 이상 유효 엔트리 없음
 
 constexpr uint16_t kFileAttrDirectory = 0x10;  // FAT32 attr 비트와 값 호환(SP-F1987EF8 §3.5)
+// [신규, 2026-09-28, SP-9039F955 §3.3] FAT32 kAttrReadOnly(vfat.h)와
+// 값이 같다(주석 그대로 "FAT32 attr 비트와 값 호환") - Stat의 mode
+// 합성에 쓴다(libvfat과 동일한 규칙).
+constexpr uint16_t kFileAttrReadOnly = 0x01;
 
 // ---------------------------------------------------------------------
 // 4(부분) - ExfatVolume: 읽기 전용 마운트 + mount()가 캐싱한 상태의

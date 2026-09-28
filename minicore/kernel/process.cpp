@@ -6,6 +6,7 @@
 #include "libkenv/mem.h"
 #include "libkenv/spinlock.h"
 #include "libkmm/slab.h"
+#include "mount_table.h"  // [신규, 2026-09-28, SP-9039F955 §5.2] EXEC_SETUID Stat 조회
 #include "page_frame_allocator.h"
 #include "paging.h"
 #include "resource_group.h"
@@ -1106,6 +1107,16 @@ public:
             args->error = SpawnProcessError::InvalidArgument;
             co_return;
         }
+        // [신규, 2026-09-28, SP-9039F955 §5.1] kSpawnAllowSetuid는
+        // imagePath 없이는 승격 판정 자체가 불가능하다 - 조용히 무시
+        // (승격 없이 그냥 진행)하지 않고 명시적으로 거부한다(위와 동일한
+        // "오타/버전 불일치를 바로 드러내기" 관례).
+        if ((args->flags & SpawnProcessFlags::kSpawnAllowSetuid) &&
+            (!args->imagePath || args->imagePathLen == 0 ||
+             !Paging::isUserRangeValid(reinterpret_cast<uint64_t>(args->imagePath), args->imagePathLen))) {
+            args->error = SpawnProcessError::InvalidArgument;
+            co_return;
+        }
 
         // 1단계 - imageBuffer/imageSize 검증(SP-6BEAE0C1 §3 "기본적으로
         // untrusted"). isUserRangeValid는 length==0도 true를 돌려주므로
@@ -1400,6 +1411,43 @@ public:
         // 없다 - 이 역시 이론상 도달 불가(SpawnProcess 자체가 유저
         // 프로세스 실행 흐름에서만 오므로 이미 최소 init은 떠 있어야
         // 함)라 더 방어하지 않는다.
+
+        // [신규, 2026-09-28, SP-9039F955 §5.2] EXEC_SETUID - imagePath로
+        // 그 파일을 커널이 직접 Stat해(호출자가 주장하는 값을 믿지
+        // 않음 - 보안이 걸린 판정) mode에 S 비트가 있으면 새 프로세스의
+        // uid를 그 파일 소유자로 즉시 전환한다. 아직 Scheduler::enqueue
+        // 전(procShared는 이 요청 안에서만 보이는 상태)이라 이 시점에
+        // uid를 덮어써도 경쟁이 없다. **주의**: 이 onExec()은 이
+        // 파일에서 한 번도 `co_await`를 쓰지 않는 stackful 코루틴이다
+        // (JoinAwaiter의 문서 주석 - "기존 onExec들은 전부 co_await 없이
+        // 동작") - `AsyncTaskAwaiter(...).await()`만 쓰고 `co_await
+        // AsyncTaskCoroAwaiter(...)`는 절대 섞지 않는다(DC-90A66932가
+        // 실측으로 확인한 "두 방식 혼용 시 실행 중복/오염" 원칙 그대로,
+        // 코드 관계도에도 기록돼 있음).
+        if (args->flags & SpawnProcessFlags::kSpawnAllowSetuid) {
+            MountKind statKind{};
+            uint64_t statChannelId = 0;
+            KernelFsDriver* statDriver = nullptr;
+            uint32_t statRelOffset = 0;
+            if (MountTable::resolve(args->imagePath, args->imagePathLen, &statKind, &statChannelId, &statDriver,
+                                     &statRelOffset) &&
+                statKind != MountKind::Channel) {
+                KernelFsStatArgs statArgs;
+                statArgs.relPath = args->imagePath + statRelOffset;
+                statArgs.relPathLen = args->imagePathLen - statRelOffset;
+                AsyncTask* statTask = AsyncTask::submit(statDriver->subjectCode(), 0, &statArgs, /*autoFree=*/false);
+                if (statTask) {
+                    statTask->submitterTask = task->submitterTask;
+                    AsyncTaskAwaiter(statTask).await();
+                    if (statArgs.error == VfsError::None && (statArgs.mode & kPermSpecialS)) {
+                        procShared->uid = statArgs.uid;
+                    }
+                }
+            }
+            // Stat 실패(파일이 사라짐 등)는 승격 없이 그냥 진행한다 -
+            // 이미 메모리에 이미지가 있으므로 exec 자체를 실패시키지
+            // 않는다(§5.2 그대로).
+        }
 
         // argv/envp는 아직 실제로 전달하지 않는다(SpawnProcessArgs
         // 문서 주석 참고 - §4 전체가 미착수).

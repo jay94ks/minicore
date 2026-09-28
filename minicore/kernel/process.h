@@ -719,14 +719,22 @@ enum SpawnProcessFlags : uint32_t {
     // 안에서만 통하는 단순화, 두 관례를 동시에 지원해야 할 실사용처가
     // 생기면 그때 재검토).
     kSpawnInheritFds = 1u << 1,
-    // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 2, ...).
+    // [신규, 2026-09-28, SP-9039F955 §5.1] EXEC_SETUID - `imagePath`가
+    // 가리키는 파일의 mode에 S 비트(kPermSpecialS)가 있으면 새
+    // 프로세스의 uid를 그 파일 소유자로 즉시 승격한다(kSetuid()의
+    // 조상-자손/화이트리스트 판정 없이 - 파일 자체의 S 비트 + Chmod의
+    // 소유자 전용 게이트가 이미 그 역할을 대신함, §5.2). `imagePath`
+    // 없이 이 플래그만 세팅하면 승격 판정 자체가 불가능해 즉시
+    // InvalidArgument(SpawnProcessHandler::onExec 1단계).
+    kSpawnAllowSetuid = 1u << 2,
+    // 이후 필요해지는 옵션은 여기 비트를 계속 추가(예: 1u << 3, ...).
 };
 
 // 현재 정의된 비트 전부의 OR - `flags`에 이 마스크 밖의 비트가 하나라도
 // 세팅되면 InvalidArgument(§3 "조용히 무시하지 않음, 표준 커널 syscall
 // 관례"). 새 비트를 추가할 때마다 이 마스크도 같이 넓혀야 한다.
-constexpr uint32_t kSpawnProcessFlagsMask =
-    SpawnProcessFlags::kSpawnDebugStart | SpawnProcessFlags::kSpawnInheritFds;
+constexpr uint32_t kSpawnProcessFlagsMask = SpawnProcessFlags::kSpawnDebugStart | SpawnProcessFlags::kSpawnInheritFds |
+                                             SpawnProcessFlags::kSpawnAllowSetuid;
 
 // [SP-6BEAE0C1 §3] SpawnProcess syscall 인자 - `imageBuffer`/`argv`/
 // `envp`는 전부 유저 포인터(untrusted, 핸들러 내부에서 Paging::
@@ -745,6 +753,12 @@ struct SpawnProcessArgs {
     char* const* argv = nullptr;  // 유저 포인터, NULL 종단 - PN-E35294B8 항목2에서 실제 소비
     char* const* envp = nullptr;  // 유저 포인터, NULL 종단 - PN-E35294B8 항목2에서 실제 소비
     uint32_t flags = SpawnProcessFlags::kSpawnNone;  // SpawnProcessFlags 비트마스크
+    // [신규, 2026-09-28, SP-9039F955 §5.1] 유저 포인터, optional
+    // (nullptr 허용 - 기존 모든 호출부는 이 플래그를 안 쓰므로 하위
+    // 호환 100% 유지). kSpawnAllowSetuid가 이 이미지의 출처 파일을
+    // 커널이 직접 Stat해 S 비트를 확인하는 데만 쓰인다.
+    const char* imagePath = nullptr;
+    uint32_t imagePathLen = 0;
     // out
     SpawnProcessError error = SpawnProcessError::None;
     // [수정, 2026-09-17, PN-C39882D0, SP-9CB55C5B §2/§6] 성공 시 새

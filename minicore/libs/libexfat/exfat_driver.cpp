@@ -118,6 +118,9 @@ struct ExfatParsedEntry {
     uint64_t fileSize = 0;
     uint16_t nameUtf16[kMaxNameUtf16];
     uint32_t nameLen = 0;
+    // [신규, 2026-09-28, SP-9039F955 §3.3] Stat의 mode 합성(kFileAttrReadOnly)에
+    // 필요 - Primary 엔트리의 원본 속성 비트를 그대로 보존.
+    uint16_t fileAttributes = 0;
 };
 
 // [신규, 2026-09-23, RM-F2DAFF66 §3 점검 중 발견 - SP-F1987EF8 §3.5가
@@ -161,6 +164,7 @@ ExfatParsedEntry kParseFileEntrySet(const uint8_t* entrySet, uint32_t secondaryC
     ExfatStreamExtEntry stream;
     memcpy(&stream, entrySet + 32, sizeof(stream));
     result.isDir = (primary.fileAttributes & kFileAttrDirectory) != 0;
+    result.fileAttributes = primary.fileAttributes;
     result.noFatChain = (stream.generalSecondaryFlags & kNoFatChainBit) != 0;
     result.firstCluster = stream.firstCluster;
     result.fileSize = stream.dataLength;
@@ -593,6 +597,7 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
             bool currentIsDir = true;
             uint64_t currentFileSize = 0;
             bool currentNoFatChain = false;
+            uint16_t currentFileAttributes = 0;  // [신규, SP-9039F955 §3.3] mode 합성용
             bool failed = false;
 
             uint32_t pos = 0;
@@ -766,6 +771,7 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 currentIsDir = matched.isDir;
                 currentFileSize = matched.fileSize;
                 currentNoFatChain = matched.noFatChain;
+                currentFileAttributes = matched.fileAttributes;
             }
 
             if (failed) {
@@ -776,6 +782,20 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 // ext4의 Stat과 달리 별도 "타깃 재조회"가 필요 없다.
                 args->size = currentFileSize;
                 args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
+                // [신규, 2026-09-28, SP-9039F955 §3.3] libvfat과 동일한
+                // 합성 규칙 - 마운트한 유저 소유, kFileAttrReadOnly(값은
+                // FAT32 kAttrReadOnly와 호환)로부터 mode 합성.
+                args->uid = args->mountUid;
+                args->gid = args->mountGid;
+                if (currentIsDir) {
+                    args->mode = kernel::kPermOwnerRead | kernel::kPermOwnerExec | kernel::kPermGroupRead |
+                                 kernel::kPermGroupExec | kernel::kPermOtherRead | kernel::kPermOtherExec;  // 0555
+                } else if (currentFileAttributes & kFileAttrReadOnly) {
+                    args->mode = kernel::kPermOwnerRead | kernel::kPermGroupRead | kernel::kPermOtherRead;  // 0444
+                } else {
+                    args->mode = kernel::kPermOwnerRead | kernel::kPermOwnerWrite | kernel::kPermGroupRead |
+                                 kernel::kPermOtherRead;  // 0644
+                }
                 args->error = kernel::VfsError::None;
             }
             break;
@@ -791,6 +811,25 @@ kernel::AsyncExecCoro ExfatDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
         }
         case kernel::KernelFsOpCode::Unlink: {
             static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw)->error = kernel::VfsError::PermissionDenied;
+            break;
+        }
+        // [신규, 2026-09-28, SP-9039F955 §4] Chmod/Chown - libexfat은
+        // 아직 쓰기 경로가 전혀 없다(Write/Mkdir/Rmdir/Unlink 전부
+        // PermissionDenied 스텁, §4 미결 그대로). exFAT의 디렉터리
+        // 엔트리 집합은 Primary+Stream Extension+FileName들이 클러스터
+        // 경계를 넘을 수도 있고(FAT32 LFN과 달리 이 코드베이스에 그
+        // 경계-안-넘음 보장이 없음) 속성 변경 시 집합 체크섬(§
+        // kExfatEntrySetChecksum, 지금은 읽기 검증에만 쓰임)도 다시
+        // 계산해 써야 해 - libvfat처럼 기존 Unlink 패턴을 그대로
+        // 재사용할 수 없는 첫 쓰기 경로다. 이번 증분은 Stat의 소유자/
+        // mode 노출까지만 다루고, 실제 쓰기는 별도 계획으로 미룬다
+        // (PN-24A2B6F5류 후속 항목 등록 - CLAUDE.md 규칙7).
+        case kernel::KernelFsOpCode::Chmod: {
+            static_cast<kernel::KernelFsChmodArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
+            break;
+        }
+        case kernel::KernelFsOpCode::Chown: {
+            static_cast<kernel::KernelFsChownArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
             break;
         }
 

@@ -343,7 +343,10 @@ void kFsKernelMain(void* /*arg*/) {
     }
 
     for (uint32_t i = 0; i < kMountPointCount; ++i) {
-        MountTable::mount(kMountPoints[i].path, kMountPoints[i].pathLen, channelId);
+        // [갱신, 2026-09-28, SP-9039F955 §3.3] 이 fs 서비스 자신의
+        // 부팅 시 자동 등록 - 실제 유저 호출자가 없어(mountKernel()과
+        // 동일한 상황) kRootUid/kRootGid 기본값 그대로.
+        MountTable::mount(kMountPoints[i].path, kMountPoints[i].pathLen, channelId, kRootUid, kRootGid);
     }
 
     // 블록 스토리지 장치 인식/구동 - VFS 마운트 지점 라우팅 등록

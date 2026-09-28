@@ -2,6 +2,7 @@
 #define MINICORE_KERNEL_MOUNT_TABLE_H
 
 #include "async_task.h"
+#include "libkenv/permission.h"  // [신규, 2026-09-28, SP-9039F955] Uid/Gid/Permission 재사용
 #include "libkenv/types.h"
 
 namespace kernel {
@@ -59,6 +60,12 @@ enum class VfsError : uint32_t {
     // 않음("."/".." 외의 유효 엔트리가 남아있음) - ChannelError::
     // NotEmpty로 매핑.
     NotEmpty,
+    // [신규, 2026-09-28, SP-9039F955 §3.3/§4] 이 파일시스템이 그
+    // 오퍼레이션 자체를 구조적으로 지원하지 않음(예: FAT32/exFAT/NTFS의
+    // Chmod S 비트 설정 시도, Chown 전체) - ChannelError::NotSupported로
+    // 매핑. "권한이 없어서"(PermissionDenied)와 구분되는, "이
+    // 파일시스템엔 그 개념 자체가 없어서" 실패.
+    NotSupported,
 };
 
 struct FileHandle {
@@ -96,6 +103,11 @@ enum class KernelFsOpCode : uint32_t {
     Rmdir,
     Unlink,
     Readdir,
+    // [신규, 2026-09-28, SP-9039F955 §4] Stat/Mkdir 등과 동일하게 경로
+    // 기반(fd 불필요) - vfs_syscall.h의 ChmodArgs/ChownArgs(그룹3 call
+    // 15/16)를 그대로 이 op로 라우팅한다.
+    Chmod,
+    Chown,
 };
 
 // [신규, 2026-09-23, PN-740005DF 항목1, RM-F2DAFF66 §1-V] SP-2AAD7C8D
@@ -171,13 +183,57 @@ enum class FileType : uint8_t {
     Socket = 2,
 };
 
+// [갱신, 2026-09-28, SP-9039F955 §2/§3] uid/gid/mode 메타데이터 신설.
+// `mountUid`/`mountGid`는 in - StatHandler가 `MountTable::resolve()`로
+// 미리 얻은 그 마운트의 소유 유저(§3.3)를 실어 보낸다. ext4처럼 실제
+// 온디스크 소유자가 있는 드라이버는 이 값을 무시하고 자신의 inode
+// 값을 `uid`/`gid`(out)에 채우면 되고, FAT32/exFAT/NTFS/livefs처럼
+// 소유자 개념이 없는 드라이버는 이 in 값을 그대로 out에 반사한다
+// (§3.2/§3.3/§3.4).
 struct KernelFsStatArgs {
     KernelFsOpCode op = KernelFsOpCode::Stat;
     const char* relPath = nullptr;
     uint32_t relPathLen = 0;
+    Uid mountUid = kRootUid;   // in
+    Gid mountGid = kRootGid;   // in
     // out
     uint64_t size = 0;
     FileType type = FileType::Regular;
+    Uid uid = kRootUid;
+    Gid gid = kRootGid;
+    Permission mode = 0;
+    VfsError error = VfsError::None;
+};
+
+// [신규, 2026-09-28, SP-9039F955 §4] Chmod/Chown - Stat과 동일하게
+// 경로 기반(fd 불필요). `callerUid`/`callerGid`는 in - 이 요청을
+// 트리거한 syscall 호출자의 신원(ChmodHandler/ChownHandler가
+// `Process::uid/gid`에서 채움)이라 각 드라이버가 자신이 아는 소유자
+// 판정 기준(ext4는 inode uid, FAT류/NTFS는 mountUid)과 비교해 권한을
+// 판정한다 - 판정 로직을 드라이버마다 다르게 두는 이유는 "소유자가
+// 무엇을 의미하는지" 자체가 파일시스템마다 다르기 때문(§3 그대로).
+struct KernelFsChmodArgs {
+    KernelFsOpCode op = KernelFsOpCode::Chmod;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    Permission mode = 0;       // in
+    Uid callerUid = kRootUid;  // in
+    Gid callerGid = kRootGid;  // in
+    Uid mountUid = kRootUid;   // in - FAT류/NTFS의 owner 판정 기준(§3.3)
+    // out
+    VfsError error = VfsError::None;
+};
+
+// root만 호출 가능하다는 판정(§4)은 파일시스템과 무관해 ChownHandler
+// 단계에서 이미 끝내고 통과한 요청만 여기로 내려온다 - 드라이버는
+// callerUid를 볼 필요가 없다(Chmod와 달리 소유자 판정 분기 없음).
+struct KernelFsChownArgs {
+    KernelFsOpCode op = KernelFsOpCode::Chown;
+    const char* relPath = nullptr;
+    uint32_t relPathLen = 0;
+    Uid uid = kRootUid;  // in - 새 소유자
+    Gid gid = kRootGid;  // in - 새 그룹
+    // out
     VfsError error = VfsError::None;
 };
 
@@ -270,6 +326,14 @@ struct MountEntry {
     MountKind kind = MountKind::Channel;
     uint64_t ownerChannelId = 0;       // kind == Channel일 때만 유효
     KernelFsDriver* kernelDriver = nullptr;  // kind == KernelDriver일 때만 유효
+    // [신규, 2026-09-28, SP-9039F955 §3.3] 이 볼륨을 마운트한 유저 -
+    // FAT32/exFAT/NTFS처럼 네이티브 소유자 개념이 없는 파일시스템의
+    // Stat/Chmod가 이 값을 소유자로 보고한다. kind==Channel(유저
+    // syscall Mount)은 호출자 Process::uid/gid로 채워지고,
+    // kind==KernelDriver(ext4/FAT류/NTFS 자동 마운트, fs.cpp)는 아직
+    // 실제 호출자가 없어 기본값 root 그대로 남는다(§3.3 그대로).
+    Uid mountUid = kRootUid;
+    Gid mountGid = kRootGid;
     bool used = false;
 };
 
@@ -286,13 +350,18 @@ public:
     // 그 드라이버의 open/read를 대행 호출한다(IPC 왕복 없음).
     // outRelOffset에는 path 안에서 마운트 경로 접두사(+ 있으면 구분자
     // '/')를 뺀 나머지가 시작하는 위치를 채운다.
+    // [갱신, 2026-09-28, SP-9039F955 §3.3] outMountUid/outMountGid는
+    // 선택적(nullptr 허용) - 그 마운트의 소유 유저/그룹을 함께 돌려준다.
     static bool resolve(const char* path, uint32_t pathLen,
                          MountKind* outKind, uint64_t* outChannelId,
-                         KernelFsDriver** outKernelDriver, uint32_t* outRelOffset);
+                         KernelFsDriver** outKernelDriver, uint32_t* outRelOffset,
+                         Uid* outMountUid = nullptr, Gid* outMountGid = nullptr);
 
     // 유저랜드 fs 서비스용(§2.2 Mount syscall이 이걸 호출) - 이미
-    // 마운트된 경로거나 테이블이 가득 찼으면 false.
-    static bool mount(const char* path, uint32_t pathLen, uint64_t channelId);
+    // 마운트된 경로거나 테이블이 가득 찼으면 false. [갱신, 2026-09-28,
+    // SP-9039F955 §3.3] mountUid/mountGid - 호출자(Process::uid/gid)를
+    // 그대로 넘긴다.
+    static bool mount(const char* path, uint32_t pathLen, uint64_t channelId, Uid mountUid, Gid mountGid);
 
     // 커널 자신이 부팅 시퀀스(kmain.cpp)에서 직접 호출 - syscall이
     // 아니다(유저 프로세스가 커널 드라이버를 마운트시킬 이유가 없음).

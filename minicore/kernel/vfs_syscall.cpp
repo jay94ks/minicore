@@ -101,6 +101,8 @@ ChannelError kMapVfsError(VfsError error) {
             return ChannelError::AlreadyExists;
         case VfsError::NotEmpty:
             return ChannelError::NotEmpty;
+        case VfsError::NotSupported:
+            return ChannelError::NotSupported;
     }
     return ChannelError::InvalidArgument;
 }
@@ -128,8 +130,16 @@ public:
             args->error = ChannelError::InvalidPointer;
             co_return;
         }
-        args->error =
-            MountTable::mount(args->path, args->pathLen, args->channelId) ? ChannelError::None : ChannelError::AlreadyExists;
+        // [신규, 2026-09-28, SP-9039F955 §3.3] 이 마운트를 요청한 유저를
+        // MountEntry::mountUid/mountGid로 남긴다 - FAT32/exFAT/NTFS
+        // 소유자 판정의 기준이 된다. kValidateVfsBuffer가 이미 제출자가
+        // UserThread임을 확인했으므로 kProcessFromSubmitter는 안전하다.
+        SharedPtr<Process> callerProcess = kProcessFromSubmitter(task);
+        const Uid mountUid = callerProcess ? callerProcess->uid : kRootUid;
+        const Gid mountGid = callerProcess ? callerProcess->gid : kRootGid;
+        args->error = MountTable::mount(args->path, args->pathLen, args->channelId, mountUid, mountGid)
+                          ? ChannelError::None
+                          : ChannelError::AlreadyExists;
         co_return;
     }
     void onFailure(AsyncTask*) override {}
@@ -747,7 +757,10 @@ public:
         uint64_t channelId = 0;
         KernelFsDriver* driver = nullptr;
         uint32_t relOffset = 0;
-        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset)) {
+        Uid mountUid = kRootUid;
+        Gid mountGid = kRootGid;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset, &mountUid,
+                                  &mountGid)) {
             args->error = ChannelError::NotFound;
             co_return;
         }
@@ -759,6 +772,10 @@ public:
         KernelFsStatArgs kfsArgs;
         kfsArgs.relPath = args->path + relOffset;
         kfsArgs.relPathLen = args->pathLen - relOffset;
+        // [신규, 2026-09-28, SP-9039F955 §3.3] 소유자 개념이 없는
+        // 드라이버(FAT류/NTFS/livefs)가 이 값을 그대로 out에 반사한다.
+        kfsArgs.mountUid = mountUid;
+        kfsArgs.mountGid = mountGid;
         AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
         if (!fsTask) {
             args->error = ChannelError::ResourceExhausted;
@@ -773,6 +790,9 @@ public:
         }
         args->size = kfsArgs.size;
         args->type = kfsArgs.type;
+        args->uid = kfsArgs.uid;    // [신규, SP-9039F955 §2]
+        args->gid = kfsArgs.gid;    // [신규, SP-9039F955 §2]
+        args->mode = kfsArgs.mode;  // [신규, SP-9039F955 §2]
         args->error = ChannelError::None;
         co_return;
     }
@@ -913,6 +933,116 @@ public:
 
 RmdirHandler gRmdirHandler;
 
+// [신규, 2026-09-28, SP-9039F955 §4] Chmod - Mkdir/Unlink류와 같은
+// 골격이되, 권한 판정에 필요한 caller uid/gid(kValidateVfsBuffer가
+// 이미 제출자를 UserThread로 확정했으므로 kProcessFromSubmitter는
+// 안전)와 그 마운트의 소유 유저(mountUid, FAT류/NTFS 판정 기준)를
+// 함께 KernelFsChmodArgs로 내려보낸다 - 최종 허용/거부는 각 드라이버가
+// 자신의 소유자 개념으로 판정한다(§4, mount_table.h 주석 참고).
+class ChmodHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ChmodArgs*>(argsRaw);
+        if (!kValidateVfsBuffer(task, args->path, args->pathLen)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
+
+        MountKind kind{};
+        uint64_t channelId = 0;
+        KernelFsDriver* driver = nullptr;
+        uint32_t relOffset = 0;
+        Uid mountUid = kRootUid;
+        Gid mountGid = kRootGid;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset, &mountUid,
+                                  &mountGid)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (kind == MountKind::Channel) {
+            args->error = ChannelError::NotSupported;  // PN-EA4EE935와 동일한 스코프 결정
+            co_return;
+        }
+
+        SharedPtr<Process> callerProcess = kProcessFromSubmitter(task);
+        KernelFsChmodArgs kfsArgs;
+        kfsArgs.relPath = args->path + relOffset;
+        kfsArgs.relPathLen = args->pathLen - relOffset;
+        kfsArgs.mode = args->mode;
+        kfsArgs.callerUid = callerProcess ? callerProcess->uid : kRootUid;
+        kfsArgs.callerGid = callerProcess ? callerProcess->gid : kRootGid;
+        kfsArgs.mountUid = mountUid;
+        AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
+        if (!fsTask) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // PN-EA4EE935 실측 발견 그대로 재적용
+        AsyncTaskAwaiter(fsTask).await();
+
+        args->error = kMapVfsError(kfsArgs.error);
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ChmodHandler gChmodHandler;
+
+// [신규, 2026-09-28, SP-9039F955 §4] Chown - root만 허용(Linux 관례)
+// 이라는 판정은 파일시스템과 무관하므로 드라이버를 부르기도 전에
+// 여기서 끝낸다 - ext4 외 드라이버는 그 다음 자신의 Chown 케이스에서
+// 스스로 NotSupported를 반환한다(§4).
+class ChownHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ChownArgs*>(argsRaw);
+        if (!kValidateVfsBuffer(task, args->path, args->pathLen)) {
+            args->error = ChannelError::InvalidPointer;
+            co_return;
+        }
+
+        SharedPtr<Process> callerProcess = kProcessFromSubmitter(task);
+        if (!callerProcess || callerProcess->uid != kRootUid) {
+            args->error = ChannelError::PermissionDenied;
+            co_return;
+        }
+
+        MountKind kind{};
+        uint64_t channelId = 0;
+        KernelFsDriver* driver = nullptr;
+        uint32_t relOffset = 0;
+        if (!MountTable::resolve(args->path, args->pathLen, &kind, &channelId, &driver, &relOffset)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+        if (kind == MountKind::Channel) {
+            args->error = ChannelError::NotSupported;  // PN-EA4EE935와 동일한 스코프 결정
+            co_return;
+        }
+
+        KernelFsChownArgs kfsArgs;
+        kfsArgs.relPath = args->path + relOffset;
+        kfsArgs.relPathLen = args->pathLen - relOffset;
+        kfsArgs.uid = args->uid;
+        kfsArgs.gid = args->gid;
+        AsyncTask* fsTask = AsyncTask::submit(driver->subjectCode(), 0, &kfsArgs, /*autoFree=*/false);
+        if (!fsTask) {
+            args->error = ChannelError::ResourceExhausted;
+            co_return;
+        }
+        fsTask->submitterTask = task->submitterTask;  // PN-EA4EE935 실측 발견 그대로 재적용
+        AsyncTaskAwaiter(fsTask).await();
+
+        args->error = kMapVfsError(kfsArgs.error);
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+ChownHandler gChownHandler;
+
 }  // namespace
 
 void VfsSyscallService::registerSyscallEndpoints() {
@@ -931,6 +1061,8 @@ void VfsSyscallService::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointMkdir, &gMkdirHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointUnlink, &gUnlinkHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointRmdir, &gRmdirHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointChmod, &gChmodHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointChown, &gChownHandler);
 }
 
 }  // namespace kernel

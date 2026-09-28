@@ -152,3 +152,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/setuidtest ${CMAKE_CURR
 # TEMP 스폰 경로로 이름("sudotest")이 매치돼 부팅 시 자동 실행된다
 # (minicore/sudotest/main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/sudotest ${CMAKE_CURRENT_BINARY_DIR}/minicore-sudotest)
+
+# vfsmetatest(SP-9039F955, VFS uid/gid/mode + Chmod/Chown E2E 검증) -
+# setuidtest/sudotest와 동일한 이유의 out-of-tree add_subdirectory -
+# kmain.cpp의 TEMP 스폰 경로로 이름("vfsmetatest")이 매치돼 부팅 시
+# 자동 실행된다(minicore/vfsmetatest/main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/vfsmetatest ${CMAKE_CURRENT_BINARY_DIR}/minicore-vfsmetatest)
