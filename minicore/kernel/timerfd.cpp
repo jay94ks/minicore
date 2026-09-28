@@ -44,22 +44,46 @@ void kFreeTimerfdCallbackContext(TimerfdCallbackContext* ctx) {
 // 있으므로(PN-96265AE4가 실측으로 확인), 대기자를 깨울 땐 반드시
 // preemptive=true로 그 코어에 IPI를 보내 즉시 드레인을 강제한다
 // (timerfd.h 문서 주석, PN-4FA5F13B가 확립한 원칙과 동일).
+// [신규, 2026-09-29, SP-A7479F83 §6-C 답변] Close(fd)가 cancel()
+// 실패(경쟁) 시 이 함수에게 최종 정리를 떠넘긴 경우 - fd 슬롯을 지금
+// 대신 회수한다(timerfd.h TimerfdState::closing 문서 주석 참고).
+void kReclaimClosingTimerfdSlot(TimerfdState* state) {
+    SharedPtr<Process> process = state->ownerProcess.lock();
+    if (!process) {
+        return;
+    }
+    const int32_t fd = state->ownerFd;
+    auto* slot = process->fileDescriptors.find([fd](const Process::FileDescriptor& e) { return e.fd == fd; });
+    if (slot && slot->value.kind == MountKind::Timerfd && slot->value.timerfd.get() == state) {
+        process->fileDescriptors.erase(slot);
+    }
+}
+
 void kOnTimerfdFire(void* arg) {
     auto* ctx = static_cast<TimerfdCallbackContext*>(arg);
     TimerfdState* state = ctx->state.get();
 
+    bool isClosing = false;
     AsyncTask* wake = nullptr;
     bool reschedule = false;
     uint64_t intervalTicks = 0;
     {
         SpinlockGuard guard(state->lock);
-        state->expirationCount += 1;
-        state->activeToken = 0;
-        wake = state->pendingReaders.popFront();
-        if (state->periodic && state->intervalTicks > 0) {
-            reschedule = true;
-            intervalTicks = state->intervalTicks;
+        isClosing = state->closing;
+        if (!isClosing) {
+            state->expirationCount += 1;
+            state->activeToken = 0;
+            wake = state->pendingReaders.popFront();
+            if (state->periodic && state->intervalTicks > 0) {
+                reschedule = true;
+                intervalTicks = state->intervalTicks;
+            }
         }
+    }
+    if (isClosing) {
+        kReclaimClosingTimerfdSlot(state);
+        kFreeTimerfdCallbackContext(ctx);
+        return;
     }
     if (wake) {
         AsyncReactor::submitCompletion(wake, /*preemptive=*/true);
@@ -105,6 +129,11 @@ public:
             args->error = ChannelError::ResourceExhausted;
             co_return;
         }
+        // [신규, 2026-09-29, SP-A7479F83 §6-C 답변] Close(fd)/
+        // kOnTimerfdFire가 경쟁 상황에서 이 fd 슬롯을 되짚어 지울 수
+        // 있도록 소유자 정보를 미리 심어 둔다(timerfd.h 문서 주석 참고).
+        state->ownerProcess = WeakPtr<Process>(process);
+        state->ownerFd = newFd;
         Process::FileDescriptor fdEntry;
         fdEntry.fd = newFd;
         fdEntry.kind = MountKind::Timerfd;

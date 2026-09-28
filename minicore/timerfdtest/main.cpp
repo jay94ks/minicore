@@ -27,6 +27,14 @@
 //   12 = 주기 Read(2회차) 실패(submit/wait)
 //   13 = 주기 Read(2회차) error!=None 이거나 bytesRead!=8
 //   14 = 주기 Close 실패
+//   15/16/17 = §6-C close-race 회귀 - 짧은 주기 타이머 생성/SetTime/
+//     즉시 Close(Read 없이) 단계
+//   18/19 = §6-C 후속 확인용 1회성 타이머 생성/SetTime
+//   20/21/22 = §6-C 후속 확인 Read(20/21=submit/result 실패,
+//     22=expirationCount==0) - close-race 이후에도 fd 테이블/타이머
+//     인프라가 정상 동작하는지 확인(UAF/오염이 있었다면 여기서 크래시/
+//     행업/이상 동작으로 드러난다)
+//   23 = §6-C 후속 확인 Close 실패
 #include "libmc/syscall.h"
 #include "libmc/timerfd.h"
 #include "libmc/vfs.h"
@@ -114,6 +122,68 @@ extern "C" void _start() {
     token = mc::submit(mc::kSyscallEndpointClose, &periodicCloseArgs);
     if (token == 0 || !mc::wait(token) || periodicCloseArgs.error != mc::ChannelError::None) {
         kFinish(14);
+    }
+
+    // 3) SP-A7479F83 §6-C close-race 회귀 - 짧은 주기 타이머를 한 번도
+    // Read하지 않은 채 즉시 Close() - cancel()이 성공하든(즉시 회수)
+    // 실패하든(closing 플래그로 kOnTimerfdFire가 나중에 회수) 이후
+    // 시스템이 여전히 정상 동작해야 한다(use-after-free/fd 테이블
+    // 오염이 있었다면 아래 후속 단계에서 크래시/행업/이상 동작으로
+    // 드러난다).
+    mc::TimerfdCreateArgs raceCreateArgs;
+    raceCreateArgs.periodic = true;
+    token = mc::submit(mc::kSyscallEndpointTimerfdCreate, &raceCreateArgs);
+    if (token == 0 || !mc::wait(token) || raceCreateArgs.error != mc::ChannelError::None) {
+        kFinish(15);
+    }
+    const mc::int32_t raceFd = static_cast<mc::int32_t>(raceCreateArgs.fd);
+
+    mc::TimerfdSetTimeArgs raceSetArgs;
+    raceSetArgs.fd = raceFd;
+    raceSetArgs.initialTicks = 5;
+    raceSetArgs.intervalTicks = 5;
+    token = mc::submit(mc::kSyscallEndpointTimerfdSetTime, &raceSetArgs);
+    if (token == 0 || !mc::wait(token) || raceSetArgs.error != mc::ChannelError::None) {
+        kFinish(16);
+    }
+
+    mc::CloseArgs raceCloseArgs;
+    raceCloseArgs.fd = raceFd;
+    token = mc::submit(mc::kSyscallEndpointClose, &raceCloseArgs);
+    if (token == 0 || !mc::wait(token) || raceCloseArgs.error != mc::ChannelError::None) {
+        kFinish(17);
+    }
+
+    // 원래 만료 시각(5~10틱 후)을 확실히 지나도록 30틱짜리 1회성
+    // 타이머로 대기 - kOnTimerfdFire가 (혹시 늦게 실행되더라도)
+    // closing 경로를 타고 지나갔을 시간을 확보한 뒤, fd 테이블/타이머
+    // 인프라가 여전히 정상인지 끝까지 확인한다.
+    mc::TimerfdCreateArgs waitCreateArgs;
+    waitCreateArgs.periodic = false;
+    token = mc::submit(mc::kSyscallEndpointTimerfdCreate, &waitCreateArgs);
+    if (token == 0 || !mc::wait(token) || waitCreateArgs.error != mc::ChannelError::None) {
+        kFinish(18);
+    }
+    const mc::int32_t waitFd = static_cast<mc::int32_t>(waitCreateArgs.fd);
+
+    mc::TimerfdSetTimeArgs waitSetArgs;
+    waitSetArgs.fd = waitFd;
+    waitSetArgs.initialTicks = 30;
+    waitSetArgs.intervalTicks = 0;
+    token = mc::submit(mc::kSyscallEndpointTimerfdSetTime, &waitSetArgs);
+    if (token == 0 || !mc::wait(token) || waitSetArgs.error != mc::ChannelError::None) {
+        kFinish(19);
+    }
+
+    if (kReadExpirationCount(waitFd, 20, 21) == 0) {
+        kFinish(22);
+    }
+
+    mc::CloseArgs waitCloseArgs;
+    waitCloseArgs.fd = waitFd;
+    token = mc::submit(mc::kSyscallEndpointClose, &waitCloseArgs);
+    if (token == 0 || !mc::wait(token) || waitCloseArgs.error != mc::ChannelError::None) {
+        kFinish(23);
     }
 
     kFinish(0);

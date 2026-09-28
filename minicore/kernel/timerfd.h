@@ -24,12 +24,29 @@
 // 한다.
 namespace kernel {
 
+class Process;  // 포인터로만 참조(TimerfdState::ownerProcess) - 전체 정의는 process.h
+
+// [신규, 2026-09-29, SP-A7479F83 §6-C 답변("완전히 정리될 때까지는
+// 유지하되, 정리될 것임을 플래그로 미리 마킹해 둔다")] `closing`은
+// Close(fd)가 세운다 - `DelayedExecutionQueue::cancel(activeToken)`이
+// false(이미 실행됐거나 실행 중)를 반환하는 순간에도 `kOnTimerfdFire`
+// 가 다른 코어에서 이미 실행 중이거나 실행 직전일 수 있어, Close()가
+// 이 경쟁을 무시하고 fd 슬롯을 즉시 회수하면 그 직후 실행되는
+// `kOnTimerfdFire`가 이미 회수/재사용된 상태를 건드리는
+// use-after-free가 된다(QU-93140484가 지적한 위험). cancel()이
+// false를 반환하면 Close()는 fd 슬롯을 그대로 두고, `kOnTimerfdFire`
+// 자신이 `closing`을 확인해 마지막 정리자가 된다(그래서 fd 슬롯을
+// 되짚어 지울 수 있도록 ownerProcess/ownerFd를 들고 있다 - Create
+// 시점에 채워짐).
 struct TimerfdState {
     Spinlock lock;
     uint64_t expirationCount = 0;
     bool periodic = false;
     uint64_t intervalTicks = 0;
     uint64_t activeToken = 0;
+    bool closing = false;
+    WeakPtr<Process> ownerProcess;
+    int32_t ownerFd = -1;
     AsyncTaskWaitQueue pendingReaders;
     void destroy() {}
 };

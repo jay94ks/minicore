@@ -412,21 +412,31 @@ public:
             // 감소는 그쪽이 담당, 위 분기는 "부가 자원까지 같이 정리할지"
             // 만 결정한다).
         } else if (slot->value.kind == MountKind::Timerfd && slot->value.timerfd) {
-            // [신규, 2026-09-29, PN-96265AE4/PN-0F56DE4B, SP-A7479F83 §2]
-            // 활성 타이머가 있으면 취소한다 - 취소하지 않으면 이 fd
-            // 슬롯(따라서 TimerfdState 자신도 SharedPtr 참조가 사라져
-            // 반납될 예정)이 회수된 뒤에도 예전 타이머가 만료돼
-            // kOnTimerfdFire가 죽은 상태를 건드릴 위험이 있다(use-after-free
-            // 방지, DC-2B22FBF0류 지적과 동일한 부류의 위험을 여기선
-            // 설계 시점에 선제 차단).
+            // [갱신, 2026-09-29, SP-A7479F83 §6-C 답변("완전히 정리될
+            // 때까지는 유지하되, 정리될 것임을 플래그로 미리 마킹해
+            // 둔다")] `DelayedExecutionQueue::cancel()`은 "아직 실행
+            // 전이면 제거하고 true, 이미 실행됐거나(다른 코어의
+            // pump()가 방금 리스트에서 떼어내 콜백을 막 부르려는
+            // 참이어도) false"를 반환한다 - false인 순간에도
+            // kOnTimerfdFire가 다른 코어에서 이미 실행 중이거나 실행
+            // 직전일 수 있다. 이 경쟁을 무시하고 fd 슬롯을 즉시
+            // 회수하면 그 직후 실행되는 kOnTimerfdFire가 이미 회수/
+            // 재사용된 TimerfdState를 건드리는 use-after-free가
+            // 된다(QU-93140484가 지적한 위험). closing 플래그를 먼저
+            // 세운 뒤 cancel()이 실패하면 fd 슬롯을 여기서 지우지 않고
+            // 남겨 둔다 - kOnTimerfdFire 자신이 closing을 보고 마지막
+            // 정리자가 된다(timerfd.h TimerfdState 문서 주석 참고).
             uint64_t oldToken = 0;
             {
                 SpinlockGuard guard(slot->value.timerfd->lock);
+                slot->value.timerfd->closing = true;
                 oldToken = slot->value.timerfd->activeToken;
                 slot->value.timerfd->activeToken = 0;
             }
-            if (oldToken != 0) {
-                DelayedExecutionQueue::cancel(oldToken);
+            const bool safeToReclaimNow = oldToken == 0 || DelayedExecutionQueue::cancel(oldToken);
+            if (!safeToReclaimNow) {
+                args->error = ChannelError::None;
+                co_return;  // kOnTimerfdFire가 나중에 이 fd 슬롯을 대신 회수한다.
             }
         }
         process->fileDescriptors.erase(slot);

@@ -121,7 +121,7 @@
 | [SP-A21DD889](./SP-A21DD889.md) | ResourceGroup I/O 대역폭 컨트롤러 — 설계 제안 (인터페이스 레벨, PN-DEC738B8) | approved | 2026-09-22T07:19:02.888Z |
 | [SP-A252E82F](./SP-A252E82F.md) | 인터럽트 컨텍스트 재설계 - 회피 불가능한 예외만 IST로 격리, 일반 인터럽트는 단일 스택 통일, gInterruptDepth 폐기 | approved | 2026-09-21T23:03:58.039Z |
 | [SP-A658A124](./SP-A658A124.md) | libvfat — FAT32/16 온디스크 포맷 읽기/쓰기 라이브러리 설계 | approved | 2026-09-23T00:51:34.903Z |
-| [SP-A7479F83](./SP-A7479F83.md) | timerfd/signalfd - epoll 호환 타이머/시그널 fd — 설계 제안 | approved | 2026-09-28T17:11:16.650Z |
+| [SP-A7479F83](./SP-A7479F83.md) | timerfd/signalfd - epoll 호환 타이머/시그널 fd — 설계 제안 | approved | 2026-09-28T17:39:09.267Z |
 | [SP-AA6DF406](./SP-AA6DF406.md) | libntfs — NTFS 온디스크 포맷 읽기 라이브러리 설계 (1차 증분: 읽기 전용) | approved | 2026-09-22T06:19:30.570Z |
 | [SP-B071E628](./SP-B071E628.md) | 프로세스간 "공개 인터페이스" Registry 및 제어 채널 중계 — 설계 제안 | approved | 2026-09-17T20:01:50.983Z |
 | [SP-B1E258D8](./SP-B1E258D8.md) | RCU(Read-Copy-Update) 인프라 도입 평가 및 설계 제안 | approved | 2026-09-17T08:01:51.755Z |
