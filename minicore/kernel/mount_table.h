@@ -30,6 +30,10 @@ enum class MountKind : uint8_t {
     // 않는다(POSIX epoll_create()가 반환하는 fd와 동일 - 평범한 fd지만
     // 파일시스템 경로가 없다).
     Epoll = 3,
+    // [신규, 2026-09-29, PN-96265AE4/PN-0F56DE4B, SP-A7479F83 §2] Socket/
+    // Epoll과 동일한 이유 - timerfd도 절대 `MountTable`에 마운트되지
+    // 않는다(POSIX timerfd_create()가 반환하는 fd와 동일).
+    Timerfd = 4,
 };
 
 // **[v1 잠정 결정, 2026-09-16, PN-71C2B857]** SP-7CC5693A §2.1의

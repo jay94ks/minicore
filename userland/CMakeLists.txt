@@ -179,3 +179,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/lrutest ${CMAKE_CURRENT
 # main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/exittest ${CMAKE_CURRENT_BINARY_DIR}/minicore-exittest)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/exitwaiter ${CMAKE_CURRENT_BINARY_DIR}/minicore-exitwaiter)
+
+# timerfdtest(PN-96265AE4/PN-0F56DE4B, timerfd E2E 검증) - 위 테스트들과
+# 동일한 이유의 out-of-tree add_subdirectory - kmain.cpp의 TEMP 스폰
+# 경로로 이름("timerfdtest")이 매치돼 부팅 시 자동 실행된다
+# (minicore/timerfdtest/main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/timerfdtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-timerfdtest)

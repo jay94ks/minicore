@@ -40,6 +40,7 @@ add_library(minicore_kernel OBJECT
     vfs_syscall.cpp
     socket.cpp
     epoll.cpp
+    timerfd.cpp
     process.cpp
     user_record.cpp
     authmgr_client.cpp

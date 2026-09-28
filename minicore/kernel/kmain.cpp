@@ -40,6 +40,7 @@
 #include "smp.h"
 #include "socket.h"
 #include "epoll.h"
+#include "timerfd.h"
 #include "syscall.h"
 #include "syscall_fastpath.h"
 #include "task.h"
@@ -899,6 +900,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 유효하지만 순서를 나란히 맞춰 둔다).
     kernel::Epoll::registerSyscallEndpoints();
     kernel::Logger::info("minicore: epoll create/ctl/wait syscall endpoints registered");
+
+    // [신규, 2026-09-29, PN-96265AE4/PN-0F56DE4B, SP-A7479F83 §2/§3]
+    // Socket/Epoll과 같은 이유로 순서를 나란히 맞춘다 - fd 테이블
+    // kind==Timerfd를 읽는 vfs_syscall.cpp의 Read/Close 분기는 이미
+    // 이 시점 이전부터 유효.
+    kernel::Timerfd::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: timerfd create/settime syscall endpoints registered");
 
     // ResourceGroup syscall 6종(SP-245D130B §8/SP-6A563A8F §5-A/§7,
     // PN-4190BBD3) - 위와 같은 이유로 BSP에서 한 번만. gRootResourceGroup

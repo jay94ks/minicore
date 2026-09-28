@@ -1,5 +1,6 @@
 #include "vfs_syscall.h"
 
+#include "delayed_exec.h"
 #include "libkenv/spinlock.h"
 #include "libkmm/slab.h"
 #include "mount_table.h"
@@ -9,6 +10,7 @@
 #include "resource_group.h"
 #include "socket.h"
 #include "task.h"
+#include "timerfd.h"
 
 namespace kernel {
 
@@ -409,6 +411,23 @@ public:
             // 내려놓는다(아래 fileDescriptors.erase(slot) - 참조 카운트
             // 감소는 그쪽이 담당, 위 분기는 "부가 자원까지 같이 정리할지"
             // 만 결정한다).
+        } else if (slot->value.kind == MountKind::Timerfd && slot->value.timerfd) {
+            // [신규, 2026-09-29, PN-96265AE4/PN-0F56DE4B, SP-A7479F83 §2]
+            // 활성 타이머가 있으면 취소한다 - 취소하지 않으면 이 fd
+            // 슬롯(따라서 TimerfdState 자신도 SharedPtr 참조가 사라져
+            // 반납될 예정)이 회수된 뒤에도 예전 타이머가 만료돼
+            // kOnTimerfdFire가 죽은 상태를 건드릴 위험이 있다(use-after-free
+            // 방지, DC-2B22FBF0류 지적과 동일한 부류의 위험을 여기선
+            // 설계 시점에 선제 차단).
+            uint64_t oldToken = 0;
+            {
+                SpinlockGuard guard(slot->value.timerfd->lock);
+                oldToken = slot->value.timerfd->activeToken;
+                slot->value.timerfd->activeToken = 0;
+            }
+            if (oldToken != 0) {
+                DelayedExecutionQueue::cancel(oldToken);
+            }
         }
         process->fileDescriptors.erase(slot);
         args->error = ChannelError::None;
@@ -481,6 +500,45 @@ public:
             args->error = readArgs.error;
             co_return;
         }
+        if (slot->value.kind == MountKind::Timerfd) {
+            // [신규, 2026-09-29, PN-96265AE4/PN-0F56DE4B, SP-A7479F83 §4]
+            // timerfd Read - 8바이트 expirationCount를 읽고 리셋한다
+            // (Linux timerfd와 동일한 시맨틱). 이미 만료된 게 있으면
+            // (expirationCount>0) 블로킹 없이 즉시 반환(빠른 경로) -
+            // 없으면 ChannelReadHandler와 동일한 모양(pendingReaders
+            // 등록 + yield 루프)으로 다음 만료까지 블로킹한다.
+            if (!slot->value.timerfd) {
+                args->bytesRead = 0;
+                args->error = ChannelError::InvalidHandle;
+                co_return;
+            }
+            if (args->len < sizeof(uint64_t)) {
+                args->bytesRead = 0;
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+            SharedPtr<TimerfdState> state = slot->value.timerfd;
+            for (;;) {
+                bool done = false;
+                {
+                    SpinlockGuard guard(state->lock);
+                    if (state->expirationCount > 0) {
+                        const uint64_t count = state->expirationCount;
+                        state->expirationCount = 0;
+                        memcpy(args->buf, &count, sizeof(count));
+                        done = true;
+                    } else {
+                        state->pendingReaders.pushBack(task);
+                    }
+                }
+                if (done) {
+                    args->bytesRead = sizeof(uint64_t);
+                    args->error = ChannelError::None;
+                    co_return;
+                }
+                AsyncTask::yield();
+            }
+        }
         if (slot->value.kind != MountKind::KernelDriver) {
             args->bytesRead = 0;
             args->error = ChannelError::NotSupported;  // Channel 경로 - PN-EA4EE935 스코프 밖
@@ -529,7 +587,27 @@ public:
         co_return;
     }
     void onFailure(AsyncTask*) override {}
-    void onCancel(AsyncTask*, void*) override {}
+    // [신규, 2026-09-29, PN-96265AE4/PN-0F56DE4B] ChannelReadHandler::
+    // onCancel과 동일한 이유 - Timerfd 블로킹 중 취소되면(예: Kill)
+    // pendingReaders에 남은 댕글링 포인터를 제거해야 한다. 다른 kind는
+    // 각자 그 kind의 하위 위임 AsyncTask가 대신 처리하므로(예: Socket은
+    // ChannelReadHandler 쪽) 여기선 관여하지 않는다.
+    void onCancel(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<ReadArgs*>(argsRaw);
+        args->bytesRead = 0;
+        args->error = ChannelError::Interrupted;
+        SharedPtr<Process> process = kProcessFromSubmitter(task);
+        if (!process) {
+            return;
+        }
+        const int32_t fd = args->fd;
+        auto* slot = process->fileDescriptors.find([fd](const Process::FileDescriptor& e) { return e.fd == fd; });
+        if (!slot || slot->value.kind != MountKind::Timerfd || !slot->value.timerfd) {
+            return;
+        }
+        SpinlockGuard guard(slot->value.timerfd->lock);
+        slot->value.timerfd->pendingReaders.remove(task);
+    }
 };
 
 ReadHandler gReadHandler;

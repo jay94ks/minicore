@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-28T15:51:36.593Z
+  updatedAt: 2026-09-28T16:21:52.508Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2339,6 +2339,28 @@ DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영�
 **은폐된 갭이 아니다** - 전부 `PN-2A0981B7` 본문이 "남은 항목"으로
 이미 정확히 열거해 뒀다.
 
+## §1-X. [발견 및 부분 해소, 2026-09-29] `SP-A7479F83`(timerfd/signalfd, approved) - timerfd(§2/§3, call6/7)만 구현, signalfd 전체(call8/9)·절대시각(§6-A)·RT신호(§6-B)·epoll 통합(§5)은 여전히 미구현
+
+`PN-96265AE4`(주기 타이머 Read가 AsyncReactor/DelayedExecutionQueue
+쪽에서 영원히 안 깨어나던 결함)를 해소하면서 `PN-0F56DE4B`의 원래
+체크리스트 1-3번(timerfd만, 1회성+주기 둘 다)을 실제로 구현+커밋했다 -
+`MountKind::Timerfd`(mount_table.h), `TimerfdState`(신규
+minicore/kernel/timerfd.h/.cpp), `vfs_syscall.cpp`의 Read/Close
+Timerfd 분기. `minicore/timerfdtest`(신규, 영구 보존)로 1회성+주기
+타이머 둘 다 블로킹 Read가 정상적으로 깨어남을 반복 실측 확인(SMP4,
+5회 연속 통과 - 이전 세션이 발견한 hang은 재현하지 못했다, 원본
+결함 코드 자체가 보존돼 있지 않아 정확히 같은 조건을 재현할 수
+없었음을 정직하게 기록).
+
+**여전히 범위 밖**(§4의 §2-추가7이 "해당 없음"으로 뭉뚱그렸던 것 중
+signalfd 쪽은 그대로 유효): signalfd 전체(call8/9, `SignalfdState`
+자체가 없음), 절대시각 타이머(§6-A, `TimerfdSetTime`에 `absolute`
+파라미터 없음), RT 신호 큐잉(§6-B), epoll 통합(§5 - `PN-7562DA62`
+자신은 완료됐지만 `kIsFdReadable`에 Timerfd 분기가 아직 없음). 이
+잔여 범위는 새 계획으로 분리 등록할 가치가 있으나(CLAUDE.md 규칙7),
+`PN-0F56DE4B` 자신이 이미 그 체크리스트를 갖고 있어 별도 신규 계획
+없이 그 문서 갱신으로 충분(아래 참고).
+
 ## §1-W. [발견 및 해소, 2026-09-29] `SP-76250478`(멀티스레드 유저 프로세스 지원, approved) §3.2 - "Process::exitCode는 마지막 스레드의 exitCode를 물려받는다"가 실제로는 미구현이었음(§4의 2026-09-18 "갭 없음" 점검이 §3.2를 누락한 사례)
 
 `PN-5EDE3C96`(`DC-90A66932` 검증 중 발견해 사후 등록한 계획) 항목1 -
@@ -2641,7 +2663,7 @@ resourcegroupfs/ext4/FAT32/FAT16/exFAT/NTFS) 전부의 Stat 핸들러가
 `bool`로 남아 있는 것은 갭이 아니다 - `PN-4BDA31FC` 본문이 이 경계를
 명시적으로 기록해 뒀다.
 
-## §2-추가7. [점검 완료(해당 없음), 2026-09-27; **SP-6350DEBB 부분만 2026-09-27 후속 틱에 §1-U로 갱신 - 이제 구현됨, 갭 발견**] `SP-6350DEBB`(epoll)/`SP-A7479F83`(timerfd/signalfd)
+## §2-추가7. [점검 완료(해당 없음), 2026-09-27; **SP-6350DEBB 부분만 2026-09-27 후속 틱에 §1-U로 갱신 - 이제 구현됨, 갭 발견**; **SP-A7479F83(timerfd) 부분만 2026-09-29 §1-X로 갱신 - timerfd만 구현됨, signalfd는 여전히 해당 없음**] `SP-6350DEBB`(epoll)/`SP-A7479F83`(timerfd/signalfd)
 
 `docs git grep`/저장소 전수 검색으로 `EpollInstance`/`EpollCreate`/
 `Timerfd`/`Signalfd`류 심볼이 코드베이스 어디에도 없음을 확인 -
