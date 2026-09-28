@@ -65,6 +65,12 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/pubreg ${CMAKE_CURRENT_
 # 동일한 out-of-tree 관례.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/libs/libkvdb ${CMAKE_CURRENT_BINARY_DIR}/minicore-libkvdb)
 
+# libkcrypto(SP-CC1CF30E §8) - authmgr(유저랜드 프로세스)의 미래
+# 의존성(패스워드 SHA256 해싱)이라 libkvdb와 동일한 이유의 out-of-tree
+# add_subdirectory - 커널 빌드 트리(top-level CMakeLists.txt)와는
+# 완전히 별개 CMake 프로젝트라 양쪽에 각각 둬야 한다.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/libs/libkcrypto ${CMAKE_CURRENT_BINARY_DIR}/minicore-libkcrypto)
+
 # authmgr(SP-8B6B8D25 §3.1 항목8, PN-24A2B6F5/PN-CFEAEF40) -
 # init/pubreg와 동일한 이유의 out-of-tree add_subdirectory.
 # [갱신, 2026-09-23, PN-24A2B6F5] libkvdb 연동 시작 - 스캐폴딩만

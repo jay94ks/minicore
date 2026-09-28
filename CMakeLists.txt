@@ -36,6 +36,7 @@ add_subdirectory(minicore/libs/libkmm)
 add_subdirectory(minicore/libs/libelf)
 add_subdirectory(minicore/libs/libkcont)
 add_subdirectory(minicore/libs/libkvdb)
+add_subdirectory(minicore/libs/libkcrypto)
 add_subdirectory(minicore/libs/libutf8)
 add_subdirectory(minicore/libs/libjson)
 add_subdirectory(minicore/libs/libswapfs)
@@ -55,6 +56,7 @@ target_link_libraries(minicore.elf PRIVATE
     libcpio
     libkmm
     libelf
+    libkcrypto
     libutf8
     libjson
     libswapfs
