@@ -61,9 +61,22 @@ struct TimerfdCreateArgs {
     int64_t fd = -1;
 };
 
+// [갱신, 2026-09-29, SP-A7479F83 §6-A(절대시각 타이머)] `absolute`가
+// false(기본, 기존 동작)면 `initialTicks`는 "지금부터 몇 틱 후". true면
+// `initialTicks`는 `Rtc::toEpochSeconds()`와 같은 형식의 절대
+// 유닉스 타임스탬프(초)다 - `TimerfdSetTimeHandler`가 설정 시점에
+// `Rtc::readWallClock()`으로 현재 시각을 딱 한 번 읽어 그 차이를
+// `kSchedulerTickHz`(scheduler.h, 100Hz)로 환산한 뒤에는 §3의 상대
+// 틱 방식과 완전히 동일하게 동작한다(이후 `Rtc` 재조회 없음 - POSIX
+// `timerfd_settime(TFD_TIMER_ABSTIME)`가 시스템 시각이 나중에
+// 바뀌어도 이미 걸린 타이머의 만료 시각 자체는 재계산하지 않는 것과
+// 동일한 단순화, 이 프로젝트는 NTP/시각 재조정 개념이 아직 없어 항상
+// 정확하다). 대상 시각이 이미 지났으면 0틱(다음 pump()에서 즉시
+// 만료)으로 clamp한다.
 struct TimerfdSetTimeArgs {
     int32_t fd = -1;
-    uint64_t initialTicks = 0;
+    bool absolute = false;
+    uint64_t initialTicks = 0;  // absolute=true면 목표 시각(유닉스 타임스탬프 초)
     uint64_t intervalTicks = 0;  // periodic이 아니면 무시
     // out
     ChannelError error = ChannelError::None;

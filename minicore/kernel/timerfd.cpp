@@ -5,6 +5,8 @@
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
 #include "process.h"
+#include "rtc.h"
+#include "scheduler.h"  // kSchedulerTickHz - SP-A7479F83 §6-A 절대시각 환산용
 
 namespace kernel {
 namespace {
@@ -177,7 +179,24 @@ public:
         if (oldToken != 0) {
             DelayedExecutionQueue::cancel(oldToken);
         }
-        if (args->initialTicks > 0) {
+        // [신규, 2026-09-29, SP-A7479F83 §6-A(절대시각 타이머)] absolute면
+        // initialTicks를 목표 유닉스 타임스탬프(초)로 해석해, 설정
+        // 시점에 Rtc를 딱 한 번 읽어 상대 틱으로 환산한다 - 그 뒤로는
+        // 나머지 코드가 상대 틱 방식과 완전히 동일하게 스케줄한다.
+        // 이미 지난 시각이면 0틱(다음 pump()에서 즉시 만료)으로
+        // clamp한다 - 상대 모드의 0(=disarm, 아래 shouldSchedule)과
+        // 달리 absolute는 항상 실제로 스케줄해야 한다(명시적으로 준
+        // 목표 시각이 과거였을 뿐, "타이머를 걸지 말라"는 뜻이 아님).
+        uint64_t effectiveInitialTicks = args->initialTicks;
+        bool shouldSchedule = args->initialTicks > 0;
+        if (args->absolute) {
+            const WallClockTime now = Rtc::readWallClock();
+            const uint64_t nowEpoch = Rtc::toEpochSeconds(now);
+            effectiveInitialTicks =
+                args->initialTicks > nowEpoch ? (args->initialTicks - nowEpoch) * kSchedulerTickHz : 0;
+            shouldSchedule = true;
+        }
+        if (shouldSchedule) {
             void* mem = GenericSlabAllocator::alloc(sizeof(TimerfdCallbackContext));
             if (!mem) {
                 args->error = ChannelError::ResourceExhausted;
@@ -185,7 +204,7 @@ public:
             }
             auto* ctx = new (mem) TimerfdCallbackContext();
             ctx->state = state;
-            const uint64_t token = DelayedExecutionQueue::schedule(args->initialTicks, &kOnTimerfdFire, ctx);
+            const uint64_t token = DelayedExecutionQueue::schedule(effectiveInitialTicks, &kOnTimerfdFire, ctx);
             if (token == 0) {
                 kFreeTimerfdCallbackContext(ctx);
                 args->error = ChannelError::ResourceExhausted;

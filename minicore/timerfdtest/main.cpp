@@ -35,6 +35,21 @@
 //     인프라가 정상 동작하는지 확인(UAF/오염이 있었다면 여기서 크래시/
 //     행업/이상 동작으로 드러난다)
 //   23 = §6-C 후속 확인 Close 실패
+//   24/25 = §6-A 절대시각 타이머 - 생성/SetTime(absolute=true, 이미
+//     지난 유닉스 타임스탬프 - 즉시 만료 clamp 경로) 실패
+//   26/27/28 = §6-A Read(26/27=submit/result 실패, 28=expirationCount==0)
+//   29 = §6-A Close 실패
+//   30/31 = §6-A "미래" 산술 경로 - 생성/SetTime(absolute=true, 먼
+//     미래 타임스탬프) 실패(오버플로/스케줄 실패가 있다면 여기서 드러남)
+//   32 = §6-A "미래" 경로 Close(취소) 실패
+//
+// §6-A 참고: 유저랜드에 아직 wall-clock 조회 API가 없어(userland/libs/
+// libmc에 Rtc 거울 없음) "미래 목표 시각까지 정확히 기다리는지"는 이
+// 테스트가 검증하지 못한다 - 대신 "이미 지난 절대 시각(유닉스
+// 타임스탬프 1 = 1970-01-01 00:00:01)"을 줘서 커널의 clamp-to-0
+// 경로(TimerfdSetTimeHandler, timerfd.cpp)가 크래시 없이 즉시
+// 만료시키는지만 확인한다 - 환산 산술(목표-현재)*kSchedulerTickHz
+// 자체는 간단해 코드 리뷰로 충분하다고 판단.
 #include "libmc/syscall.h"
 #include "libmc/timerfd.h"
 #include "libmc/vfs.h"
@@ -184,6 +199,71 @@ extern "C" void _start() {
     token = mc::submit(mc::kSyscallEndpointClose, &waitCloseArgs);
     if (token == 0 || !mc::wait(token) || waitCloseArgs.error != mc::ChannelError::None) {
         kFinish(23);
+    }
+
+    // 4) SP-A7479F83 §6-A 절대시각 타이머 - 이미 지난 유닉스
+    // 타임스탬프(1 = 1970-01-01 00:00:01)를 목표로 줘서 커널의
+    // clamp-to-0 경로(TimerfdSetTimeHandler)가 크래시 없이 즉시
+    // 만료시키는지 확인한다(파일 상단 주석 참고 - "미래" 산술은
+    // 유저랜드에 wall-clock 조회 API가 없어 이 테스트로 검증 못함).
+    mc::TimerfdCreateArgs absCreateArgs;
+    absCreateArgs.periodic = false;
+    token = mc::submit(mc::kSyscallEndpointTimerfdCreate, &absCreateArgs);
+    if (token == 0 || !mc::wait(token) || absCreateArgs.error != mc::ChannelError::None) {
+        kFinish(24);
+    }
+    const mc::int32_t absFd = static_cast<mc::int32_t>(absCreateArgs.fd);
+
+    mc::TimerfdSetTimeArgs absSetArgs;
+    absSetArgs.fd = absFd;
+    absSetArgs.absolute = true;
+    absSetArgs.initialTicks = 1;  // 유닉스 타임스탬프 1초 - 확실히 과거
+    absSetArgs.intervalTicks = 0;
+    token = mc::submit(mc::kSyscallEndpointTimerfdSetTime, &absSetArgs);
+    if (token == 0 || !mc::wait(token) || absSetArgs.error != mc::ChannelError::None) {
+        kFinish(25);
+    }
+
+    if (kReadExpirationCount(absFd, 26, 27) == 0) {
+        kFinish(28);
+    }
+
+    mc::CloseArgs absCloseArgs;
+    absCloseArgs.fd = absFd;
+    token = mc::submit(mc::kSyscallEndpointClose, &absCloseArgs);
+    if (token == 0 || !mc::wait(token) || absCloseArgs.error != mc::ChannelError::None) {
+        kFinish(29);
+    }
+
+    // 5) §6-A "미래" 산술 경로 - 먼 미래 유닉스 타임스탬프(4102444800 =
+    // 2100-01-01)를 줘서 (목표-현재)*kSchedulerTickHz 계산이 오버플로
+    // 없이 정상적으로 스케줄되는지 확인한다(실제로 그 시각까지 기다릴
+    // 수는 없으므로 스케줄 성공 직후 바로 Close()해 취소 - 3)의
+    // close-race 경로와 달리 이 시점엔 활성 토큰이 확실히 아직 만료
+    // 전이라 cancel()이 항상 true를 반환해야 정상이다).
+    mc::TimerfdCreateArgs futureCreateArgs;
+    futureCreateArgs.periodic = false;
+    token = mc::submit(mc::kSyscallEndpointTimerfdCreate, &futureCreateArgs);
+    if (token == 0 || !mc::wait(token) || futureCreateArgs.error != mc::ChannelError::None) {
+        kFinish(30);
+    }
+    const mc::int32_t futureFd = static_cast<mc::int32_t>(futureCreateArgs.fd);
+
+    mc::TimerfdSetTimeArgs futureSetArgs;
+    futureSetArgs.fd = futureFd;
+    futureSetArgs.absolute = true;
+    futureSetArgs.initialTicks = 4102444800ULL;  // 2100-01-01 00:00:00 UTC
+    futureSetArgs.intervalTicks = 0;
+    token = mc::submit(mc::kSyscallEndpointTimerfdSetTime, &futureSetArgs);
+    if (token == 0 || !mc::wait(token) || futureSetArgs.error != mc::ChannelError::None) {
+        kFinish(31);
+    }
+
+    mc::CloseArgs futureCloseArgs;
+    futureCloseArgs.fd = futureFd;
+    token = mc::submit(mc::kSyscallEndpointClose, &futureCloseArgs);
+    if (token == 0 || !mc::wait(token) || futureCloseArgs.error != mc::ChannelError::None) {
+        kFinish(32);
     }
 
     kFinish(0);
