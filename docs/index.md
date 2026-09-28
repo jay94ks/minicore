@@ -8,11 +8,12 @@
 | [DC-01434F82](./DC-01434F82.md) | 비동기 프레임워크(SP-F682B889) 세부 결정 미정 | archived | 2026-09-15T05:46:52.264Z |
 | [DC-06FC78E8](./DC-06FC78E8.md) | PN-584DB994 근본 원인 확정 - onTick()/onForcedMigration()의 EOI~kContextSwitchFromISR 창이 자기 자신에 대해 재진입 보호가 없음 - 수정 설계 확인 요청 | approved | 2026-09-20T14:30:21.387Z |
 | [DC-0CC88ABB](./DC-0CC88ABB.md) | HPET 없는 환경에서 스케줄러 LAPIC 틱과 Timer 전역 틱의 하드웨어 소유권 충돌 | archived | 2026-09-15T05:47:07.531Z |
+| [DC-1526389A](./DC-1526389A.md) | sudo/su S 비트 exec-time 승격 - VFS에 파일 소유자(uid/mode) 메타데이터가 아예 없음(착수 전 구조적 공백 발견) | review | 2026-09-28T05:11:45.060Z |
 | [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
 | [DC-2CB9DDA0](./DC-2CB9DDA0.md) | DC-54D69BEE 방향(B) 적용 후에도 dbgdriver는 9/60(15%) 재현 - 캐스케이딩 gLock 데드락 하드닝 방향 결정 요청 | review | 2026-09-27T14:28:40.633Z |
-| [DC-34764C25](./DC-34764C25.md) | sudo/su 메커니즘(SP-30FCC8AE §1-B/SP-CC1CF30E §7) - 5개 세부 결정 필요 | review | 2026-09-28T02:38:15.109Z |
+| [DC-34764C25](./DC-34764C25.md) | sudo/su 메커니즘(SP-30FCC8AE §1-B/SP-CC1CF30E §7) - 5개 세부 결정 필요 | review | 2026-09-28T05:26:32.003Z |
 | [DC-3D3212A4](./DC-3D3212A4.md) | 가드 페이지 구현 중 발견: IST 없이는 오버플로우가 진단 없는 triple fault로 귀결 | archived | 2026-09-15T05:47:02.266Z |
 | [DC-427BB6B2](./DC-427BB6B2.md) | 부트 경로 구현 착수 순서 및 부트로더 구현 방식 미정 | approved | 2026-09-13T13:14:35.335Z |
 | [DC-47000304](./DC-47000304.md) | DebugGetRegisters/SetRegisters - 정지된 유저 Task의 전체 레지스터 스냅숏 위치 미확정 | approved | 2026-09-17T09:33:30.400Z |
@@ -62,7 +63,7 @@
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-27T11:39:19.768Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-27T07:07:15.386Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-28T05:28:02.290Z |
 | [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-28T05:05:39.521Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-28T02:28:35.965Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
