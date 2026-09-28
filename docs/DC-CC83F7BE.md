@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-CC83F7BE
-  status: review
-  updatedAt: 2026-09-28T09:05:09.274Z
+  status: approved
+  updatedAt: 2026-09-28T11:20:42.866Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -86,3 +86,42 @@
   정책, (A)가 대칭시킬 참고 규칙.
 - `userland/libs/libmc/authmgr.h` - `CreateUser` 요청/`AuthmgrUserRecord`
   실제 와이어 정의.
+
+## [구현+실측 검증 완료, 2026-09-28]
+
+설계자 답변("(A) 커널 중개... 최종 권한 판정은 커널이") 반영해
+구현 완료, commit `bcdc4d8`로 발행했다. `kSyscallEndpointCreateUser`
+(그룹0 call12) 신설 - `CreateUserHandler`(process.cpp)가
+`kCreateUserOnExecImpl`(user_record.cpp)로 위임(`SetuidHandler`와
+동일한 패턴). 권한 판정은 `kSetuid()`가 내부적으로 쓰던
+`kIsDescendantUser`를 헤더에 노출해 그대로 재사용 - "callerUid가
+새로 만들 uid의 parentUid 자신이거나 그 조상일 때만 허용"(root는
+예외적으로 항상 허용). 통과하면 `authmgr_client.h`(DC-90A66932)로
+authmgr에 CreateUser를 대신 요청한다.
+
+**실측 중 발견/수정한 버그**: 생성 성공 후 그 레코드를 커널 자신의
+`UserRecordCache`에 채우지 않으면, 방금 만든 uid를 곧바로 parentUid로
+삼아 손자를 생성(또는 Setuid)하려 할 때 캐시 미스로 `ServiceUnavailable`
+이 나는 실제 문제를 발견했다(`minicore/createusertest`로 재현) -
+`kAuthmgrCreateUser()` 성공 직후 `UserRecordCache::insertOrUpdate(record)`
+를 호출하도록 수정해 해소했다(어차피 커널 자신이 방금 authmgr에
+만들라고 보낸 값이라 재조회 없이 그대로 신뢰).
+
+`minicore/createusertest`(신규, 영구 보존)로 4가지 시나리오 실측
+검증: (1) root가 임의 parentUid로 생성 - 허용, (2) 비-root가 자기
+직계 자식을 생성 - 허용, (3) 비-root가 무관한(조상 아닌) parentUid로
+생성 시도 - `PermissionDenied`(권한 상승 회귀 없음 확인), (4) 비-root가
+자기 손자(조상 체인 2단계)를 생성 - 허용(직계 부모 판정이 아니라
+조상 체인 전체 판정임을 확인, 위 캐시 버그가 바로 이 시나리오에서
+발견됨). 표준 회귀 3종(PVH/GRUB SMP1/SMP4) 클린. TEMP 진단 로그/스폰
+훅은 검증 직후 완전히 원복(`git status` 클린).
+
+**의도적으로 남긴 잔여 공백**(선택하지 않은 (B)의 결과) - authmgr의
+raw Channel(이름 "authmgr")에 직접 연결해 CreateUser를 보내는 경로는
+여전히 무검증이다. 설계자가 (A)를 선택하고 (B)(Channel 레벨 peer
+신원 첨부)를 선택하지 않았으므로, 이 syscall은 "올바른 문"을 새로
+만든 것이지 "예전 문을 잠근" 것은 아니다 - authmgr 자신의
+권한-검사-없음 상태(코드 주석에 이미 명시돼 있던 그대로)는 의도적으로
+변경하지 않았다.
+
+`PN-24A2B6F5`(authmgr 계획)의 "남은 것" 항목2가 이걸로 완료됐다.

@@ -34,7 +34,7 @@
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
 | [DC-C4A011C7](./DC-C4A011C7.md) | AsyncTask::waitingTask 크로스코어 데이터 레이스 - raw ConnectChannel/AcceptFromChannel 핸드셰이크(및 모든 유저랜드 raw syscall 완료 통지)가 가끔 유실되는 근본 원인 후보 | approved | 2026-09-27T16:44:29.559Z |
-| [DC-CC83F7BE](./DC-CC83F7BE.md) | authmgr CreateUser 권한 검사 - caller uid를 와이어로 신뢰성 있게 전달하는 규약이 없음 | review | 2026-09-28T09:05:09.274Z |
+| [DC-CC83F7BE](./DC-CC83F7BE.md) | authmgr CreateUser 권한 검사 - caller uid를 와이어로 신뢰성 있게 전달하는 규약이 없음 | approved | 2026-09-28T11:20:42.866Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
 | [DC-D8951156](./DC-D8951156.md) | 블로킹 syscall(parkCurrent)이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는 문제 - 수정 방향 결정 필요 | approved | 2026-09-27T01:38:17.356Z |
 | [DC-DC9B2C3E](./DC-DC9B2C3E.md) | ext4 inode 테이블 블록 read-modify-write 경쟁(고아 블록) - 락 세분화 단위 결정 요청 | approved | 2026-09-26T04:21:13.790Z |
@@ -64,8 +64,8 @@
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-27T11:39:19.768Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-28T08:53:33.727Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-28T08:52:36.676Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-28T11:20:05.527Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-28T11:19:54.326Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-28T02:28:35.965Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-26T14:53:45.979Z |
