@@ -1916,6 +1916,19 @@ public:
 
 SetuidHandler gSetuidHandler;
 
+// [신규, 2026-09-28, DC-CC83F7BE 답변 반영] `CreateUser` 본체 -
+// SetuidHandler와 동일한 반환값 위임 패턴(user_record.cpp의
+// kCreateUserOnExecImpl이 caller uid 조상-자손 판정+authmgr 요청을
+// 전부 담당).
+class CreateUserHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override { return kCreateUserOnExecImpl(task, argsRaw); }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+CreateUserHandler gCreateUserHandler;
+
 // [신규, 2026-09-18, SP-30FCC8AE §3/§4, PN-88E62419] Kill의 권한
 // 판정 - §3이 확정한 순서 그대로: (1) 커널/KernelService는 role 자체가
 // 이미 무제한이라 uid 판정을 아예 건너뛴다(uid/gid와 통합 안 함,
@@ -2297,6 +2310,7 @@ void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointJoin, &gJoinHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDetach, &gDetachHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointSetuid, &gSetuidHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointCreateUser, &gCreateUserHandler);
 }
 
 }  // namespace kernel

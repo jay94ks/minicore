@@ -225,4 +225,61 @@ AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw) {
     co_return;
 }
 
+// [신규, 2026-09-28, DC-CC83F7BE 답변("(A) 커널 중개, 최종 권한
+// 판정은 커널이") 반영] CreateUserHandler(process.cpp)가 위임하는
+// 실제 구현. 캐시미스 재시도가 있는 kSetuidOnExecImpl과 달리, 여기서
+// kIsDescendantUser()가 조상 체인 중간에서 캐시 미스를 만나면 그냥
+// ServiceUnavailable로 정직하게 실패한다(재시도 안 함) - 어떤 uid가
+// 미스였는지 이 함수 시그니처로는 알 수 없어(kSetuid의 "정확히
+// targetUid 하나"와 달리 체인 전체가 대상) authmgr 재질의 대상을
+// 특정할 수 없기 때문(RM-23F4B687 §4 - 실사용 없이 추측으로 범위를
+// 넓히지 않음, 필요해지면 후속 세션이 kIsDescendantUser의 실패
+// 지점을 함께 반환하도록 확장).
+AsyncExecCoro kCreateUserOnExecImpl(AsyncTask* task, void* argsRaw) {
+    auto* args = static_cast<CreateUserArgs*>(argsRaw);
+
+    SharedPtr<Task> submitter = task->submitterTask.lock();
+    auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+    SharedPtr<Process> proc = caller ? caller->process.lock() : SharedPtr<Process>();
+    if (!proc) {
+        args->error = ChannelError::NotFound;
+        co_return;
+    }
+
+    if (proc->uid != kRootUid) {
+        ChannelError lookupFailure = ChannelError::None;
+        if (!kIsDescendantUser(proc->uid, args->parentUid, &lookupFailure)) {
+            args->error = lookupFailure != ChannelError::None ? lookupFailure : ChannelError::PermissionDenied;
+            co_return;
+        }
+    }
+
+    UserRecord record{};
+    record.uid = args->uid;
+    record.parentUid = args->parentUid;
+    record.gid = args->gid;
+    memcpy(record.loginName, args->loginName, sizeof(record.loginName));
+    memcpy(record.passwordHash, args->passwordHash, sizeof(record.passwordHash));
+    memcpy(record.defaultShell, args->defaultShell, sizeof(record.defaultShell));
+
+    kAuthmgrClientLock();
+    const bool created = kAuthmgrEnsureConnected() && kAuthmgrCreateUser(record);
+    kAuthmgrClientUnlock();
+    if (created) {
+        // [신규, 2026-09-28] 방금 만든 레코드를 커널 자신의 read-through
+        // 캐시에도 즉시 채운다 - 안 그러면 같은 세션에서 곧바로 그
+        // uid를 parentUid로 삼아 다시 CreateUser(손자 생성)나 Setuid를
+        // 시도할 때 kIsDescendantUser()/kSetuid()가 이 uid를 캐시
+        // 미스로만 보게 돼(authmgr LookupByUid를 통해서만 채워지는
+        // 기존 경로를 아직 안 거쳤으므로) ServiceUnavailable로 정직하게
+        // 실패한다 - 실측(createusertest, uid 61의 자식 63 생성
+        // 시도)으로 발견한 실제 버그. 이 레코드는 지금 막 kernel이 직접
+        // authmgr에 만들라고 보낸 값 그대로이니 authmgr에 다시 왕복
+        // 조회할 필요 없이 그대로 신뢰해 캐시에 넣는다.
+        UserRecordCache::insertOrUpdate(record);
+    }
+    args->error = created ? ChannelError::None : ChannelError::ServiceUnavailable;
+    co_return;
+}
+
 }  // namespace kernel

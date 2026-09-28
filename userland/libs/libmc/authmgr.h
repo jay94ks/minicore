@@ -47,15 +47,18 @@ enum class AuthmgrRequestType : uint8_t {
     // 커널의 UserRecordCache 미스 시 이 요청으로 채운다(배선 자체는
     // 아직 후속 - 이 증분은 authmgr 쪽만).
     LookupByUid = 2,
-    // [신규, 2026-09-23] 새 UserRecord 생성 - **[알려진 제약]** 이
-    // 요청은 아직 어떤 kernel syscall 경로로도 노출되지 않는다.
-    // "누가 요청했는지"(caller uid)를 Channel IPC 와이어에 실어
-    // 보내는 규약 자체가 아직 없어(PN-24A2B6F5 항목3 "authmgr 생성
-    // 권한"이 kSetuid류 tree-walk와 정합되게 설계돼야 함, 아직 미정)
-    // 권한 검사를 전혀 하지 않는다 - 지금은 authmgr 자신의 libkvdb
-    // 배선을 검증하기 위한 내부용/테스트 전용 요청이다. 실제로
-    // 노출하려면 caller uid 전달 규약을 먼저 확정할 것(CLAUDE.md
-    // 규칙 4 - 미정 설계를 임의로 채우지 않음).
+    // [신규, 2026-09-23] 새 UserRecord 생성. **[갱신, 2026-09-28,
+    // DC-CC83F7BE 답변("(A) 커널 중개")]** 이제 `mc::process::
+    // kSyscallEndpointCreateUser`(그룹0 call12)를 통해 정식으로
+    // 노출된다 - 커널이 caller의 실제 uid로 조상-자손 판정(Setuid와
+    // 대칭)을 마친 뒤 `authmgr_client.h`로 이 요청을 대신 보낸다.
+    // **여전히 남은 잔여 공백**: 이 Channel 자체(이름 "authmgr")에
+    // 직접 연결해 이 요청을 보내는 경로는 여전히 무검증이다 - 설계자가
+    // (B) Channel 레벨 peer 신원 첨부를 선택하지 않아 authmgr 자신은
+    // "누가 보냈는지" 구분할 방법이 없다(DC-CC83F7BE 참고, 의도적
+    // 범위 밖). 이 필드 셋(uid/parentUid/gid/loginName/passwordHash/
+    // defaultShell)을 커널 쪽 `AuthmgrUserRecord`와 1:1로 실어 보내는
+    // 관례는 그대로 유지.
     CreateUser = 3,
     // [신규, 2026-09-28, DC-34764C25 항목1 답변 "authmgr 내부의 별도
     // 화이트 리스트 (계정별로 화이트 리스트가 별도로 존재)"] callerUid

@@ -10,6 +10,7 @@
 #include "mount_table.h"  // MountKind/KernelFsDriver/FileHandle - Process::fileDescriptors(SP-2AAD7C8D §9.2)용
 #include "signal.h"
 #include "syscall.h"
+#include "user_record.h"  // kUserRecordMax*Bytes - CreateUserArgs 필드 크기용
 
 namespace elf {
 class Image;  // 전방 선언(minicore/libs/libelf/elf.h) - Process::execImage 시그니처용
@@ -855,6 +856,33 @@ constexpr SyscallEndpointId kSyscallEndpointSetuid = kMakeSyscallEndpointId(0, 1
 
 struct SetuidArgs {
     Uid targetUid = kRootUid;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-28, DC-CC83F7BE 답변("(A) 커널 중개... 최종 권한
+// 판정은 커널이") 반영] `CreateUser`(RM-48E1E610 그룹0 #12) - authmgr의
+// `AuthmgrRequestType::CreateUser`를 유저랜드가 직접 두드리는 대신,
+// 커널이 caller의 실제 `Process::uid`를 신뢰할 수 있는 값으로 확인한
+// 뒤 `authmgr_client.h`(DC-90A66932의 커널 전용 Channel 클라이언트)로
+// 대신 요청한다 - `Setuid`와 대칭적인 조상-자손 판정
+// (`kIsDescendantUser`): root는 임의 parentUid로, 그 외 caller는
+// parentUid 자신이거나 그 조상 체인 위에 있을 때만(=새 uid가 caller
+// 자신의 하위가 될 때만) 허용. **알려진 잔여 공백(DC-CC83F7BE 참고)**:
+// authmgr 자신의 raw Channel(named "authmgr") CreateUser 요청 자체는
+// 여전히 무검증이다(authmgr.h 문서 주석 그대로, "설계자가 (B) Channel
+// 레벨 peer 신원 첨부를 선택하지 않았으므로" 이번 증분의 의도적 범위
+// 밖) - 이 syscall은 "올바른 문"을 새로 만든 것이지 옛 문을 잠근 것은
+// 아니다.
+constexpr SyscallEndpointId kSyscallEndpointCreateUser = kMakeSyscallEndpointId(0, 12);
+
+struct CreateUserArgs {
+    Uid uid = kRootUid;                                    // in
+    Uid parentUid = kRootUid;                              // in
+    Gid gid = kRootGid;                                    // in
+    char loginName[kUserRecordMaxLoginNameBytes] = {};     // in
+    char passwordHash[kUserRecordMaxPasswordHashBytes] = {};  // in
+    char defaultShell[kUserRecordMaxShellBytes] = {};      // in
     // out
     ChannelError error = ChannelError::None;
 };

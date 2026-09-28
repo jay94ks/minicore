@@ -74,6 +74,20 @@ public:
 // `ChannelError::ServiceUnavailable`.
 ChannelError kSetuid(Process& caller, Uid targetUid);
 
+// [신규, 2026-09-28, DC-CC83F7BE 답변("(A) 커널 중개... kSetuid와
+// 대칭적인 조상-자손 규칙") 반영] `kSetuid()`가 내부적으로 쓰던
+// 조상-자손 tree-walk을 `CreateUser`의 권한 판정에도 재사용할 수
+// 있도록 헤더에 노출한다 - "targetUid에서 parentUid 체인을 타고
+// 올라가 callerUid에 닿는지"(=callerUid가 targetUid의 조상이거나
+// 자기 자신인지)를 그대로 검사하므로, `CreateUser`가 새로 만들려는
+// uid의 선언된 parentUid를 `targetUid` 자리에 넘기면 "callerUid가
+// 그 parentUid의 조상이거나 자기 자신일 때만 허용"이라는 원하는
+// 의미와 정확히 일치한다. **`kCanSetuid` 폐기 원칙과 무관** - 이건
+// "질의 전용 API"가 아니라 `kSetuid()`/`kCreateUserOnExecImpl()`
+// 둘 다의 판정+실행이 같은 함수 호출 안에서 곧바로 이어지는 내부
+// 구현 세부의 공유일 뿐이다(TOCTOU 창이 없음).
+bool kIsDescendantUser(Uid callerUid, Uid targetUid, ChannelError* outLookupFailure);
+
 // [신규, 2026-09-28, DC-90A66932 (A) 채택] `SetuidHandler::onExec()`의
 // 실제 구현 - 위 `kSetuid()`로 먼저 시도해 캐시 히트면 즉시 끝내고,
 // `ServiceUnavailable`(캐시 미스)이면 `authmgr_client.h`를 통해
@@ -84,6 +98,16 @@ ChannelError kSetuid(Process& caller, Uid targetUid);
 // 제약(ext4/fat32 VFS 통합이 이미 겪음) 때문에, "코루틴을 co_await"가
 // 아니라 "코루틴 객체를 그대로 반환"하는 위임으로 연결한다.
 AsyncExecCoro kSetuidOnExecImpl(AsyncTask* task, void* argsRaw);
+
+// [신규, 2026-09-28, DC-CC83F7BE 답변 반영] `CreateUserHandler::
+// onExec()`의 실제 구현(process.cpp가 kSetuidOnExecImpl과 동일한
+// 반환값 위임 패턴으로 연결) - caller의 실제 Process::uid를 얻어
+// (root 또는 새 uid의 parentUid에 대한 조상-자손 판정, 위
+// kIsDescendantUser 참고) 통과하면 authmgr_client.h로 authmgr에
+// CreateUser를 대신 요청한다. kSetuidOnExecImpl과 마찬가지로 이
+// 함수는 co_await를 쓰지 않는다(같은 이유 - authmgr_client.h가 쓰는
+// AsyncTaskAwaiter와의 dispatch-mode 혼용 금지, DC-90A66932 참고).
+AsyncExecCoro kCreateUserOnExecImpl(AsyncTask* task, void* argsRaw);
 
 }  // namespace kernel
 

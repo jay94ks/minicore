@@ -465,4 +465,40 @@ bool kAuthmgrCheckSudoPermission(Uid callerUid, Uid targetUid) {
     return response.error == 0;  // 0 == mc::ChannelError::None
 }
 
+// [신규, 2026-09-28, DC-CC83F7BE 답변 반영] CreateUser 요청 - 응답
+// 본문 없음(error만, userland/libs/libmc/authmgr.h §CreateUser 주석과
+// 동일한 관례) - kAuthmgrCheckSudoPermission과 동일한 write+read 왕복
+// 모양.
+bool kAuthmgrCreateUser(const UserRecord& record) {
+    WireRequestHeader header{};
+    header.header.totalLength = sizeof(WireRequestHeader) + sizeof(WireUserRecord);
+    header.header.frameKind = WireFrameKind::Request;
+    header.requestType = WireRequestType::CreateUser;
+    WireUserRecord body{};
+    body.uid = record.uid;
+    body.parentUid = record.parentUid;
+    body.gid = record.gid;
+    memcpy(body.loginName, record.loginName, sizeof(body.loginName));
+    memcpy(body.passwordHash, record.passwordHash, sizeof(body.passwordHash));
+    memcpy(body.defaultShell, record.defaultShell, sizeof(body.defaultShell));
+
+    uint8_t buf[sizeof(WireRequestHeader) + sizeof(WireUserRecord)];
+    memcpy(buf, &header, sizeof(header));
+    memcpy(buf + sizeof(header), &body, sizeof(body));
+    if (!kAuthmgrWriteAll(buf, sizeof(buf))) {
+        return false;
+    }
+
+    WireResponseHeader response{};
+    if (!kAuthmgrReadAll(reinterpret_cast<uint8_t*>(&response), sizeof(response))) {
+        return false;
+    }
+    if (response.header.frameKind != WireFrameKind::Response || response.requestType != WireRequestType::CreateUser ||
+        response.header.totalLength != sizeof(WireResponseHeader)) {
+        gAuthmgrBridge.reset();
+        return false;
+    }
+    return response.error == 0;
+}
+
 }  // namespace kernel

@@ -124,6 +124,27 @@ struct SetuidArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-28, DC-CC83F7BE 답변("(A) 커널 중개") 반영] process.h의
+// kSyscallEndpointCreateUser(그룹0.call12)와 동일한 값 - authmgr에
+// 직접 Channel로 CreateUser를 보내는 대신(무검증), 커널이 caller uid
+// 기준 조상-자손 판정을 마친 뒤 대신 요청하게 하는 새 문.
+constexpr SyscallEndpointId kSyscallEndpointCreateUser = kMakeSyscallEndpointId(0, 12);
+
+// kernel::CreateUserArgs와 바이트 단위로 정확히 같은 필드 순서/타입 -
+// 필드 폭은 커널 kUserRecordMax*Bytes(user_record.h)와 동일한
+// 32/96/64바이트 고정 크기 배열로 손으로 맞춘다(유저랜드 freestanding
+// 툴체인이 그 헤더를 직접 include할 수 없어 거울 복사).
+struct CreateUserArgs {
+    uint32_t uid = 0;         // in
+    uint32_t parentUid = 0;   // in
+    uint32_t gid = 0;         // in
+    char loginName[32] = {};      // in
+    char passwordHash[96] = {};   // in
+    char defaultShell[64] = {};   // in
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_PROCESS_H

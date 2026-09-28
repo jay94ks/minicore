@@ -101,6 +101,14 @@ bool kAuthmgrReadLookupResponse(UserRecord* outRecord);
 // 승격 경로라 통신 실패를 "허용"으로 잘못 해석하면 안 된다(fail-closed).
 bool kAuthmgrCheckSudoPermission(Uid callerUid, Uid targetUid);
 
+// [신규, 2026-09-28, DC-CC83F7BE 답변("(A) 커널 중개") 반영] authmgr에
+// 새 UserRecord 생성을 요청한다 - 이 함수를 부르는 시점엔 이미 호출부
+// (user_record.cpp의 kCreateUserOnExecImpl)가 caller uid 기준 조상-자손
+// 판정을 끝낸 뒤다(권한 판정은 커널 책임, authmgr은 그대로 실행만).
+// CheckSudoPermission과 동일한 이유로 write+read를 한 번에 묶는다
+// (응답 본문 없음, error 하나뿐). 통신 오류는 false(실패)로 접는다.
+bool kAuthmgrCreateUser(const UserRecord& record);
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_AUTHMGR_CLIENT_H
