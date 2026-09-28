@@ -8,7 +8,7 @@
 | [DC-01434F82](./DC-01434F82.md) | 비동기 프레임워크(SP-F682B889) 세부 결정 미정 | archived | 2026-09-15T05:46:52.264Z |
 | [DC-06FC78E8](./DC-06FC78E8.md) | PN-584DB994 근본 원인 확정 - onTick()/onForcedMigration()의 EOI~kContextSwitchFromISR 창이 자기 자신에 대해 재진입 보호가 없음 - 수정 설계 확인 요청 | approved | 2026-09-20T14:30:21.387Z |
 | [DC-0CC88ABB](./DC-0CC88ABB.md) | HPET 없는 환경에서 스케줄러 LAPIC 틱과 Timer 전역 틱의 하드웨어 소유권 충돌 | archived | 2026-09-15T05:47:07.531Z |
-| [DC-1526389A](./DC-1526389A.md) | sudo/su S 비트 exec-time 승격 - VFS에 파일 소유자(uid/mode) 메타데이터가 아예 없음(착수 전 구조적 공백 발견) | review | 2026-09-28T05:11:45.060Z |
+| [DC-1526389A](./DC-1526389A.md) | sudo/su S 비트 exec-time 승격 - VFS에 파일 소유자(uid/mode) 메타데이터가 아예 없음(착수 전 구조적 공백 발견) | review | 2026-09-28T05:59:53.799Z |
 | [DC-21647E46](./DC-21647E46.md) | 커널 전역 포인터를 SharedPtr/WeakPtr로 대체할지 - 조사 결과 및 결정 요청 | approved | 2026-09-16T18:20:22.899Z |
 | [DC-235312EF](./DC-235312EF.md) | git_add_bulk/git_add 업로드 파이프라인의 재현 가능한 한글 주석 손상 버그 | approved | 2026-09-15T16:50:37.873Z |
 | [DC-23AEA8B4](./DC-23AEA8B4.md) | AsyncTask 컨텍스트 전환: 스택풀 vs C++20 코루틴 미정 | archived | 2026-09-15T05:47:30.465Z |
@@ -108,6 +108,7 @@
 | [SP-83A07867](./SP-83A07867.md) | 스케줄러 디스패치 CR3 동기화 통합 및 최적화 — 설계 제안 | approved | 2026-09-21T23:30:25.605Z |
 | [SP-8B6B8D25](./SP-8B6B8D25.md) | Minicore 범용 운영체제 — 초기 설계 명세 | approved | 2026-09-21T14:43:57.320Z |
 | [SP-8D206F11](./SP-8D206F11.md) | Minicore CPU 캐시 관리 정책 | approved | 2026-09-18T13:06:14.505Z |
+| [SP-9039F955](./SP-9039F955.md) | VFS 파일 소유자/모드(uid/gid/mode) 메타데이터 + Chmod/Chown + EXEC_SETUID | review | 2026-09-28T05:59:27.745Z |
 | [SP-94C6A764](./SP-94C6A764.md) | PageFrame 캐시 타입 불일치(PAT aliasing) 처리 정책 — 설계 제안 (SP-6CEFBE9B §3 후속, PN-81223433) | approved | 2026-09-26T09:36:23.181Z |
 | [SP-94CD958D](./SP-94CD958D.md) | systemd 포팅 준비 사전조사 | review | 2026-09-26T14:13:03.798Z |
 | [SP-9525C4C0](./SP-9525C4C0.md) | Push/Pull 로드밸런싱 (PN-7679813D) — 설계 제안 | approved | 2026-09-17T12:27:37.052Z |
