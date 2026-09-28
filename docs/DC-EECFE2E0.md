@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-EECFE2E0
   status: review
-  updatedAt: 2026-09-27T19:12:59.396Z
+  updatedAt: 2026-09-28T00:48:25.205Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -122,6 +122,56 @@ authtest와 **정확히 동일한 시그니처**로 영구 정지하는 것을 g
 기아가 그 재현 하네스를 먼저 잡아먹어 원래 코드 경로에 도달하지도
 못하게 막고 있었을 가능성**을 뒷받침한다 - "authmgr에 국한되지
 않는다"는 위 절의 판단을 독립적으로 뒷받침하는 두 번째 사례.
+
+## [더 넓은 조사 완료, 2026-09-28] QU-26A69B1C 답변(D) 반영 - PN-E4C6AF72/PN-0B461E6F는 이 근본 원인과 연관성 없음으로 결론
+
+설계자가 (D)(과거 heisenbug들과의 연관성부터 넓게 확인 후 결정)로
+답변해, 이전 절이 "교차 기록"으로만 남겨 뒀던 두 후보
+(`PN-E4C6AF72`, `PN-0B461E6F`)를 각각 전체 조사 이력까지 다시
+읽고 인과 메커니즘을 대조했다. 재현을 다시 시도하기보다(둘 다
+이미 15~25회 연속 무결함으로 장기 휴면 상태라 재시도 비용 대비
+정보 이득이 낮음) 세 가지 축으로 메커니즘 자체를 대조하는 방식을
+택했다:
+
+1. **증상 종류가 다르다**: 이 DC의 근본 원인(gNormalQueues 영구
+   기아)은 Ready 상태 Task가 `popMin()`에서 영원히 선택되지 않는
+   "조용한 영구 정지"만 만든다 - 레지스터 손상이나 잘못된 메모리
+   접근을 일으킬 메커니즘이 전혀 없다. 반면 `PN-E4C6AF72`는 실제
+   `#GP`(CS/SS가 TSS 셀렉터로 나타남), `PN-0B461E6F`는 실제 Page
+   Fault PANIC이다 - 둘 다 크래시가 발생하는 반면 이 DC의 버그는
+   크래시를 절대 유발하지 않는다.
+2. **발생 시점/서브시스템이 다르다**: `PN-E4C6AF72`의 크래시
+   지점은 `Smp::startApCores()`의 `memcpy`(AP 트램폴린 코드 복사) -
+   BSP가 AP를 깨우는 아주 이른 부팅 단계로, 이 시점엔 아직
+   `gNormalQueues`에 경쟁할 UserThread 자체가 없거나(devmgr/fs
+   KernelThread조차 아직 스폰 전일 가능성이 높음) 스케줄러 틱
+   기반 선점이 유의미하게 시작되지도 않았다. `PN-0B461E6F`는
+   `kPowerKernelMain`(devmgr/fs와 동일한 Process-less KernelThread
+   패턴) 자신이 `WaitInterruptHandler`+`waitAll()`의 busy-poll
+   경로에서 겪는 Page Fault로, `InterruptSubscription`/IOAPIC
+   Subscribe-ISR 재진입이 필수 조건임이 이미 실측으로 좁혀져 있다 -
+   vruntime/`gNormalQueues` 순서와는 무관한 메모리 접근 문제다.
+3. **인과 방향이 성립하지 않는다**: `kPowerKernelMain` 자신도
+   `TaskClass::Normal`+Process-less KernelThread라 이 DC의 버그
+   때문에 vruntime이 영원히 0에 머문다 - 즉 이 버그의 효과는
+   `kPowerKernelMain`을 오히려 항상 우선 선택되게 만들 뿐(기아 X),
+   `PN-0B461E6F`가 필요로 하는 "드물게만 재현되는 타이밍 창"을
+   설명할 방향이 반대다.
+
+**결론**: 두 후보 모두 이 DC의 근본 원인과 인과관계가 없다고 판단한다
+- 증상 종류(크래시 vs 조용한 정지), 발생 시점(이른 SMP 기동 vs
+  정상 런타임), 메커니즘(레지스터/메모리 손상 vs 스케줄링 순서)
+모두 일치하지 않는다. 이미 확정된 연관 사례는 `PN-0556C759`
+(dbgdriver, authtest와 완전히 동일한 시그니처 - `state=Ready,
+inRunQueue=true`, 동일 `vruntime` 값)뿐이며, 이것으로 "authmgr에
+국한되지 않는다"는 이 DC의 핵심 주장은 이미 충분히 뒷받침된다.
+프로젝트 전체에서 "heisenbug"/"레이아웃 민감" 키워드로 다른 미해결
+후보를 추가로 검색했으나, `DC-D8951156`/`PN-395F4D89` 계열(블로킹
+syscall이 인터럽트 공용 디스패치 스택 위에서 재개 지점을 저장하는
+문제)은 이미 별도로 근본 원인이 확정·승인된 완전히 다른 버그라 이
+DC와 무관하다. 이 이상 넓히는 것은 수확 체감이 크다고 판단해, 넓은
+조사는 여기서 마무리하고 원래 결정(수정 방향 A/B/C)으로 되돌아갈
+것을 다시 요청한다(`QU-26A69B1C` 후속 질의로 재등록).
 
 ## 참고
 - `PN-AA9D7030` - 이 근본 원인을 확정한 조사(23/23 재현, TEMP
