@@ -4,8 +4,8 @@
   이 파일은 자동 생성된 사본(캐시)입니다 - 손으로 편집하지 마세요.
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: DC-EECFE2E0
-  status: review
-  updatedAt: 2026-09-28T00:48:25.205Z
+  status: approved
+  updatedAt: 2026-09-28T02:02:58.171Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -122,6 +122,38 @@ authtest와 **정확히 동일한 시그니처**로 영구 정지하는 것을 g
 기아가 그 재현 하네스를 먼저 잡아먹어 원래 코드 경로에 도달하지도
 못하게 막고 있었을 가능성**을 뒷받침한다 - "authmgr에 국한되지
 않는다"는 위 절의 판단을 독립적으로 뒷받침하는 두 번째 사례.
+
+## [결과, 2026-09-28] (A) 채택 후 구현+실측 검증 완료 - 근본 원인 해소 확인
+
+`QU-DEB5EA58` 답변으로 설계자가 (A)(devmgr/fs/AsyncReactor도 vruntime
+적립)를 채택했다. `minicore/kernel/scheduler.cpp:1809`의 `onTick()`
+vruntime 적립 조건에서 `isUserLevel` 검사를 제거해 `TaskClass::Normal`
+이면 KernelThread든 UserThread든 동일하게 vruntime을 적립하게 했다 -
+단 `ResourceGroup` CPU 쿼터 계정(Process 소속 전제, `static_cast<
+UserThread*>` 필요)은 `KernelThread`가 `UserThread`와 무관한 별개
+`Task` 파생 클래스라 안전하게 캐스트할 수 없으므로 `isUserLevel`
+검사로 그 하위 블록만 분기해 유지했다(단순히 `isUserLevel` 조건을
+지우기만 하면 KernelThread를 `UserThread*`로 잘못 캐스트하는 새
+메모리 안전성 버그가 생겼을 것 - 구현 중 자체 발견).
+
+**표준 회귀 3종**(PVH 무init/GRUB SMP1+init/GRUB SMP4+init) 전부
+클린. **실측 검증**: `kSpawnServiceProcesses()` 매니페스트에
+authtest를 TEMP로 추가해(검증 직후 완전히 원복, `git diff --stat`
+무변경 재확인) GRUB SMP1으로 재현 - 이전엔 100%(23/23) `Ready`
+상태로 영원히 멈췄던 authtest가 이번엔 실제로 실행돼 authmgr과의
+CreateUser/LookupByUid Channel IPC 왕복을 전부 마치고
+`selfTerminate(0)`으로 정상 종료했다(gdb로 `exitCode=0` 직접 확인 -
+essential 서비스 취급돼 종료 시 PANIC이 뜬 건 이 TEMP 하네스가
+authtest를 서비스 매니페스트 경로로 스폰해 essential=true가 붙은
+부작용일 뿐, 스케줄러 버그와 무관 - 정상 흐름이면 authtest는 애초에
+계속 실행되다 종료 안 하는 별도 프로세스가 아니라 한 번 끝나고
+사라지는 테스트 바이너리라 essential 취급 자체가 이 임시 하네스의
+설계 실수였다). 이것으로 gNormalQueues 영구 기아가 실제로 해소됐음을
+직접 확인했다.
+
+**커밋**: `minicore/kernel/scheduler.cpp` 변경만 포함(TEMP 검증
+하네스는 커밋에 전혀 포함되지 않음, `kmain.cpp`는 베이스라인과
+바이트 동일 재확인).
 
 ## [더 넓은 조사 완료, 2026-09-28] QU-26A69B1C 답변(D) 반영 - PN-E4C6AF72/PN-0B461E6F는 이 근본 원인과 연관성 없음으로 결론
 

@@ -1793,30 +1793,37 @@ void Scheduler::onTick(InterruptFrame* frame) {
             }
             // mustLeaveCore(방금 Blocked) - 아래 `if (!next)` 폴백이 처리.
         } else if (next) {
-            // [신규, 2026-09-17, SP-B26CDBDD §3.2/§5, PN-158B6B2F] vruntime/
+            // [정정, 2026-09-28, DC-EECFE2E0/QU-DEB5EA58 (A) 채택] vruntime/
             // cpuTicksUsed 갱신 + ResourceGroup CPU 계정 - 반드시 enqueue()
             // (그 vruntime을 정렬 키로 삽입 위치를 정한다) 호출보다 먼저다.
-            // isUserLevel 조건은 커널 자신의 Normal Task(있다면)까지 공정
-            // 스케줄링/계정 대상으로 끌어들이지 않기 위함(SP-B26CDBDD §3.2 -
-            // 실제로 지금은 이 코드 경로에 도달하는 Normal Task가 전부
-            // UserThread뿐이라 이 조건이 당장 무언가를 걸러내진 않지만,
-            // 설계가 명시한 조건이라 그대로 반영한다).
-            if (current->taskClass == TaskClass::Normal && current->isUserLevel) {
+            // 원래 isUserLevel 조건(SP-B26CDBDD §3.2, PN-158B6B2F)은
+            // devmgr/fs/코어별 AsyncReactor 리액터 같은 Process-less
+            // KernelThread가 gNormalQueues에서 UserThread와 경쟁하면서도
+            // 자기 자신은 vruntime을 절대 안 내는 영구 기아를 만든다는 게
+            // 확인돼(DC-EECFE2E0) 폐기됐다 - TaskClass::Normal이면
+            // KernelThread든 UserThread든 동일하게 vruntime을 적립한다.
+            // ResourceGroup CPU 쿼터 계정(Process 소속 전제)은 UserThread
+            // 에서만 여전히 유효하므로 그 부분만 isUserLevel로 분기해
+            // 남긴다 - Process 없는 KernelThread를 UserThread*로
+            // static_cast하면 안 되기 때문(둘 다 Task의 별개 파생 클래스).
+            if (current->taskClass == TaskClass::Normal) {
                 current->vruntime += (kEffectiveWeightBase * kVruntimeScale) / kEffectiveWeightOf(current->weight);
                 current->cpuTicksUsed += 1;
-                if (SharedPtr<Process> proc = static_cast<UserThread*>(current)->process.lock()) {
-                    if (ResourceGroup* group = proc->group) {
-                        group->accounting.totalCpuTicks += 1;  // 쿼터 없어도 항상 집계(SP-245D130B §5)
-                        if (group->cpu.periodTicks != 0) {      // 쿼터 활성 그룹만
-                            // [신규, 2026-09-19, SP-6A563A8F §3] 증가 전에
-                            // 먼저 주기 롤오버를 확인한다 - 안 그러면
-                            // usedTicksInPeriod가 주기 경계 없이 무한정
-                            // 누적된다(pickNext()의 스로틀 판정 쪽만
-                            // 롤오버를 확인하는 것으로는 불충분 - 이
-                            // 그룹이 한동안 pickNext()에서 안 뽑히면
-                            // 여기서만 계속 늘어남).
-                            kCheckAndResetCpuPeriod(group);
-                            group->cpu.usedTicksInPeriod += 1;
+                if (current->isUserLevel) {
+                    if (SharedPtr<Process> proc = static_cast<UserThread*>(current)->process.lock()) {
+                        if (ResourceGroup* group = proc->group) {
+                            group->accounting.totalCpuTicks += 1;  // 쿼터 없어도 항상 집계(SP-245D130B §5)
+                            if (group->cpu.periodTicks != 0) {      // 쿼터 활성 그룹만
+                                // [신규, 2026-09-19, SP-6A563A8F §3] 증가 전에
+                                // 먼저 주기 롤오버를 확인한다 - 안 그러면
+                                // usedTicksInPeriod가 주기 경계 없이 무한정
+                                // 누적된다(pickNext()의 스로틀 판정 쪽만
+                                // 롤오버를 확인하는 것으로는 불충분 - 이
+                                // 그룹이 한동안 pickNext()에서 안 뽑히면
+                                // 여기서만 계속 늘어남).
+                                kCheckAndResetCpuPeriod(group);
+                                group->cpu.usedTicksInPeriod += 1;
+                            }
                         }
                     }
                 }
