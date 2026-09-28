@@ -122,11 +122,15 @@ cp "${BUILD_USERLAND_DIR}/minicore-granttest/granttest" "${STAGE_DIR}/granttest"
 # 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행된다(main.cpp
 # 상단 주석 참고).
 cp "${BUILD_USERLAND_DIR}/minicore-diskmetatest/diskmetatest" "${STAGE_DIR}/diskmetatest"
+# fatdisktest(PN-2A0981B7 항목3, 2026-09-29) 추가 - diskmetatest와
+# 동일한 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행된다
+# (main.cpp 상단 주석 참고).
+cp "${BUILD_USERLAND_DIR}/minicore-fatdisktest/fatdisktest" "${STAGE_DIR}/fatdisktest"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\nsetuidtest\nsudotest\nvfsmetatest\ncreateusertest\nlrutest\nexittest\nexitwaiter\ntimerfdtest\ngranttest\ndiskmetatest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\nsetuidtest\nsudotest\nvfsmetatest\ncreateusertest\nlrutest\nexittest\nexitwaiter\ntimerfdtest\ngranttest\ndiskmetatest\nfatdisktest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest+setuidtest+sudotest+vfsmetatest+createusertest+lrutest+exittest+exitwaiter+timerfdtest+granttest+diskmetatest)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest+setuidtest+sudotest+vfsmetatest+createusertest+lrutest+exittest+exitwaiter+timerfdtest+granttest+diskmetatest+fatdisktest)"

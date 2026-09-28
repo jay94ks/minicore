@@ -197,3 +197,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/granttest ${CMAKE_CURRE
 # kmain.cpp의 TEMP 스폰 경로로 이름("diskmetatest")이 매치돼 부팅 시
 # 자동 실행된다(minicore/diskmetatest/main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/diskmetatest ${CMAKE_CURRENT_BINARY_DIR}/minicore-diskmetatest)
+
+# fatdisktest(PN-2A0981B7 항목3, FAT32 디스크 이미지 Stat/Chmod 실측
+# 검증) - diskmetatest(ext4용)와 짝을 이루는 FAT32용, 동일한 이유의
+# out-of-tree add_subdirectory - kmain.cpp의 TEMP 스폰 경로로 이름
+# ("fatdisktest")이 매치돼 부팅 시 자동 실행된다(minicore/fatdisktest/
+# main.cpp 상단 주석 참고).
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/fatdisktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-fatdisktest)
