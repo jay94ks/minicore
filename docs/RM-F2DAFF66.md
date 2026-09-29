@@ -5,8 +5,8 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-28T18:41:01.179Z
-  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t C:\GitHub\minicore\docs
+  updatedAt: 2026-09-29T01:39:22.631Z
+  갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
 ﻿﻿# Minicore 설계공백 검수
@@ -2402,6 +2402,35 @@ RM-23F4B687 §4 관례). **남은 갭은 signalfd 전체(call8/9)·RT신호
 의도적으로 틀리게 바꿔 실패 코드가 정직하게 나오는 것까지 확인). 표준
 회귀 3종(PVH/GRUB SMP1/SMP4) 클린, TEMP 스폰/진단 훅은 검증 직후 완전히
 원복(`git status` 클린).
+
+## §1-Y. [발견, 2026-09-29] `SP-AA6DF406`(libntfs, approved) - §1이 확정한
+"1차 증분 읽기전용" 경계 자체는 지켜졌으나, 실측 중 그 경계 안에서도
+실제 NTFS 볼륨을 거의 전혀 못 읽는 더 근본적인 실용 공백을 발견
+
+`PN-2A0981B7` 항목2(NTFS Chmod, `QU-9F8AD7A8` 답변(A))를 `mkntfs`
+(ntfs-3g) 실제 이미지로 E2E 검증하려다 발견 - **루트 디렉터리(MFT
+레코드 5)는 방금 포맷한 빈 볼륨에서조차 이미 `$INDEX_ROOT`가
+"large"(헤더 플래그 0x01)이고 별도 `$INDEX_ALLOCATION`을 갖는다**
+(`ntfsinfo`로 확인). 일반 하위 디렉터리는 파일이 있어도 "small"
+그대로였다 - 루트만 예외적으로 항상 large라는 게 `mkntfs`/Windows
+공통 관례로 보인다.
+
+`SP-AA6DF406` §2/§3.6은 `$INDEX_ALLOCATION` 하위 노드 순회를 명시적으로
+1차 증분 범위 밖(후속 증분2)으로 뒀는데, 경로 해석이 항상 루트의
+`$INDEX_ROOT` 스캔에서 시작하는 구조상 **루트 자체가 large면 그 아래
+무엇이 있든 이 드라이버로는 절대 도달할 수 없다** - `Open`/`Stat`/
+`Chmod` 전부 영향받는다. §1이 "1차 증분은 작은 디렉터리까지만"이라고
+적어 둔 스코프 자체는 정확했지만, "실제 NTFS 볼륨의 루트는 거의
+항상 large"라는 사실과 맞물려 실용적으로는 "루트 레벨 콘텐츠를
+사실상 전혀 못 읽는다"는 훨씬 좁은 실제 범위가 됐다 - 문서가 확정한
+스코프를 코드가 놓친 사례가 아니라(§1-V/§1-W류와 다름), **문서의
+스코프 결정 자체가 실측 전에는 드러나지 않았던 더 큰 실용적 함의를
+가졌던 사례**.
+
+Chmod 구현 자체(exFAT과 대칭, `$STANDARD_INFORMATION.fileAttributes`
+제자리 갱신)는 코드 리뷰 수준으로는 완료됐고 커널 빌드도 정상이지만,
+위 발견 때문에 실제 QEMU 부팅 E2E 검증은 아직 못 했다. `SP-AA6DF406`
+§7에 이 발견과 `QU-E0080F90`(진행 방향 질의)을 함께 기록해 뒀다.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 
