@@ -28,6 +28,10 @@ constexpr SyscallEndpointId kSyscallEndpointRead = kMakeSyscallEndpointId(3, 7);
 constexpr SyscallEndpointId kSyscallEndpointWrite = kMakeSyscallEndpointId(3, 8);
 constexpr SyscallEndpointId kSyscallEndpointLseek = kMakeSyscallEndpointId(3, 9);
 constexpr SyscallEndpointId kSyscallEndpointStat = kMakeSyscallEndpointId(3, 10);
+// [신규, PN-F9CBF1A9] 커널 쪽 kSyscallEndpointReaddir(call 11)의 거울 -
+// 이 파일이 지금까지 못 따라가던 기존 공백(위 Rmdir/call14와 같은
+// 종류)을 메운다.
+constexpr SyscallEndpointId kSyscallEndpointReaddir = kMakeSyscallEndpointId(3, 11);
 constexpr SyscallEndpointId kSyscallEndpointMkdir = kMakeSyscallEndpointId(3, 12);
 constexpr SyscallEndpointId kSyscallEndpointUnlink = kMakeSyscallEndpointId(3, 13);
 // [신규, 2026-09-28, SP-9039F955 §4] 커널 쪽 kSyscallEndpointRmdir(call
@@ -137,6 +141,20 @@ enum class FileType : uint8_t {
     Regular = 0,
     Directory = 1,
     Socket = 2,
+};
+
+// [신규, PN-F9CBF1A9] 커널 kernel::vfs_syscall.h::ReaddirArgs의 거울 -
+// 디렉터리를 먼저 Open()으로 연 fd에 대해 반복 호출하는 스트리밍
+// 나열(커널 쪽 문서 주석 참고 - 커서는 fd 자신이 소유, hasMore=false면
+// 끝).
+struct ReaddirArgs {
+    int32_t fd = -1;
+    // out
+    char name[64] = {};
+    uint32_t nameLength = 0;
+    bool isDirectory = false;
+    bool hasMore = false;
+    ChannelError error = ChannelError::None;
 };
 
 // [SP-2AAD7C8D §9.3/§9.4, PN-238FD331] fd 없이 경로만으로 동작.

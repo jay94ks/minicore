@@ -9,6 +9,7 @@
 #include "process.h"
 #include "resource_group.h"
 #include "scheduler.h"
+#include "socket.h"
 #include "syscall.h"
 
 namespace {
@@ -45,6 +46,107 @@ bool kHasPrefix(const char* s, kernel::uint32_t sLen, const char* prefix, kernel
 
 bool kEqualsExact(const char* s, kernel::uint32_t sLen, const char* other, kernel::uint32_t otherLen) {
     return sLen == otherLen && memcmp(s, other, otherLen) == 0;
+}
+
+// [신규, PN-F9CBF1A9, SP-231493CB §4-1] "named/" 아래 소켓 자동 등록
+// 경로("<pid>/<handle>", socket.h kFormatAutoSocketPath의 역함수) -
+// 더 이상 NamedObjectTable에 등록되지 않으므로(§4-1 갱신) 이 이름을
+// 직접 파싱해 살아있는 프로세스의 fd 테이블을 즉석 조회한다.
+bool kParseAutoSocketPath(const char* name, kernel::uint32_t nameLen, kernel::int64_t* outPid,
+                           kernel::int32_t* outFd) {
+    kernel::uint32_t i = 0;
+    const bool pidNeg = i < nameLen && name[i] == '-';
+    if (pidNeg) {
+        ++i;
+    }
+    if (i >= nameLen || name[i] < '0' || name[i] > '9') {
+        return false;
+    }
+    kernel::int64_t pid = 0;
+    while (i < nameLen && name[i] >= '0' && name[i] <= '9') {
+        pid = pid * 10 + (name[i] - '0');
+        ++i;
+    }
+    if (i >= nameLen || name[i] != '/') {
+        return false;
+    }
+    ++i;
+    const bool fdNeg = i < nameLen && name[i] == '-';
+    if (fdNeg) {
+        ++i;
+    }
+    if (i >= nameLen || name[i] < '0' || name[i] > '9') {
+        return false;
+    }
+    kernel::int32_t fd = 0;
+    while (i < nameLen && name[i] >= '0' && name[i] <= '9') {
+        fd = fd * 10 + (name[i] - '0');
+        ++i;
+    }
+    if (i != nameLen) {
+        return false;
+    }
+    *outPid = pidNeg ? -pid : pid;
+    *outFd = fdNeg ? -fd : fd;
+    return true;
+}
+
+// [신규, PN-F9CBF1A9] Readdir 나열 전용 - Process::forEachLive()의
+// 콜백(살아있는 프로세스 하나씩)에서 그 프로세스의 fd 테이블 중
+// "실제로 §4-1 대상인" Socket 슬롯(channelId != 0 - Accept()가 만든,
+// 자기 Channel이 없는 소켓은 socket.h 문서 주석 그대로 제외)만
+// targetIndex번째까지 순서대로 센다 - NamedObjectTable::getByIndex와
+// 동일한 "사용 중인 것만 순서대로 센 몇 번째인지" 관례.
+struct SocketAutoPathIndexCtx {
+    kernel::uint32_t targetIndex;
+    kernel::uint32_t seen = 0;
+    bool found = false;
+    char* outName;
+    kernel::uint32_t* outNameLength;
+};
+
+void kVisitProcessForSocketAutoPathByIndex(const kernel::SharedPtr<kernel::Process>& proc, void* ctxRaw) {
+    auto* ctx = static_cast<SocketAutoPathIndexCtx*>(ctxRaw);
+    if (ctx->found) {
+        return;
+    }
+    proc->fileDescriptors.forEach([&](kernel::Process::FileDescriptor& fd, auto*) {
+        if (ctx->found || fd.kind != kernel::MountKind::Socket) {
+            return;
+        }
+        kernel::UnixSocket* socket = fd.socket.get();
+        if (!socket || socket->channelId == 0) {
+            return;
+        }
+        if (ctx->seen == ctx->targetIndex) {
+            *ctx->outNameLength = kernel::kFormatAutoSocketPath(proc->processId, fd.fd, ctx->outName,
+                                                                 kernel::kMaxNamedObjectNameLength);
+            ctx->found = true;
+            return;
+        }
+        ++ctx->seen;
+    });
+}
+
+bool kLiveFsGetSocketAutoPathByIndex(kernel::uint32_t index, char* outName, kernel::uint32_t* outNameLength) {
+    SocketAutoPathIndexCtx ctx{index, 0, false, outName, outNameLength};
+    kernel::Process::forEachLive(&kVisitProcessForSocketAutoPathByIndex, &ctx);
+    return ctx.found;
+}
+
+// [신규, PN-F9CBF1A9] NamedObjectTable에 실제로 등록된(이름 있는
+// Channel) 개수 - Readdir이 "그다음은 소켓 자동 등록 경로 차례"로
+// 넘어갈 인덱스 경계를 계산하는 데만 쓴다. getByIndex 자체가 이미
+// O(kMaxNamedObjects) 선형 스캔이라 이 카운팅도 같은 비용 - v1
+// 단순성 우선(named_object.cpp의 기존 관례와 동일).
+kernel::uint32_t kCountNamedObjectEntries() {
+    kernel::uint32_t count = 0;
+    char scratch[kernel::kMaxNamedObjectNameLength];
+    kernel::uint32_t scratchLen = 0;
+    while (kernel::NamedObjectTable::getByIndex(count, scratch, &scratchLen)) {
+        ++count;
+    }
+    return count;
 }
 
 }  // namespace
@@ -231,10 +333,32 @@ kernel::OpenResult kLiveFsOpenImpl(kernel::AsyncTask* task, const char* relPath,
         const kernel::uint32_t nameLen = relPathLen - (sizeof(kNamedPrefix) - 1);
         kernel::NamedObjectKind kind = kernel::NamedObjectKind::Channel;
         kernel::uint64_t objectId = 0;
-        if (!kernel::NamedObjectTable::resolve(name, static_cast<kernel::uint64_t>(nameLen), &kind, &objectId)) {
-            return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
+        if (kernel::NamedObjectTable::resolve(name, static_cast<kernel::uint64_t>(nameLen), &kind, &objectId)) {
+            return kernel::OpenResult{kernel::FileHandle{objectId}, false, kernel::VfsError::None};
         }
-        return kernel::OpenResult{kernel::FileHandle{objectId}, false, kernel::VfsError::None};
+        // [변경, PN-F9CBF1A9, SP-231493CB §4-1] NamedObjectTable에
+        // 없으면 소켓 자동 등록 경로("<pid>/<handle>")일 수 있다 -
+        // 더 이상 별도 테이블에 등록되지 않으므로, 그 프로세스의 fd
+        // 테이블을 즉석 조회하는 것으로 대체한다(fd 테이블 자체가
+        // 진실의 원천 - Close()가 그 슬롯을 반납하는 기존 동작만으로
+        // 이 경로도 자동으로 사라진다, 별도 해제 불필요).
+        kernel::int64_t pid = 0;
+        kernel::int32_t fd = 0;
+        if (kParseAutoSocketPath(name, nameLen, &pid, &fd)) {
+            kernel::SharedPtr<kernel::Process> proc = kernel::Process::resolveById(pid);
+            if (proc) {
+                auto* slot =
+                    proc->fileDescriptors.find([fd](const kernel::Process::FileDescriptor& e) { return e.fd == fd; });
+                if (slot && slot->value.kind == kernel::MountKind::Socket) {
+                    kernel::UnixSocket* socket = slot->value.socket.get();
+                    if (socket && socket->channelId != 0) {
+                        return kernel::OpenResult{kernel::FileHandle{socket->channelId}, false,
+                                                   kernel::VfsError::None};
+                    }
+                }
+            }
+        }
+        return kernel::OpenResult{kernel::FileHandle{}, false, kernel::VfsError::NotFound};
     }
 
     if (kEqualsExact(relPath, relPathLen, kInitrdCpioPath, sizeof(kInitrdCpioPath) - 1)) {
@@ -375,15 +499,28 @@ void kLiveFsReaddirImpl(kernel::KernelFsReaddirArgs* args) {
     // 아님).
     if (args->dirHandle.value == kLiveFsNamedDirHandleValue) {
         kernel::uint32_t nameLength = 0;
-        if (!kernel::NamedObjectTable::getByIndex(static_cast<kernel::uint32_t>(args->index), args->entry.name,
-                                                   &nameLength)) {
-            args->hasMore = false;
+        const auto index = static_cast<kernel::uint32_t>(args->index);
+        if (kernel::NamedObjectTable::getByIndex(index, args->entry.name, &nameLength)) {
+            args->entry.nameLength = nameLength;
+            args->entry.isDirectory = false;
+            args->hasMore = true;
             args->error = kernel::VfsError::None;
             return;
         }
-        args->entry.nameLength = nameLength;
-        args->entry.isDirectory = false;
-        args->hasMore = true;
+        // [변경, PN-F9CBF1A9, SP-231493CB §4-1] index가 NamedObjectTable
+        // (이름 있는 Channel)의 실제 등록 개수를 넘어서면, 소켓 자동
+        // 등록 경로(더 이상 별도 테이블이 아니라 살아있는 프로세스들의
+        // fd 테이블 투영)를 이어서 나열한다.
+        const kernel::uint32_t namedCount = kCountNamedObjectEntries();
+        if (index >= namedCount &&
+            kLiveFsGetSocketAutoPathByIndex(index - namedCount, args->entry.name, &nameLength)) {
+            args->entry.nameLength = nameLength;
+            args->entry.isDirectory = false;
+            args->hasMore = true;
+            args->error = kernel::VfsError::None;
+            return;
+        }
+        args->hasMore = false;
         args->error = kernel::VfsError::None;
         return;
     }

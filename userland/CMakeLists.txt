@@ -228,6 +228,14 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ntfsdisktest ${CMAKE_CU
 # add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ext4rwtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-ext4rwtest)
 
+# socknamedtest/socknamedwaiter(PN-F9CBF1A9, SP-231493CB §4-1 후속 -
+# 소켓 자동 등록 경로의 fd 테이블 투영 전환 E2E 검증) - exittest/
+# exitwaiter와 동일한 이유(투영 대상이 되려면 진짜 SpawnProcess로
+# 낳은 평범한 프로세스여야 함 - socknamedwaiter/main.cpp 상단 주석
+# 참고)의 out-of-tree add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/socknamedtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-socknamedtest)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/socknamedwaiter ${CMAKE_CURRENT_BINARY_DIR}/minicore-socknamedwaiter)
+
 # signalmasktarget/signalmasktest(PN-A1A0B595 선행 작업, QU-28D7C7B1
 # 답변(A) - 프로세스 시그널 마스크 E2E 검증) - 위 테스트들과 동일한
 # 이유의 out-of-tree add_subdirectory.

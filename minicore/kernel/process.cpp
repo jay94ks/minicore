@@ -2234,6 +2234,20 @@ SignalMaskHandler gSignalMaskHandler;
 // 링크)이라 `procfs.cpp` 등 다른 TU에서 호출 가능하다.
 SharedPtr<Process> Process::resolveById(ProcessId pid) { return kResolveProcessId(pid); }
 
+// [신규, PN-F9CBF1A9, SP-231493CB §4-1] process.h 선언 문서 주석 참고 -
+// 위 gProcessTable(같은 익명 네임스페이스, 같은 번역 단위라 이름 조회
+// 가능)을 읽기 락으로 순회한다 - kResolveProcessId()와 동일한
+// RwSpinlockReadGuard(다른 읽기와 동시 진행 가능).
+void Process::forEachLive(void (*callback)(const SharedPtr<Process>&, void* ctx), void* ctx) {
+    RwSpinlockReadGuard guard(gProcessTableLock);
+    for (uint32_t i = 0; i < kMaxProcessTableSlots; ++i) {
+        SharedPtr<Process> proc = gProcessTable[i].proc.lock();
+        if (proc) {
+            callback(proc, ctx);
+        }
+    }
+}
+
 // [신규, 2026-09-19, SP-30FCC8AE §3/§4류, PN-85FA4992] process.h
 // 선언 문서 주석 참고 - `kCanSendSignal()`(위 익명 네임스페이스 안)과
 // 완전히 같은 판정 순서, 대상 필드만 statusPermission/kPermOwnerRead로

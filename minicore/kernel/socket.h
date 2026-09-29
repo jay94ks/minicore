@@ -3,7 +3,6 @@
 
 #include "channel.h"
 #include "libkenv/types.h"
-#include "named_object.h"
 #include "socket_bind_table.h"
 #include "syscall.h"
 

@@ -3,7 +3,6 @@
 #include "async_task.h"
 #include "libkenv/mem.h"
 #include "libkmm/slab.h"
-#include "named_object.h"
 #include "paging.h"
 #include "process.h"
 #include "socket_bind_table.h"
@@ -186,22 +185,16 @@ public:
         fdEntry.used = true;
         process->fileDescriptors.insert(fdEntry);
 
-        // [SP-231493CB §4-1] 모든 소켓의 자동 등록 경로 - "<pid>/<handle>".
+        // [변경, PN-F9CBF1A9, SP-231493CB §4-1] 모든 소켓의 자동 등록
+        // 경로("/sys/live/named/<pid>/<handle>")는 더 이상 여기서 별도
+        // 테이블에 등록하지 않는다 - livefs.cpp가 이 fd 테이블 자체를
+        // 즉석 조회(projection)하므로 등록 자체가 필요 없다(등록을
+        // 빠뜨려 생기던 "안 보임" 실패 모드도 이제 구조적으로 없음).
         // [정직하게 기록] 커널/커널 서비스가 직접 소켓을 만드는
         // "unix/kernel/<ownerId>/<handle>" 갈래는 실사용처가 없다
         // (Process::fileDescriptors 자체가 Process 전용, KernelThread엔
         // 없음) - 그 경로가 실제로 필요해지는 시점으로 미룬다
         // (RM-23F4B687 §4).
-        char autoPath[kMaxNamedObjectNameLength];
-        const uint32_t autoPathLen =
-            kFormatAutoSocketPath(process->processId, newFd, autoPath, kMaxNamedObjectNameLength);
-        // [정직하게 기록] 이 reserve()가 실패할 수 있는 유일한 경우는
-        // NamedObjectTable 슬롯 고갈(128개, kMaxNamedObjects)뿐이다
-        // (pid/fd 조합은 항상 유일해 이름 충돌은 불가능) - 실패해도
-        // 소켓 자체는 정상 동작한다, 단지 이 자동 가시성 목록에서
-        // 안 보일 뿐이라 반환값을 확인하지 않는다(§4-1은 "발견
-        // 가능성"을 위한 것이지 소켓 동작의 필수 조건이 아니다).
-        NamedObjectTable::reserve(autoPath, autoPathLen, NamedObjectKind::Channel, socket->channelId);
 
         args->fd = newFd;
         args->error = ChannelError::None;

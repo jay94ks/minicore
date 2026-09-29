@@ -542,6 +542,15 @@ public:
     // 실패(잘못된 pid/이미 죽은 프로세스) 시 빈 `SharedPtr`.
     static SharedPtr<Process> resolveById(ProcessId pid);
 
+    // [신규, PN-F9CBF1A9, SP-231493CB §4-1] 위 resolveById()가 쓰는 것과
+    // 같은 전역 프로세스 슬롯 테이블 전체를 순회한다 - 살아있는
+    // (WeakPtr::lock() 성공) 프로세스마다 callback을 부른다. v1은
+    // kMaxProcessTableSlots(65535)칸 선형 스캔 그대로(named_object.cpp의
+    // 128칸 스캔과 같은 "정확하지만 최적은 아닌" v1 단순화) -
+    // livefs.cpp의 "/sys/live/named/<pid>/<handle>"(소켓 자동 등록
+    // 경로, fd 테이블 투영) 나열이 첫 소비자.
+    static void forEachLive(void (*callback)(const SharedPtr<Process>&, void* ctx), void* ctx);
+
     // pml4Phys를 새로 확보하고 커널 상위 절반(higher-half)을 공유하는
     // 상태로 초기화한다(Paging::createAddressSpace 참고 - 하위 절반은
     // 전부 비어 있는 채로 시작, ELF 로더가 채울 자리). 실패(Slab/페이지

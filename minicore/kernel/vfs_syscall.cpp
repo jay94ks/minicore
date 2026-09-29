@@ -4,7 +4,6 @@
 #include "libkenv/spinlock.h"
 #include "libkmm/slab.h"
 #include "mount_table.h"
-#include "named_object.h"
 #include "paging.h"
 #include "process.h"
 #include "resource_group.h"
@@ -368,13 +367,15 @@ public:
             }
         } else if (slot->value.kind == MountKind::Socket) {
             // [PN-CC0F4EAC, SP-231493CB §3] 소켓 fd 종료 - 연결
-            // 상태(bridge)/자기 소유 Channel/§4-1 자동 등록 이름/명시적
-            // Bind() 이름을 전부 정리해야 한다. 이 중 하나라도 빠뜨리면
-            // NamedObjectTable(§4-1 자동 등록) 또는 SocketBindTable
-            // (§4-2 Bind, PN-E310E23A로 분리됨)에 죽은 소켓을 가리키는
-            // 좀비 이름이 영구히 남는다(socket.h UnixSocket::boundPath
-            // 문서 주석 참고 - kResolveChannelId 자체는 세대 태그로
-            // 안전하지만, 그 이름이 다시는 재사용 못 하게 되는
+            // 상태(bridge)/자기 소유 Channel/명시적 Bind() 이름을 전부
+            // 정리해야 한다. [갱신, PN-F9CBF1A9, §4-1] 자동 등록 경로는
+            // 더 이상 별도 테이블이 아니라 fd 테이블 투영이라 아래
+            // fileDescriptors.erase(slot) 하나로 자동 정리된다 - 이 중
+            // Bind() 이름 하나만 빠뜨려도 SocketBindTable(§4-2,
+            // PN-E310E23A)에 죽은 소켓을 가리키는 좀비 이름이 영구히
+            // 남는다(socket.h UnixSocket::boundPath 문서 주석 참고 -
+            // kResolveChannelId 자체는 세대 태그로 안전하지만, 그
+            // 이름이 다시는 재사용 못 하게 되는
             // 네임스페이스 누수).
             // [해소, 2026-09-27 6회차, PN-CC0F4EAC 항목7 §2] 4회차가
             // "다음 착수 세션 필수 과제"로 남겨 둔 참조 카운트 조회가
@@ -398,12 +399,12 @@ public:
                     kSubmitAndAwait(task, kSyscallEndpointCloseBridge, &closeArgs);
                 }
                 if (socket->channelId != 0) {
-                    // Socket()이 등록한 것과 정확히 같은 포맷으로 재계산
-                    // (kFormatAutoSocketPath, socket.h §4-1 포맷 주석 참고).
-                    char autoPath[kMaxNamedObjectNameLength];
-                    const uint32_t autoPathLen =
-                        kFormatAutoSocketPath(process->processId, fd, autoPath, kMaxNamedObjectNameLength);
-                    NamedObjectTable::release(autoPath, autoPathLen);
+                    // [변경, PN-F9CBF1A9, SP-231493CB §4-1] §4-1 자동
+                    // 등록 경로는 더 이상 별도 테이블에 등록되지 않는다
+                    // (livefs.cpp가 fd 테이블을 즉석 조회) - 이 fd 슬롯을
+                    // 아래에서 fileDescriptors.erase(slot)로 반납하는
+                    // 기존 동작만으로 그 경로도 자동으로 사라지므로
+                    // 별도 release() 호출이 필요 없다.
                     if (socket->explicitlyBound) {
                         // [변경, PN-E310E23A, SP-231493CB §4-2] Bind()
                         // 이름은 이제 SocketBindTable에 있다.
