@@ -134,11 +134,19 @@ cp "${BUILD_USERLAND_DIR}/minicore-setuidspawntest/setuidspawntest" "${STAGE_DIR
 # 동일한 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시 자동 실행된다
 # (main.cpp 상단 주석 참고).
 cp "${BUILD_USERLAND_DIR}/minicore-exfatdisktest/exfatdisktest" "${STAGE_DIR}/exfatdisktest"
+# ntfsdisktest(PN-2A0981B7 항목2, QU-9F8AD7A8 답변(A), 2026-09-29) 추가 -
+# 위 테스트들과 동일한 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시
+# 자동 실행된다(main.cpp 상단 주석 참고).
+cp "${BUILD_USERLAND_DIR}/minicore-ntfsdisktest/ntfsdisktest" "${STAGE_DIR}/ntfsdisktest"
+# ext4rwtest(PN-2A0981B7 항목5, QU-1E7DFB8C 답변(A), 2026-09-29) 추가 -
+# 위 테스트들과 동일한 이유로 kmain.cpp의 TEMP 스폰 경로로 부팅 시
+# 자동 실행된다(main.cpp 상단 주석 참고).
+cp "${BUILD_USERLAND_DIR}/minicore-ext4rwtest/ext4rwtest" "${STAGE_DIR}/ext4rwtest"
 
 mkdir -p "$(dirname "${OUT_PATH}")"
 (
     cd "${STAGE_DIR}"
-    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\nsetuidtest\nsudotest\nvfsmetatest\ncreateusertest\nlrutest\nexittest\nexitwaiter\ntimerfdtest\ngranttest\ndiskmetatest\nfatdisktest\nsetuidspawntest\nexfatdisktest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
+    printf 'init\npubreg\nauthmgr\ndbgtarget\nproctest\ndbgdriver\nsocktest\nsockclient\nsockinherit\nsockinheritchild\nepolltest\nauthtest\nsetuidtest\nsudotest\nvfsmetatest\ncreateusertest\nlrutest\nexittest\nexitwaiter\ntimerfdtest\ngranttest\ndiskmetatest\nfatdisktest\nsetuidspawntest\nexfatdisktest\nntfsdisktest\next4rwtest\n' | cpio -o -H newc --quiet > "${OUT_PATH}"
 )
 
-echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest+setuidtest+sudotest+vfsmetatest+createusertest+lrutest+exittest+exitwaiter+timerfdtest+granttest+diskmetatest+fatdisktest+setuidspawntest+exfatdisktest)"
+echo "initrd 생성 완료: ${OUT_PATH} ($(stat -c%s "${OUT_PATH}" 2>/dev/null || stat -f%z "${OUT_PATH}") bytes, init+pubreg+authmgr+dbgtarget+proctest+dbgdriver+socktest+sockclient+sockinherit+sockinheritchild+epolltest+authtest+setuidtest+sudotest+vfsmetatest+createusertest+lrutest+exittest+exitwaiter+timerfdtest+granttest+diskmetatest+fatdisktest+setuidspawntest+exfatdisktest+ntfsdisktest+ext4rwtest)"

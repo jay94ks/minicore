@@ -405,6 +405,7 @@ void kSpawnInitProcess() {
     kernel::Logger::info("minicore: init process spawned, entry=%llx", gInitImage.entryPoint());
 }
 
+
 // 부팅 매니페스트(SP-EAB162FC §2.2, PN-D3C05C0B) - devmgr/fs/net/tty
 // 중 initrd에 실제로 존재하는 것만 ProcessRole::KernelService로
 // 스폰한다. "init"과 달리 하나라도 없다고 부팅을 막지 않는다(로그만
@@ -688,6 +689,13 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     if (kCmdlineHasFlag(bootInfo.cmdline, "--disable-x2apic")) {
         kernel::Lapic::setX2ApicDisabled(true);
         kernel::Logger::info("minicore: --disable-x2apic requested, x2APIC will be forced off");
+    }
+    // [신규, 2026-09-29, QU-1E7DFB8C 답변(A), SP-7CC5693A §6 보강] 기본은
+    // 항상 readOnly 자동 마운트 - 이 플래그가 있을 때만 fs 서비스가
+    // 감지한 ext4/FAT32/FAT16을 실제로 쓰기 가능하게 마운트한다.
+    if (kCmdlineHasFlag(bootInfo.cmdline, "--rw-mount")) {
+        kernel::kSetWritableAutoMountRequested(true);
+        kernel::Logger::info("minicore: --rw-mount requested, auto-detected ext4/FAT32/FAT16 will mount writable");
     }
 
     kLogMemoryMap(memmap, memmapEntries);

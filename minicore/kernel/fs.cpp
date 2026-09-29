@@ -140,6 +140,13 @@ vfat::Fat16Driver gFat16Driver;
 fs::SwapfsBackend gSwapBackend;
 bool gHasSwapBackend = false;
 
+// [신규, 2026-09-29, QU-1E7DFB8C 답변(A)] kmain.cpp가 부팅 cmdline의
+// "--rw-mount" 플래그를 보고 kSetWritableAutoMountRequested()로 채운다 -
+// kTryAutoMountBlockDevice()가 ext4/FAT32/FAT16에 넘기는 readOnly 인자를
+// 이 값의 반대로 정한다. 기본값(플래그 없음)은 기존과 동일하게 항상
+// readOnly=true.
+bool gWritableAutoMountRequested = false;
+
 // devmgr에서 하던 EnumerateDevices->매칭->RequestIoPermission->HBA
 // 초기화까지 그대로 이 KernelThread 안에서 직접 호출로 수행한다 -
 // 별도 프로세스/Channel 핸드오프가 필요 없다(devmgr 파일럿과 동일한
@@ -220,21 +227,30 @@ void kTryAutoMountBlockDevice() {
     if (!gHasAhciBlockDevice) {
         return;
     }
-    if (gExt4Driver.mount(&gAhciBlockDevice, /*readOnly=*/true)) {
+    // [갱신, 2026-09-29, QU-1E7DFB8C 답변(A)] gWritableAutoMountRequested가
+    // 서 있으면(부팅 cmdline "--rw-mount") readOnly=false로 마운트한다 -
+    // ext4/FAT32는 이미 Chmod 등 실제 쓰기 경로를 구현해 뒀으므로 이
+    // 플래그 하나로 그 경로가 실제 디스크에 반영되는지 처음으로 검증할
+    // 수 있다.
+    const bool readOnly = !gWritableAutoMountRequested;
+    if (gExt4Driver.mount(&gAhciBlockDevice, readOnly)) {
         MountTable::unmount(kMountMnt, sizeof(kMountMnt) - 1);
         MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gExt4Driver);
         return;
     }
-    if (gFat32Driver.mount(&gAhciBlockDevice, /*readOnly=*/true)) {
+    if (gFat32Driver.mount(&gAhciBlockDevice, readOnly)) {
         MountTable::unmount(kMountMnt, sizeof(kMountMnt) - 1);
         MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gFat32Driver);
         return;
     }
     // [구현, 2026-09-26, PN-5481287C] FAT12/16 - Fat32Volume이 §3.2
-    // clusterCount 기준으로 거부한 볼륨을 여기서 잡는다. v1은 읽기
-    // 전용(Open/Close/Read/Stat/Readdir)만 지원 - Write/Mkdir/Rmdir/
-    // Unlink는 항상 PermissionDenied(vfat_driver.h 문서 주석 참고).
-    if (gFat16Driver.mount(&gAhciBlockDevice, /*readOnly=*/true)) {
+    // clusterCount 기준으로 거부한 볼륨을 여기서 잡는다.
+    // [정정, 2026-09-29] 이 자리의 옛 주석("v1은 읽기 전용만 지원")은
+    // PN-5481287C 시점 기준이었다 - 그 뒤 PN-9D6FE4B6/PN-3D39A53C/
+    // PN-740005DF/PN-C03ED4BC가 Fat16Driver에도 Fat32Driver와 동일한
+    // 실제 쓰기 경로(Mkdir/Chmod 등, readOnly_ 게이트 포함)를 갖춰 놔
+    // 여기서도 readOnly를 그대로 전달한다 - 낡은 채 남아 있던 자리.
+    if (gFat16Driver.mount(&gAhciBlockDevice, readOnly)) {
         MountTable::unmount(kMountMnt, sizeof(kMountMnt) - 1);
         MountTable::mountKernel(kMountMnt, sizeof(kMountMnt) - 1, &gFat16Driver);
         return;
@@ -317,6 +333,13 @@ void kAcceptFromChannelDirect(const SharedPtr<Task>& self, AcceptFromChannelArgs
 // (부팅 극초반) 감지된 블록 장치가 스왑 포맷이 아니면 nullptr.
 fs::SwapBackend* kActiveSwapBackend() {
     return gHasSwapBackend ? &gSwapBackend : nullptr;
+}
+
+// [신규, 2026-09-29, QU-1E7DFB8C 답변(A)] kmain.cpp가 부팅 극초반(스케줄러
+// 시작 전, fs KernelThread가 아직 kTryAutoMountBlockDevice()를 부르기
+// 전)에 호출한다 - Lapic::setX2ApicDisabled와 동일한 관례.
+void kSetWritableAutoMountRequested(bool requested) {
+    gWritableAutoMountRequested = requested;
 }
 
 // [교체, 2026-09-20, SP-43331889 §7] `kSpawnKernelThread()`가 새

@@ -15,9 +15,14 @@
 // 를 직접 박아 넣는 평탄화(flatten) 버전으로 구현한다(코루틴 합성
 // 불가 제약, ext4_driver.cpp 상단 문서 주석과 동일한 이유).
 //
-// `libntfs` 1차 증분이 읽기 전용이라 이 드라이버도 읽기 전용 -
-// `remount(true)`(writable 전환 요청)와 Write/Mkdir/Rmdir/Unlink는
-// 전부 명시적으로 거부한다(SP-AA6DF406 §4 스케치 그대로).
+// `libntfs` 1차 증분은 기본적으로 읽기 전용 - Write/Mkdir/Rmdir/Unlink는
+// `readOnly_`와 무관하게 항상 거부한다(SP-AA6DF406 §1이 든 위험 - MFT
+// 비트맵 할당/속성 상주-비상주 확장/B+ 트리 재조정은 여전히 범위 밖).
+// **[예외, 2026-09-29, QU-9F8AD7A8 답변(A)]** Chmod만은 그 위험 중
+// 어디에도 해당하지 않는 "이미 존재하는 상주 속성($STANDARD_INFORMATION,
+// 크기 불변)의 제자리 갱신"이라 `readOnly_` 게이트를 통과하면 실제로
+// 디스크에 쓴다(exFAT의 Chmod와 대칭, PN-2A0981B7 항목2) - `mount()`가
+// 이제 `readOnly` 인자를 실제로 반영하고 `remount()`도 전환을 허용한다.
 //
 // FileHandle 인코딩: NTFS는 MFT 레코드 번호 자체가 재조회 가능한
 // 단일 정수 식별자다(ext4의 inode 번호와 동일한 성격 - 파일 크기는
@@ -44,6 +49,7 @@ public:
 private:
     NtfsVolume volume_;
     bool mounted_ = false;
+    bool readOnly_ = true;
 };
 
 }  // namespace ntfs

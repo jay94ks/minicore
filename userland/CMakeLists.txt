@@ -217,3 +217,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/setuidspawntest ${CMAKE
 # ("exfatdisktest")이 매치돼 부팅 시 자동 실행된다(minicore/
 # exfatdisktest/main.cpp 상단 주석 참고).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/exfatdisktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-exfatdisktest)
+
+# ntfsdisktest(PN-2A0981B7 항목2, QU-9F8AD7A8 답변(A) - NTFS 실제
+# Chmod 쓰기 경로 E2E 검증) - exfatdisktest와 동일한 이유의 out-of-tree
+# add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ntfsdisktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-ntfsdisktest)
+
+# ext4rwtest(PN-2A0981B7 항목5, QU-1E7DFB8C 답변(A) - ext4 실제 쓰기
+# 가능 마운트 E2E 검증) - 위 테스트들과 동일한 이유의 out-of-tree
+# add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ext4rwtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-ext4rwtest)

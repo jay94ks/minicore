@@ -58,6 +58,21 @@ kernel::AsyncTask* kSubmitReadSectors(fs::BlockDevice* device, uint32_t sectorSi
                                      outResult);
 }
 
+// [신규, 2026-09-29, QU-9F8AD7A8 답변(A), PN-2A0981B7 항목2]
+// kSubmitReadSectors와 동일한 LBA 변환의 쓰기 짝 - exfat_driver.cpp의
+// kSubmitWriteSectors와 동일한 패턴. 이 드라이버 최초의 실제 온디스크
+// 쓰기(Chmod의 $STANDARD_INFORMATION.fileAttributes 갱신)에 쓰인다.
+kernel::AsyncTask* kSubmitWriteSectors(fs::BlockDevice* device, uint32_t sectorSize, uint64_t sectorStart,
+                                        uint32_t sectorCount, const void* buf, fs::BlockIoResult* outResult) {
+    const kernel::uint32_t devBlockSize = device->blockSize();
+    if (devBlockSize == 0 || sectorSize % devBlockSize != 0) {
+        return nullptr;
+    }
+    const kernel::uint32_t devBlocksPerSector = sectorSize / devBlockSize;
+    return device->submitWriteBlocks(sectorStart * devBlocksPerSector, buf, sectorCount * devBlocksPerSector,
+                                      outResult);
+}
+
 uint16_t kWidenAscii(char c) { return static_cast<uint16_t>(static_cast<uint8_t>(c)); }
 
 uint64_t kReadUnsignedLe(const uint8_t* bytes, uint32_t size) {
@@ -148,6 +163,32 @@ bool kApplyFixup(uint8_t* buf, uint32_t mftRecordSize, uint32_t bytesPerSector) 
         memcpy(buf + sectorEndOffset, usa + (i + 1) * 2, sizeof(uint16_t));
     }
     return true;
+}
+
+// [신규, 2026-09-29, QU-9F8AD7A8 답변(A)] kApplyFixup의 역방향 - 이미
+// fixup이 풀려(진짜 데이터가 그대로 있는) buf를 디스크에 다시 쓰기 전에
+// fixup을 다시 씌운다. USN을 1 증가시켜(0은 피함 - 일부 문헌이 예약값으로
+// 다루는 관례를 그대로 따름) USA[0]에 쓰고, 각 섹터의 현재(=진짜) 꼬리
+// 2바이트를 USA[i+1]에 보존한 뒤 그 꼬리를 새 USN으로 덮어쓴다 -
+// kApplyFixup과 정확히 반대 방향의 같은 루프.
+void kInstallFixup(uint8_t* buf, uint32_t mftRecordSize, uint32_t bytesPerSector) {
+    (void)mftRecordSize;  // kApplyFixup과 시그니처를 맞춰 둠(대칭) - 이미 검증된 buf라 경계 재검사는 불필요
+    NtfsFileRecordHeader header;
+    memcpy(&header, buf, sizeof(header));
+    uint8_t* usa = buf + header.updateSequenceOffset;
+    uint16_t oldUsn = 0;
+    memcpy(&oldUsn, usa, sizeof(oldUsn));
+    uint16_t newUsn = static_cast<uint16_t>(oldUsn + 1);
+    if (newUsn == 0) {
+        newUsn = 1;
+    }
+    memcpy(usa, &newUsn, sizeof(newUsn));
+    const uint32_t sectorsInRecord = header.updateSequenceSize - 1;
+    for (uint32_t i = 0; i < sectorsInRecord; ++i) {
+        const uint32_t sectorEndOffset = (i + 1) * bytesPerSector - 2;
+        memcpy(usa + (i + 1) * 2, buf + sectorEndOffset, sizeof(uint16_t));
+        memcpy(buf + sectorEndOffset, &newUsn, sizeof(newUsn));
+    }
 }
 
 // recordBuf(fixup 적용됨) 안에서 attrType과 일치하는 첫 속성을
@@ -278,20 +319,25 @@ bool kScanIndexRootBuf(const uint8_t* recordBuf, uint32_t mftRecordSize, const u
 }  // namespace
 
 bool NtfsDriver::mount(fs::BlockDevice* device, bool readOnly) {
-    (void)readOnly;  // libntfs 1차 증분은 항상 읽기 전용(§4) - 인자는 인터페이스 일관성을 위해서만 받음
     if (!volume_.mount(device)) {
         return false;
     }
     mounted_ = true;
+    // [갱신, 2026-09-29, QU-9F8AD7A8 답변(A)] Chmod만 readOnly_ 게이트
+    // 뒤에서 실제로 쓴다(Ext4Driver/ExfatDriver와 동일한 관례) - Write/
+    // Mkdir/Rmdir/Unlink는 이 값과 무관하게 여전히 항상 거부(아래 각
+    // case 참고).
+    readOnly_ = readOnly;
     return true;
 }
 
 bool NtfsDriver::remount(bool writable) {
-    // libntfs 1차 증분은 읽기 전용 - writable 전환 요청은 명시적으로
-    // 거부한다(계획 본문 - Ext4Driver/Fat32Driver/ExfatDriver와 달리
-    // "이미 읽기전용이라 전환 자체가 의미 없음"이 아니라 "쓰기 자체가
-    // 위험해 의도적으로 금지"라는 점이 다름).
-    return !writable;
+    // [갱신, 2026-09-29, QU-9F8AD7A8 답변(A)] Ext4Driver/ExfatDriver와
+    // 동일한 관례로 전환 자체는 항상 허용한다 - Chmod만 이 플래그를
+    // 소비하고, 그 외 쓰기 연산은 여전히 무조건 거부라 writable=true여도
+    // 실질적 위험이 늘지 않는다.
+    readOnly_ = !writable;
+    return true;
 }
 
 kernel::AsyncExecCoro NtfsDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
@@ -588,18 +634,61 @@ kernel::AsyncExecCoro NtfsDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
                 args->type = currentIsDir ? kernel::FileType::Directory : kernel::FileType::Regular;
                 // [신규, 2026-09-28, SP-9039F955 §3.2] NTFS는 ACL 파싱이
                 // 전혀 없다(§1) - FAT류와 동일하게 마운트한 유저 소유로
-                // 취급하되, FAT의 kAttrReadOnly 같은 근거조차 파싱해
-                // 두지 않아(§3.2, NTFS 실제 ACL 파싱은 범위 밖) 읽기
-                // 전용 여부를 구분할 방법이 없다 - 고정값(파일 0644,
-                // 디렉터리 0755)만 노출한다.
+                // 취급한다.
                 args->uid = args->mountUid;
                 args->gid = args->mountGid;
+
+                // [신규, 2026-09-29, QU-9F8AD7A8 답변(A), PN-2A0981B7 항목2]
+                // Chmod와 대칭 - 타깃 자신의 MFT 레코드를 열어
+                // $STANDARD_INFORMATION.fileAttributes의 READONLY 비트를
+                // 읽어 owner-write 여부에 반영한다(FAT의 kAttrReadOnly와
+                // 동일한 취급). 이 재조회가 실패해도(포맷 이상 등) Stat
+                // 자체를 실패시키지 않고 "쓰기 가능"으로 안전하게 폴백한다 -
+                // 어차피 §1대로 Write류는 항상 거부되므로 잘못된 폴백이
+                // 실제 쓰기로 이어지지 않는다.
+                bool readOnlyFlag = false;
+                {
+                    SlabBuf targetBuf(mftRecordSize);
+                    bool targetIoFailed = !targetBuf;
+                    if (!targetIoFailed) {
+                        const uint64_t recordByteOffset =
+                            mftStartLcn * clusterSize + currentRecord * static_cast<uint64_t>(mftRecordSize);
+                        const uint64_t sector = recordByteOffset / bytesPerSector;
+                        const uint32_t sectorCount = mftRecordSize / bytesPerSector;
+                        fs::BlockIoResult ioResult;
+                        kernel::AsyncTask* ioTask =
+                            kSubmitReadSectors(device, bytesPerSector, sector, sectorCount, targetBuf.get(), &ioResult);
+                        if (!ioTask) {
+                            targetIoFailed = true;
+                        } else {
+                            co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                            if (!ioResult.ok) {
+                                targetIoFailed = true;
+                            }
+                        }
+                    }
+                    if (!targetIoFailed && kApplyFixup(targetBuf.get(), mftRecordSize, bytesPerSector)) {
+                        const uint8_t* attr = nullptr;
+                        uint32_t attrLen = 0;
+                        if (kFindAttribute(targetBuf.get(), mftRecordSize, kNtfsAttrTypeStandardInformation,
+                                            /*matchUnnamedOnly=*/true, &attr, &attrLen)) {
+                            NtfsResidentAttrTail tail;
+                            memcpy(&tail, attr + sizeof(NtfsAttributeHeader), sizeof(tail));
+                            uint32_t fileAttributes = 0;
+                            memcpy(&fileAttributes, attr + tail.contentOffset + offsetof(NtfsStandardInfoContent, fileAttributes),
+                                   sizeof(fileAttributes));
+                            readOnlyFlag = (fileAttributes & kFileAttrReadOnly) != 0;
+                        }
+                    }
+                }
+
+                const uint16_t ownerWriteBit = readOnlyFlag ? 0 : kernel::kPermOwnerWrite;
                 args->mode = currentIsDir
-                                 ? (kernel::kPermOwnerRead | kernel::kPermOwnerWrite | kernel::kPermOwnerExec |
+                                 ? (kernel::kPermOwnerRead | ownerWriteBit | kernel::kPermOwnerExec |
                                     kernel::kPermGroupRead | kernel::kPermGroupExec | kernel::kPermOtherRead |
-                                    kernel::kPermOtherExec)   // 0755
-                                 : (kernel::kPermOwnerRead | kernel::kPermOwnerWrite | kernel::kPermGroupRead |
-                                    kernel::kPermOtherRead);  // 0644
+                                    kernel::kPermOtherExec)   // 0755/0555
+                                 : (kernel::kPermOwnerRead | ownerWriteBit | kernel::kPermGroupRead |
+                                    kernel::kPermOtherRead);  // 0644/0444
                 args->error = kernel::VfsError::None;
             }
             break;
@@ -617,17 +706,178 @@ kernel::AsyncExecCoro NtfsDriver::onExec(kernel::AsyncTask*, void* argsRaw) {
             static_cast<kernel::KernelFsUnlinkArgs*>(argsRaw)->error = kernel::VfsError::PermissionDenied;
             break;
         }
-        // [신규, 2026-09-28, SP-9039F955 §3.2/§4] Chmod/Chown -
-        // libntfs는 Write/Mkdir/Rmdir/Unlink 전부가 이미 무조건
-        // PermissionDenied인, 애초부터 설계상 읽기 전용인 드라이버다
-        // (`readOnly_` 조건부가 아니라 매 op가 그냥 거부). 이 SP의
-        // §4가 NTFS도 FAT류처럼 Chmod 근사를 제안했지만, 그러려면
-        // 이 드라이버 역사상 첫 온디스크 쓰기(MFT 레코드의
-        // $STANDARD_INFORMATION 갱신 + fixup 재적용)를 새로 만들어야
-        // 해 이번 증분 범위를 넘는다 - NotSupported로 정직하게
-        // 남겨 두고 별도 계획으로 등록한다(CLAUDE.md 규칙7).
+        // [구현, 2026-09-29, QU-9F8AD7A8 답변(A), PN-2A0981B7 항목2]
+        // Chmod - exFAT의 Chmod와 정확히 같은 성격("이미 존재하는 상주
+        // 속성의 제자리 갱신")이라 SP-AA6DF406 §1의 읽기전용 경계에서
+        // 예외로 인정됐다(§1이 우려한 MFT 비트맵 할당/속성 상주->비상주
+        // 확장/B+ 트리 재조정 중 어디에도 해당하지 않음). 타깃 자신의
+        // MFT 레코드를 열어 $STANDARD_INFORMATION.fileAttributes의
+        // READONLY 비트만 고쳐 쓰고 fixup을 재계산해 같은 레코드 크기로
+        // 그대로 다시 쓴다 - 이 드라이버 역사상 첫 온디스크 쓰기.
         case kernel::KernelFsOpCode::Chmod: {
-            static_cast<kernel::KernelFsChmodArgs*>(argsRaw)->error = kernel::VfsError::NotSupported;
+            auto* args = static_cast<kernel::KernelFsChmodArgs*>(argsRaw);
+            if (readOnly_) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
+            if (args->mode & kernel::kPermSpecialS) {
+                args->error = kernel::VfsError::NotSupported;
+                break;
+            }
+            if (args->callerUid != kernel::kRootUid && args->callerUid != args->mountUid) {
+                args->error = kernel::VfsError::PermissionDenied;
+                break;
+            }
+
+            // 경로를 걸어 타깃 자신의 MFT 레코드 번호를 찾는다(Open/Stat과
+            // 동일한 순회 - 코루틴 합성 불가 제약으로 다시 반복).
+            uint64_t currentRecord = kNtfsRootDirectoryRecord;
+            bool currentIsDir = true;
+            bool failed = false;
+            bool haveTarget = false;
+            uint32_t pos = 0;
+            while (pos < args->relPathLen && !failed) {
+                while (pos < args->relPathLen && args->relPath[pos] == '/') {
+                    ++pos;
+                }
+                if (pos >= args->relPathLen) {
+                    break;
+                }
+                const uint32_t segStart = pos;
+                while (pos < args->relPathLen && args->relPath[pos] != '/') {
+                    ++pos;
+                }
+                const uint32_t segLen = pos - segStart;
+                if (!currentIsDir || segLen > kMaxNameUtf16) {
+                    failed = true;
+                    break;
+                }
+                uint16_t query[kMaxNameUtf16];
+                for (uint32_t i = 0; i < segLen; ++i) {
+                    query[i] = kWidenAscii(args->relPath[segStart + i]);
+                }
+
+                SlabBuf recordBuf(mftRecordSize);
+                if (!recordBuf) {
+                    failed = true;
+                    break;
+                }
+                bool ioFailed = false;
+                {
+                    const uint64_t recordByteOffset =
+                        mftStartLcn * clusterSize + currentRecord * static_cast<uint64_t>(mftRecordSize);
+                    const uint64_t sector = recordByteOffset / bytesPerSector;
+                    const uint32_t sectorCount = mftRecordSize / bytesPerSector;
+                    fs::BlockIoResult ioResult;
+                    kernel::AsyncTask* ioTask =
+                        kSubmitReadSectors(device, bytesPerSector, sector, sectorCount, recordBuf.get(), &ioResult);
+                    if (!ioTask) {
+                        ioFailed = true;
+                    } else {
+                        co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                        if (!ioResult.ok) {
+                            ioFailed = true;
+                        }
+                    }
+                }
+                if (ioFailed || !kApplyFixup(recordBuf.get(), mftRecordSize, bytesPerSector)) {
+                    failed = true;
+                    break;
+                }
+
+                NtfsParsedEntry matched;
+                if (!kScanIndexRootBuf(recordBuf.get(), mftRecordSize, query, segLen, 0, &matched, nullptr, 0,
+                                        nullptr)) {
+                    failed = true;
+                    break;
+                }
+                currentRecord = matched.mftRecordNumber;
+                currentIsDir = matched.isDir;
+                haveTarget = true;
+            }
+
+            if (failed || !haveTarget) {
+                // haveTarget==false - 빈 경로(루트 자신)는 exFAT과 동일하게
+                // 대상 없음으로 취급(1차 증분은 루트 자체의 Chmod를 다루지
+                // 않음).
+                args->error = kernel::VfsError::NotFound;
+                break;
+            }
+
+            SlabBuf targetBuf(mftRecordSize);
+            if (!targetBuf) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            bool ioFailed = false;
+            {
+                const uint64_t recordByteOffset =
+                    mftStartLcn * clusterSize + currentRecord * static_cast<uint64_t>(mftRecordSize);
+                const uint64_t sector = recordByteOffset / bytesPerSector;
+                const uint32_t sectorCount = mftRecordSize / bytesPerSector;
+                fs::BlockIoResult ioResult;
+                kernel::AsyncTask* ioTask =
+                    kSubmitReadSectors(device, bytesPerSector, sector, sectorCount, targetBuf.get(), &ioResult);
+                if (!ioTask) {
+                    ioFailed = true;
+                } else {
+                    co_await kernel::AsyncTaskCoroAwaiter(ioTask);
+                    if (!ioResult.ok) {
+                        ioFailed = true;
+                    }
+                }
+            }
+            if (ioFailed || !kApplyFixup(targetBuf.get(), mftRecordSize, bytesPerSector)) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+
+            const uint8_t* attr = nullptr;
+            uint32_t attrLen = 0;
+            if (!kFindAttribute(targetBuf.get(), mftRecordSize, kNtfsAttrTypeStandardInformation,
+                                 /*matchUnnamedOnly=*/true, &attr, &attrLen)) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            const uint32_t attrOffset = static_cast<uint32_t>(attr - targetBuf.get());
+            NtfsResidentAttrTail tail;
+            memcpy(&tail, targetBuf.get() + attrOffset + sizeof(NtfsAttributeHeader), sizeof(tail));
+            const uint32_t fileAttributesOffset =
+                attrOffset + tail.contentOffset + static_cast<uint32_t>(offsetof(NtfsStandardInfoContent, fileAttributes));
+            if (fileAttributesOffset + sizeof(uint32_t) > mftRecordSize) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+
+            uint32_t fileAttributes = 0;
+            memcpy(&fileAttributes, targetBuf.get() + fileAttributesOffset, sizeof(fileAttributes));
+            if (args->mode & kernel::kPermOwnerWrite) {
+                fileAttributes &= ~kFileAttrReadOnly;
+            } else {
+                fileAttributes |= kFileAttrReadOnly;
+            }
+            memcpy(targetBuf.get() + fileAttributesOffset, &fileAttributes, sizeof(fileAttributes));
+
+            kInstallFixup(targetBuf.get(), mftRecordSize, bytesPerSector);
+
+            const uint64_t recordByteOffset =
+                mftStartLcn * clusterSize + currentRecord * static_cast<uint64_t>(mftRecordSize);
+            const uint64_t sector = recordByteOffset / bytesPerSector;
+            const uint32_t sectorCount = mftRecordSize / bytesPerSector;
+            fs::BlockIoResult writeIo;
+            kernel::AsyncTask* writeTask =
+                kSubmitWriteSectors(device, bytesPerSector, sector, sectorCount, targetBuf.get(), &writeIo);
+            if (!writeTask) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+            co_await kernel::AsyncTaskCoroAwaiter(writeTask);
+            if (!writeIo.ok) {
+                args->error = kernel::VfsError::InvalidHandle;
+                break;
+            }
+
+            args->error = kernel::VfsError::None;
             break;
         }
         case kernel::KernelFsOpCode::Chown: {

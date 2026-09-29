@@ -216,6 +216,16 @@ constexpr uint8_t kNtfsNamespaceWin32AndDos = 3;
 // 파일로 오판해 그 안으로 못 들어감) - 실측 바이트로 확인 후 정정.
 constexpr uint32_t kFileAttrDirectory = 0x10000000;
 
+// [신규, 2026-09-29, QU-9F8AD7A8 답변(A), PN-2A0981B7] Win32
+// FILE_ATTRIBUTE_READONLY - 위 kFileAttrDirectory와 달리 이 비트는
+// $STANDARD_INFORMATION.fileAttributes/$FILE_NAME.fileAttributes 양쪽
+// 다 실제 Win32 정의 그대로다(실측 mkfs.ntfs 이미지에서도 hello.txt=
+// 0x20 ARCHIVE만 서 있어 0x1 READONLY와 값이 겹치지 않음을 확인) -
+// FAT류의 kAttrReadOnly(0x01)와 같은 값/같은 의미. NtfsDriver::Chmod가
+// $STANDARD_INFORMATION의 이 비트를 갱신하고, Stat이 그 값을 읽어
+// owner-write 여부에 반영한다(exFAT의 kFileAttrReadOnly 대칭 패턴).
+constexpr uint32_t kFileAttrReadOnly = 0x1;
+
 inline uint64_t kNtfsMftReferenceRecordNumber(uint64_t ref) { return ref & 0xFFFFFFFFFFFFull; }
 
 // ---------------------------------------------------------------------
