@@ -79,7 +79,7 @@
 | [SP-1DB13F61](./SP-1DB13F61.md) | 가상 함수(vtable) 타입의 슬랩 할당 초기화 관례 - placement new 예외 설계 제안 | approved | 2026-09-16T16:48:17.214Z |
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-21T20:00:11.552Z |
 | [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
-| [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-28T13:41:54.366Z |
+| [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-29T04:59:31.186Z |
 | [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | approved | 2026-09-22T02:14:20.261Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-22T01:15:53.326Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-17T08:01:20.217Z |
