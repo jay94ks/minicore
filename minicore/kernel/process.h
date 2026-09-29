@@ -24,6 +24,7 @@ struct BridgePipe;  // 포인터로만 참조(Process::openBridges) - 전체 정
 struct UnixSocket;  // 포인터로만 참조(FileDescriptor::socket) - 전체 정의는 socket.h(PN-CC0F4EAC)
 class EpollInstance;  // 포인터로만 참조(FileDescriptor::epollInstance) - 전체 정의는 epoll.h(PN-7562DA62)
 struct TimerfdState;  // 포인터로만 참조(FileDescriptor::timerfd) - 전체 정의는 timerfd.h(PN-96265AE4/PN-0F56DE4B)
+struct SignalfdState;  // 포인터로만 참조(FileDescriptor::signalfd) - 전체 정의는 signalfd.h(PN-A1A0B595)
 
 // 프로세스 신원 - 이 프로세스가 신뢰할 수 있는 커널 서비스인지를
 // syscall 레벨에서 판정하는 불변 속성(SP-EAB162FC §2.1). 생성
@@ -294,6 +295,9 @@ public:
         // SharedPtr 관례(`kMakeShared` 소유, `fileDescriptors.erase()`가
         // 슬롯을 지우는 순간 참조 카운트가 자연히 줄어듦).
         SharedPtr<TimerfdState> timerfd;
+        // [신규, 2026-09-29, PN-A1A0B595, SP-A7479F83 §2] kind==Signalfd일
+        // 때만 유효 - timerfd와 동일한 SharedPtr 관례.
+        SharedPtr<SignalfdState> signalfd;
         FileHandle fsHandle;
         uint64_t offset = 0;
         bool isDirectory = false;

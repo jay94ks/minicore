@@ -1,5 +1,6 @@
 #include "process.h"
 
+#include "async_task.h"  // [신규, 2026-09-29, PN-A1A0B595] AsyncReactor::submitCompletion - raiseSignal()의 signalfd 관찰자 깨우기용
 #include "debug_session.h"
 #include "gdt.h"
 #include "libelf/elf.h"
@@ -11,6 +12,7 @@
 #include "paging.h"
 #include "resource_group.h"
 #include "scheduler.h"
+#include "signalfd.h"  // [신규, 2026-09-29, PN-A1A0B595] SignalfdState - raiseSignal()이 관심 signalfd에 펜딩 비트를 세우기 위함
 #include "syscall.h"
 #include "user_record.h"
 #include "waitable.h"
@@ -925,6 +927,41 @@ bool Process::raiseSignal(SignalNumber number) {
     if (!pendingSignals.insert(sig)) {
         return false;  // 자원 고갈 - 다른 ChunkedList 소비자와 동일한 정책
     }
+    // [신규, 2026-09-29, PN-A1A0B595, SP-A7479F83 §4] 이 신호를 관심
+    // 신호로 등록해 둔 signalfd가 있으면 그 fd의 펜딩 비트도 함께
+    // 세우고 블로킹 중인 Read/epoll 관찰자를 깨운다 - SignalfdCreate/
+    // SignalfdSetMask가 동시에 Process::signalMask도 블록해 두므로
+    // (signalfd.cpp kSyncProcessSignalMask), 이 신호는 체크포인트의
+    // 일반 종료 경로로는 새지 않고 이 fd로만 관찰된다.
+    {
+        const uint32_t signalBit = 1u << static_cast<uint32_t>(number);
+        fileDescriptors.forEach([signalBit](FileDescriptor& fd, auto*) {
+            if (fd.kind != MountKind::Signalfd || !fd.signalfd) {
+                return;
+            }
+            SignalfdState* state = fd.signalfd.get();
+            AsyncTask* wake = nullptr;
+            EpollObserverQueue wakeEpollObservers;
+            {
+                SpinlockGuard guard(state->lock);
+                if ((state->watchedSignalMask & signalBit) == 0) {
+                    return;  // 이 fd의 관심 밖
+                }
+                state->pendingMask |= signalBit;
+                wake = state->pendingReaders.popFront();
+                for (EpollObserverNode* n = state->epollReadObservers.popFront(); n;
+                     n = state->epollReadObservers.popFront()) {
+                    wakeEpollObservers.pushBack(n);
+                }
+            }
+            if (wake) {
+                AsyncReactor::submitCompletion(wake, /*preemptive=*/true);
+            }
+            for (EpollObserverNode* n = wakeEpollObservers.popFront(); n; n = wakeEpollObservers.popFront()) {
+                AsyncReactor::submitCompletion(n->task, /*preemptive=*/true);
+            }
+        });
+    }
     // §9.5 - 대기 중이면 그 자리에서 즉시 강제로 깨운다. cancel()의
     // 반환값(성공/실패)은 여기서 참고하지 않는다 - 실패는 "이미
     // 정상적으로 깨어난 뒤"라는 뜻이라 어차피 체크포인트 쪽에서 이
@@ -967,7 +1004,18 @@ bool Process::raiseSignal(SignalNumber number) {
         // (설계자 답변 "얘들을 실패시키면 되잖아", QU-8E137FFD) - 대상이
         // 실제로 파킹돼 있지 않으면(pendingSyscalls가 비어있거나 전부
         // 이미 끝남) 이 호출은 그냥 아무 일도 안 하는 것과 같다.
-        if (number == SignalNumber::Kill || number == SignalNumber::Terminate) {
+        // [수정, 2026-09-29, PN-A1A0B595, SP-0666DB3C §4.6] Terminate가
+        // 이제 마스킹될 수 있어(Kill은 여전히 마스킹 불가) - 마스크된
+        // Terminate까지 무조건 pendingSyscalls를 강제 취소하면
+        // signalfd로 그 신호를 "읽으려고" 블로킹 중이던 Read 자신이
+        // Cancelled로 끊겨 버려(정확히 signalfdtest 실측에서 발견한
+        // 회귀 - exitCode=3), 마스킹+signalfd의 의미 자체가 무너진다.
+        // Kill은 그대로 무조건, Terminate는 마스크 안 걸렸을 때만(원래
+        // PN-B5C2845A 동작 그대로 - signalMask가 없던 시절엔 이 조건이
+        // 항상 참이었으므로 관찰 가능한 기존 동작은 안 바뀐다).
+        const bool terminateIsMasked =
+            (signalMask & (1u << static_cast<uint32_t>(SignalNumber::Terminate))) != 0;
+        if (number == SignalNumber::Kill || (number == SignalNumber::Terminate && !terminateIsMasked)) {
             Scheduler::cancelPendingSyscalls(t);
         }
         // [신규, 2026-09-19, PN-0AC554C2 갱신5, QU-60AB17B6 답변]

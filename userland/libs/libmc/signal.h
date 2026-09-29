@@ -82,6 +82,33 @@ struct SignalMaskArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-29, PN-A1A0B595] signalfd.h의
+// kSyscallEndpointSignalfdCreate/kSyscallEndpointSignalfdSetMask
+// (그룹6.call8/9)와 동일한 값 - signalfdtest 최초 소비자.
+constexpr SyscallEndpointId kSyscallEndpointSignalfdCreate = kMakeSyscallEndpointId(6, 8);
+constexpr SyscallEndpointId kSyscallEndpointSignalfdSetMask = kMakeSyscallEndpointId(6, 9);
+
+// kernel::SignalfdCreateArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
+struct SignalfdCreateArgs {
+    uint32_t signalMask = 0;
+    // out
+    ChannelError error = ChannelError::None;
+    int64_t fd = -1;
+};
+
+// kernel::SignalfdSetMaskArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
+struct SignalfdSetMaskArgs {
+    int32_t fd = -1;
+    uint32_t signalMask = 0;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// kernel::SignalfdSiginfo와 바이트 단위로 정확히 같은 필드 순서/타입.
+struct SignalfdSiginfo {
+    uint32_t signo = 0;
+};
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_SIGNAL_H

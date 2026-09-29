@@ -8,6 +8,8 @@
 #include "paging.h"
 #include "process.h"
 #include "resource_group.h"
+#include "signal.h"    // [신규, 2026-09-29, PN-A1A0B595] SignalNumber/kSignalCount/PendingSignal - signalfd Read가 process->pendingSignals를 직접 조회
+#include "signalfd.h"  // [신규, 2026-09-29, PN-A1A0B595] SignalfdState/SignalfdSiginfo
 #include "socket.h"
 #include "task.h"
 #include "timerfd.h"
@@ -549,6 +551,62 @@ public:
                 AsyncTask::yield();
             }
         }
+        if (slot->value.kind == MountKind::Signalfd) {
+            // [신규, 2026-09-29, PN-A1A0B595, SP-A7479F83 §4] signalfd
+            // Read - pendingMask 중 watchedSignalMask에 아직 걸려 있는
+            // 가장 낮은 번호의 신호 하나를 읽고 그 비트를 지운다(POSIX
+            // signalfd - 표준 신호는 여러 번 와도 "펜딩 여부"만 추적하므로
+            // 한 번에 하나씩만 반환, RT신호 큐잉은 PN-FD706AF6 범위).
+            // 이 fd로 읽어 소비한 신호는 process->pendingSignals에서도
+            // 함께 지운다 - POSIX signalfd가 "읽으면 프로세스의 pending
+            // 집합에서도 사라진다"는 것과 동일(안 지우면 이 신호가
+            // Process::signalMask에서 나중에 언마스크될 때 체크포인트가
+            // 뒤늦게 또 처리해 버린다).
+            if (!slot->value.signalfd) {
+                args->bytesRead = 0;
+                args->error = ChannelError::InvalidHandle;
+                co_return;
+            }
+            if (args->len < sizeof(SignalfdSiginfo)) {
+                args->bytesRead = 0;
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+            SharedPtr<SignalfdState> state = slot->value.signalfd;
+            for (;;) {
+                uint32_t firedSignal = 0;
+                {
+                    SpinlockGuard guard(state->lock);
+                    const uint32_t ready = state->pendingMask & state->watchedSignalMask;
+                    if (ready != 0) {
+                        for (uint32_t n = 1; n < kSignalCount; ++n) {
+                            if (ready & (1u << n)) {
+                                firedSignal = n;
+                                break;
+                            }
+                        }
+                        state->pendingMask &= ~(1u << firedSignal);
+                    } else {
+                        state->pendingReaders.pushBack(task);
+                    }
+                }
+                if (firedSignal != 0) {
+                    auto* pendingSlot = process->pendingSignals.find([firedSignal](const PendingSignal& s) {
+                        return static_cast<uint32_t>(s.number) == firedSignal;
+                    });
+                    if (pendingSlot) {
+                        process->pendingSignals.erase(pendingSlot);
+                    }
+                    SignalfdSiginfo info;
+                    info.signo = firedSignal;
+                    memcpy(args->buf, &info, sizeof(info));
+                    args->bytesRead = sizeof(SignalfdSiginfo);
+                    args->error = ChannelError::None;
+                    co_return;
+                }
+                AsyncTask::yield();
+            }
+        }
         if (slot->value.kind != MountKind::KernelDriver) {
             args->bytesRead = 0;
             args->error = ChannelError::NotSupported;  // Channel 경로 - PN-EA4EE935 스코프 밖
@@ -612,11 +670,21 @@ public:
         }
         const int32_t fd = args->fd;
         auto* slot = process->fileDescriptors.find([fd](const Process::FileDescriptor& e) { return e.fd == fd; });
-        if (!slot || slot->value.kind != MountKind::Timerfd || !slot->value.timerfd) {
+        if (!slot) {
             return;
         }
-        SpinlockGuard guard(slot->value.timerfd->lock);
-        slot->value.timerfd->pendingReaders.remove(task);
+        if (slot->value.kind == MountKind::Timerfd && slot->value.timerfd) {
+            SpinlockGuard guard(slot->value.timerfd->lock);
+            slot->value.timerfd->pendingReaders.remove(task);
+            return;
+        }
+        // [신규, 2026-09-29, PN-A1A0B595] Timerfd와 동일한 이유 - signalfd
+        // 블로킹 중 취소되면 pendingReaders에 남은 댕글링 포인터를
+        // 제거해야 한다.
+        if (slot->value.kind == MountKind::Signalfd && slot->value.signalfd) {
+            SpinlockGuard guard(slot->value.signalfd->lock);
+            slot->value.signalfd->pendingReaders.remove(task);
+        }
     }
 };
 

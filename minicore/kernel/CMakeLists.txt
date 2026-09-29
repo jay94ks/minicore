@@ -41,6 +41,7 @@ add_library(minicore_kernel OBJECT
     socket.cpp
     epoll.cpp
     timerfd.cpp
+    signalfd.cpp
     process.cpp
     user_record.cpp
     authmgr_client.cpp

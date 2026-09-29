@@ -233,3 +233,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ext4rwtest ${CMAKE_CURR
 # 이유의 out-of-tree add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalmasktarget ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalmasktarget)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalmasktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalmasktest)
+
+# signalfdchild/signalfdtest(PN-A1A0B595, SP-A7479F83 §2/§3/§4 -
+# signalfd E2E 검증) - 위 테스트들과 동일한 이유의 out-of-tree
+# add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalfdchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalfdchild)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalfdtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalfdtest)
