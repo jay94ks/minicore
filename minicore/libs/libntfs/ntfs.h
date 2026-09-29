@@ -243,27 +243,61 @@ struct NtfsIndexRootHeader {  // NtfsResidentAttrTail의 content 시작
 };
 static_assert(sizeof(NtfsIndexRootHeader) == 16, "NtfsIndexRootHeader는 16바이트여야 함");
 
-// NtfsIndexRootHeader 바로 뒤에 옴.
+// NtfsIndexRootHeader 바로 뒤에 옴. $INDEX_ALLOCATION 내부의 각 INDX
+// 레코드(NtfsIndexRecordHeader, 아래) 바로 뒤에도 동일한 포맷으로
+// 다시 나온다 - $INDEX_ROOT/INDX 블록 양쪽에서 엔트리 배열을 찾는
+// "껍질"만 다르고 그 안의 엔트리 순회 로직(ntfs_driver.cpp
+// kScanIndexEntriesForName)은 완전히 공유된다.
 struct NtfsIndexHeader {
     uint32_t entriesOffset;  // 첫 NtfsIndexEntry까지의 오프셋(이 헤더 시작 기준)
     uint32_t usedSize;
     uint32_t totalSize;
-    uint32_t flags;          // 0x00=small 0x01=large(1차 증분 미지원)
+    // [갱신, 2026-09-29, PN-E... $INDEX_ALLOCATION 순회 구현] 0x01(large)
+    // 이 더 이상 "1차 증분 미지원"이 아니다 - $INDEX_ROOT가 이 플래그를
+    // 가지면 ntfs_driver.cpp가 $INDEX_ALLOCATION으로 내려간다.
+    uint32_t flags;          // 0x00=small(엔트리가 이 블록 안에서 완결) 0x01=large($INDEX_ALLOCATION 하위 노드 있음)
 };
 static_assert(sizeof(NtfsIndexHeader) == 16, "NtfsIndexHeader는 16바이트여야 함");
 
 struct NtfsIndexEntry {
-    uint64_t mftReference;   // 이 엔트리가 가리키는 자식의 MFT 참조
+    uint64_t mftReference;   // 이 엔트리가 가리키는 자식의 MFT 참조(하위 노드 전용 센티널 엔트리는 0)
     uint16_t entryLength;
-    uint16_t keyLength;      // 뒤따르는 $FILE_NAME 형식 키의 길이
-    uint16_t flags;          // bit0=하위 노드 있음(1차 증분 미지원) bit1=마지막 엔트리(키 없음)
+    uint16_t keyLength;      // 뒤따르는 $FILE_NAME 형식 키의 길이(센티널이면 0)
+    uint16_t flags;          // bit0=하위 노드 있음(엔트리 끝 8바이트에 자식 VCN) bit1=마지막 엔트리(키 없을 수 있음)
     uint16_t reserved;
+    // flags bit1이 꺼져 있으면 여기부터 keyLength바이트의 $FILE_NAME
+    // 형식 키(NtfsFileNameContent+이름, §3.5)가 온다. flags bit0(하위
+    // 노드 있음)이 세팅됐으면, 키가 있든 없든(센티널이어도) 이 엔트리의
+    // 마지막 8바이트에 자식 INDX 레코드의 VCN(uint64_t, $INDEX_ALLOCATION
+    // 기준)이 온다 - entryLength가 이미 그 8바이트를 포함한 전체 크기.
 };
 static_assert(sizeof(NtfsIndexEntry) == 16, "NtfsIndexEntry는 16바이트여야 함");
 #pragma pack(pop)
 
+// [신규, 2026-09-29, PN-E... $INDEX_ALLOCATION 순회 구현] $INDEX_ALLOCATION
+// 데이터 런이 가리키는 각 INDX 레코드(인덱스 블록)의 헤더 - MFT
+// 레코드 헤더(NtfsFileRecordHeader)와 같은 fixup(Update Sequence
+// Array) 메커니즘을 쓰지만 매직이 "INDX"이고 자기 자신의 VCN을
+// 추가로 담는다(Linux 커널 `struct INDEX_BUFFER`와 1바이트 단위로
+// 대조 완료 - NTFS_RECORD_HEADER(16B) + vcn(8B) = 24바이트, 그 바로
+// 뒤에 NtfsIndexHeader가 다시 온다). fixup 검증(ntfs_driver.cpp
+// kApplyFixup의 매직 파라미터화 버전)은 MFT 레코드와 완전히 동일한
+// 알고리즘 - 유일한 차이가 magic 기대값뿐이다.
+#pragma pack(push, 1)
+struct NtfsIndexRecordHeader {
+    char     magic[4];              // "INDX"
+    uint16_t updateSequenceOffset;
+    uint16_t updateSequenceSize;
+    uint64_t logFileSequenceNumber; // $LogFile LSN - MFT 레코드와 동일하게 무시(저널 리플레이 없음)
+    uint64_t indexVcn;               // 이 블록 자신의 VCN($INDEX_ALLOCATION 기준 - 자체 검증용, 1차 증분은 미검증)
+};
+static_assert(sizeof(NtfsIndexRecordHeader) == 24, "NtfsIndexRecordHeader는 24바이트여야 함");
+#pragma pack(pop)
+constexpr char kNtfsIndexRecordMagic[4] = {'I', 'N', 'D', 'X'};
+
 constexpr uint16_t kIndexEntryHasSubnode = 0x1;
 constexpr uint16_t kIndexEntryLast = 0x2;
+constexpr uint32_t kNtfsIndexHeaderFlagLarge = 0x1;
 
 // ---------------------------------------------------------------------
 // 4(부분) - NtfsVolume: 읽기 전용 마운트 + mount()가 캐싱한 상태의
