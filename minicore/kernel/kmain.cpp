@@ -7,6 +7,7 @@
 #include "debug_session.h"
 #include "delayed_exec.h"
 #include "devmgr_service.h"
+#include "device_registry.h"
 #include "diag_ring.h"
 #include "fs_service.h"
 #include "dma_buffer.h"
@@ -888,6 +889,21 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
         kernel::Logger::info("minicore: livefs mounted at /sys/live");
     }
 
+    // DeviceRegistry(SP-23880DC6 §3.1/§3.2) - devmgr/fs가 인식한 장치를
+    // "/sys/dev"로 통일 노출한다. livefs와 동일한 순서 원칙(MountTable::
+    // init() 이후, 실제 소비자(fs의 kProbeAndInitAhci)가 announce()를
+    // 부르기 전에 준비돼 있어야 함) - livefs 마운트 직후에 이어 붙인다.
+    kernel::DeviceRegistry::init();
+    kernel::Logger::info("minicore: device registry ready");
+
+    static constexpr char kDeviceRegistryMountPath[] = "/sys/dev";
+    if (!kernel::MountTable::mountKernel(kDeviceRegistryMountPath, sizeof(kDeviceRegistryMountPath) - 1,
+                                          &kernel::DeviceRegistryFs::instance())) {
+        kernel::Logger::error("minicore: /sys/dev mount FAILED");
+    } else {
+        kernel::Logger::info("minicore: device registry mounted at /sys/dev");
+    }
+
     // VFS syscall 5종(SP-7CC5693A §2.2/§2.5, PN-452FF696) - livefs
     // 마운트 직후(위)에 이어 붙인다: fs 서비스는 아직 없지만 Mount 등을
     // 호출하려면 최소 MountTable::init()이 끝나 있어야 하므로 이 순서를
@@ -921,6 +937,11 @@ extern "C" void kMain(kernel::uint32_t startInfoAddr, kernel::uint32_t bootProto
     // 동일한 이유로 나란히 등록.
     kernel::Signalfd::registerSyscallEndpoints();
     kernel::Logger::info("minicore: signalfd create/setmask syscall endpoints registered");
+
+    // [신규, SP-23880DC6 §3.3] DeviceEventsOpen - Timerfd/Signalfd와
+    // 동일한 이유로 나란히 등록.
+    kernel::DeviceEventsService::registerSyscallEndpoints();
+    kernel::Logger::info("minicore: device-events open syscall endpoint registered");
 
     // ResourceGroup syscall 6종(SP-245D130B §8/SP-6A563A8F §5-A/§7,
     // PN-4190BBD3) - 위와 같은 이유로 BSP에서 한 번만. gRootResourceGroup

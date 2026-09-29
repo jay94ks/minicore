@@ -34,7 +34,7 @@
 | [DC-91ABD922](./DC-91ABD922.md) | devmgr/fs를 유저랜드 프로세스에서 커널로 흡수 - 범위/방식 미정 | approved | 2026-09-22T07:19:54.448Z |
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
-| [DC-BD28632D](./DC-BD28632D.md) | DeviceRegistry(udev 유사 시스템) - 권한/I·O 의미론/향후 usermode 드라이버 등록 방식 결정 요청 | review | 2026-09-29T07:13:45.529Z |
+| [DC-BD28632D](./DC-BD28632D.md) | DeviceRegistry(udev 유사 시스템) - 권한/I·O 의미론/향후 usermode 드라이버 등록 방식 결정 요청 | approved | 2026-09-29T08:43:09.541Z |
 | [DC-C4A011C7](./DC-C4A011C7.md) | AsyncTask::waitingTask 크로스코어 데이터 레이스 - raw ConnectChannel/AcceptFromChannel 핸드셰이크(및 모든 유저랜드 raw syscall 완료 통지)가 가끔 유실되는 근본 원인 후보 | approved | 2026-09-27T16:44:29.559Z |
 | [DC-CC83F7BE](./DC-CC83F7BE.md) | authmgr CreateUser 권한 검사 - caller uid를 와이어로 신뢰성 있게 전달하는 규약이 없음 | approved | 2026-09-28T11:20:42.866Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
@@ -66,12 +66,12 @@
 | [RM-085694F8](./RM-085694F8.md) | Minicore Pubreg 프로토콜 할당표 | review | 2026-09-17T20:01:00.317Z |
 | [RM-23F4B687](./RM-23F4B687.md) | Minicore 작업 지침 — 코딩 컨벤션 및 문서화 원칙 | review | 2026-09-24T05:00:01.138Z |
 | [RM-28225668](./RM-28225668.md) | Minicore 인터럽트 벡터 목록 | review | 2026-09-27T11:39:19.768Z |
-| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-29T07:01:48.552Z |
-| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-29T07:01:32.857Z |
+| [RM-32D06563](./RM-32D06563.md) | Minicore 용어 및 개념 | review | 2026-09-29T10:58:09.535Z |
+| [RM-48E1E610](./RM-48E1E610.md) | Minicore Syscall 할당표 | review | 2026-09-29T10:58:33.664Z |
 | [RM-7C249618](./RM-7C249618.md) | Minicore 라이브러리 목록 | review | 2026-09-28T02:28:35.965Z |
 | [RM-9B8CA541](./RM-9B8CA541.md) | Minicore 가상주소 공간 관리자 위임 사항 | archived | 2026-09-15T05:54:47.958Z |
 | [RM-B5764185](./RM-B5764185.md) | Minicore Signal 번호표 | review | 2026-09-29T02:41:45.504Z |
-| [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-29T07:02:01.472Z |
+| [RM-C65F7760](./RM-C65F7760.md) | Minicore VFS 구조 | review | 2026-09-29T10:58:54.901Z |
 | [RM-F2DAFF66](./RM-F2DAFF66.md) | Minicore 설계공백 검수 | review | 2026-09-29T05:42:02.115Z |
 | [SP-00CA7175](./SP-00CA7175.md) | 커널 ↔ 커널 서비스 통신 채널 — 설계 제안 | approved | 2026-09-22T02:13:51.590Z |
 | [SP-04EE2A18](./SP-04EE2A18.md) | Syscall 디스패치 및 비동기 처리 서브시스템 — 설계 제안 | approved | 2026-09-19T01:32:40.139Z |
@@ -81,7 +81,7 @@
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-21T20:00:11.552Z |
 | [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
 | [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-29T05:21:59.386Z |
-| [SP-23880DC6](./SP-23880DC6.md) | 디바이스 이벤트/노드 계층(udev 유사 시스템) — 설계 제안 | review | 2026-09-29T07:13:25.968Z |
+| [SP-23880DC6](./SP-23880DC6.md) | 디바이스 이벤트/노드 계층(udev 유사 시스템) — 설계 제안 | review | 2026-09-29T10:59:09.858Z |
 | [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | approved | 2026-09-22T02:14:20.261Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-22T01:15:53.326Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-17T08:01:20.217Z |

@@ -104,6 +104,34 @@ struct FreeDmaBufferArgs {
 constexpr SyscallEndpointId kSyscallEndpointAllocDmaBuffer = kMakeSyscallEndpointId(2, 2);
 constexpr SyscallEndpointId kSyscallEndpointFreeDmaBuffer = kMakeSyscallEndpointId(2, 3);
 
+// [신규, SP-23880DC6 §3.3] minicore/kernel/device_registry.h의
+// DeviceEventsOpenArgs/DeviceEvent/DeviceClass/kSyscallEndpointDeviceEventsOpen
+// 과 바이트 단위로 정확히 같은 레이아웃이어야 한다(위 문서 주석의
+// 수동 동기화 부담 그대로 적용).
+enum class DeviceClass : uint8_t {
+    Unknown = 0,
+    Block = 1,
+};
+
+constexpr uint32_t kMaxDeviceNameLength = 32;
+
+struct DeviceEventsOpenArgs {
+    // out
+    ChannelError error = ChannelError::None;
+    int64_t fd = -1;
+};
+
+enum class DeviceEventKind : uint8_t { Added = 1, Removed = 2 };
+
+struct DeviceEvent {
+    DeviceEventKind kind = DeviceEventKind::Added;
+    DeviceClass deviceClass = DeviceClass::Unknown;
+    char name[kMaxDeviceNameLength] = {};
+    uint32_t nameLength = 0;
+};
+
+constexpr SyscallEndpointId kSyscallEndpointDeviceEventsOpen = kMakeSyscallEndpointId(2, 4);
+
 }  // namespace mc
 
 #endif  // USERLAND_LIBS_LIBMC_MC_PNP_H

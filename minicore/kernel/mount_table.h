@@ -37,6 +37,10 @@ enum class MountKind : uint8_t {
     // [신규, 2026-09-29, PN-A1A0B595, SP-A7479F83 §2] Timerfd와 동일한
     // 이유 - signalfd도 절대 `MountTable`에 마운트되지 않는다.
     Signalfd = 5,
+    // [신규, SP-23880DC6 §3.3] Timerfd/Signalfd와 동일한 이유 -
+    // DeviceEventsOpen이 여는 핫플러그 이벤트 fd도 절대 `MountTable`에
+    // 마운트되지 않는다(device_registry.h의 `DeviceEventFdState` 참고).
+    DeviceEvents = 6,
 };
 
 // **[v1 잠정 결정, 2026-09-16, PN-71C2B857]** SP-7CC5693A §2.1의

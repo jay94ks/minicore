@@ -70,6 +70,7 @@
 #include "ahci.h"
 #include "async_task.h"
 #include "channel.h"
+#include "device_registry.h"  // [신규, SP-23880DC6 §3.5] DeviceRegistry::announce() - AHCI 인식 직후 등록
 #include "fs_service.h"
 #include "libext4/ext4_driver.h"
 #include "libswapfs/swapfs.h"
@@ -187,6 +188,14 @@ void kProbeAndInitAhci(const SharedPtr<Task>& self) {
         if (gAhciController.probeFirstDevice(&probeResult, &port)) {
             gAhciBlockDevice.init(port, probeResult.identifyData);
             gHasAhciBlockDevice = true;
+            // [신규, SP-23880DC6 §3.5] DeviceRegistry에 등록 - "/sys/dev"에
+            // 이 순간부터 sd0로 보인다(실패는 v1 상한 초과뿐이라 무시해도
+            // VFS 마운트 자체엔 영향 없음, RM-23F4B687 §4와 동일한 태도로
+            // 이 서비스를 막지 않는다).
+            char deviceName[kMaxDeviceNameLength] = {};
+            uint32_t deviceNameLength = 0;
+            DeviceRegistry::announce(DeviceClass::Block, reinterpret_cast<uint64_t>(&gAhciBlockDevice), kRootUid,
+                                      kRootGid, 0400, deviceName, &deviceNameLength);
         }
         return;  // v1은 첫 매칭 성공 장치 하나만(§3.1 최소 검증 범위)
     }
@@ -326,6 +335,28 @@ void kAcceptFromChannelDirect(const SharedPtr<Task>& self, AcceptFromChannelArgs
 }
 
 }  // namespace
+
+// [신규, SP-23880DC6 §4 결정2 "마운트된 장치는 Open 불가"] device_registry.h
+// 가 선언한 조회 함수의 정의 - v1은 AHCI 블록 장치 하나 + 마운트 지점
+// 하나(`/sys/mnt`)뿐이라 `MountTable::resolve(kMountMnt, ...)`의 현재
+// 드라이버가 실제 FileSystemDriver(gExt4Driver/gFat32Driver/gFat16Driver)
+// 중 하나인지만 확인하면 충분하다(RM-23F4B687 §4 - 구현 세부 수준의
+// 판단, 여러 블록 장치/마운트 지점을 일반적으로 대응하는 역방향 조회
+// 테이블은 실사용처가 늘어나면 그때 추가).
+bool kIsBackingHandleMounted(uint64_t backingHandle) {
+    if (backingHandle != reinterpret_cast<uint64_t>(&gAhciBlockDevice)) {
+        return false;
+    }
+    MountKind kind{};
+    uint64_t channelId = 0;
+    KernelFsDriver* driver = nullptr;
+    uint32_t relOffset = 0;
+    if (!MountTable::resolve(kMountMnt, sizeof(kMountMnt) - 1, &kind, &channelId, &driver, &relOffset)) {
+        return false;
+    }
+    return kind == MountKind::KernelDriver &&
+           (driver == &gExt4Driver || driver == &gFat32Driver || driver == &gFat16Driver);
+}
 
 // [구현, 2026-09-23, PN-4859FDE9 준비 작업] fs.cpp 밖의 소비자(회수
 // 스캔/페이지폴트 스왑인, 아직 미배선)가 감지된 스왑 파티션을 꺼내

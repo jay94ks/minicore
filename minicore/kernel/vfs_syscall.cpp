@@ -1,6 +1,7 @@
 #include "vfs_syscall.h"
 
 #include "delayed_exec.h"
+#include "device_registry.h"  // [신규, SP-23880DC6 §3.3] DeviceEventFdState/DeviceEvent - Read/Close의 DeviceEvents 분기용
 #include "libkenv/spinlock.h"
 #include "libkmm/slab.h"
 #include "mount_table.h"
@@ -632,6 +633,41 @@ public:
                 AsyncTask::yield();
             }
         }
+        if (slot->value.kind == MountKind::DeviceEvents) {
+            // [신규, SP-23880DC6 §3.3] DeviceEventsOpen fd - 큐에서
+            // DeviceEvent 하나를 꺼내 반환, 비어 있으면 signalfd/timerfd와
+            // 동일한 관례(pendingReaders 등록 + yield 루프)로 다음
+            // announce()/withdraw() 브로드캐스트까지 블로킹한다.
+            if (!slot->value.deviceEvents) {
+                args->bytesRead = 0;
+                args->error = ChannelError::InvalidHandle;
+                co_return;
+            }
+            if (args->len < sizeof(DeviceEvent)) {
+                args->bytesRead = 0;
+                args->error = ChannelError::InvalidArgument;
+                co_return;
+            }
+            SharedPtr<DeviceEventFdState> state = slot->value.deviceEvents;
+            for (;;) {
+                DeviceEvent event;
+                bool got = false;
+                {
+                    SpinlockGuard guard(state->lock);
+                    got = state->queue.pop(&event);
+                    if (!got) {
+                        state->pendingReaders.pushBack(task);
+                    }
+                }
+                if (got) {
+                    memcpy(args->buf, &event, sizeof(event));
+                    args->bytesRead = sizeof(DeviceEvent);
+                    args->error = ChannelError::None;
+                    co_return;
+                }
+                AsyncTask::yield();
+            }
+        }
         if (slot->value.kind != MountKind::KernelDriver) {
             args->bytesRead = 0;
             args->error = ChannelError::NotSupported;  // Channel 경로 - PN-EA4EE935 스코프 밖
@@ -709,6 +745,13 @@ public:
         if (slot->value.kind == MountKind::Signalfd && slot->value.signalfd) {
             SpinlockGuard guard(slot->value.signalfd->lock);
             slot->value.signalfd->pendingReaders.remove(task);
+        }
+        // [신규, SP-23880DC6 §3.3] Timerfd/Signalfd와 동일한 이유 -
+        // DeviceEventsOpen 블로킹 중 취소되면 pendingReaders에 남은
+        // 댕글링 포인터를 제거해야 한다.
+        if (slot->value.kind == MountKind::DeviceEvents && slot->value.deviceEvents) {
+            SpinlockGuard guard(slot->value.deviceEvents->lock);
+            slot->value.deviceEvents->pendingReaders.remove(task);
         }
     }
 };

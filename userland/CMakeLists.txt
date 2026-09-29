@@ -253,3 +253,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalfdtest ${CMAKE_CU
 # add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/rtsignalchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-rtsignalchild)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/rtsignaltest ${CMAKE_CURRENT_BINARY_DIR}/minicore-rtsignaltest)
+
+# devtest(SP-23880DC6, DeviceRegistry "/sys/dev" E2E 검증) - 위
+# 테스트들과 동일한 이유의 out-of-tree add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/devtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-devtest)
