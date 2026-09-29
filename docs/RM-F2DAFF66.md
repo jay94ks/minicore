@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-29T04:40:44.364Z
+  updatedAt: 2026-09-29T05:42:02.115Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2454,6 +2454,36 @@ E2E 성공 - 이 갭은 완전히 해소됐다. 구현 과정에서 부수적으
 열거 손상의 실제 원인이었음)도 같은 커밋에서 함께 수정.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
+
+**[2026-09-29, 자동 루프 틱 갱신] `document_list(status=approved)`
+재확인 결과 2026-09-28 마지막 스윕(SP-9039F955 등) 이후 같은 날 늦게
+approved 전환된 DC 4건을 추가로 발견** - `DC-CC83F7BE`(CreateUser
+권한 검사)/`DC-90A66932`(캐시미스→authmgr 비동기 질의)/
+`DC-EECFE2E0`(gNormalQueues 기아)/`DC-C4A011C7`(AsyncTask::waitingTask
+레이스) + 2026-09-29 당일 신규 `DC-2B22FBF0`(GrantSudoPermission
+권한 검사). 뒤 넷(`DC-CC83F7BE`/`DC-90A66932`/`DC-EECFE2E0`/
+`DC-C4A011C7`)은 각각 `PN-24A2B6F5`/`PN-AA9D7030`이 이미 결정↔코드
+대조를 상세히 마치고 완료 기록까지 남겨 뒀음을 이번 틱이 직접 그
+계획 본문+실제 소스(`process.h`/`.cpp`, `async_task.h`의
+`AtomicWeakRef`, `scheduler.cpp`)로 재확인 - 전부 갭 없음, 별도
+§2 신규 항목 불필요(이미 그 계획들 자신이 이 방법론의 취지를 충족).
+`DC-2B22FBF0`은 이번 틱이 처음 대조 - 아래 §2-추가8로 기록. 다음
+approved 전환 시까지 이 §3 스윕은 다시 건너뛴다.
+
+## §2-추가8. [점검 완료, 2026-09-29] `DC-2B22FBF0`(authmgr
+GrantSudoPermission 권한 검사, approved) - 갭 없음
+
+설계자 답변 "(A-2) 조상-자손 규칙 재사용"이 그대로 구현됐다 -
+`kSyscallEndpointGrantSudoPermission`(그룹0 call13)/
+`GrantSudoPermissionHandler`(process.h/.cpp)/
+`kGrantSudoPermissionOnExecImpl`(user_record.h/.cpp)/
+`kAuthmgrGrantSudoPermission()`(authmgr_client.h/.cpp) 6개 파일
+전부에서 `GrantSudoPermission` 심볼 확인(`docs git grep` 대응 -
+로컬 grep으로 대조). 문서 자신이 이미 `minicore/granttest`(신규,
+영구 보존)로 3가지 시나리오(root 허용/자손 허용/무관 uid 거부)를
+실측 검증까지 마쳤다고 기록해 뒀고, 이번 틱은 그 구현 산출물이
+실제 코드에 전부 존재함만 교차 확인했다 - 확정된 설계 중 코드에
+반영 안 된 항목 없음.
 
 **[2026-09-28, minicore-3c 세션 갱신] `document_list(status=approved)`
 재확인 결과 §3 마지막 스윕 이후 approved 전환된 SP/DC 4건 발견** -
