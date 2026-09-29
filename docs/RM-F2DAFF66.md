@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-29T02:14:50.450Z
+  updatedAt: 2026-09-29T04:40:44.364Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2415,7 +2415,7 @@ RM-23F4B687 §4 관례).
 회귀 3종(PVH/GRUB SMP1/SMP4) 클린, TEMP 스폰/진단 훅은 검증 직후 완전히
 원복(`git status` 클린).
 
-## §1-Y. [발견, 2026-09-29] `SP-AA6DF406`(libntfs, approved) - §1이 확정한
+## §1-Y. [발견 및 해소, 2026-09-29; **같은 날 후속 틱에 `QU-E0080F90` 답변(A)로 $INDEX_ALLOCATION 순회 구현 + E2E 검증까지 완료(`SP-AA6DF406` §8, `PN-2A0981B7` 항목2 완료 전환) - 더 이상 갭 아님**] `SP-AA6DF406`(libntfs, approved) - §1이 확정한
 "1차 증분 읽기전용" 경계 자체는 지켜졌으나, 실측 중 그 경계 안에서도
 실제 NTFS 볼륨을 거의 전혀 못 읽는 더 근본적인 실용 공백을 발견
 
@@ -2443,6 +2443,15 @@ Chmod 구현 자체(exFAT과 대칭, `$STANDARD_INFORMATION.fileAttributes`
 제자리 갱신)는 코드 리뷰 수준으로는 완료됐고 커널 빌드도 정상이지만,
 위 발견 때문에 실제 QEMU 부팅 E2E 검증은 아직 못 했다. `SP-AA6DF406`
 §7에 이 발견과 `QU-E0080F90`(진행 방향 질의)을 함께 기록해 뒀다.
+
+**[해소, 2026-09-29]** 설계자가 `QU-E0080F90`에 (A)로 답해
+$INDEX_ALLOCATION 순회를 앞당겨 최소 구현(`SP-AA6DF406` §8 - BFS
+기반, 콜레이션 이진탐색은 v1 범위 밖으로 명시적으로 미룸)했다.
+실제 `mkntfs`+`ntfs-3g` 이미지의 루트 레벨 파일에 대해
+`ntfsdisktest`(--rw-mount)로 Stat/Chmod/재Stat 왕복이 exitCode=0으로
+E2E 성공 - 이 갭은 완전히 해소됐다. 구현 과정에서 부수적으로 발견된
+`ntfs.h`의 미종결 `#pragma pack` 버그(전혀 무관해 보이는 AHCI 장치
+열거 손상의 실제 원인이었음)도 같은 커밋에서 함께 수정.
 
 ## §3. 아직 점검 안 한 영역 (다음 틱 대상)
 

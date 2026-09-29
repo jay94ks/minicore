@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: SP-AA6DF406
   status: approved
-  updatedAt: 2026-09-29T01:38:53.362Z
+  updatedAt: 2026-09-29T04:38:48.861Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -470,4 +470,57 @@ NTFS 파일 접근)를 실제로 검증 가능하게 할지, 아니면 이 커�
 지금은 넘어갈지 - 후속 증분2는 §1이 이미 "쓰기보다는 작지만 여전히
 후속" 항목으로 분류해 뒀던 것이라 범위가 이 세션 하나로 끝내기엔
 크다는 점도 함께 고려해 주시기 바랍니다.
+
+## 8. $INDEX_ALLOCATION 순회 구현 완료 + E2E 검증 성공 (QU-E0080F90 답변(A), 2026-09-29)
+
+**§7의 차단이 해소됐다.** 설계자가 QU-E0080F90에 (A)로 답해
+§2 후속 증분2($INDEX_ALLOCATION B+ 트리 확장)를 앞당겨 최소
+구현했다 - ntfs.h에 NtfsIndexRecordHeader(24바이트: MFT 레코드
+헤더(§3.2)와 처음 16바이트가 동일한 레이아웃이라 같은 fixup
+알고리즘을 매직 파라미터화만 해서 재사용 - "INDX"/logFileSequenceNumber
+대신 자기 VCN)를 추가하고, $INDEX_ROOT/INDX 블록 양쪽에서 공유되는
+엔트리 순회 로직(ntfs_driver.cpp의 kScanIndexEntriesForName)을
+구현했다.
+
+**콜레이션(collation) 기반 이진 탐색은 채택하지 않았다** - NTFS의
+B+ 트리는 원래 대소문자 무관 upcase 비교로 정렬돼 있어 조기 종료가
+가능하지만, 그 콜레이션 규칙 전체를 구현하는 대신 브루트포스
+BFS로 단순화했다: 한 레벨을 선형으로 스캔하며 만나는 모든
+"하위 노드 있음" 엔트리의 VCN을 전부 수집해 두고(센티널 엔트리
+포함), 그 레벨에서 이름이 정확히 일치하는 엔트리를 못 찾으면 수집한
+VCN들을 큐에 넣고 BFS로 계속 내려간다(kMaxIndexTraversalNodes=64
+로 순회 노드 수 상한). 정확하지만 최적은 아닌 의도적 1차 단순화 -
+실사용 규모의 디렉터리에서는 문제없다(§1의 신뢰도 경고 재확인 원칙
+그대로, 콜레이션 규칙 자체를 구현하는 건 §2에 새 후속 항목으로
+남겨둠).
+
+VCN→LCN 변환은 $INDEX_ALLOCATION 헤더의 indexAllocEntrySize를
+볼륨의 클러스터 크기로 나눈 배수(clustersPerIndexBlock)를 엔트리의
+VCN에 곱해 "클러스터 VCN"으로 바꾼 뒤 기존 §3.4 데이터 런 변환을
+그대로 재사용한다 - indexAllocEntrySize가 클러스터 크기의 배수가
+아닌 경우(서브클러스터 인덱스 블록)는 1차 구현 범위 밖으로 명시적
+실패 처리(실측 이미지는 4096/4096=1의 흔한 경우만 확인).
+
+Coroutine 합성 제약(§4의 PN-9AE5BFE4/PN-6EDED542 경고)이 그대로
+적용돼, Open/Stat/Chmod 3개 호출부 각각에 동일한 BFS 순회 블록을
+인라인해야 했다(공유 헬퍼 코루틴을 만들 수 없음 - 코드 중복은
+의도된 트레이드오프).
+
+**E2E 검증 완료**: 실제 mkntfs+ntfs-3g 이미지(루트가 §7이 발견한
+대로 "large" 포맷)의 루트 레벨 NTFSTEST.TXT에 대해 ntfsdisktest
+(--rw-mount 커널 cmdline)로 Stat(초기 mode=0644 확인) -> Chmod(0444) ->
+재Stat(반영 확인) -> Chmod(0644 복원) -> 재Stat 전체 왕복이 exitCode=0으로
+성공. PN-2A0981B7 항목2를 완료로 갱신한다. RM-F2DAFF66의 관련 항목도
+해소로 갱신.
+
+**부수 발견 - 무관해 보이는 파일의 pragma pack 버그**: 이 구현 과정에서
+ntfs.h의 NtfsIndexRootHeader/NtfsIndexHeader/NtfsIndexEntry를
+감싼 #pragma pack(push, 1)에 대응하는 pop이 빠져 있었던 게 발견됐다
+- 그 여파로 이 헤더를 포함하는 번역 단위(fs.cpp) 전체에서 그 뒤에
+선언되는 무관한 struct(pnp.h의 DeviceDescriptor)까지 의도치 않게
+1바이트 정렬로 컴파일돼, pnp.cpp(정상 정렬)와 레이아웃이 어긋나는
+ODR 위반이 발생했다 - AHCI 장치 열거 결과가 인덱스 1번부터 깨져 보이는
+전혀 무관한 증상(devmgr/fs 어느 블록 장치도 인식 못 함)으로 나타나
+디버깅이 오래 걸렸다. 이번 커밋에서 누락된 pop을 추가해 수정 -
+관계도에도 기록해 뒀다(docs relation list --q ntfs.h).
 
