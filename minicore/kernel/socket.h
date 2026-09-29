@@ -4,6 +4,7 @@
 #include "channel.h"
 #include "libkenv/types.h"
 #include "named_object.h"
+#include "socket_bind_table.h"
 #include "syscall.h"
 
 namespace kernel {
@@ -86,10 +87,11 @@ struct UnixSocket {
     // 최대 1회만 허용(POSIX의 "이미 bind된 소켓 재bind 금지" 관례와
     // 동일, 실사용 근거 없이 다중 이름을 허용하지 않는다). §4-1 자동
     // 등록 경로와 별도로 기억해 둬야 `Close()`가 이 이름도 반납할 수
-    // 있다(안 그러면 소켓이 죽은 뒤에도 NamedObjectTable에 이름만
-    // 영구히 남는 네임스페이스 누수).
+    // 있다(안 그러면 소켓이 죽은 뒤에도 이름만 영구히 남는 네임스페이스
+    // 누수). [변경, PN-E310E23A, SP-231493CB §4-2] `NamedObjectTable`
+    // 대신 소켓 전용 `SocketBindTable`에 등록한다.
     bool explicitlyBound = false;
-    char boundPath[kMaxNamedObjectNameLength] = {};
+    char boundPath[kMaxSocketBindNameLength] = {};
     uint32_t boundPathLength = 0;
 
     // [신규, 2026-09-27, SP-231493CB §5] `Shutdown(fd, Read|Both)`가
@@ -142,7 +144,7 @@ struct SocketArgs {
 
 struct SocketBindArgs {
     int32_t fd = -1;
-    const char* path = nullptr;  // in: 유저 메모리. v1은 '/' 없는 단순 이름만(NamedObjectTable) -
+    const char* path = nullptr;  // in: 유저 메모리. v1은 '/' 없는 단순 이름만(SocketBindTable) -
                                   // '/'로 시작하는 실제 VFS 경로 바인드(§4-2 항목2/3)는 이번 증분 범위 밖.
     uint32_t pathLen = 0;
     // out

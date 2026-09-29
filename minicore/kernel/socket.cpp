@@ -6,6 +6,7 @@
 #include "named_object.h"
 #include "paging.h"
 #include "process.h"
+#include "socket_bind_table.h"
 
 namespace kernel {
 
@@ -218,7 +219,7 @@ class SocketBindHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<SocketBindArgs*>(argsRaw);
-        if (args->pathLen == 0 || args->pathLen > kMaxNamedObjectNameLength) {
+        if (args->pathLen == 0 || args->pathLen > kMaxSocketBindNameLength) {
             args->error = ChannelError::InvalidArgument;
             co_return;
         }
@@ -257,11 +258,17 @@ public:
             co_return;
         }
 
-        // [kCreateNamedChannel(channel.cpp)과 동일한 관례] reserve()는
-        // 순수 동기 함수라 유효성 검증만 이미 끝났다면 유저 포인터를
-        // 그대로 넘겨도 안전하다(그 함수가 스핀락을 쥔 채 즉시
-        // memcmp/memcpy하고 반환) - 별도 커널 버퍼로 복사할 필요 없음.
-        if (!NamedObjectTable::reserve(args->path, args->pathLen, NamedObjectKind::Channel, socket->channelId)) {
+        // [변경, PN-E310E23A, SP-231493CB §4-2] `NamedObjectTable`
+        // (Channel 전용)이 아니라 소켓 전용 `SocketBindTable`에
+        // 등록한다 - reserve()는 순수 동기 함수라 유효성 검증만 이미
+        // 끝났다면 유저 포인터를 그대로 넘겨도 안전하다(그 함수가
+        // 스핀락을 쥔 채 즉시 memcmp/memcpy하고 반환) - 별도 커널
+        // 버퍼로 복사할 필요 없음. [정직하게 기록] SP-231493CB §4-2는
+        // 이름 충돌 에러로 "AddressInUse"를 언급하지만 `ChannelError`에
+        // 그런 값은 없다 - 기존 NamedObjectTable::reserve 실패 시와
+        // 동일하게 이미 있는 `ChannelError::NameInUse`를 그대로 쓴다
+        // (새 enum 값 추가는 이 계획의 범위 밖).
+        if (!SocketBindTable::reserve(args->path, args->pathLen, socket->channelId)) {
             args->error = ChannelError::NameInUse;
             co_return;
         }
@@ -417,7 +424,7 @@ class SocketConnectHandler : public AsyncTaskHandler {
 public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<SocketConnectArgs*>(argsRaw);
-        if (args->pathLen == 0 || args->pathLen > kMaxNamedObjectNameLength) {
+        if (args->pathLen == 0 || args->pathLen > kMaxSocketBindNameLength) {
             args->error = ChannelError::InvalidArgument;
             co_return;
         }
@@ -462,20 +469,23 @@ public:
             co_return;
         }
 
-        // [중요 - 실측 전 코드 추적으로 발견] 여기서 커널 로컬 버퍼로
-        // 복사한 값을 ConnectChannelArgs::name에 넘기면 안 된다 -
-        // ConnectChannelHandler::onExec()이 그 포인터를 "호출자 자신의
-        // 유저 주소공간에 속하는지"(kValidateUserBuffer, channel.cpp)
-        // 다시 검증하는데, 그 검증은 이 nested AsyncTask의
-        // submitterTask(원래 호출자로 전파됨)의 유저 주소범위를
-        // 기준으로 판단한다 - 커널 스택/힙 버퍼 주소는 그 범위에 속할
-        // 수 없어 항상 InvalidPointer로 실패한다. 이미 위에서 이
-        // 포인터 자체를 검증했으므로, 그 원본 유저 포인터를 그대로
-        // 다시 넘긴다(ConnectChannelHandler가 다시 한번 같은 검증을
-        // 하는 것은 중복이지만 무해하다).
+        // [변경, PN-E310E23A, SP-231493CB §4-2] Bind()된 이름은 이제
+        // `SocketBindTable`에 있다 - `ConnectChannelHandler`는 소켓을
+        // 전혀 모르고 여전히 `NamedObjectTable`(Channel 전용)만 조회
+        // 하므로, 여기서 먼저 이름을 직접 풀어 channelId를 얻은 뒤
+        // (SocketAcceptHandler가 `listener->channelId`를 그대로
+        // `AcceptFromChannelArgs::channelHandle`에 넘기는 것과 동일한
+        // "숫자 핸들로 위임" 패턴) `ConnectChannelArgs::target`(0이
+        // 아니면 이름 조회를 건너뛰는 기존 분기, channel.h 참고)으로
+        // 넘긴다 - name/nameLength 경로는 더 이상 쓰지 않으므로 위
+        // 유저 포인터 재검증 중복 문제 자체가 사라진다.
+        uint64_t channelId = 0;
+        if (!SocketBindTable::resolve(args->path, args->pathLen, &channelId)) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
         ConnectChannelArgs connectArgs;
-        connectArgs.name = args->path;
-        connectArgs.nameLength = args->pathLen;
+        connectArgs.target = static_cast<ChannelId>(channelId);
         // [정직하게 기록] useHugePage는 v1에서 항상 false - 소켓
         // syscall 어디에도 이 선택을 노출할 자리가 없다(SP-231493CB
         // §5가 열거한 시그니처 그대로, huge page는 Channel의 기존

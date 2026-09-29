@@ -11,6 +11,7 @@
 #include "signal.h"    // [신규, 2026-09-29, PN-A1A0B595] SignalNumber/kSignalCount/PendingSignal - signalfd Read가 process->pendingSignals를 직접 조회
 #include "signalfd.h"  // [신규, 2026-09-29, PN-A1A0B595] SignalfdState/SignalfdSiginfo
 #include "socket.h"
+#include "socket_bind_table.h"
 #include "task.h"
 #include "timerfd.h"
 
@@ -369,10 +370,12 @@ public:
             // [PN-CC0F4EAC, SP-231493CB §3] 소켓 fd 종료 - 연결
             // 상태(bridge)/자기 소유 Channel/§4-1 자동 등록 이름/명시적
             // Bind() 이름을 전부 정리해야 한다. 이 중 하나라도 빠뜨리면
-            // NamedObjectTable에 죽은 소켓을 가리키는 좀비 이름이
-            // 영구히 남는다(socket.h UnixSocket::boundPath 문서 주석
-            // 참고 - kResolveChannelId 자체는 세대 태그로 안전하지만,
-            // 그 이름이 다시는 재사용 못 하게 되는 네임스페이스 누수).
+            // NamedObjectTable(§4-1 자동 등록) 또는 SocketBindTable
+            // (§4-2 Bind, PN-E310E23A로 분리됨)에 죽은 소켓을 가리키는
+            // 좀비 이름이 영구히 남는다(socket.h UnixSocket::boundPath
+            // 문서 주석 참고 - kResolveChannelId 자체는 세대 태그로
+            // 안전하지만, 그 이름이 다시는 재사용 못 하게 되는
+            // 네임스페이스 누수).
             // [해소, 2026-09-27 6회차, PN-CC0F4EAC 항목7 §2] 4회차가
             // "다음 착수 세션 필수 과제"로 남겨 둔 참조 카운트 조회가
             // SharedPtr::useCount()(shared_ptr.h)로 생겼다 - 이제 실제로
@@ -402,7 +405,9 @@ public:
                         kFormatAutoSocketPath(process->processId, fd, autoPath, kMaxNamedObjectNameLength);
                     NamedObjectTable::release(autoPath, autoPathLen);
                     if (socket->explicitlyBound) {
-                        NamedObjectTable::release(socket->boundPath, socket->boundPathLength);
+                        // [변경, PN-E310E23A, SP-231493CB §4-2] Bind()
+                        // 이름은 이제 SocketBindTable에 있다.
+                        SocketBindTable::release(socket->boundPath, socket->boundPathLength);
                     }
                     DestroyChannelArgs destroyArgs;
                     destroyArgs.channelHandle = socket->channelId;

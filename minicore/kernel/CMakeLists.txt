@@ -39,6 +39,7 @@ add_library(minicore_kernel OBJECT
     mount_table.cpp
     vfs_syscall.cpp
     socket.cpp
+    socket_bind_table.cpp
     epoll.cpp
     timerfd.cpp
     signalfd.cpp
