@@ -5,7 +5,7 @@
   정본은 claude-native-workflow(CNW)의 DB에 있습니다.
   trackingCode: RM-F2DAFF66
   status: review
-  updatedAt: 2026-09-29T01:39:22.631Z
+  updatedAt: 2026-09-29T02:14:50.450Z
   갱신: docs cache sync cmtzsjm5c000fo401iozcc60t docs
 -->
 
@@ -2339,7 +2339,7 @@ DontDeref·ObserverPtr 관례/소유자 검증) 전부 실제 코드에 반영�
 **은폐된 갭이 아니다** - 전부 `PN-2A0981B7` 본문이 "남은 항목"으로
 이미 정확히 열거해 뒀다.
 
-## §1-X. [발견 및 부분 해소, 2026-09-29; **같은 날 후속 틱에 절대시각(§6-A)/Close 정리(§6-C)/epoll 통합(§5) 추가 해소 - 아래 "추가 해소" 참고, 남은 갭은 signalfd(call8/9)·RT신호(§6-B)뿐**] `SP-A7479F83`(timerfd/signalfd, approved) - timerfd(§2/§3, call6/7)만 구현, signalfd 전체(call8/9)·절대시각(§6-A)·RT신호(§6-B)·epoll 통합(§5)은 여전히 미구현
+## §1-X. [발견 및 거의 전부 해소, 2026-09-29; **같은 날 후속 틱에 절대시각(§6-A)/Close 정리(§6-C)/epoll 통합(§5) 추가 해소, 그리고 별도 틱(PN-A1A0B595)에 signalfd 전체(call8/9)까지 마저 해소 - 남은 갭은 RT신호 큐잉(§6-B)뿐**] `SP-A7479F83`(timerfd/signalfd, approved) - timerfd(§2/§3, call6/7)만 구현, signalfd 전체(call8/9)·절대시각(§6-A)·RT신호(§6-B)·epoll 통합(§5)은 여전히 미구현
 
 `PN-96265AE4`(주기 타이머 Read가 AsyncReactor/DelayedExecutionQueue
 쪽에서 영원히 안 깨어나던 결함)를 해소하면서 `PN-0F56DE4B`의 원래
@@ -2367,11 +2367,23 @@ epoll 통합(§5)도 마저 구현했다 - `epoll.cpp`의 `kQueryFdState`/
 readObservers와 동일한 이유)를 `kOnTimerfdFire`가 만료마다 함께
 드레인. `minicore/timerfdtest`에 timerfd+epoll 통합 시나리오(exitCode
 33-44) 추가해 GRUB SMP4로 실측 확인(TEMP 스폰 훅으로 검증 후 되돌림,
-RM-23F4B687 §4 관례). **남은 갭은 signalfd 전체(call8/9)·RT신호
-큐잉(§6-B)뿐**(둘 다 `SignalfdState`/`RtSignalInstance` 자체가
-없음) - 이 둘은 새 계획으로 분리 등록할 가치가 있으나(CLAUDE.md
-규칙7), `PN-0F56DE4B` 자신이 이미 그 체크리스트를 갖고 있어 별도 신규 계획
-없이 그 문서 갱신으로 충분(아래 참고).
+RM-23F4B687 §4 관례).
+
+**추가 해소(별도 틱, 2026-09-29, `PN-A1A0B595`, `QU-28D7C7B1` 답변(A)
+반영)**: signalfd 전체(call8/9)까지 구현했다 - `MountKind::Signalfd`
+(mount_table.h), `SignalfdState`(신규 minicore/kernel/signalfd.h/.cpp),
+`vfs_syscall.cpp`의 Read/onCancel Signalfd 분기, epoll 통합
+(`kQueryFdState`/`kUpdateFdObserver`/`kIsWatchableKind`에
+`MountKind::Signalfd` 분기). 선행 작업으로 `SP-0666DB3C` §4.6
+(프로세스 시그널 마스크, `Process::signalMask`)을 먼저 구현해야 했다 -
+`SignalfdCreate`/`SignalfdSetMask`가 그 마스크를 직접 조작해 관심
+시그널을 일반 전달 경로에서도 동시에 Block한다(§4 원래 전제 그대로).
+`minicore/signalmasktarget`/`signalmasktest`(신규, 영구 보존)로
+시그널 마스크 자체를 먼저 검증했고, signalfd 자신의 E2E 검증은
+`minicore/signalfdtest`(신규, 영구 보존)로 확인. **남은 갭은 RT신호
+큐잉(§6-B)뿐**(`RtSignalInstance` 자체가 없음) - `PN-FD706AF6`가 이미
+그 체크리스트를 갖고 있어 별도 신규 계획 없이 그 문서 갱신으로
+충분(아래 참고).
 
 ## §1-W. [발견 및 해소, 2026-09-29] `SP-76250478`(멀티스레드 유저 프로세스 지원, approved) §3.2 - "Process::exitCode는 마지막 스레드의 exitCode를 물려받는다"가 실제로는 미구현이었음(§4의 2026-09-18 "갭 없음" 점검이 §3.2를 누락한 사례)
 
