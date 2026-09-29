@@ -120,6 +120,30 @@ struct SignalActionArgs {
     ChannelError error = ChannelError::None;
 };
 
+// [신규, 2026-09-29, QU-28D7C7B1 답변(A), SP-0666DB3C §4.6, RM-48E1E610
+// Process 그룹 17번] POSIX sigprocmask()에 대응하는 최소 프로세스 단위
+// 시그널 마스크 - signalfd(SP-A7479F83 §4)가 이 위에서 동작한다.
+constexpr SyscallEndpointId kSyscallEndpointSignalMask = kMakeSyscallEndpointId(0, 17);
+
+enum class SignalMaskOp : uint32_t {
+    Block,     // 지정한 비트들을 Process::signalMask에 OR
+    Unblock,   // 지정한 비트들을 Process::signalMask에서 AND-NOT
+    SetMask,   // Process::signalMask를 통째로 교체
+};
+
+// [SP-0666DB3C §4.6] `SignalMask(op, mask)` - `SignalAction`과 동일한
+// 관례로 호출자 자신의 `Process::signalMask`만 바꾼다. `mask`에
+// Kill/Stop 비트가 섞여 있으면(op와 무관하게 Block/SetMask 모두)
+// `InvalidArgument`로 거부한다(마스킹 불가 원칙 - `SignalAction`의
+// Ignore 거부와 동일).
+struct SignalMaskArgs {
+    SignalMaskOp op = SignalMaskOp::Block;
+    uint32_t mask = 0;     // in - op에 따라 적용할 비트 집합(SetMask면 새 마스크 자체)
+    uint32_t oldMask = 0;  // out - 적용 전의 signalMask(POSIX oldset과 동일 용도)
+    // out
+    ChannelError error = ChannelError::None;
+};
+
 }  // namespace kernel
 
 #endif  // MINICORE_KERNEL_SIGNAL_H

@@ -448,6 +448,12 @@ public:
     // 새 생애로 새어 들어가면 안 된다.
     ChunkedList<PendingSignal, kPendingSignalChunkCapacity> pendingSignals;
     SignalDisposition dispositions[kSignalCount];
+    // [신규, 2026-09-29, QU-28D7C7B1 답변(A), SP-0666DB3C §4.6] bit n =
+    // SignalNumber(n) 블록됨 - kCheckSignalCheckpoint()(idt.cpp)가 이
+    // 비트가 선 신호는 건너뛴다(erase하지 않고 큐에 그대로 남김).
+    // Kill/Stop 비트는 SignalMaskHandler가 세팅을 거부(마스킹 불가
+    // 원칙, dispositions의 Ignore 거부와 동일).
+    uint32_t signalMask = 0;
 
     // [신규, 2026-09-18, SP-30FCC8AE §1/§2, PN-617F4E52, PN-88E62419]
     // 사용자/권한 신원 - SpawnProcess/fork() 시 부모로부터 그대로

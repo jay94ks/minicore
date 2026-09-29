@@ -717,9 +717,15 @@ bool kCheckSignalCheckpoint(kernel::InterruptFrame* frame) {
         return false;
     }
     for (;;) {
-        auto* slot = process->pendingSignals.find([](const kernel::PendingSignal&) { return true; });
+        // [갱신, 2026-09-29, QU-28D7C7B1 답변(A), SP-0666DB3C §4.6]
+        // signalMask에 비트가 선 신호는 이 순회가 건너뛴다(erase하지
+        // 않고 큐에 그대로 남김) - 언마스크 후 다음 체크포인트가 처리.
+        auto* slot = process->pendingSignals.find([&process](const kernel::PendingSignal& sig) {
+            const kernel::uint32_t bit = 1u << static_cast<kernel::uint32_t>(sig.number);
+            return (process->signalMask & bit) == 0;
+        });
         if (!slot) {
-            return false;  // 대기 중인 신호 없음(또는 전부 Ignore로 소비함)
+            return false;  // 대기 중인(마스크 안 걸린) 신호 없음(또는 전부 Ignore로 소비함)
         }
         const kernel::SignalNumber number = slot->value.number;
         const kernel::uint32_t index = static_cast<kernel::uint32_t>(number);

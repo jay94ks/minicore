@@ -227,3 +227,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ntfsdisktest ${CMAKE_CU
 # 가능 마운트 E2E 검증) - 위 테스트들과 동일한 이유의 out-of-tree
 # add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/ext4rwtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-ext4rwtest)
+
+# signalmasktarget/signalmasktest(PN-A1A0B595 선행 작업, QU-28D7C7B1
+# 답변(A) - 프로세스 시그널 마스크 E2E 검증) - 위 테스트들과 동일한
+# 이유의 out-of-tree add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalmasktarget ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalmasktarget)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalmasktest ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalmasktest)

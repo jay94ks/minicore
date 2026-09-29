@@ -20,6 +20,9 @@ constexpr SyscallEndpointId kSyscallEndpointSignalAction = kMakeSyscallEndpointI
 // kernel::SignalNumber와 값을 맞춘다 - 지금 실사용되는 값만 담는다.
 enum class SignalNumber : uint32_t {
     None = 0,
+    // [신규, 2026-09-29, QU-28D7C7B1 답변(A) 검증용] SIGTERM -
+    // signalmasktest의 유일한 소비자.
+    Terminate = 15,
     // [신규, 2026-09-22, PN-012D6310] SIGCHLD - 자식 프로세스 종료
     // 통지. **기본 disposition(Default)이 "프로세스 종료"라서**(POSIX
     // 관례와 달리 이 커널은 Chld를 기본으로 무시하지 않는다,
@@ -43,6 +46,38 @@ enum class SignalDisposition : uint32_t {
 struct SignalActionArgs {
     SignalNumber signal = SignalNumber::None;
     SignalDisposition disposition = SignalDisposition::Default;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-29, QU-28D7C7B1 답변(A) 검증용, signalmasktest 최초
+// 소비자] signal.h의 kSyscallEndpointKill(그룹0.call1)과 동일한 값.
+constexpr SyscallEndpointId kSyscallEndpointKill = kMakeSyscallEndpointId(0, 1);
+
+// kernel::KillArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
+struct KillArgs {
+    int64_t targetProcessId = -1;
+    SignalNumber signal = SignalNumber::None;
+    // out
+    ChannelError error = ChannelError::None;
+};
+
+// [신규, 2026-09-29, QU-28D7C7B1 답변(A), SP-0666DB3C §4.6] signal.h의
+// kSyscallEndpointSignalMask(그룹0.call17)와 동일한 값.
+constexpr SyscallEndpointId kSyscallEndpointSignalMask = kMakeSyscallEndpointId(0, 17);
+
+// kernel::SignalMaskOp와 값을 맞춘다.
+enum class SignalMaskOp : uint32_t {
+    Block,
+    Unblock,
+    SetMask,
+};
+
+// kernel::SignalMaskArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
+struct SignalMaskArgs {
+    SignalMaskOp op = SignalMaskOp::Block;
+    uint32_t mask = 0;
+    uint32_t oldMask = 0;
     // out
     ChannelError error = ChannelError::None;
 };

@@ -423,6 +423,10 @@ bool Process::init() {
     for (uint32_t i = 0; i < kSignalCount; ++i) {
         dispositions[i] = SignalDisposition::Default;
     }
+    // [신규, 2026-09-29, QU-28D7C7B1 답변(A)] pendingSignals/dispositions와
+    // 동일한 이유(Resurrect §6.2 재사용) - 이전 생애의 마스크가 새
+    // 생애로 새어 들어가면 안 된다.
+    signalMask = 0;
     // [신규, SP-30FCC8AE §1/§2] pendingSignals/dispositions와 동일한
     // 이유(Resurrect 재사용) - 스폰 경로(SpawnProcessHandler/fork())가
     // init() 직후 실제 부모 uid/gid로 덮어쓴다. 부모가 없는 최초
@@ -1405,6 +1409,13 @@ public:
         if (parentProc) {
             procShared->uid = parentProc->uid;
             procShared->gid = parentProc->gid;
+            // [신규, 2026-09-29, QU-28D7C7B1 답변(A), SP-0666DB3C §4.6]
+            // signalMask도 uid/gid와 동일하게 상속한다 - 이건 v1이 임의로
+            // 고른 게 아니라 POSIX 자체가 요구하는 동작(sigprocmask로
+            // 설정한 마스크는 fork/exec 양쪽에 그대로 이어짐, 그래야
+            // "자식을 스폰하기 전에 특정 신호를 막아 둔다"는 흔한 패턴이
+            // 스폰 직후의 경쟁 없이 성립한다).
+            procShared->signalMask = parentProc->signalMask;
         }
         // parentProc이 이 시점에도 비어 있으면(진짜 root조차 없는 -
         // init도 아직 스폰 안 된 부팅 극초반) 정말 아무도 소유할 수
@@ -2065,6 +2076,55 @@ public:
 
 SignalActionHandler gSignalActionHandler;
 
+// [SP-0666DB3C §4.6, RM-48E1E610 Process 그룹 17번, QU-28D7C7B1 답변(A)]
+// `SignalMask` 본체 - signal.h의 `SignalMaskArgs` 문서 주석 그대로,
+// 호출자 자신의 `Process::signalMask`만 바꾼다(SignalActionHandler와
+// 동일한 관례).
+constexpr uint32_t kUnmaskableSignalBits = (1u << static_cast<uint32_t>(SignalNumber::Kill)) |
+                                            (1u << static_cast<uint32_t>(SignalNumber::Stop));
+
+class SignalMaskHandler : public AsyncTaskHandler {
+public:
+    AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
+        auto* args = static_cast<SignalMaskArgs*>(argsRaw);
+
+        // Unblock은 "이 비트들을 풀어라"는 의미라 Kill/Stop 비트가
+        // 섞여 있어도 무해하다(애초에 세워질 수 없었으므로 항상 이미
+        // 0) - Block/SetMask만 마스킹 불가 원칙 검증 대상.
+        if (args->op != SignalMaskOp::Unblock && (args->mask & kUnmaskableSignalBits) != 0) {
+            args->error = ChannelError::InvalidArgument;
+            co_return;
+        }
+
+        SharedPtr<Task> submitter = task->submitterTask.lock();
+        auto* caller = submitter ? static_cast<UserThread*>(submitter.get()) : nullptr;
+        SharedPtr<Process> self = caller ? caller->process.lock() : SharedPtr<Process>();
+        if (!self) {
+            args->error = ChannelError::NotFound;
+            co_return;
+        }
+
+        args->oldMask = self->signalMask;
+        switch (args->op) {
+            case SignalMaskOp::Block:
+                self->signalMask |= args->mask;
+                break;
+            case SignalMaskOp::Unblock:
+                self->signalMask &= ~args->mask;
+                break;
+            case SignalMaskOp::SetMask:
+                self->signalMask = args->mask;
+                break;
+        }
+        args->error = ChannelError::None;
+        co_return;
+    }
+    void onFailure(AsyncTask*) override {}
+    void onCancel(AsyncTask*, void*) override {}
+};
+
+SignalMaskHandler gSignalMaskHandler;
+
 }  // namespace
 
 // [신규, 2026-09-19, PN-85FA4992] process.h `Process::resolveById()`
@@ -2278,6 +2338,10 @@ void kHandleForkSyscall(InterruptFrame* frame) {
     // null 분기 불필요).
     procShared->uid = parentProc->uid;
     procShared->gid = parentProc->gid;
+    // [신규, 2026-09-29, QU-28D7C7B1 답변(A), SP-0666DB3C §4.6]
+    // signalMask 상속 - SpawnProcessHandler와 동일한 이유(POSIX
+    // fork()는 부모의 시그널 마스크를 정확히 그대로 복제).
+    procShared->signalMask = parentProc->signalMask;
     // [신규, 2026-09-19, SP-EAB162FC §2.1/§2.2, PN-645CF608 항목4]
     // `ProcessRole`도 부모 그대로 물려받는다 - `ProcessRole` enum
     // 자신의 문서 주석이 "devmgr/fs/net/tty 및 **그 PnP 드라이버
@@ -2321,6 +2385,7 @@ void Process::registerSyscallEndpoints() {
     SyscallRegistry::registerHandler(kSyscallEndpointWait, &gWaitHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointKill, &gKillHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointSignalAction, &gSignalActionHandler);
+    SyscallRegistry::registerHandler(kSyscallEndpointSignalMask, &gSignalMaskHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointCreateThread, &gCreateThreadHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointJoin, &gJoinHandler);
     SyscallRegistry::registerHandler(kSyscallEndpointDetach, &gDetachHandler);
