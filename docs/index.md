@@ -34,7 +34,7 @@
 | [DC-91ABD922](./DC-91ABD922.md) | devmgr/fs를 유저랜드 프로세스에서 커널로 흡수 - 범위/방식 미정 | approved | 2026-09-22T07:19:54.448Z |
 | [DC-B538A218](./DC-B538A218.md) | 메시징 채널 IPC(SP-1FBC0EEB) 세부 결정 미정 | archived | 2026-09-15T05:47:13.612Z |
 | [DC-B80D8D31](./DC-B80D8D31.md) | 스케줄러: 스케줄링 정책/타이머 틱/로드밸런싱 세부 미정 | archived | 2026-09-15T05:46:59.257Z |
-| [DC-BD28632D](./DC-BD28632D.md) | DeviceRegistry(udev 유사 시스템) - 권한/I·O 의미론/향후 usermode 드라이버 등록 방식 결정 요청 | review | 2026-09-29T07:07:28.078Z |
+| [DC-BD28632D](./DC-BD28632D.md) | DeviceRegistry(udev 유사 시스템) - 권한/I·O 의미론/향후 usermode 드라이버 등록 방식 결정 요청 | review | 2026-09-29T07:13:45.529Z |
 | [DC-C4A011C7](./DC-C4A011C7.md) | AsyncTask::waitingTask 크로스코어 데이터 레이스 - raw ConnectChannel/AcceptFromChannel 핸드셰이크(및 모든 유저랜드 raw syscall 완료 통지)가 가끔 유실되는 근본 원인 후보 | approved | 2026-09-27T16:44:29.559Z |
 | [DC-CC83F7BE](./DC-CC83F7BE.md) | authmgr CreateUser 권한 검사 - caller uid를 와이어로 신뢰성 있게 전달하는 규약이 없음 | approved | 2026-09-28T11:20:42.866Z |
 | [DC-D868D9EC](./DC-D868D9EC.md) | Syscall 서브시스템(SP-04EE2A18) 세부 결정 미정 | archived | 2026-09-15T05:47:11.419Z |
@@ -81,7 +81,7 @@
 | [SP-1FBC0EEB](./SP-1FBC0EEB.md) | 메시징 채널 IPC — 설계 제안 | approved | 2026-09-21T20:00:11.552Z |
 | [SP-201238BB](./SP-201238BB.md) | 커널용 lock-free 공유/약한 포인터 템플릿(SharedPtr/WeakPtr) — 설계 제안 | approved | 2026-09-16T15:41:24.850Z |
 | [SP-231493CB](./SP-231493CB.md) | 소켓 계층 및 net 커널 서비스 — 설계 제안 (POSIX 소켓, v1은 AF_UNIX) | approved | 2026-09-29T05:21:59.386Z |
-| [SP-23880DC6](./SP-23880DC6.md) | 디바이스 이벤트/노드 계층(udev 유사 시스템) — 설계 제안 | review | 2026-09-29T07:07:13.190Z |
+| [SP-23880DC6](./SP-23880DC6.md) | 디바이스 이벤트/노드 계층(udev 유사 시스템) — 설계 제안 | review | 2026-09-29T07:13:25.968Z |
 | [SP-245D130B](./SP-245D130B.md) | ResourceGroup (cgroup류) 자원 제한/우선순위/제어/계정 체계 — 설계 제안 | approved | 2026-09-22T02:14:20.261Z |
 | [SP-2602CAA6](./SP-2602CAA6.md) | 커널 이벤트 발행/구독(Kernel Event Notification) — 설계 제안 | approved | 2026-09-22T01:15:53.326Z |
 | [SP-29D652AA](./SP-29D652AA.md) | 컴파일러 진짜 thread_local 도입 (FS_BASE 스왑 + .tdata/.tbss) — 설계 제안 | approved | 2026-09-17T08:01:20.217Z |
