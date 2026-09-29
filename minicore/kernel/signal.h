@@ -45,6 +45,18 @@ enum class SignalNumber : uint32_t {
 // 하나로 단순하게 유지).
 constexpr uint32_t kSignalCount = 32;
 
+// [신규, 2026-09-29, PN-FD706AF6, SP-A7479F83 §6-B, RM-B5764185
+// "32~63 SIGRT0~SIGRT31"] 실시간 시그널(RT signal) 전용 구간 - 이
+// 표준 신호 32개(0-31)와는 완전히 별개의 독립 구간이다. RT 신호는
+// `dispositions[]`/`pendingSignals`/`signalMask`(전부 0-31 범위 전용)
+// 를 전혀 거치지 않고 signalfd의 `RtSignalInstance` FIFO로만 전달된다
+// (§6-B "신호 번호로 두 체계를 정적으로 분기") - 표준 신호의 체크포인트
+// 종료/마스킹 개념 자체가 RT 신호엔 적용되지 않는다(감시하는 signalfd가
+// 없으면 그냥 버려짐, 아래 kSyncProcessSignalMask/raiseRtSignal 참고).
+constexpr uint32_t kRtSignalBase = 32;
+constexpr uint32_t kRtSignalMax = 63;
+constexpr uint32_t kMaxSignalNumber = kRtSignalMax;
+
 // v1이 실제로 발생시키는 것은 이 중 4개뿐(Kill/Terminate/Segv/
 // IllegalInstruction, RM-B5764185 "v1에서 실제로 발생/처리하는 신호"
 // 절) - 나머지 번호는 enum에 자리만 예약돼 있다.
@@ -98,6 +110,10 @@ constexpr SyscallEndpointId kSyscallEndpointSignalAction = kMakeSyscallEndpointI
 struct KillArgs {
     int64_t targetProcessId = -1;
     SignalNumber signal = SignalNumber::None;
+    // [신규, 2026-09-29, PN-FD706AF6, SP-A7479F83 §6-B] RT 신호(32-63)
+    // 전용 부가 데이터(POSIX `sigqueue()`류, 1워드로 축소한 v1
+    // 단순화) - 표준 신호(0-31)에는 전달돼도 그냥 무시된다.
+    uint64_t userData = 0;
     // out
     ChannelError error = ChannelError::None;
 };

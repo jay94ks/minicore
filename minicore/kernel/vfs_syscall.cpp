@@ -553,15 +553,21 @@ public:
         }
         if (slot->value.kind == MountKind::Signalfd) {
             // [신규, 2026-09-29, PN-A1A0B595, SP-A7479F83 §4] signalfd
-            // Read - pendingMask 중 watchedSignalMask에 아직 걸려 있는
-            // 가장 낮은 번호의 신호 하나를 읽고 그 비트를 지운다(POSIX
-            // signalfd - 표준 신호는 여러 번 와도 "펜딩 여부"만 추적하므로
-            // 한 번에 하나씩만 반환, RT신호 큐잉은 PN-FD706AF6 범위).
-            // 이 fd로 읽어 소비한 신호는 process->pendingSignals에서도
-            // 함께 지운다 - POSIX signalfd가 "읽으면 프로세스의 pending
-            // 집합에서도 사라진다"는 것과 동일(안 지우면 이 신호가
-            // Process::signalMask에서 나중에 언마스크될 때 체크포인트가
-            // 뒤늦게 또 처리해 버린다).
+            // Read - 표준 신호(pendingMask 중 watchedSignalMask에 아직
+            // 걸려 있는 가장 낮은 번호)를 먼저 확인하고, 없으면
+            // [갱신, 2026-09-29, PN-FD706AF6, §6-B] RT 신호 FIFO
+            // (rtQueue)를 확인한다 - 어느 쪽을 먼저 볼지는 설계가
+            // 명시하지 않은 구현 세부(RM-23F4B687 §4), 순서 자체에
+            // 의미를 두지 않는다. 표준 신호는 여러 번 와도 "펜딩 여부"
+            // 만 추적하므로 한 번에 하나씩만 반환하지만, RT 신호는 같은
+            // 번호라도 인스턴스마다 전부 순서대로 반환된다(§6-B 핵심
+            // 차이). 표준 신호를 읽어 소비하면 process->pendingSignals
+            // 에서도 함께 지운다 - POSIX signalfd가 "읽으면 프로세스의
+            // pending 집합에서도 사라진다"는 것과 동일(안 지우면 이
+            // 신호가 Process::signalMask에서 나중에 언마스크될 때
+            // 체크포인트가 뒤늦게 또 처리해 버린다). RT 신호는 애초에
+            // pendingSignals를 전혀 거치지 않으므로(signal.h
+            // kRtSignalBase 문서 주석 참고) 그럴 필요가 없다.
             if (!slot->value.signalfd) {
                 args->bytesRead = 0;
                 args->error = ChannelError::InvalidHandle;
@@ -575,6 +581,8 @@ public:
             SharedPtr<SignalfdState> state = slot->value.signalfd;
             for (;;) {
                 uint32_t firedSignal = 0;
+                RtSignalInstance rtInstance;
+                bool gotRt = false;
                 {
                     SpinlockGuard guard(state->lock);
                     const uint32_t ready = state->pendingMask & state->watchedSignalMask;
@@ -586,6 +594,8 @@ public:
                             }
                         }
                         state->pendingMask &= ~(1u << firedSignal);
+                    } else if (state->rtQueue.pop(&rtInstance)) {
+                        gotRt = true;
                     } else {
                         state->pendingReaders.pushBack(task);
                     }
@@ -599,6 +609,15 @@ public:
                     }
                     SignalfdSiginfo info;
                     info.signo = firedSignal;
+                    memcpy(args->buf, &info, sizeof(info));
+                    args->bytesRead = sizeof(SignalfdSiginfo);
+                    args->error = ChannelError::None;
+                    co_return;
+                }
+                if (gotRt) {
+                    SignalfdSiginfo info;
+                    info.signo = rtInstance.signalNumber;
+                    info.userData = rtInstance.userData;
                     memcpy(args->buf, &info, sizeof(info));
                     args->bytesRead = sizeof(SignalfdSiginfo);
                     args->error = ChannelError::None;

@@ -239,3 +239,9 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalmasktest ${CMAKE_
 # add_subdirectory.
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalfdchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalfdchild)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/signalfdtest ${CMAKE_CURRENT_BINARY_DIR}/minicore-signalfdtest)
+
+# rtsignalchild/rtsignaltest(PN-FD706AF6, SP-A7479F83 §6-B - RT 신호
+# 큐잉 E2E 검증) - 위 테스트들과 동일한 이유의 out-of-tree
+# add_subdirectory.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/rtsignalchild ${CMAKE_CURRENT_BINARY_DIR}/minicore-rtsignalchild)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../minicore/rtsignaltest ${CMAKE_CURRENT_BINARY_DIR}/minicore-rtsignaltest)

@@ -617,6 +617,21 @@ public:
     // 시 false.
     bool raiseSignal(SignalNumber number);
 
+    // [신규, 2026-09-29, PN-FD706AF6, SP-A7479F83 §6-B] RT 신호(32-63)
+    // 전용 전달 경로 - `raiseSignal()`(표준 신호, pendingSignals/
+    // signalMask/체크포인트 경유)과 완전히 분리된 별도 함수다. RT
+    // 신호는 이 프로세스의 fd 테이블에서 그 번호를 감시 중인
+    // signalfd를 찾아 그 `RtSignalInstance` FIFO에만 쌓는다 - 감시하는
+    // signalfd가 하나도 없으면 조용히 버려진다(표준 신호처럼 "기본
+    // 동작으로 프로세스 종료"하는 경로 자체가 RT 신호엔 없다 - 이
+    // 프로젝트에 RT 신호 핸들러/기본 동작 인프라가 없기 때문에 v1이
+    // 의도적으로 선택한 축소 범위, signalfd로 감시하지 않으면 애초에
+    // 관찰할 방법이 없다는 뜻이지 버그가 아니다). 여러 signalfd가
+    // 같은 번호를 감시하면 전부에게 쌓인다(표준 신호 라우팅과 동일한
+    // "관심 있는 모든 fd에 전파" 원칙). 항상 성공(자원 고갈이 아니라
+    // "받는 사람이 없다"는 건 실패가 아님) - 반환값 없음.
+    void raiseRtSignal(uint32_t rtSignalNumber, uint64_t userData);
+
     // [신규, 2026-09-17, SP-245D130B §1] 이 프로세스를 `newGroup`으로
     // 옮긴다(옛 그룹에서 빼고 새 그룹에 넣음, `newGroup==nullptr`이면
     // 그냥 빼기만) - `ResourceGroup::addMember()`가 `WeakPtr<Process>`를

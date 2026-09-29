@@ -54,10 +54,17 @@ struct SignalActionArgs {
 // 소비자] signal.h의 kSyscallEndpointKill(그룹0.call1)과 동일한 값.
 constexpr SyscallEndpointId kSyscallEndpointKill = kMakeSyscallEndpointId(0, 1);
 
+// [신규, 2026-09-29, PN-FD706AF6, RM-B5764185 "32~63 SIGRT0~SIGRT31"]
+// RT 신호 구간 - signalfdtest(RT) 소비자.
+constexpr uint32_t kRtSignalBase = 32;
+
 // kernel::KillArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
 struct KillArgs {
     int64_t targetProcessId = -1;
     SignalNumber signal = SignalNumber::None;
+    // [신규, 2026-09-29, PN-FD706AF6] RT 신호(32-63) 전용 부가 데이터 -
+    // 표준 신호에는 전달돼도 무시된다.
+    uint64_t userData = 0;
     // out
     ChannelError error = ChannelError::None;
 };
@@ -91,6 +98,7 @@ constexpr SyscallEndpointId kSyscallEndpointSignalfdSetMask = kMakeSyscallEndpoi
 // kernel::SignalfdCreateArgs와 바이트 단위로 정확히 같은 필드 순서/타입.
 struct SignalfdCreateArgs {
     uint32_t signalMask = 0;
+    uint32_t rtSignalMask = 0;
     // out
     ChannelError error = ChannelError::None;
     int64_t fd = -1;
@@ -100,6 +108,7 @@ struct SignalfdCreateArgs {
 struct SignalfdSetMaskArgs {
     int32_t fd = -1;
     uint32_t signalMask = 0;
+    uint32_t rtSignalMask = 0;
     // out
     ChannelError error = ChannelError::None;
 };
@@ -107,6 +116,7 @@ struct SignalfdSetMaskArgs {
 // kernel::SignalfdSiginfo와 바이트 단위로 정확히 같은 필드 순서/타입.
 struct SignalfdSiginfo {
     uint32_t signo = 0;
+    uint64_t userData = 0;
 };
 
 }  // namespace mc

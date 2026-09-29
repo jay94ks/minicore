@@ -78,6 +78,10 @@ public:
             co_return;
         }
         state->watchedSignalMask = args->signalMask;
+        // [신규, 2026-09-29, PN-FD706AF6] RT 신호(32-63) 관심 집합 -
+        // Process::signalMask와 무관하다(kSyncProcessSignalMask 대상이
+        // 아님, signalfd.h SignalfdState 문서 주석 참고).
+        state->watchedRtMask = args->rtSignalMask;
 
         process->fileDescriptors.ensureAllocator(&GenericSlabAllocator::alloc, &GenericSlabAllocator::free);
         const int32_t newFd = kAllocateFd(process.get());
@@ -131,6 +135,13 @@ public:
             oldWatchedMask = state->watchedSignalMask;
             state->watchedSignalMask = args->signalMask;
             state->pendingMask &= args->signalMask;  // 더 이상 관심 없는 신호는 펜딩에서도 제거
+            // [신규, 2026-09-29, PN-FD706AF6] RT 신호 관심 집합 갱신 -
+            // 이미 큐에 쌓인 인스턴스는 그대로 둔다(표준 신호의 즉시
+            // pendingMask 정리와 달리, RT 큐는 순서가 있는 FIFO라 이미
+            // 도착한 인스턴스를 중간에 걷어내는 건 POSIX가 요구하지
+            // 않는 v1 범위 밖 - "앞으로 새로 도착할 것"만 새 마스크가
+            // 적용된다).
+            state->watchedRtMask = args->rtSignalMask;
         }
         kSyncProcessSignalMask(*process, oldWatchedMask, args->signalMask);
         args->error = ChannelError::None;

@@ -1042,6 +1042,46 @@ bool Process::raiseSignal(SignalNumber number) {
     return true;
 }
 
+// [신규, 2026-09-29, PN-FD706AF6, SP-A7479F83 §6-B] RT 신호 전용 경로 -
+// raiseSignal()과 달리 pendingSignals/signalMask/체크포인트를 전혀
+// 거치지 않는다(signalfd.h SignalfdState 문서 주석 참고) - 관심
+// signalfd의 RtSignalQueue에 직접 쌓기만 한다. 감시하는 signalfd가
+// 하나도 없으면 조용히 버려진다(표준 신호와 달리 "기본 동작으로
+// 프로세스 종료"하는 경로 자체가 RT 신호엔 없다 - 의도적 v1 축소
+// 범위, process.h raiseRtSignal() 문서 주석 참고).
+void Process::raiseRtSignal(uint32_t rtSignalNumber, uint64_t userData) {
+    const uint32_t rtBit = 1u << (rtSignalNumber - kRtSignalBase);
+    fileDescriptors.forEach([rtSignalNumber, userData, rtBit](FileDescriptor& fd, auto*) {
+        if (fd.kind != MountKind::Signalfd || !fd.signalfd) {
+            return;
+        }
+        SignalfdState* state = fd.signalfd.get();
+        AsyncTask* wake = nullptr;
+        EpollObserverQueue wakeEpollObservers;
+        {
+            SpinlockGuard guard(state->lock);
+            if ((state->watchedRtMask & rtBit) == 0) {
+                return;  // 이 fd의 관심 밖
+            }
+            RtSignalInstance instance;
+            instance.signalNumber = rtSignalNumber;
+            instance.userData = userData;
+            state->rtQueue.push(instance);
+            wake = state->pendingReaders.popFront();
+            for (EpollObserverNode* n = state->epollReadObservers.popFront(); n;
+                 n = state->epollReadObservers.popFront()) {
+                wakeEpollObservers.pushBack(n);
+            }
+        }
+        if (wake) {
+            AsyncReactor::submitCompletion(wake, /*preemptive=*/true);
+        }
+        for (EpollObserverNode* n = wakeEpollObservers.popFront(); n; n = wakeEpollObservers.popFront()) {
+            AsyncReactor::submitCompletion(n->task, /*preemptive=*/true);
+        }
+    });
+}
+
 void Process::joinResourceGroup(ResourceGroup* newGroup) {
     if (group == newGroup) {
         return;
@@ -2040,7 +2080,10 @@ public:
     AsyncExecCoro onExec(AsyncTask* task, void* argsRaw) override {
         auto* args = static_cast<KillArgs*>(argsRaw);
 
-        if (args->signal == SignalNumber::None || static_cast<uint32_t>(args->signal) >= kSignalCount) {
+        // [갱신, 2026-09-29, PN-FD706AF6] 상한을 kMaxSignalNumber(63)로
+        // 넓혔다 - RT 신호(32-63)도 이 syscall로 보낸다(signal.h
+        // kRtSignalBase 문서 주석 참고). None(0)은 여전히 거부.
+        if (args->signal == SignalNumber::None || static_cast<uint32_t>(args->signal) > kMaxSignalNumber) {
             args->error = ChannelError::InvalidArgument;
             co_return;
         }
@@ -2073,6 +2116,16 @@ public:
             co_return;
         }
 
+        // [갱신, 2026-09-29, PN-FD706AF6] RT 신호(32-63)는 완전히 별도
+        // 경로(raiseRtSignal) - pendingSignals/signalMask/체크포인트를
+        // 안 거친다(signal.h kRtSignalBase 문서 주석 참고). 항상 성공
+        // 취급(감시자가 없어 버려지는 건 실패가 아님, process.h
+        // raiseRtSignal() 문서 주석 참고).
+        if (static_cast<uint32_t>(args->signal) >= kRtSignalBase) {
+            target->raiseRtSignal(static_cast<uint32_t>(args->signal), args->userData);
+            args->error = ChannelError::None;
+            co_return;
+        }
         args->error = target->raiseSignal(args->signal) ? ChannelError::None : ChannelError::ResourceExhausted;
         co_return;
     }
